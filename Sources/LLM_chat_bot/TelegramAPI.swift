@@ -1,5 +1,6 @@
 import Foundation
 import AsyncHTTPClient
+import NIOFoundationCompat
 
 enum TelegramAPI {
     static func getUpdates(telegramUrl: String, offset: Int?) async throws -> [TelegramUpdate] {

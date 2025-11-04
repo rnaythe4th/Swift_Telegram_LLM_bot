@@ -1,5 +1,6 @@
 import Foundation
 import AsyncHTTPClient
+import NIOFoundationCompat
 
 enum DeepseekAPI {
     // просто ответ без стрима
