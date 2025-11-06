@@ -7,6 +7,9 @@ struct LLM_chat_bot {
     static func main() async throws {
         let tgToken = try Config.env(.telegramToken)
         let deepseekKey = try Config.env(.deepseekKey)
+        let companyChatId = try Int(Config.env(.companyChatId))
+        
+        let companyMembers = ". Участники чата: @max_semenko, @maythe4th, @vladnest02, @xleb_s_korochkoi и бот @CatchMyVidBot."
         
         let telegramUrl = "https://api.telegram.org/bot\(tgToken)"
         
@@ -15,6 +18,7 @@ struct LLM_chat_bot {
         var chatHistories: [Int: [Int64: [ChatMessage]]] = [:]
         var chatTemps: [Int: [Int64: Float]] = [:]
         var chatShowStats: [Int: [Int64: Bool]] = [:]
+        let maxHistoryLength = 11
         
         let systemPrompt = "Ты физик, тебя зовут Анатолий"
         
@@ -27,7 +31,7 @@ struct LLM_chat_bot {
                 if let maxUpdateId = updates.map(\.update_id).max() {
                     currentOffset = maxUpdateId + 1
                 }
-                print("обновил оффсет")
+                
                 for u in updates {
                     if let msg = u.message, let text = msg.text {
                         
@@ -38,25 +42,25 @@ struct LLM_chat_bot {
                         
                         switch splittedText[0] {
                         case "/setrole":
-                            if chatRoles[chatID] == nil {
-                                chatRoles[chatID] = [:]
-                            }
-                            chatRoles[chatID]?[thread_id] = splittedText[1]
-                            
-                            if chatHistories[chatID] == nil {
-                                chatHistories[chatID] = [:]
-                            }
-                            chatHistories[chatID]?[thread_id] = [ .init(role: "system", content: splittedText[1]) ]
-                            try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Роль изменена + история очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                            // устанавливаем заданную роль
+                            setRole(chatID: chatID, thread_id: thread_id, role: splittedText[1])
+                            // инициализируем чистую историю с заданной ролью
+                            resetHistory(chatID: chatID, thread_id: thread_id, role: chatRoles[chatID]![thread_id]!)
+                            // обратная связь юзеру
+                            _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Роль изменена + история очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
                             
                             
                         case "/clear_history", "/clear_history@SwiftPT_bot":
-                            let role = chatRoles[chatID]?[thread_id] ?? systemPrompt
-                            if chatHistories[chatID] == nil {
-                                chatHistories[chatID] = [:]
+                            // если роль уже есть, то просто сбрасываем историю и делаем первое сообщение с этой ролью
+                            if let role = chatRoles[chatID]?[thread_id] {
+                                resetHistory(chatID: chatID, thread_id: thread_id, role: role)
+                            } else {
+                                // а если роли нет, то сначала устанавливаем роль, а потом ресетаем историю с системной ролью
+                                setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt)
+                                resetHistory(chatID: chatID, thread_id: thread_id, role: chatRoles[chatID]![thread_id]!)
                             }
-                            chatHistories[chatID]?[thread_id] = [.init(role: "system", content: role)]
-                            try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "История очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                            // обратная связь юзеру
+                            _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "История очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
                             
                             
                         case "/settemp":
@@ -64,7 +68,8 @@ struct LLM_chat_bot {
                                 chatTemps[chatID] = [:]
                             }
                             chatTemps[chatID]?[thread_id] = Float(splittedText[1]) ?? 1.5
-                            try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Temperature: \(chatTemps[chatID]?[thread_id] ?? 1.5)", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                            // обратная связь юзеру
+                            _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Temperature: \(chatTemps[chatID]?[thread_id] ?? 1.5)", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
                             
                             
                         case "/tokens_toggle", "/tokens_toggle@SwiftPT_bot":
@@ -73,25 +78,22 @@ struct LLM_chat_bot {
                             }
                             let current = chatShowStats[chatID]?[thread_id] ?? false
                             chatShowStats[chatID]?[thread_id] = !current
-                            try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Показывать расход токенов: \(!current)", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                            // обратная связь юзеру
+                            _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Показывать расход токенов: \(!current)", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
                             
                             
                         case "/default_role", "/default_role@SwiftPT_bot":
-                            if chatRoles[chatID] == nil {
-                                chatRoles[chatID] = [:]
-                            }
-                            chatRoles[chatID]?[thread_id] = systemPrompt
-                            
-                            if chatHistories[chatID] == nil {
-                                chatHistories[chatID] = [:]
-                            }
-                            chatHistories[chatID]?[thread_id] = [.init(role: "system", content: systemPrompt)]
-                            try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: msg.chat.id, text: "Роль изменена на стандартную + история очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                            // устанавливаем стандартную роль
+                            setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt)
+                            // инициализируем историю с установленной ролью
+                            resetHistory(chatID: chatID, thread_id: thread_id, role: chatRoles[chatID]![thread_id]!)
+                            // обратная связь юзеру
+                            _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: msg.chat.id, text: "Роль изменена на стандартную + история очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
                             
                             
                         case "@SwiftPT_bot":
                             print(text)
-                            try await processMention(msg: msg, cleanText: splittedText[1], thread_id: thread_id)
+                            try await processMention(msg: msg, cleanText: splittedText[1], chatID:chatID, thread_id: thread_id)
                             
                             
                         default:
@@ -105,19 +107,64 @@ struct LLM_chat_bot {
             }
         }
         
-        func processMention(msg: TelegramMessage, cleanText: String, thread_id: Int64) async throws {
-            let chatID = msg.chat.id
+        func setRole(chatID: Int, thread_id: Int64, role: String) {
+            if chatRoles[chatID] == nil {
+                chatRoles[chatID] = [:]
+            }
             
+            if chatID == companyChatId {
+                chatRoles[chatID]?[thread_id] = role + companyMembers
+            } else {
+                chatRoles[chatID]?[thread_id] = role
+            }
+        }
+        
+        func resetHistory(chatID: Int, thread_id: Int64, role: String) {
             if chatHistories[chatID] == nil {
                 chatHistories[chatID] = [:]
             }
+            
+            chatHistories[chatID]?[thread_id] = [.init(role: "system", content: role)]
+        }
+        
+        
+        func processMention(msg: TelegramMessage, cleanText: String, chatID: Int, thread_id: Int64) async throws {
+            var promptText = cleanText
+            
+            if let senderUsername = msg.from?.username {
+                promptText = "Тебе пишет @\(senderUsername): \(cleanText)"
+            } else {
+                promptText = cleanText
+            }
+            
+            //сначала проверки всё ли у нас есть, и если нет, то инициализация
+            // не дает блин использовать просто chatTemps[chatID]?[thread_id, default: 1.5]
+            // поэтому пока делаю тут
+            
+            // проверяем роль
+            if chatRoles[chatID]?[thread_id] == nil {
+                // если нет, то ставим стандартную
+                setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt)
+            }
+            
+            // инициализируем историю чата, если ее нет
+            if chatHistories[chatID] == nil {
+                chatHistories[chatID] = [:]
+            }
+            // и теперь записываем туда сисемный промпт с ролью
             if chatHistories[chatID]?[thread_id] == nil {
-                let role = chatRoles[chatID]?[thread_id] ?? systemPrompt
-                chatHistories[chatID]?[thread_id] = [.init(role: "system", content: role)]
+                // роль уже точно есть, поэтому норм, force unwrap
+                chatHistories[chatID]?[thread_id] = [.init(role: "system", content: chatRoles[chatID]![thread_id]!)]
+            }
+            
+            // проверка длины истории сообщений
+            if chatHistories[chatID]![thread_id]!.count >= maxHistoryLength {
+                // системный промпт с ролью надо оставить (индекс 0)
+                chatHistories[chatID]![thread_id]!.removeSubrange(1...2)
             }
             
             // сообщение пользователя в исторю
-            chatHistories[chatID]?[thread_id]?.append(.init(role: "user", content: cleanText))
+            chatHistories[chatID]?[thread_id]?.append(.init(role: "user", content: promptText, name: msg.from?.username ?? nil))
             
             // отправить черновик чтобы юзер понял что промпт был принят
             let placeholder = try await TelegramAPI.sendTelegramMessage(
@@ -127,11 +174,11 @@ struct LLM_chat_bot {
                 reply_parameters: ReplyParameters(message_id: msg.message_id),
                 message_thread_id: thread_id != 0 ? thread_id : nil
             )
-            print("получил placeholder")
+            
             // запрос к дипсику, причем с потоком
             let reqParams = Prompt(
                 model: "deepseek-chat",
-                messages: chatHistories[chatID]?[thread_id] ?? [.init(role: "system", content: systemPrompt)],
+                messages: chatHistories[chatID]![thread_id]!,
                 stream: true,
                 temperature: chatTemps[chatID]?[thread_id] ?? 1.5,
                 showStats: chatShowStats[chatID]?[thread_id] ?? false

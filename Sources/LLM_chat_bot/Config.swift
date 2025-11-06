@@ -3,6 +3,7 @@ import Foundation
 enum EnvironmentKeys: String {
     case telegramToken = "TG_BOT_TOKEN"
     case deepseekKey   = "DEEPSEEK_API_KEY"
+    case companyChatId = "COMPANY_CHAT_ID"
 }
 
 enum Config {

@@ -61,6 +61,7 @@ struct TelegramEditMessageTextBody: Codable {
 struct ChatMessage: Codable {
     let role: String
     let content: String
+    var name: String? = nil
 }
 // тело запроса при отправке промпта
 struct Prompt: Codable {
