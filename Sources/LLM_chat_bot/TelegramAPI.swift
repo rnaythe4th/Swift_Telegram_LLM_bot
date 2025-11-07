@@ -22,7 +22,7 @@ enum TelegramAPI {
     
     static func sendTelegramMessage(telegramUrl: String, chat_id: Int, text: String, reply_parameters: ReplyParameters?, message_thread_id: Int64?) async throws -> TelegramMessage? {
         
-        let body = TelegramSendMessageBody(chat_id: chat_id, text: text, reply_parameters: reply_parameters, message_thread_id: message_thread_id)
+        let body = TelegramSendMessageBody(chat_id: chat_id, text: TelegramHTMLFormatter.helper(text: text), reply_parameters: reply_parameters, message_thread_id: message_thread_id, parse_mode: "HTML")
         
         var request = HTTPClientRequest(url: "\(telegramUrl)/sendMessage")
         request.method = .POST
@@ -43,7 +43,7 @@ enum TelegramAPI {
     }
     
     static func editTelegramMessage(telegramUrl: String, chat_id: Int, message_id: Int, text: String) async throws {
-        let body = TelegramEditMessageTextBody(chat_id: chat_id, message_id: message_id, text: text)
+        let body = TelegramEditMessageTextBody(chat_id: chat_id, message_id: message_id, text: TelegramHTMLFormatter.helper(text: text), parse_mode: "HTML")
         var request = HTTPClientRequest(url: "\(telegramUrl)/editMessageText")
         request.method = .POST
         request.headers.add(name: "Content-Type", value: "application/json")

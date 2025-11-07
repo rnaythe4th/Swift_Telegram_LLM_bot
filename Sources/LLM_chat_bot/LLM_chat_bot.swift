@@ -20,7 +20,8 @@ struct LLM_chat_bot {
         var chatShowStats: [Int: [Int64: Bool]] = [:]
         let maxHistoryLength = 11
         
-        let systemPrompt = "Ты физик, тебя зовут Анатолий"
+        let systemPrompt = "Ты физик, тебя зовут Анатолий."
+        let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api)."
         
         var currentOffset: Int? = nil
         var lastEdit = Date.distantPast
@@ -43,7 +44,7 @@ struct LLM_chat_bot {
                         switch splittedText[0] {
                         case "/setrole":
                             // устанавливаем заданную роль
-                            setRole(chatID: chatID, thread_id: thread_id, role: splittedText[1])
+                            setRole(chatID: chatID, thread_id: thread_id, role: splittedText[1] + formatOptions)
                             // инициализируем чистую историю с заданной ролью
                             resetHistory(chatID: chatID, thread_id: thread_id, role: chatRoles[chatID]![thread_id]!)
                             // обратная связь юзеру
@@ -56,7 +57,7 @@ struct LLM_chat_bot {
                                 resetHistory(chatID: chatID, thread_id: thread_id, role: role)
                             } else {
                                 // а если роли нет, то сначала устанавливаем роль, а потом ресетаем историю с системной ролью
-                                setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt)
+                                setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
                                 resetHistory(chatID: chatID, thread_id: thread_id, role: chatRoles[chatID]![thread_id]!)
                             }
                             // обратная связь юзеру
@@ -84,7 +85,7 @@ struct LLM_chat_bot {
                             
                         case "/default_role", "/default_role@SwiftPT_bot":
                             // устанавливаем стандартную роль
-                            setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt)
+                            setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
                             // инициализируем историю с установленной ролью
                             resetHistory(chatID: chatID, thread_id: thread_id, role: chatRoles[chatID]![thread_id]!)
                             // обратная связь юзеру
@@ -144,7 +145,7 @@ struct LLM_chat_bot {
             // проверяем роль
             if chatRoles[chatID]?[thread_id] == nil {
                 // если нет, то ставим стандартную
-                setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt)
+                setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
             }
             
             // инициализируем историю чата, если ее нет
@@ -202,7 +203,7 @@ struct LLM_chat_bot {
                 }
             }
             // финальное редактирование
-            let finalText = accumulator.isEmpty ? "Пустой ответ." : accumulator + "\nОтвет завершен."
+            let finalText = accumulator.isEmpty ? "Пустой ответ." : accumulator + "\n\n✅ <b>Ответ завершен.</b>"
             try await TelegramAPI.editTelegramMessage(
                 telegramUrl: telegramUrl,
                 chat_id: chatID,

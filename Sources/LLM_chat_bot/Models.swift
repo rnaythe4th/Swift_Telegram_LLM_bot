@@ -47,6 +47,7 @@ struct TelegramSendMessageBody: Codable {
     let text: String
     let reply_parameters: ReplyParameters?
     let message_thread_id: Int64?
+    let parse_mode: String?
 }
 
 // тело запроса при редактировании тг сообщения
@@ -54,6 +55,7 @@ struct TelegramEditMessageTextBody: Codable {
     let chat_id: Int
     let message_id: Int
     let text: String
+    let parse_mode: String?
 }
 
 // тут пошло для дипсика
