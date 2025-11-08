@@ -1,5 +1,15 @@
 import Foundation
 
+public struct StreamKey: Hashable, Codable, Sendable {
+    public let chatID: Int
+    public let threadID: Int64  // 0 = без треда (обычное сообщение)
+
+    public init(chatID: Int, threadID: Int64) {
+        self.chatID = chatID
+        self.threadID = threadID
+    }
+}
+
 // любой ответ от телеграма
 struct TelegramResponse<T: Decodable>: Decodable {
     let ok: Bool
@@ -12,6 +22,7 @@ struct TelegramResponse<T: Decodable>: Decodable {
 struct TelegramUpdate: Codable {
     let update_id: Int
     let message: TelegramMessage?
+    let callback_query: CallbackQuery?
 }
 
 // сообщение в телеграме
@@ -48,6 +59,7 @@ struct TelegramSendMessageBody: Codable {
     let reply_parameters: ReplyParameters?
     let message_thread_id: Int64?
     let parse_mode: String?
+    let reply_markup: InlineKeyboardMarkup?
 }
 
 // тело запроса при редактировании тг сообщения
@@ -56,6 +68,36 @@ struct TelegramEditMessageTextBody: Codable {
     let message_id: Int
     let text: String
     let parse_mode: String?
+    let reply_markup: InlineKeyboardMarkup? 
+}
+
+struct InlineKeyboardButton: Codable {
+    let text: String
+    let callback_data: String
+}
+
+struct InlineKeyboardMarkup: Codable {
+    let inline_keyboard: [[InlineKeyboardButton]]
+}
+
+struct CallbackQuery: Codable {
+    let id: String
+    let from: TelegramUser
+    let data: String?
+    let message: MaybeInaccessibleMessage?
+}
+
+struct MaybeInaccessibleMessage: Codable {
+    let chat: TelegramChat
+    let message_id: Int
+    let date: Int
+    let text: String?
+}
+
+struct AnswerCallbackQueryBody: Codable {
+    let callback_query_id: String
+    let text: String?
+    let show_alert: Bool?
 }
 
 // тут пошло для дипсика

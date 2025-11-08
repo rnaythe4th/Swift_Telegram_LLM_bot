@@ -1,6 +1,31 @@
 import AsyncHTTPClient
 import Foundation
 
+actor TaskCenter {
+    private var tasks: [StreamKey: Task<Void, Never>] = [:]
+    
+    func register(key: StreamKey, task: Task<Void, Never>) {
+        tasks[key] = task
+    }
+    
+    func cancel(key: StreamKey) {
+        tasks[key]?.cancel()
+        tasks[key] = nil
+    }
+    
+    func cancelAll(in chatID: Int, threadID: Int64) {
+        for (k, t) in tasks where k.chatID == chatID && k.threadID == threadID {
+            t.cancel()
+            tasks[k] = nil
+        }
+    }
+    
+    func latest(for chatID: Int, threadID: Int64) -> StreamKey? {
+        // Not strictly LIFO, but returning any one active key is fine for /stop.
+        return tasks.keys.first(where: { $0.chatID == chatID && $0.threadID == threadID })
+    }
+}
+
 actor BotState {
     var chatRoles: [Int: [Int64: String]] = [:]
     var chatHistories: [Int: [Int64: [ChatMessage]]] = [:]
@@ -90,8 +115,8 @@ struct LLM_chat_bot {
     
     static let companyMembers = ". Участники чата: @max_semenko, @maythe4th, @vladnest02, @xleb_s_korochkoi и бот @CatchMyVidBot."
     static let systemPrompt = "Ты физик, тебя зовут Анатолий."
-//    static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api)."
-    static let formatOptions = " Отвечай с внятным форматированием и аккуратно соблюдай HTML-entities для Telegram."
+    static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api)."
+//    static let formatOptions = " Отвечай с внятным форматированием и аккуратно соблюдай HTML-entities для Telegram."
     
     static func main() async throws {
         let tgToken = try Config.env(.telegramToken)
@@ -108,6 +133,8 @@ struct LLM_chat_bot {
             maxHistoryLength: 11
         )
         
+        let tasks = TaskCenter()
+        
         var currentOffset: Int? = nil
         var lastEdit = Date.distantPast
         while true {
@@ -120,6 +147,39 @@ struct LLM_chat_bot {
                 }
                 // обработка каждого апдейта
                 for u in updates {
+                    if let cq = u.callback_query {
+                        // формат callback_data ниже
+                        let data = cq.data ?? ""
+                        if data.hasPrefix("stop:") {
+                            // распарсим chatID и threadID
+                            let parts = data.split(separator: ":")
+                            if parts.count >= 3,
+                               let chatID = Int(parts[1]),
+                               let threadID = Int64(parts[2]) {
+                                
+                                await tasks.cancelAll(in: chatID, threadID: threadID)
+                                
+                                // визуально подчистим клавиатуру на сообщении, по которому нажали
+                                if let msg = cq.message {
+                                    try? await TelegramAPI.editTelegramMessage(
+                                        telegramUrl: telegramUrl,
+                                        chat_id: msg.chat.id,
+                                        message_id: msg.message_id,
+                                        text: (msg.text ?? "") + "\n\n🛑 Остановлено пользователем.",
+                                        reply_markup: InlineKeyboardMarkup(inline_keyboard: []) // убираем кнопки
+                                    )
+                                }
+                                
+                                // подтвердим нажатие
+                                try? await TelegramAPI.answerCallbackQuery(
+                                    telegramUrl: telegramUrl,
+                                    callback_query_id: cq.id,
+                                    text: "Остановлено"
+                                )
+                            }
+                        }
+                        continue
+                    }
                     // если текста сообщения нет, то скипаем этот апдейт
                     guard let msg = u.message, let text = msg.text else { continue }
                     // таска для синхронной обработки нескольких сообщений
@@ -205,13 +265,18 @@ struct LLM_chat_bot {
             // сообщение пользователя в исторю
             await state.appendUser(chatID: chatID, thread_id: thread_id, content: promptText, username: msg.from?.username)
             
+            let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
+                .init(text: "🛑 СТОП", callback_data: "stop:\(chatID):\(thread_id)")
+            ]])
+            
             // отправить черновик чтобы юзер понял что промпт был принят
             let placeholder = try await TelegramAPI.sendTelegramMessage(
                 telegramUrl: telegramUrl,
                 chat_id: chatID,
                 text: "Думаю...",
                 reply_parameters: ReplyParameters(message_id: msg.message_id),
-                message_thread_id: thread_id != 0 ? thread_id : nil
+                message_thread_id: thread_id != 0 ? thread_id : nil,
+                reply_markup: stopMarkup
             )
             
             // параметры генерации читаем из актора
@@ -227,36 +292,90 @@ struct LLM_chat_bot {
                 temperature: temp,
                 showStats: showStats
             )
-            var accumulator = ""
-            var lastLength = 0
-            let clock = ContinuousClock()
-            var lastEdit = clock.now // по идее теперь локально
-            do {
-                for try await chunk in DeepseekAPI.deepseekStream(apiKey: deepseekKey, reqParams: reqParams, showStats: showStats) {
-                    accumulator += chunk
-                    // интервал обновление тг сообщения
-                    if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 150 {
-                        try await TelegramAPI.editTelegramMessage(
-                            telegramUrl: telegramUrl,
-                            chat_id: msg.chat.id,
-                            message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
-                            text: accumulator
-                        )
-                        lastEdit = clock.now
-                        lastLength = accumulator.count
+            
+            let key = StreamKey(chatID: chatID, threadID: thread_id)
+            
+            let streamingTask = Task {
+                var accumulator = ""
+                var lastLength = 0
+                let clock = ContinuousClock()
+                var lastEdit = clock.now // по идее теперь локально
+                
+                var isCancelled = false
+                
+                do {
+                    for try await chunk in DeepseekAPI.deepseekStream(apiKey: deepseekKey, reqParams: reqParams, showStats: showStats) {
+                        // Проверяем отмену в начале каждой итерации
+                        if Task.isCancelled {
+                            isCancelled = true
+                            break
+                        }
+                        
+                        accumulator += chunk
+                        // интервал обновление тг сообщения
+                        if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
+                            do {
+                                try await TelegramAPI.editTelegramMessage(
+                                    telegramUrl: telegramUrl,
+                                    chat_id: msg.chat.id,
+                                    message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
+                                    text: accumulator,
+                                    reply_markup: stopMarkup
+                                )
+                                lastEdit = clock.now
+                                lastLength = accumulator.count
+                            } catch {
+                                if (error as NSError).localizedDescription.contains("Too Many Requests") {
+                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                } else {
+                                    throw error
+                                }
+                            }
+                        }
                     }
+                } catch {
+                    // Обработка ошибок
+                    try? await TelegramAPI.editTelegramMessage(
+                        telegramUrl: telegramUrl,
+                        chat_id: chatID,
+                        message_id: placeholder?.message_id ?? msg.message_id,
+                        text: "❌ Ошибка: \(error)",
+                        reply_markup: InlineKeyboardMarkup(inline_keyboard: [])
+                    )
+                    await tasks.cancel(key: key)
+                    return
                 }
+                // финальное редактирование
+                let finalText: String
+                let finalMarkup: InlineKeyboardMarkup?
+                
+                if isCancelled {
+                    finalText = accumulator.isEmpty ?
+                        "🛑 <b>Остановлено пользователем.</b>" :
+                        accumulator + "\n\n🛑 <b>Остановлено пользователем.</b>"
+                    finalMarkup = InlineKeyboardMarkup(inline_keyboard: [])
+                } else {
+                    finalText = accumulator.isEmpty ?
+                        "Пустой ответ." :
+                        accumulator + "\n\n✅ <b>Ответ завершен.</b>"
+                    finalMarkup = InlineKeyboardMarkup(inline_keyboard: [])
+                }
+                
+                try? await TelegramAPI.editTelegramMessage(
+                    telegramUrl: telegramUrl,
+                    chat_id: chatID,
+                    message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
+                    text: finalText,
+                    reply_markup: finalMarkup
+                )
+                
+                // добавляем ответ бота в историю
+                await state.appendAssistant(chatID: chatID, thread_id: thread_id, content: accumulator)
+                
+                await tasks.cancel(key: key)
             }
-            // финальное редактирование
-            let finalText = accumulator.isEmpty ? "Пустой ответ." : accumulator + "\n\n✅ <b>Ответ завершен.</b>"
-            try await TelegramAPI.editTelegramMessage(
-                telegramUrl: telegramUrl,
-                chat_id: chatID,
-                message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
-                text: finalText
-            )
-            // добавляем ответ бота в историю
-            await state.appendAssistant(chatID: chatID, thread_id: thread_id, content: accumulator)
+            // регистрируем задачу для этого чата/треда
+            await tasks.register(key: key, task: streamingTask)
         }
     }
     
