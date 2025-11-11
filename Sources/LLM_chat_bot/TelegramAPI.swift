@@ -9,7 +9,7 @@ enum TelegramAPI {
         request.method = .GET
         
         let response = try await HTTPClient.shared.execute(request, timeout: .seconds(35))
-        print("got response")
+        //print("got response")
         
         var buf = try await response.body.collect(upTo: 1 << 22)
         let responseData = buf.readData(length: buf.readableBytes) ?? Data()

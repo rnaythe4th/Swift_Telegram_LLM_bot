@@ -140,7 +140,7 @@ struct LLM_chat_bot {
         while true {
             do {
                 let updates = try await TelegramAPI.getUpdates(telegramUrl: telegramUrl, offset: currentOffset)
-                print("получил апдейты")
+                print("-------new updates-------")
                 // среди всех обновлений находим максимальный оффсет
                 if let maxUpdateId = updates.map(\.update_id).max() {
                     currentOffset = maxUpdateId + 1
@@ -182,6 +182,7 @@ struct LLM_chat_bot {
                     }
                     // если текста сообщения нет, то скипаем этот апдейт
                     guard let msg = u.message, let text = msg.text else { continue }
+                    print(text)
                     // таска для синхронной обработки нескольких сообщений
                     Task {
                         do {
@@ -242,8 +243,14 @@ struct LLM_chat_bot {
                 print(text)
                 // обрабатываем сообщение с промптом
                 try await processMention(msg: msg, cleanText: arg, chatID: chatID, thread_id: thread_id)
+                
             default:
-                break
+                // если пишут в личку, то реагировать надо на всё
+                if msg.chat.type == "private" {
+                    try await processMention(msg: msg, cleanText: text, chatID: chatID, thread_id: thread_id)
+                } else {
+                    break
+                }
             }
         }
         
@@ -351,13 +358,13 @@ struct LLM_chat_bot {
                 
                 if isCancelled {
                     finalText = accumulator.isEmpty ?
-                        "🛑 <b>Остановлено пользователем.</b>" :
-                        accumulator + "\n\n🛑 <b>Остановлено пользователем.</b>"
+                    "🛑 <b>Остановлено пользователем.</b>" :
+                    accumulator + "\n\n🛑 <b>Остановлено пользователем.</b>"
                     finalMarkup = InlineKeyboardMarkup(inline_keyboard: [])
                 } else {
                     finalText = accumulator.isEmpty ?
-                        "Пустой ответ." :
-                        accumulator + "\n\n✅ <b>Ответ завершен.</b>"
+                    "Пустой ответ." :
+                    accumulator + "\n\n✅ <b>Ответ завершен.</b>"
                     finalMarkup = InlineKeyboardMarkup(inline_keyboard: [])
                 }
                 
