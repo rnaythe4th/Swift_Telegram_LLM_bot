@@ -31,19 +31,32 @@ actor BotState {
     var chatHistories: [Int: [Int64: [ChatMessage]]] = [:]
     var chatTemps: [Int: [Int64: Float]] = [:]
     var chatShowStats: [Int: [Int64: Bool]] = [:]
-    let maxHistoryLength: Int
+    let defaultHistoryLength: Int
+    var historyLength: [Int: [Int64: Int]] = [:]
     
     let systemPrompt: String
     let formatOptions: String
     let companyChatId: Int
     let companyMembers: String
     
-    init(systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, maxHistoryLength: Int) {
+    init(systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, defaultHistoryLength: Int) {
         self.systemPrompt = systemPrompt
         self.formatOptions = formatOptions
         self.companyChatId = companyChatId
         self.companyMembers = companyMembers
-        self.maxHistoryLength = maxHistoryLength
+        self.defaultHistoryLength = defaultHistoryLength
+    }
+    
+    func setMaxHistory(chatID: Int, thread_id: Int64, newMax: Int) {
+        if historyLength[chatID] == nil { historyLength[chatID] = [:] }
+        historyLength[chatID]![thread_id] = newMax
+    }
+    
+    func ensureMaxHistory(chatID: Int, thread_id: Int64) -> Int {
+        if historyLength[chatID] == nil {
+            setMaxHistory(chatID: chatID, thread_id: thread_id, newMax: defaultHistoryLength)
+        }
+        return historyLength[chatID]![thread_id]!
     }
     
     func setRole(chatID: Int, thread_id: Int64, role: String) {
@@ -73,7 +86,7 @@ actor BotState {
     
     func trimHistoryIfNeeded(chatID: Int, thread_id: Int64) {
         guard var arr = chatHistories[chatID]?[thread_id] else { return }
-        if arr.count >= maxHistoryLength, arr.count > 1 {
+        if arr.count >= ensureMaxHistory(chatID: chatID, thread_id: thread_id), arr.count > 1 {
             // оставляем системное 0, удаляем 1..2
             let hi = min(2, arr.count - 1)
             arr.removeSubrange(1...hi)
@@ -116,7 +129,7 @@ struct LLM_chat_bot {
     static let companyMembers = ". Участники чата: @max_semenko, @maythe4th, @vladnest02, @xleb_s_korochkoi и бот @CatchMyVidBot."
     static let systemPrompt = "Ты физик, тебя зовут Анатолий."
     static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api)."
-//    static let formatOptions = " Отвечай с внятным форматированием и аккуратно соблюдай HTML-entities для Telegram."
+    //    static let formatOptions = " Отвечай с внятным форматированием и аккуратно соблюдай HTML-entities для Telegram."
     
     static func main() async throws {
         let tgToken = try Config.env(.telegramToken)
@@ -130,13 +143,12 @@ struct LLM_chat_bot {
             formatOptions: formatOptions,
             companyChatId: companyChatId ?? 0,
             companyMembers: companyMembers,
-            maxHistoryLength: 11
+            defaultHistoryLength: 11
         )
         
         let tasks = TaskCenter()
         
         var currentOffset: Int? = nil
-        var lastEdit = Date.distantPast
         while true {
             do {
                 let updates = try await TelegramAPI.getUpdates(telegramUrl: telegramUrl, offset: currentOffset)
@@ -239,6 +251,20 @@ struct LLM_chat_bot {
                 // обратная связь юзеру
                 _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Роль изменена на стандартную + история очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
                 
+            case "/historylength" , "/historylength@SwiftPT_bot":
+                if let newMax = Int(arg) {
+                    
+                    if (0...50).contains(newMax) {
+                        await state.setMaxHistory(chatID: chatID, thread_id: thread_id, newMax: newMax)
+                        
+                        _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Длина истории: \(newMax) сообщений", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                    } else {
+                        _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Ошибка: укажите число от 0 до 50. Вы указали:  \(newMax)", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                    }
+                } else {
+                    _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Ошибка: укажите число от 0 до 50", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                }
+                
             case "@SwiftPT_bot":
                 print(text)
                 // обрабатываем сообщение с промптом
@@ -265,6 +291,8 @@ struct LLM_chat_bot {
             // подготовка роли и истории в акторе
             let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
             await state.ensureHistory(chatID: chatID, thread_id: thread_id)
+            
+            await state.ensureMaxHistory(chatID: chatID, thread_id: thread_id)
             
             // проверка длины истории сообщений
             await state.trimHistoryIfNeeded(chatID: chatID, thread_id: thread_id)
