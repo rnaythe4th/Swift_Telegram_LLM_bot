@@ -224,23 +224,35 @@ struct LLM_chat_bot {
                 // инициализируем чистую историю с заданной ролью
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
                 // обратная связь юзеру
-                _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Роль изменена + история очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                try await sendUserFeedback("Роль изменена + история очищена")
+                
                 
             case "/clear_history", "/clear_history@SwiftPT_bot":
                 let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
                 // обратная связь юзеру
-                _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "История очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                try await sendUserFeedback("История очищена")
+                
                 
             case "/settemp":
-                await state.setTemp(chatID: chatID, thread_id: thread_id, value: Float(arg) ?? 1.5)
+                guard let temp = Float(arg), (0.0...2.0).contains(temp) else {
+                    let errorMessage = Float(arg) == nil
+                        ? "Ошибка: укажите ЧИСЛО от 0 до 2"
+                        : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(arg)!)"
+                    // обратная связь юзеру
+                    try await sendUserFeedback(errorMessage)
+                    return
+                }
+                await state.setTemp(chatID: chatID, thread_id: thread_id, value: temp)
                 // обратная связь юзеру
-                _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Temperature: \(await state.temp(chatID: chatID, thread_id: thread_id))", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                try await sendUserFeedback("Temperature: \(await state.temp(chatID: chatID, thread_id: thread_id))")
+                
                 
             case "/tokens_toggle", "/tokens_toggle@SwiftPT_bot":
                 let new = await state.toggleShowStats(chatID: chatID, thread_id: thread_id)
                 // обратная связь юзеру
-                _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Показывать расход токенов: \(new)", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                try await sendUserFeedback("Показывать расход токенов: \(new)")
+                
                 
             case "/default_role", "/default_role@SwiftPT_bot":
                 // устанавливаем стандартную роль
@@ -249,26 +261,28 @@ struct LLM_chat_bot {
                 // инициализируем историю с установленной ролью
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
                 // обратная связь юзеру
-                _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Роль изменена на стандартную + история очищена", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                try await sendUserFeedback("Роль изменена на стандартную + история очищена")
+                
                 
             case "/historylength" , "/historylength@SwiftPT_bot":
-                if let newMax = Int(arg) {
-                    
-                    if (0...50).contains(newMax) {
-                        await state.setMaxHistory(chatID: chatID, thread_id: thread_id, newMax: newMax)
-                        
-                        _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Длина истории: \(newMax) сообщений", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
-                    } else {
-                        _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Ошибка: укажите число от 0 до 50. Вы указали:  \(newMax)", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
-                    }
-                } else {
-                    _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: "Ошибка: укажите число от 0 до 50", reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
+                guard let newMax = Int(arg), (0...50).contains(newMax) else {
+                    let errorMessage = Int(arg) == nil
+                    ? "Ошибка: укажите ЧИСЛО от 0 до 50"
+                    : "Ошибка: укажите число от 0 до 50. Вы указали: \(Int(arg)!)"
+                    // обратная связь юзеру
+                    try await sendUserFeedback(errorMessage)
+                    return
                 }
+                await state.setMaxHistory(chatID: chatID, thread_id: thread_id, newMax: newMax)
+                // обратная связь юзеру
+                try await sendUserFeedback("Длина истории: \(newMax) сообщений")
+                
                 
             case "@SwiftPT_bot":
                 print(text)
                 // обрабатываем сообщение с промптом
                 try await processMention(msg: msg, cleanText: arg, chatID: chatID, thread_id: thread_id)
+                
                 
             default:
                 // если пишут в личку, то реагировать надо на всё
@@ -277,6 +291,10 @@ struct LLM_chat_bot {
                 } else {
                     break
                 }
+            }
+            
+            func sendUserFeedback(_ text: String) async throws {
+                _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: text, reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
             }
         }
         
