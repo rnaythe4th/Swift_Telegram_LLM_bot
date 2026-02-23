@@ -135,14 +135,15 @@ struct LLM_chat_bot {
                 
             case .model:
                 // установка новой модели и получение старой
-                let oldModel = await state.setModel(newModel: String(parsedCommand.argument))
+                let oldModel = await state.setModel(chatID: chatID, thread_id: thread_id, newModel: String(parsedCommand.argument))
+                let newModel = await state.model(chatID: chatID, thread_id: thread_id)
                 // сброс истории
                 let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
                 // фидбек пользователю
                 try await sendUserFeedback("""
 Модель изменена:
-\(oldModel) ----> \(await state.model).
+\(oldModel) ----> \(newModel).
 История очищена.
 """)
                 
@@ -241,9 +242,10 @@ struct LLM_chat_bot {
 
             switch provider {
             case .openrouter:
+                let model = await state.model(chatID: chatID, thread_id: thread_id)
                 streamRequest = .openrouter(RouterRequestBody(
                     messages: messages,
-                    model: await state.model,
+                    model: model,
                     stream: true,
                     stream_options: showStats ? .init(include_usage: true) : nil,
                     temperature: temp))

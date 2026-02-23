@@ -5,10 +5,11 @@ actor BotState {
     var chatHistories: [Int: [Int64: [ChatMessage]]] = [:]
     var chatTemps: [Int: [Int64: Float]] = [:]
     var chatShowStats: [Int: [Int64: Bool]] = [:]
+    var chatModels: [Int: [Int64: String]] = [:]
     let defaultHistoryLength: Int
     var historyLength: [Int: [Int64: Int]] = [:]
     var serviceProvider: ServiceProvider = .openrouter
-    var model: String
+    let defaultModel: String
 
     let systemPrompt: String
     let formatOptions: String
@@ -21,7 +22,7 @@ actor BotState {
         self.companyChatId = companyChatId
         self.companyMembers = companyMembers
         self.defaultHistoryLength = defaultHistoryLength
-        self.model = model
+        self.defaultModel = model
     }
 
     func setMaxHistory(chatID: Int, thread_id: Int64, newMax: Int) {
@@ -88,10 +89,23 @@ actor BotState {
         chatTemps[chatID]![thread_id] = value
     }
 
-    func setModel(newModel: String) -> String {
-        let currentModel = model
-        model = newModel
+    func setModel(chatID: Int, thread_id: Int64, newModel: String) -> String {
+        let currentModel = ensureModel(chatID: chatID, thread_id: thread_id)
+        if chatModels[chatID] == nil { chatModels[chatID] = [:] }
+        chatModels[chatID]![thread_id] = newModel
         return currentModel
+    }
+
+    func ensureModel(chatID: Int, thread_id: Int64) -> String {
+        if chatModels[chatID] == nil { chatModels[chatID] = [:] }
+        if chatModels[chatID]![thread_id] == nil {
+            chatModels[chatID]![thread_id] = defaultModel
+        }
+        return chatModels[chatID]![thread_id]!
+    }
+
+    func model(chatID: Int, thread_id: Int64) -> String {
+        ensureModel(chatID: chatID, thread_id: thread_id)
     }
 
     func showStats(chatID: Int, thread_id: Int64) -> Bool {
