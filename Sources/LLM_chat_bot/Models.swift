@@ -13,7 +13,7 @@ public struct StreamKey: Hashable, Codable, Sendable {
 // любой ответ от телеграма
 struct TelegramResponse<T: Decodable>: Decodable {
     let ok: Bool
-    let result: T
+    let result: T?
     let description: String?
     let error_code: Int?
 }

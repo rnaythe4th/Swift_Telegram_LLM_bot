@@ -3,6 +3,24 @@ import AsyncHTTPClient
 import NIOFoundationCompat
 
 enum TelegramAPI {
+    static func deleteWebhook(telegramUrl: String) async throws {
+        let url = "\(telegramUrl)/deleteWebhook"
+        var request = HTTPClientRequest(url: url)
+        request.method = .POST
+
+        let response = try await HTTPClient.shared.execute(request, timeout: .seconds(10))
+        guard response.status == .ok else {
+            var buf = try await response.body.collect(upTo: 1 << 18)
+            let data = buf.readData(length: buf.readableBytes) ?? Data()
+            let raw = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+            throw NSError(
+                domain: "TelegramAPI",
+                code: Int(response.status.code),
+                userInfo: [NSLocalizedDescriptionKey: "deleteWebhook failed: \(response.status). Raw: \(raw)"]
+            )
+        }
+    }
+    
     static func getUpdates(telegramUrl: String, offset: Int?) async throws -> [TelegramUpdate] {
         let url = "\(telegramUrl)/getUpdates?timeout=30&offset=\(offset ?? 0)"
         var request = HTTPClientRequest(url: url)
@@ -14,10 +32,20 @@ enum TelegramAPI {
         var buf = try await response.body.collect(upTo: 1 << 22)
         let responseData = buf.readData(length: buf.readableBytes) ?? Data()
         let decoded = try JSONDecoder().decode(TelegramResponse<[TelegramUpdate]>.self, from: responseData)
-        if decoded.ok {return decoded.result} else {
-            print("ne ok")
+        
+        if decoded.ok, let result = decoded.result {
+            return result
         }
-        return decoded.result
+        
+        let raw = String(data: responseData, encoding: .utf8) ?? "<non-utf8>"
+        throw NSError(
+            domain: "TelegramAPI",
+            code: decoded.error_code ?? Int(response.status.code),
+            userInfo: [
+                NSLocalizedDescriptionKey: decoded.description ?? "Telegram returned error without description",
+                "raw": raw
+            ]
+        )
     }
     
     static func sendTelegramMessage(telegramUrl: String, chat_id: Int, text: String, reply_parameters: ReplyParameters?, message_thread_id: Int64?, reply_markup: InlineKeyboardMarkup? = nil) async throws -> TelegramMessage? {

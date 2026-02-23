@@ -6,18 +6,24 @@ actor TaskCenter {
     
     func register(key: StreamKey, task: Task<Void, Never>) {
         tasks[key] = task
+        print("[TaskCenter] register key=\(key), active=\(tasks.count)")
     }
     
     func cancel(key: StreamKey) {
+        print("[TaskCenter] cancel key=\(key), hadTask=\(tasks[key] != nil)")
         tasks[key]?.cancel()
         tasks[key] = nil
+        print("[TaskCenter] active after cancel=\(tasks.count)")
     }
     
     func cancelAll(in chatID: Int, threadID: Int64) {
+        print("[TaskCenter] cancelAll chatID=\(chatID), threadID=\(threadID), activeBefore=\(tasks.count)")
         for (k, t) in tasks where k.chatID == chatID && k.threadID == threadID {
             t.cancel()
             tasks[k] = nil
+            print("[TaskCenter] cancelled key=\(k)")
         }
+        print("[TaskCenter] active after cancelAll=\(tasks.count)")
     }
     
     func latest(for chatID: Int, threadID: Int64) -> StreamKey? {
@@ -33,18 +39,21 @@ actor BotState {
     var chatShowStats: [Int: [Int64: Bool]] = [:]
     let defaultHistoryLength: Int
     var historyLength: [Int: [Int64: Int]] = [:]
+    var serviceProvider: String = "Openrouter"
+    var model: String
     
     let systemPrompt: String
     let formatOptions: String
     let companyChatId: Int
     let companyMembers: String
     
-    init(systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, defaultHistoryLength: Int) {
+    init(model: String, systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, defaultHistoryLength: Int) {
         self.systemPrompt = systemPrompt
         self.formatOptions = formatOptions
         self.companyChatId = companyChatId
         self.companyMembers = companyMembers
         self.defaultHistoryLength = defaultHistoryLength
+        self.model = model
     }
     
     func setMaxHistory(chatID: Int, thread_id: Int64, newMax: Int) {
@@ -109,6 +118,12 @@ actor BotState {
         chatTemps[chatID]![thread_id] = value
     }
     
+    func setModel(newModel: String) -> String{
+        let currentModel = model
+        model = newModel
+        return currentModel
+    }
+    
     func showStats(chatID: Int, thread_id: Int64) -> Bool { chatShowStats[chatID]?[thread_id] ?? false }
     
     func toggleShowStats(chatID: Int, thread_id: Int64) -> Bool {
@@ -126,27 +141,32 @@ actor BotState {
 @main
 struct LLM_chat_bot {
     
-    static let companyMembers = ". Участники чата: @max_semenko, @maythe4th, @vladnest02, @xleb_s_korochkoi и бот @CatchMyVidBot."
+    static let companyMembers = ". Участники чата: max_semenko, maythe4th, vladnest02, xleb_s_korochkoi и бот CatchMyVidBot."
     static let systemPrompt = "Ты физик, тебя зовут Анатолий."
-    static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api)."
+    static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api). При упоминании или образении к участникам никогда не ставь @ перед их именами, чтобы не тегать их."
     //    static let formatOptions = " Отвечай с внятным форматированием и аккуратно соблюдай HTML-entities для Telegram."
     
     static func main() async throws {
         let tgToken = try Config.env(.telegramToken)
         let deepseekKey = try Config.env(.deepseekKey)
+        let routerApiKey = try Config.env(.routerApiKey)
         let companyChatId = try Int(Config.env(.companyChatId))
         
         let telegramUrl = "https://api.telegram.org/bot\(tgToken)"
         
         let state = BotState(
+            model: "x-ai/grok-4.1-fast",
             systemPrompt: systemPrompt,
             formatOptions: formatOptions,
             companyChatId: companyChatId ?? 0,
             companyMembers: companyMembers,
-            defaultHistoryLength: 11
+            defaultHistoryLength: 11,
         )
         
         let tasks = TaskCenter()
+        
+        // избегаем 409 (не знаю откуда оно взялось, потом разобраться)
+        try? await TelegramAPI.deleteWebhook(telegramUrl: telegramUrl)
         
         var currentOffset: Int? = nil
         while true {
@@ -160,6 +180,7 @@ struct LLM_chat_bot {
                 // обработка каждого апдейта
                 for u in updates {
                     if let cq = u.callback_query {
+                        print("[Bot] callback query received, data=\(cq.data ?? "nil"), id=\(cq.id)")
                         // формат callback_data ниже
                         let data = cq.data ?? ""
                         if data.hasPrefix("stop:") {
@@ -168,6 +189,7 @@ struct LLM_chat_bot {
                             if parts.count >= 3,
                                let chatID = Int(parts[1]),
                                let threadID = Int64(parts[2]) {
+                                print("[Bot] stop parsed chatID=\(chatID), threadID=\(threadID)")
                                 
                                 await tasks.cancelAll(in: chatID, threadID: threadID)
                                 
@@ -188,6 +210,9 @@ struct LLM_chat_bot {
                                     callback_query_id: cq.id,
                                     text: "Остановлено"
                                 )
+                                print("[Bot] stop callback answered")
+                            } else {
+                                print("[Bot] stop callback parse failed, raw=\(data)")
                             }
                         }
                         continue
@@ -237,8 +262,8 @@ struct LLM_chat_bot {
             case "/settemp":
                 guard let temp = Float(arg), (0.0...2.0).contains(temp) else {
                     let errorMessage = Float(arg) == nil
-                        ? "Ошибка: укажите ЧИСЛО от 0 до 2"
-                        : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(arg)!)"
+                    ? "Ошибка: укажите ЧИСЛО от 0 до 2"
+                    : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(arg)!)"
                     // обратная связь юзеру
                     try await sendUserFeedback(errorMessage)
                     return
@@ -246,6 +271,19 @@ struct LLM_chat_bot {
                 await state.setTemp(chatID: chatID, thread_id: thread_id, value: temp)
                 // обратная связь юзеру
                 try await sendUserFeedback("Temperature: \(await state.temp(chatID: chatID, thread_id: thread_id))")
+                
+            case "/model":
+                // установка новой модели и получение старой
+                let oldModel = await state.setModel(newModel: String(arg))
+                // сброс истории
+                let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
+                await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
+                // фидбек пользователю
+                try await sendUserFeedback("""
+Модель изменена: \(oldModel) ----> \(await state.model).
+История очищена.
+Текущая роль: \(role)
+""")
                 
                 
             case "/tokens_toggle", "/tokens_toggle@SwiftPT_bot":
@@ -337,16 +375,32 @@ struct LLM_chat_bot {
             let showStats = await state.showStats(chatID: chatID, thread_id: thread_id)
             let messages = await state.messages(chatID: chatID, thread_id: thread_id)
             
-            // запрос к дипсику, причем с потоком
-            let reqParams = Prompt(
-                model: "deepseek-chat",
-                messages: messages,
-                stream: true,
-                temperature: temp,
-                showStats: showStats
-            )
+            var routerReqParams: RouterRequestBody? = nil
+            var deepseekReqParams: Prompt? = nil
+            
+            switch await state.serviceProvider {
+            case "Openrouter":
+                routerReqParams = RouterRequestBody(
+                    messages: messages,
+                    model: await state.model,
+                    stream: true,
+                    stream_options: showStats ? .init(include_usage: true) : nil,
+                    temperature: temp)
+            case "Deepseek":
+                deepseekReqParams = Prompt(
+                    model: "deepseek-chat",
+                    messages: messages,
+                    stream: true,
+                    temperature: temp,
+                    showStats: showStats
+                )
+            default:
+                print("No service provider selected")
+                return
+            }
             
             let key = StreamKey(chatID: chatID, threadID: thread_id)
+            print("[Bot] starting stream key=\(key), provider=\(await state.serviceProvider), showStats=\(showStats)")
             
             let streamingTask = Task {
                 var accumulator = ""
@@ -357,37 +411,75 @@ struct LLM_chat_bot {
                 var isCancelled = false
                 
                 do {
-                    for try await chunk in DeepseekAPI.deepseekStream(apiKey: deepseekKey, reqParams: reqParams, showStats: showStats) {
-                        // Проверяем отмену в начале каждой итерации
-                        if Task.isCancelled {
-                            isCancelled = true
-                            break
+                    if await state.serviceProvider == "Openrouter" {
+                        for try await chunk in OpenRouterAPI.stream(apiKey: routerApiKey, reqBody: routerReqParams!, showStats: showStats){
+                            // Проверяем отмену в начале каждой итерации
+                            if Task.isCancelled {
+                                isCancelled = true
+                                print("[Bot] stream cancelled flag observed in OpenRouter loop")
+                                break
+                            }
+                            
+                            accumulator += chunk
+                            // интервал обновление тг сообщения
+                            if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
+                                do {
+                                    try await TelegramAPI.editTelegramMessage(
+                                        telegramUrl: telegramUrl,
+                                        chat_id: msg.chat.id,
+                                        message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
+                                        text: accumulator,
+                                        reply_markup: stopMarkup
+                                    )
+                                    lastEdit = clock.now
+                                    lastLength = accumulator.count
+                                } catch {
+                                    if (error as NSError).localizedDescription.contains("Too Many Requests") {
+                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                    } else {
+                                        throw error
+                                    }
+                                }
+                            }
                         }
-                        
-                        accumulator += chunk
-                        // интервал обновление тг сообщения
-                        if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
-                            do {
-                                try await TelegramAPI.editTelegramMessage(
-                                    telegramUrl: telegramUrl,
-                                    chat_id: msg.chat.id,
-                                    message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
-                                    text: accumulator,
-                                    reply_markup: stopMarkup
-                                )
-                                lastEdit = clock.now
-                                lastLength = accumulator.count
-                            } catch {
-                                if (error as NSError).localizedDescription.contains("Too Many Requests") {
-                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                } else {
-                                    throw error
+                    } else {
+                        for try await chunk in DeepseekAPI.deepseekStream(apiKey: deepseekKey, reqParams: deepseekReqParams!, showStats: showStats){
+                            // Проверяем отмену в начале каждой итерации
+                            if Task.isCancelled {
+                                isCancelled = true
+                                print("[Bot] stream cancelled flag observed in Deepseek loop")
+                                break
+                            }
+                            
+                            accumulator += chunk
+                            // интервал обновление тг сообщения
+                            if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
+                                do {
+                                    try await TelegramAPI.editTelegramMessage(
+                                        telegramUrl: telegramUrl,
+                                        chat_id: msg.chat.id,
+                                        message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
+                                        text: accumulator,
+                                        reply_markup: stopMarkup
+                                    )
+                                    lastEdit = clock.now
+                                    lastLength = accumulator.count
+                                } catch {
+                                    if (error as NSError).localizedDescription.contains("Too Many Requests") {
+                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                    } else {
+                                        throw error
+                                    }
                                 }
                             }
                         }
                     }
+                } catch is CancellationError {
+                    isCancelled = true
+                    print("[Bot] streaming task received CancellationError for key=\(key)")
                 } catch {
                     // Обработка ошибок
+                    print("[Bot] streaming task failed for key=\(key): \(error)")
                     try? await TelegramAPI.editTelegramMessage(
                         telegramUrl: telegramUrl,
                         chat_id: chatID,
@@ -397,6 +489,9 @@ struct LLM_chat_bot {
                     )
                     await tasks.cancel(key: key)
                     return
+                }
+                if Task.isCancelled {
+                    isCancelled = true
                 }
                 // финальное редактирование
                 let finalText: String
@@ -426,6 +521,7 @@ struct LLM_chat_bot {
                 await state.appendAssistant(chatID: chatID, thread_id: thread_id, content: accumulator)
                 
                 await tasks.cancel(key: key)
+                print("[Bot] stream task finished key=\(key), cancelled=\(isCancelled), chars=\(accumulator.count)")
             }
             // регистрируем задачу для этого чата/треда
             await tasks.register(key: key, task: streamingTask)
