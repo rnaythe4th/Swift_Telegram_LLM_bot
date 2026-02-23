@@ -1,6 +1,34 @@
 import AsyncHTTPClient
 import Foundation
 
+enum ServiceProvider: String, Sendable {
+    case openrouter = "Openrouter"
+    case deepseek = "Deepseek"
+}
+
+enum ProviderStreamRequest {
+    case openrouter(RouterRequestBody)
+    case deepseek(Prompt)
+
+    var provider: ServiceProvider {
+        switch self {
+        case .openrouter:
+            return .openrouter
+        case .deepseek:
+            return .deepseek
+        }
+    }
+
+    func makeStream(routerApiKey: String, deepseekKey: String, showStats: Bool) -> AsyncThrowingStream<String, Error> {
+        switch self {
+        case .openrouter(let params):
+            return OpenRouterAPI.stream(apiKey: routerApiKey, reqBody: params, showStats: showStats)
+        case .deepseek(let params):
+            return DeepseekAPI.deepseekStream(apiKey: deepseekKey, reqParams: params, showStats: showStats)
+        }
+    }
+}
+
 actor TaskCenter {
     private var tasks: [StreamKey: Task<Void, Never>] = [:]
     
@@ -39,7 +67,7 @@ actor BotState {
     var chatShowStats: [Int: [Int64: Bool]] = [:]
     let defaultHistoryLength: Int
     var historyLength: [Int: [Int64: Int]] = [:]
-    var serviceProvider: String = "Openrouter"
+    var serviceProvider: ServiceProvider = .openrouter
     var model: String
     
     let systemPrompt: String
@@ -143,7 +171,7 @@ struct LLM_chat_bot {
     
     static let companyMembers = ". Участники чата: max_semenko, maythe4th, vladnest02, xleb_s_korochkoi и бот CatchMyVidBot."
     static let systemPrompt = "Ты физик, тебя зовут Анатолий."
-    static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api). При упоминании или образении к участникам никогда не ставь @ перед их именами, чтобы не тегать их."
+    static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api). При упоминании или обращении к участникам никогда не ставь @ перед их именами, чтобы не тегать их."
     //    static let formatOptions = " Отвечай с внятным форматированием и аккуратно соблюдай HTML-entities для Telegram."
     
     static func main() async throws {
@@ -280,9 +308,9 @@ struct LLM_chat_bot {
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
                 // фидбек пользователю
                 try await sendUserFeedback("""
-Модель изменена: \(oldModel) ----> \(await state.model).
+Модель изменена:
+\(oldModel) ----> \(await state.model).
 История очищена.
-Текущая роль: \(role)
 """)
                 
                 
@@ -375,32 +403,29 @@ struct LLM_chat_bot {
             let showStats = await state.showStats(chatID: chatID, thread_id: thread_id)
             let messages = await state.messages(chatID: chatID, thread_id: thread_id)
             
-            var routerReqParams: RouterRequestBody? = nil
-            var deepseekReqParams: Prompt? = nil
-            
-            switch await state.serviceProvider {
-            case "Openrouter":
-                routerReqParams = RouterRequestBody(
+            let provider = await state.serviceProvider
+            let streamRequest: ProviderStreamRequest
+
+            switch provider {
+            case .openrouter:
+                streamRequest = .openrouter(RouterRequestBody(
                     messages: messages,
                     model: await state.model,
                     stream: true,
                     stream_options: showStats ? .init(include_usage: true) : nil,
-                    temperature: temp)
-            case "Deepseek":
-                deepseekReqParams = Prompt(
+                    temperature: temp))
+            case .deepseek:
+                streamRequest = .deepseek(Prompt(
                     model: "deepseek-chat",
                     messages: messages,
                     stream: true,
                     temperature: temp,
                     showStats: showStats
-                )
-            default:
-                print("No service provider selected")
-                return
+                ))
             }
             
             let key = StreamKey(chatID: chatID, threadID: thread_id)
-            print("[Bot] starting stream key=\(key), provider=\(await state.serviceProvider), showStats=\(showStats)")
+            print("[Bot] starting stream key=\(key), provider=\(provider.rawValue), showStats=\(showStats)")
             
             let streamingTask = Task {
                 var accumulator = ""
@@ -411,65 +436,38 @@ struct LLM_chat_bot {
                 var isCancelled = false
                 
                 do {
-                    if await state.serviceProvider == "Openrouter" {
-                        for try await chunk in OpenRouterAPI.stream(apiKey: routerApiKey, reqBody: routerReqParams!, showStats: showStats){
-                            // Проверяем отмену в начале каждой итерации
-                            if Task.isCancelled {
-                                isCancelled = true
-                                print("[Bot] stream cancelled flag observed in OpenRouter loop")
-                                break
-                            }
-                            
-                            accumulator += chunk
-                            // интервал обновление тг сообщения
-                            if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
-                                do {
-                                    try await TelegramAPI.editTelegramMessage(
-                                        telegramUrl: telegramUrl,
-                                        chat_id: msg.chat.id,
-                                        message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
-                                        text: accumulator,
-                                        reply_markup: stopMarkup
-                                    )
-                                    lastEdit = clock.now
-                                    lastLength = accumulator.count
-                                } catch {
-                                    if (error as NSError).localizedDescription.contains("Too Many Requests") {
-                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                    } else {
-                                        throw error
-                                    }
-                                }
-                            }
+                    let responseStream = streamRequest.makeStream(
+                        routerApiKey: routerApiKey,
+                        deepseekKey: deepseekKey,
+                        showStats: showStats
+                    )
+
+                    for try await chunk in responseStream {
+                        // Проверяем отмену в начале каждой итерации
+                        if Task.isCancelled {
+                            isCancelled = true
+                            print("[Bot] stream cancelled flag observed in \(streamRequest.provider.rawValue) loop")
+                            break
                         }
-                    } else {
-                        for try await chunk in DeepseekAPI.deepseekStream(apiKey: deepseekKey, reqParams: deepseekReqParams!, showStats: showStats){
-                            // Проверяем отмену в начале каждой итерации
-                            if Task.isCancelled {
-                                isCancelled = true
-                                print("[Bot] stream cancelled flag observed in Deepseek loop")
-                                break
-                            }
-                            
-                            accumulator += chunk
-                            // интервал обновление тг сообщения
-                            if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
-                                do {
-                                    try await TelegramAPI.editTelegramMessage(
-                                        telegramUrl: telegramUrl,
-                                        chat_id: msg.chat.id,
-                                        message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
-                                        text: accumulator,
-                                        reply_markup: stopMarkup
-                                    )
-                                    lastEdit = clock.now
-                                    lastLength = accumulator.count
-                                } catch {
-                                    if (error as NSError).localizedDescription.contains("Too Many Requests") {
-                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                    } else {
-                                        throw error
-                                    }
+                        
+                        accumulator += chunk
+                        // интервал обновление тг сообщения
+                        if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
+                            do {
+                                try await TelegramAPI.editTelegramMessage(
+                                    telegramUrl: telegramUrl,
+                                    chat_id: msg.chat.id,
+                                    message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
+                                    text: accumulator,
+                                    reply_markup: stopMarkup
+                                )
+                                lastEdit = clock.now
+                                lastLength = accumulator.count
+                            } catch {
+                                if (error as NSError).localizedDescription.contains("Too Many Requests") {
+                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                } else {
+                                    throw error
                                 }
                             }
                         }
