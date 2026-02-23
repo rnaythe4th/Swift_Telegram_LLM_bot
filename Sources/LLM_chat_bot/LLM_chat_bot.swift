@@ -98,14 +98,14 @@ struct LLM_chat_bot {
         
         // обработка сообщения пользователя
         func routeMessage(msg: TelegramMessage, text: String) async throws {
-            let (cmd, arg) = Self.splitBySpace(from: text)
+            let parsedCommand = ParsedBotCommand.parse(from: text)
             let chatID = msg.chat.id
             let thread_id: Int64 = msg.message_thread_id ?? 0
             
-            switch cmd {
-            case "/setrole":
+            switch parsedCommand.name {
+            case .setRole:
                 // устанавливаем заданную роль
-                await state.setRole(chatID: chatID, thread_id: thread_id, role: arg + formatOptions)
+                await state.setRole(chatID: chatID, thread_id: thread_id, role: parsedCommand.argument + formatOptions)
                 let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
                 // инициализируем чистую историю с заданной ролью
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
@@ -113,18 +113,18 @@ struct LLM_chat_bot {
                 try await sendUserFeedback("Роль изменена + история очищена")
                 
                 
-            case "/clear_history", "/clear_history@SwiftPT_bot":
+            case .clearHistory:
                 let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
                 // обратная связь юзеру
                 try await sendUserFeedback("История очищена")
                 
                 
-            case "/settemp":
-                guard let temp = Float(arg), (0.0...2.0).contains(temp) else {
-                    let errorMessage = Float(arg) == nil
+            case .setTemp:
+                guard let temp = Float(parsedCommand.argument), (0.0...2.0).contains(temp) else {
+                    let errorMessage = Float(parsedCommand.argument) == nil
                     ? "Ошибка: укажите ЧИСЛО от 0 до 2"
-                    : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(arg)!)"
+                    : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(parsedCommand.argument)!)"
                     // обратная связь юзеру
                     try await sendUserFeedback(errorMessage)
                     return
@@ -133,9 +133,9 @@ struct LLM_chat_bot {
                 // обратная связь юзеру
                 try await sendUserFeedback("Temperature: \(await state.temp(chatID: chatID, thread_id: thread_id))")
                 
-            case "/model":
+            case .model:
                 // установка новой модели и получение старой
-                let oldModel = await state.setModel(newModel: String(arg))
+                let oldModel = await state.setModel(newModel: String(parsedCommand.argument))
                 // сброс истории
                 let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
                 await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
@@ -147,13 +147,13 @@ struct LLM_chat_bot {
 """)
                 
                 
-            case "/tokens_toggle", "/tokens_toggle@SwiftPT_bot":
+            case .tokensToggle:
                 let new = await state.toggleShowStats(chatID: chatID, thread_id: thread_id)
                 // обратная связь юзеру
                 try await sendUserFeedback("Показывать расход токенов: \(new)")
                 
                 
-            case "/default_role", "/default_role@SwiftPT_bot":
+            case .defaultRole:
                 // устанавливаем стандартную роль
                 await state.setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
                 let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
@@ -163,11 +163,11 @@ struct LLM_chat_bot {
                 try await sendUserFeedback("Роль изменена на стандартную + история очищена")
                 
                 
-            case "/historylength" , "/historylength@SwiftPT_bot":
-                guard let newMax = Int(arg), (0...50).contains(newMax) else {
-                    let errorMessage = Int(arg) == nil
+            case .historyLength:
+                guard let newMax = Int(parsedCommand.argument), (0...50).contains(newMax) else {
+                    let errorMessage = Int(parsedCommand.argument) == nil
                     ? "Ошибка: укажите ЧИСЛО от 0 до 50"
-                    : "Ошибка: укажите число от 0 до 50. Вы указали: \(Int(arg)!)"
+                    : "Ошибка: укажите число от 0 до 50. Вы указали: \(Int(parsedCommand.argument)!)"
                     // обратная связь юзеру
                     try await sendUserFeedback(errorMessage)
                     return
@@ -177,13 +177,13 @@ struct LLM_chat_bot {
                 try await sendUserFeedback("Длина истории: \(newMax) сообщений")
                 
                 
-            case "@SwiftPT_bot":
+            case .mention:
                 print(text)
                 // обрабатываем сообщение с промптом
-                try await processMention(msg: msg, cleanText: arg, chatID: chatID, thread_id: thread_id)
+                try await processMention(msg: msg, cleanText: parsedCommand.argument, chatID: chatID, thread_id: thread_id)
                 
                 
-            default:
+            case .unknown:
                 // если пишут в личку, то реагировать надо на всё
                 if msg.chat.type == "private" {
                     try await processMention(msg: msg, cleanText: text, chatID: chatID, thread_id: thread_id)
@@ -290,7 +290,7 @@ struct LLM_chat_bot {
                                 try await TelegramAPI.editTelegramMessage(
                                     telegramUrl: telegramUrl,
                                     chat_id: msg.chat.id,
-                                    message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
+                                    message_id: placeholder.message_id,
                                     text: accumulator,
                                     reply_markup: stopMarkup
                                 )
@@ -314,7 +314,7 @@ struct LLM_chat_bot {
                     try? await TelegramAPI.editTelegramMessage(
                         telegramUrl: telegramUrl,
                         chat_id: chatID,
-                        message_id: placeholder?.message_id ?? msg.message_id,
+                        message_id: placeholder.message_id,
                         text: "❌ Ошибка: \(error)",
                         reply_markup: InlineKeyboardMarkup(inline_keyboard: [])
                     )
@@ -343,7 +343,7 @@ struct LLM_chat_bot {
                 try? await TelegramAPI.editTelegramMessage(
                     telegramUrl: telegramUrl,
                     chat_id: chatID,
-                    message_id: placeholder?.message_id ?? msg.message_id, // тут чисто чтобы ошибку кинуло
+                    message_id: placeholder.message_id,
                     text: finalText,
                     reply_markup: finalMarkup
                 )
@@ -359,10 +359,4 @@ struct LLM_chat_bot {
         }
     }
     
-    static func splitBySpace(from text: String) -> (String, String) {
-        let parts = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            .map(String.init)
-        return (parts.first ?? "", parts.count > 1 ? parts[1] : "")
-    }
 }

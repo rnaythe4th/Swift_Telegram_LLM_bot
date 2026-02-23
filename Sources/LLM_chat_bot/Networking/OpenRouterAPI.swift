@@ -40,7 +40,8 @@ enum OpenRouterAPI {
         AsyncThrowingStream { continuation in
             let requestTask = Task {
                 do {
-                    log("stream start: model=\(reqBody.model ?? "nil"), showStats=\(showStats)")
+                    let modelName = reqBody.model ?? "unknown-model"
+                    log("stream start: model=\(modelName), showStats=\(showStats)")
                     var req = HTTPClientRequest(url: "https://openrouter.ai/api/v1/chat/completions")
                     req.method = .POST
                     req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
@@ -75,7 +76,7 @@ enum OpenRouterAPI {
                             log("received [DONE], yieldedChunks=\(yieldedChunks)")
                             if showStats, let u = capturedUsage {
                                 log("yield final usage block")
-                                continuation.yield(formatUsage(u, reqBody.model!))
+                                continuation.yield(formatUsage(u, modelName))
                             }
                             continuation.finish()
                             log("stream finished")
@@ -155,7 +156,7 @@ enum OpenRouterAPI {
                     }
                     if showStats, let u = capturedUsage {
                         log("stream ended without [DONE], yielding captured usage")
-                        continuation.yield(formatUsage(u, reqBody.model!))
+                        continuation.yield(formatUsage(u, modelName))
                     }
                     continuation.finish()
                     log("stream finished (eof)")

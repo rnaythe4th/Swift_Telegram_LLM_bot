@@ -48,7 +48,7 @@ enum TelegramAPI {
         )
     }
     
-    static func sendTelegramMessage(telegramUrl: String, chat_id: Int, text: String, reply_parameters: ReplyParameters?, message_thread_id: Int64?, reply_markup: InlineKeyboardMarkup? = nil) async throws -> TelegramMessage? {
+    static func sendTelegramMessage(telegramUrl: String, chat_id: Int, text: String, reply_parameters: ReplyParameters?, message_thread_id: Int64?, reply_markup: InlineKeyboardMarkup? = nil) async throws -> TelegramMessage {
         
         let body = TelegramSendMessageBody(chat_id: chat_id, text: TelegramHTMLFormatter.helper(text: text), reply_parameters: reply_parameters, message_thread_id: message_thread_id, parse_mode: "HTML", reply_markup: reply_markup)
         
@@ -58,15 +58,38 @@ enum TelegramAPI {
         request.body = .bytes(try JSONEncoder().encode(body))
         
         let response = try await HTTPClient.shared.execute(request, timeout: .seconds(30))
-        guard response.status == .ok else {
-            print("error sending message: \(response.status)")
-            return nil
-        }
         var buf = try await response.body.collect(upTo: 1 << 22)
-        let responseData = buf.readData(length: buf.readableBytes) ?? Data()
-        let decoded = try JSONDecoder().decode(TelegramResponse<TelegramMessage>.self, from: responseData)
-        
-        return decoded.result
+        let data = buf.readData(length: buf.readableBytes) ?? Data()
+
+        guard response.status == .ok else {
+            if let apiErr = try? JSONDecoder().decode(TelegramResponse<TelegramMessage>.self, from: data),
+               let desc = apiErr.description {
+                throw NSError(
+                    domain: "TelegramAPI",
+                    code: apiErr.error_code ?? Int(response.status.code),
+                    userInfo: [NSLocalizedDescriptionKey: desc]
+                )
+            } else {
+                let raw = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                throw NSError(
+                    domain: "TelegramAPI",
+                    code: Int(response.status.code),
+                    userInfo: [NSLocalizedDescriptionKey: "sendMessage failed: \(response.status). Raw: \(raw)"]
+                )
+            }
+        }
+
+        let decoded = try JSONDecoder().decode(TelegramResponse<TelegramMessage>.self, from: data)
+        guard decoded.ok, let result = decoded.result else {
+            let raw = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+            throw NSError(
+                domain: "TelegramAPI",
+                code: decoded.error_code ?? Int(response.status.code),
+                userInfo: [NSLocalizedDescriptionKey: decoded.description ?? "Telegram returned ok=false for sendMessage. Raw: \(raw)"]
+            )
+        }
+
+        return result
         
     }
     
