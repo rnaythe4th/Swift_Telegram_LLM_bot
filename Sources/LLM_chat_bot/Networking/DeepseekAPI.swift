@@ -34,11 +34,11 @@ enum DeepseekAPI {
         return answer
     }
     // ответ со стримом
-    static func deepseekStream(apiKey: String, reqParams: Prompt, showStats: Bool) -> AsyncThrowingStream<String, Error> {
+    static func deepseekStream(apiKey: String, reqParams: Prompt) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    log("stream start: model=\(reqParams.model), showStats=\(showStats)")
+                    log("stream start: model=\(reqParams.model)")
                     var req = HTTPClientRequest(url: "https://api.deepseek.com/v1/chat/completions")
                     req.method = .POST
                     req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
@@ -56,8 +56,30 @@ enum DeepseekAPI {
                         throw NSError(domain: "DeepSeek", code: Int(response.status.code), userInfo: [NSLocalizedDescriptionKey: "HTTP \(response.status.code) \n\(errText)"])
                     }
                     var capturedUsage: Usage?
+                    var didYieldMeta = false
                     var accumulator = Data()
                     var yieldedChunks = 0
+
+                    let yieldMetaIfNeeded: () -> Void = {
+                        guard !didYieldMeta else { return }
+                        didYieldMeta = true
+
+                        let usageSummary = capturedUsage.map { u in
+                            StreamUsageSummary(
+                                promptTokens: Double(u.prompt_tokens),
+                                completionTokens: Double(u.completion_tokens),
+                                totalTokens: Double(u.total_tokens),
+                                cacheHitTokens: Double(u.prompt_cache_hit_tokens),
+                                cacheWriteTokens: nil,
+                                cacheMissTokens: Double(u.prompt_cache_miss_tokens),
+                                reasoningTokens: u.completion_details.map { Double($0.reasoning_tokens) },
+                                cost: nil
+                            )
+                        }
+
+                        continuation.yield(.meta(.init(model: reqParams.model, usage: usageSummary)))
+                    }
+
                     for try await var part in response.body {
                         if Task.isCancelled { break }
                         if let bytes = part.readBytes(length: part.readableBytes) {
@@ -72,34 +94,29 @@ enum DeepseekAPI {
                             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                             if payload == "[DONE]" {
                                 log("received [DONE], yieldedChunks=\(yieldedChunks)")
-                                // финальный доброс Usage (если был)
-                                if let u = capturedUsage {
-                                    log("yield final usage block")
-                                    continuation.yield(formatUsage(u))
-                                }
+                                yieldMetaIfNeeded()
                                 continuation.finish()
                                 log("stream finished")
                                 return
                             }
                             guard let json = payload.data(using: .utf8) else { continue }
                             
-                            // 1) Сначала попробуем поймать usage-чанк
-                            if showStats, let u = parseUsage(jsonData: json) {
+                            if let u = parseUsage(jsonData: json) {
                                 capturedUsage = u
                                 log("usage chunk received: prompt=\(u.prompt_tokens), completion=\(u.completion_tokens), total=\(u.total_tokens)")
-                                continue
                             }
                             
                             if let piece = parseDelta(jsonData: json), !piece.isEmpty {
                                 yieldedChunks += 1
                                 log("delta chunk #\(yieldedChunks), chars=\(piece.count), preview=\(preview(piece))")
-                                continuation.yield(piece)
+                                continuation.yield(.text(piece))
                             }
                         }
                     }
                     if Task.isCancelled {
                         log("producer task cancelled before normal finish")
                     }
+                    yieldMetaIfNeeded()
                     continuation.finish()
                     log("stream finished (eof)")
                     
@@ -122,24 +139,5 @@ enum DeepseekAPI {
     // парсинг обычного дельта-чанка
     private static func parseDelta(jsonData: Data) -> String? {
         (try? JSONDecoder().decode(StreamChunk.self, from: jsonData))?.choices.first?.delta?.content
-    }
-    // текст с использованными токенами в конце сообщения
-    private static func formatUsage(_ u: Usage) -> String {
-        
-        var reasoning_tokens = ""
-        
-        if let r = u.completion_details?.reasoning_tokens {
-            reasoning_tokens = "\n• Reasoning: \(r)"
-        }
-        
-        return """
-        
-        ———
-        • Prompt: \(u.prompt_tokens)
-           • cache hit: \(u.prompt_cache_hit_tokens)
-           • cache miss: \(u.prompt_cache_miss_tokens)\(reasoning_tokens)
-        • Completion: \(u.completion_tokens)
-        • Total: \(u.total_tokens)
-        """
     }
 }

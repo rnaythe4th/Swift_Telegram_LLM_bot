@@ -36,12 +36,12 @@ enum OpenRouterAPI {
         return answer
     }
     // ответ со стримом
-    static func stream(apiKey: String, reqBody: RouterRequestBody, showStats: Bool) -> AsyncThrowingStream<String, Error> {
+    static func stream(apiKey: String, reqBody: RouterRequestBody) -> AsyncThrowingStream<ProviderStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let requestTask = Task {
                 do {
                     let modelName = reqBody.model ?? "unknown-model"
-                    log("stream start: model=\(modelName), showStats=\(showStats)")
+                    log("stream start: model=\(modelName)")
                     var req = HTTPClientRequest(url: "https://openrouter.ai/api/v1/chat/completions")
                     req.method = .POST
                     req.headers.add(name: "Authorization", value: "Bearer \(apiKey)")
@@ -67,17 +67,35 @@ enum OpenRouterAPI {
                     }
 
                     var capturedUsage: RouterResponseUsage?
+                    var didYieldMeta = false
                     var accumulator = Data()
                     var eventDataLines: [String] = []
                     var yieldedChunks = 0
 
+                    let yieldMetaIfNeeded: () -> Void = {
+                        guard !didYieldMeta else { return }
+                        didYieldMeta = true
+
+                        let usageSummary = capturedUsage.map { u in
+                            StreamUsageSummary(
+                                promptTokens: Double(u.prompt_tokens),
+                                completionTokens: Double(u.completion_tokens),
+                                totalTokens: Double(u.total_tokens),
+                                cacheHitTokens: u.prompt_tokens_details?.cachedTokens.map(Double.init),
+                                cacheWriteTokens: u.prompt_tokens_details?.cacheWriteTokens.map(Double.init),
+                                cacheMissTokens: nil,
+                                reasoningTokens: u.completion_tokens_details?.reasoning_tokens.map(Double.init),
+                                cost: u.cost ?? u.cost_details?.upstream_inference_cost
+                            )
+                        }
+
+                        continuation.yield(.meta(.init(model: modelName, usage: usageSummary)))
+                    }
+
                     let processPayload: (String) -> Bool = { payload in
                         if payload == "[DONE]" {
                             log("received [DONE], yieldedChunks=\(yieldedChunks)")
-                            if showStats, let u = capturedUsage {
-                                log("yield final usage block")
-                                continuation.yield(formatUsage(u, modelName))
-                            }
+                            yieldMetaIfNeeded()
                             continuation.finish()
                             log("stream finished")
                             return true
@@ -85,7 +103,7 @@ enum OpenRouterAPI {
 
                         guard let json = payload.data(using: .utf8) else { return false }
 
-                        if showStats, let u = parseUsage(jsonData: json) {
+                        if let u = parseUsage(jsonData: json) {
                             capturedUsage = u
                             log("usage chunk received: prompt=\(u.prompt_tokens), completion=\(u.completion_tokens), total=\(u.total_tokens)")
                         }
@@ -93,7 +111,7 @@ enum OpenRouterAPI {
                         if let piece = parseDelta(jsonData: json), !piece.isEmpty {
                             yieldedChunks += 1
                             log("delta chunk #\(yieldedChunks), chars=\(piece.count), preview=\(preview(piece))")
-                            continuation.yield(piece)
+                            continuation.yield(.text(piece))
                         }
 
                         return false
@@ -154,10 +172,7 @@ enum OpenRouterAPI {
                     if Task.isCancelled {
                         log("producer task cancelled before normal finish")
                     }
-                    if showStats, let u = capturedUsage {
-                        log("stream ended without [DONE], yielding captured usage")
-                        continuation.yield(formatUsage(u, modelName))
-                    }
+                    yieldMetaIfNeeded()
                     continuation.finish()
                     log("stream finished (eof)")
 
@@ -189,23 +204,5 @@ enum OpenRouterAPI {
         let pieces = choices.compactMap { $0.delta?.content }.filter { !$0.isEmpty }
         guard !pieces.isEmpty else { return nil }
         return pieces.joined()
-    }
-    // текст с использованными токенами в конце сообщения
-    private static func formatUsage(_ u: RouterResponseUsage, _ model: String) -> String {
-        let cacheHitLine = u.prompt_tokens_details?.cachedTokens.map { "\n   • cache hit: \($0)" } ?? ""
-        let cacheWriteLine = u.prompt_tokens_details?.cacheWriteTokens.map { "\n   • cache write: \($0)" } ?? ""
-        let reasoningLine = u.completion_tokens_details?.reasoning_tokens.map { "\n   • reasoning: \($0)" } ?? ""
-        
-        let cost = u.cost.map { String(format: "%.6f", $0) } ?? ""
-
-        return """
-
-        ———
-        Model: \(model)
-        • Prompt: \(u.prompt_tokens)\(cacheHitLine)\(cacheWriteLine)
-        • Completion: \(u.completion_tokens)\(reasoningLine)
-        • Total: \(u.total_tokens)
-        • COST: $\(cost)
-        """
     }
 }

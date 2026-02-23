@@ -5,11 +5,15 @@ enum BotCommandName {
     case clearHistory
     case setTemp
     case model
-    case tokensToggle
+    //case tokensToggle
     case defaultRole
     case historyLength
     case mention
     case unknown
+    case showModel
+    case showCost
+    case showTokens
+    case help
 
     init(rawCommand: String) {
         switch rawCommand {
@@ -21,14 +25,20 @@ enum BotCommandName {
             self = .setTemp
         case "/model":
             self = .model
-        case "/tokens_toggle", "/tokens_toggle@SwiftPT_bot":
-            self = .tokensToggle
+        case "/show_tokens", "/show_tokens@SwiftPT_bot":
+            self = .showTokens
         case "/default_role", "/default_role@SwiftPT_bot":
             self = .defaultRole
         case "/historylength", "/historylength@SwiftPT_bot":
             self = .historyLength
         case "@SwiftPT_bot":
             self = .mention
+        case "/show_model", "/show_model@SwiftPT_bot":
+            self = .showModel
+        case "/show_cost", "/show_cost@SwiftPT_bot":
+            self = .showCost
+        case "/help", "/help@SwiftPT_bot":
+            self = .help
         default:
             self = .unknown
         }

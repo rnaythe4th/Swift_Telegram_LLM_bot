@@ -144,11 +144,53 @@ struct LLM_chat_bot {
 """)
                 
                 
-            case .tokensToggle:
+            case .showTokens:
                 let new = await state.toggleShowStats(chatID: chatID, thread_id: thread_id)
                 // обратная связь юзеру
                 try await sendUserFeedback("Показывать расход токенов: \(new)")
+            
+            case .showCost:
+                let new = await state.toggleShowCost(chatID: chatID, thread_id: thread_id)
+                try await sendUserFeedback("Показывать стоимость сообщений: \(new)")
                 
+            case .showModel:
+                let new = await state.toggleShowModel(chatID: chatID, thread_id: thread_id)
+                try await sendUserFeedback("Показывать использованную модель: \(new)")
+                
+            case .help:
+                let currentModel = await state.getCurrentModel(chatID: chatID, thread_id: thread_id)
+                let currentRole = await state.getCurrentRole(chatID: chatID, thread_id: thread_id)
+                let currentTemp = await state.temp(chatID: chatID, thread_id: thread_id)
+                let currentMaxHistory = await state.getCurrentMaxHistory(chatID: chatID, thread_id: thread_id)
+                let currentShowTokens = await state.getShowStats(chatID: chatID, thread_id: thread_id)
+                let currentShowCost = await state.getShowCost(chatID: chatID, thread_id: thread_id)
+                let currentShowModel = await state.getShowModel(chatID: chatID, thread_id: thread_id)
+                let defaultRole = await state.defaultRole(chatID: chatID)
+                
+                try await sendUserFeedback("""
+                    /setrole <Новая роль> - установить новую роль боту и очистить историю сообщений
+                    /clear_history - очистить историю сообщений, сохранив роль
+                    /settemp <число> - задать креативность бота. 2.0 - максимальная креативность, 0.0 - максимальна точность и стабильность ответов. (По умолчанию = 1.5)
+                    /show_tokens - вкл/выкл показ расхода токенов, использованных для генерации сообщения. (По умолчанию = выкл)
+                    /default_role - вернуть стандартную роль
+                    /historylength <число> - задать количество последних сообщений, которые будет помнить бот. (По умолчанию = 11)
+                    /model <новая модель> - задать новую модель ИИ для ответов (По умолчанию - \(state.defaultModel)
+                    /show_model - вкл/выкл показ использованной модели (По умолчанию = вкл)
+                    /show_cost - вкл/выкл показ стоимости сгенерированного сообщения в $ (По умолчанию = выкл)
+                    
+                    -------------------
+                    Текущие настройки для этого чата:
+                    -------------------
+                    
+                    • Модель: \(currentModel)
+                    • Temperature: \(currentTemp)
+                    • Длина истории: \(currentMaxHistory)
+                    • Показать расход токенов: \(currentShowTokens)
+                    • Показать стоимость сообщения: \(currentShowCost)
+                    • Показать использованную модель: \(currentShowModel)
+                    • Роль: <blockquote>\(currentRole)</blockquote>
+                    • Дефолтная роль: <blockquote>\(defaultRole)</blockquote>
+                    """)
                 
             case .defaultRole:
                 // устанавливаем стандартную роль и сразу сбрасываем историю
@@ -193,12 +235,77 @@ struct LLM_chat_bot {
         
         // обработка сообщения с промптом
         func processMention(msg: TelegramMessage, cleanText: String, chatID: Int, thread_id: Int64) async throws {
+            func formatTokenValue(_ value: Double) -> String {
+                if value.rounded(.towardZero) == value {
+                    return String(Int(value))
+                }
+                return String(format: "%.3f", value)
+            }
+
+            func formatFooter(meta: StreamMeta?, fallbackModel: String, showTokens: Bool, showCost: Bool, showModel: Bool) -> String? {
+                guard showTokens || showCost || showModel else { return nil }
+
+                var lines: [String] = ["", "━━━━━━━━━━━━━"]
+                let usage = meta?.usage
+
+                if showTokens {
+                    var hasAnyTokenData = false
+
+                    if let prompt = usage?.promptTokens {
+                        lines.append("• Prompt: \(formatTokenValue(prompt))")
+                        hasAnyTokenData = true
+                    }
+                    if let cacheHit = usage?.cacheHitTokens {
+                        lines.append("  • cache hit: \(formatTokenValue(cacheHit))")
+                        hasAnyTokenData = true
+                    }
+                    if let cacheWrite = usage?.cacheWriteTokens {
+                        lines.append("  • cache write: \(formatTokenValue(cacheWrite))")
+                        hasAnyTokenData = true
+                    }
+                    if let cacheMiss = usage?.cacheMissTokens {
+                        lines.append("  • cache miss: \(formatTokenValue(cacheMiss))")
+                        hasAnyTokenData = true
+                    }
+                    if let completion = usage?.completionTokens {
+                        lines.append("• Completion: \(formatTokenValue(completion))")
+                        hasAnyTokenData = true
+                    }
+                    if let reasoning = usage?.reasoningTokens {
+                        lines.append("  • reasoning: \(formatTokenValue(reasoning))")
+                        hasAnyTokenData = true
+                    }
+                    if let total = usage?.totalTokens {
+                        lines.append("• Total: \(formatTokenValue(total))")
+                        hasAnyTokenData = true
+                    }
+
+                    if !hasAnyTokenData {
+                        lines.append("• Токены: н/д")
+                    }
+                }
+
+                if showCost {
+                    if let cost = usage?.cost {
+                        lines.append("• Стоимость: $\(String(format: "%.6f", cost))")
+                    } else {
+                        lines.append("• Стоимость: н/д")
+                    }
+                }
+
+                if showModel {
+                    lines.append("Модель: \(meta?.model ?? fallbackModel)")
+                }
+
+                return lines.count > 2 ? lines.joined(separator: "\n") : nil
+            }
+
             // текст промпта для дипсика
             let promptText: String = {
                 if let u = msg.from?.username { return "Тебе пишет @\(u): \(cleanText)" }
                 return cleanText
             }()
-            
+
             // атомарно обновляем контекст и получаем снимок параметров генерации
             let snapshot = await state.prepareGeneration(
                 chatID: chatID,
@@ -206,11 +313,11 @@ struct LLM_chat_bot {
                 userContent: promptText,
                 username: msg.from?.username
             )
-            
+
             let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
                 .init(text: "🛑 СТОП", callback_data: "stop:\(chatID):\(thread_id)")
             ]])
-            
+
             // отправить черновик чтобы юзер понял что промпт был принят
             let placeholder = try await TelegramAPI.sendTelegramMessage(
                 telegramUrl: telegramUrl,
@@ -220,14 +327,17 @@ struct LLM_chat_bot {
                 message_thread_id: thread_id != 0 ? thread_id : nil,
                 reply_markup: stopMarkup
             )
-            
+
             // параметры генерации читаем из актора
             let temp = snapshot.temperature
             let showStats = snapshot.showStats
+            let showCost = snapshot.showCost
+            let showModel = snapshot.showModel
             let messages = snapshot.messages
-            
+
             let provider = snapshot.provider
             let streamRequest: ProviderStreamRequest
+            let fallbackModel: String
 
             switch provider {
             case .openrouter:
@@ -235,8 +345,9 @@ struct LLM_chat_bot {
                     messages: messages,
                     model: snapshot.model,
                     stream: true,
-                    stream_options: showStats ? .init(include_usage: true) : nil,
+                    stream_options: showStats || showCost ? .init(include_usage: true) : nil,
                     temperature: temp))
+                fallbackModel = snapshot.model
             case .deepseek:
                 streamRequest = .deepseek(Prompt(
                     model: "deepseek-chat",
@@ -245,54 +356,60 @@ struct LLM_chat_bot {
                     temperature: temp,
                     showStats: showStats
                 ))
+                fallbackModel = "deepseek-chat"
             }
-            
+
             let key = StreamKey(chatID: chatID, threadID: thread_id)
             print("[Bot] starting stream key=\(key), provider=\(provider.rawValue), showStats=\(showStats)")
-            
+
             let streamingTask = Task {
                 var accumulator = ""
+                var streamMeta: StreamMeta?
                 var lastLength = 0
                 let clock = ContinuousClock()
                 var lastEdit = clock.now // по идее теперь локально
-                
+
                 var isCancelled = false
-                
+
                 do {
                     let responseStream = streamRequest.makeStream(
                         routerApiKey: routerApiKey,
-                        deepseekKey: deepseekKey,
-                        showStats: showStats
+                        deepseekKey: deepseekKey
                     )
 
-                    for try await chunk in responseStream {
+                    for try await event in responseStream {
                         // Проверяем отмену в начале каждой итерации
                         if Task.isCancelled {
                             isCancelled = true
                             print("[Bot] stream cancelled flag observed in \(streamRequest.provider.rawValue) loop")
                             break
                         }
-                        
-                        accumulator += chunk
-                        // интервал обновление тг сообщения
-                        if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
-                            do {
-                                try await TelegramAPI.editTelegramMessage(
-                                    telegramUrl: telegramUrl,
-                                    chat_id: msg.chat.id,
-                                    message_id: placeholder.message_id,
-                                    text: accumulator,
-                                    reply_markup: stopMarkup
-                                )
-                                lastEdit = clock.now
-                                lastLength = accumulator.count
-                            } catch {
-                                if (error as NSError).localizedDescription.contains("Too Many Requests") {
-                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                } else {
-                                    throw error
+
+                        switch event {
+                        case .text(let chunk):
+                            accumulator += chunk
+                            // интервал обновление тг сообщения
+                            if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
+                                do {
+                                    try await TelegramAPI.editTelegramMessage(
+                                        telegramUrl: telegramUrl,
+                                        chat_id: msg.chat.id,
+                                        message_id: placeholder.message_id,
+                                        text: accumulator,
+                                        reply_markup: stopMarkup
+                                    )
+                                    lastEdit = clock.now
+                                    lastLength = accumulator.count
+                                } catch {
+                                    if (error as NSError).localizedDescription.contains("Too Many Requests") {
+                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                    } else {
+                                        throw error
+                                    }
                                 }
                             }
+                        case .meta(let meta):
+                            streamMeta = meta
                         }
                     }
                 } catch is CancellationError {
@@ -317,19 +434,27 @@ struct LLM_chat_bot {
                 // финальное редактирование
                 let finalText: String
                 let finalMarkup: InlineKeyboardMarkup?
-                
+
                 if isCancelled {
                     finalText = accumulator.isEmpty ?
                     "🛑 <b>Остановлено пользователем.</b>" :
                     accumulator + "\n\n🛑 <b>Остановлено пользователем.</b>"
                     finalMarkup = InlineKeyboardMarkup(inline_keyboard: [])
                 } else {
+                    let footer = formatFooter(
+                        meta: streamMeta,
+                        fallbackModel: fallbackModel,
+                        showTokens: showStats,
+                        showCost: showCost,
+                        showModel: showModel
+                    ) ?? ""
+
                     finalText = accumulator.isEmpty ?
-                    "Пустой ответ." :
-                    accumulator + "\n\n✅ <b>Ответ завершен.</b>"
+                    "Пустой ответ.\(footer)\n\n✅ <b>Ответ завершен.</b>" :
+                    accumulator + footer + "\n\n✅ <b>Ответ завершен.</b>"
                     finalMarkup = InlineKeyboardMarkup(inline_keyboard: [])
                 }
-                
+
                 try? await TelegramAPI.editTelegramMessage(
                     telegramUrl: telegramUrl,
                     chat_id: chatID,
@@ -337,10 +462,10 @@ struct LLM_chat_bot {
                     text: finalText,
                     reply_markup: finalMarkup
                 )
-                
+
                 // добавляем ответ бота в историю
                 await state.appendAssistant(chatID: chatID, thread_id: thread_id, content: accumulator)
-                
+
                 await tasks.cancel(key: key)
                 print("[Bot] stream task finished key=\(key), cancelled=\(isCancelled), chars=\(accumulator.count)")
             }

@@ -7,6 +7,8 @@ struct ChatContext {
     var temp: Float
     var showStats: Bool
     var maxHistory: Int
+    var showCost: Bool
+    var showModel: Bool
 }
 
 struct GenerationStateSnapshot: Sendable {
@@ -15,6 +17,8 @@ struct GenerationStateSnapshot: Sendable {
     let temperature: Float
     let showStats: Bool
     let messages: [ChatMessage]
+    let showCost: Bool
+    let showModel: Bool
 }
 
 actor ChatContextStore {
@@ -45,7 +49,7 @@ actor ChatContextStore {
         (chatID == companyChatId) ? role + companyMembers : role
     }
 
-    private func defaultRole(chatID: Int) -> String {
+    func defaultRole(chatID: Int) -> String {
         roleWithCompanyMembers(chatID: chatID, role: systemPrompt + formatOptions)
     }
 
@@ -59,7 +63,9 @@ actor ChatContextStore {
                 model: defaultModel,
                 temp: 1.5,
                 showStats: false,
-                maxHistory: defaultHistoryLength
+                maxHistory: defaultHistoryLength,
+                showCost: false,
+                showModel: true
             )
         }
         return contextKey
@@ -77,10 +83,18 @@ actor ChatContextStore {
         contexts[contextKey] = context
     }
 
+    func getCurrentMaxHistory(chatID: Int, thread_id: Int64) -> Int {
+        getContext(chatID: chatID, thread_id: thread_id).maxHistory
+    }
+    
     func setMaxHistory(chatID: Int, thread_id: Int64, newMax: Int) {
         mutateContext(chatID: chatID, thread_id: thread_id) {
             $0.maxHistory = newMax
         }
+    }
+    
+    func getCurrentRole(chatID: Int, thread_id: Int64) -> String {
+        getContext(chatID: chatID, thread_id: thread_id).role
     }
 
     func setRoleAndResetHistory(chatID: Int, thread_id: Int64, role: String) -> String {
@@ -117,6 +131,10 @@ actor ChatContextStore {
             $0.temp = value
         }
     }
+    
+    func getCurrentModel(chatID: Int, thread_id: Int64) -> String {
+        getContext(chatID: chatID, thread_id: thread_id).model
+    }
 
     func setModelAndResetHistory(chatID: Int, thread_id: Int64, newModel: String) -> (oldModel: String, newModel: String) {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
@@ -129,6 +147,10 @@ actor ChatContextStore {
 
         return (oldModel: oldModel, newModel: context.model)
     }
+    
+    func getShowStats(chatID: Int, thread_id: Int64) -> Bool {
+        getContext(chatID: chatID, thread_id: thread_id).showStats
+    }
 
     func toggleShowStats(chatID: Int, thread_id: Int64) -> Bool {
         var newValue = false
@@ -138,7 +160,33 @@ actor ChatContextStore {
         }
         return newValue
     }
-
+    
+    func getShowCost(chatID: Int, thread_id: Int64) -> Bool {
+        getContext(chatID: chatID, thread_id: thread_id).showCost
+    }
+    
+    func toggleShowCost(chatID: Int, thread_id: Int64) -> Bool {
+        var newValue: Bool = false
+        mutateContext(chatID: chatID, thread_id: thread_id) { context in
+            context.showCost.toggle()
+            newValue = context.showCost
+        }
+        return newValue
+    }
+    
+    func getShowModel(chatID: Int, thread_id: Int64) -> Bool {
+        getContext(chatID: chatID, thread_id: thread_id).showModel
+    }
+    
+    func toggleShowModel(chatID: Int, thread_id: Int64) -> Bool {
+        var newValue: Bool = false
+        mutateContext(chatID: chatID, thread_id: thread_id) { context in
+            context.showModel.toggle()
+            newValue = context.showModel
+        }
+        return newValue
+    }
+    
     func prepareGeneration(chatID: Int, thread_id: Int64, userContent: String, username: String?) -> GenerationStateSnapshot {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
@@ -160,7 +208,9 @@ actor ChatContextStore {
             model: context.model,
             temperature: context.temp,
             showStats: context.showStats,
-            messages: context.history
+            messages: context.history,
+            showCost: context.showCost,
+            showModel: context.showModel
         )
     }
 }
