@@ -102,7 +102,7 @@ struct AnswerCallbackQueryBody: Codable {
 
 // тут пошло для дипсика
 // сообщение в чате (в истории)
-struct ChatMessage: Codable {
+struct ChatMessage: Codable, Sendable {
     let role: String
     let content: String
     var name: String? = nil

@@ -15,7 +15,7 @@ struct LLM_chat_bot {
         
         let telegramUrl = appConfig.telegramUrl
         
-        let state = BotState(
+        let state = ChatContextStore(
             model: "x-ai/grok-4.1-fast",
             systemPrompt: systemPrompt,
             formatOptions: formatOptions,
@@ -104,18 +104,14 @@ struct LLM_chat_bot {
             
             switch parsedCommand.name {
             case .setRole:
-                // устанавливаем заданную роль
-                await state.setRole(chatID: chatID, thread_id: thread_id, role: parsedCommand.argument + formatOptions)
-                let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
-                // инициализируем чистую историю с заданной ролью
-                await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
+                // устанавливаем роль и сразу сбрасываем историю в одной actor-операции
+                _ = await state.setRoleAndResetHistory(chatID: chatID, thread_id: thread_id, role: parsedCommand.argument + formatOptions)
                 // обратная связь юзеру
                 try await sendUserFeedback("Роль изменена + история очищена")
                 
                 
             case .clearHistory:
-                let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
-                await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
+                await state.clearHistory(chatID: chatID, thread_id: thread_id)
                 // обратная связь юзеру
                 try await sendUserFeedback("История очищена")
                 
@@ -134,16 +130,16 @@ struct LLM_chat_bot {
                 try await sendUserFeedback("Temperature: \(await state.temp(chatID: chatID, thread_id: thread_id))")
                 
             case .model:
-                // установка новой модели и получение старой
-                let oldModel = await state.setModel(chatID: chatID, thread_id: thread_id, newModel: String(parsedCommand.argument))
-                let newModel = await state.model(chatID: chatID, thread_id: thread_id)
-                // сброс истории
-                let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
-                await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
+                // атомарно меняем модель и сбрасываем историю
+                let changedModel = await state.setModelAndResetHistory(
+                    chatID: chatID,
+                    thread_id: thread_id,
+                    newModel: String(parsedCommand.argument)
+                )
                 // фидбек пользователю
                 try await sendUserFeedback("""
 Модель изменена:
-\(oldModel) ----> \(newModel).
+\(changedModel.oldModel) ----> \(changedModel.newModel).
 История очищена.
 """)
                 
@@ -155,11 +151,8 @@ struct LLM_chat_bot {
                 
                 
             case .defaultRole:
-                // устанавливаем стандартную роль
-                await state.setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
-                let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
-                // инициализируем историю с установленной ролью
-                await state.resetHistory(chatID: chatID, thread_id: thread_id, role: role)
+                // устанавливаем стандартную роль и сразу сбрасываем историю
+                _ = await state.setRoleAndResetHistory(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
                 // обратная связь юзеру
                 try await sendUserFeedback("Роль изменена на стандартную + история очищена")
                 
@@ -206,17 +199,13 @@ struct LLM_chat_bot {
                 return cleanText
             }()
             
-            // подготовка роли и истории в акторе
-            let role = await state.ensureRole(chatID: chatID, thread_id: thread_id)
-            await state.ensureHistory(chatID: chatID, thread_id: thread_id)
-            
-            await state.ensureMaxHistory(chatID: chatID, thread_id: thread_id)
-            
-            // проверка длины истории сообщений
-            await state.trimHistoryIfNeeded(chatID: chatID, thread_id: thread_id)
-            
-            // сообщение пользователя в исторю
-            await state.appendUser(chatID: chatID, thread_id: thread_id, content: promptText, username: msg.from?.username)
+            // атомарно обновляем контекст и получаем снимок параметров генерации
+            let snapshot = await state.prepareGeneration(
+                chatID: chatID,
+                thread_id: thread_id,
+                userContent: promptText,
+                username: msg.from?.username
+            )
             
             let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
                 .init(text: "🛑 СТОП", callback_data: "stop:\(chatID):\(thread_id)")
@@ -233,19 +222,18 @@ struct LLM_chat_bot {
             )
             
             // параметры генерации читаем из актора
-            let temp = await state.temp(chatID: chatID, thread_id: thread_id)
-            let showStats = await state.showStats(chatID: chatID, thread_id: thread_id)
-            let messages = await state.messages(chatID: chatID, thread_id: thread_id)
+            let temp = snapshot.temperature
+            let showStats = snapshot.showStats
+            let messages = snapshot.messages
             
-            let provider = await state.serviceProvider
+            let provider = snapshot.provider
             let streamRequest: ProviderStreamRequest
 
             switch provider {
             case .openrouter:
-                let model = await state.model(chatID: chatID, thread_id: thread_id)
                 streamRequest = .openrouter(RouterRequestBody(
                     messages: messages,
-                    model: model,
+                    model: snapshot.model,
                     stream: true,
                     stream_options: showStats ? .init(include_usage: true) : nil,
                     temperature: temp))
