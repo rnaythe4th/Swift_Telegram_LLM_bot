@@ -1,170 +1,4 @@
-import AsyncHTTPClient
 import Foundation
-
-enum ServiceProvider: String, Sendable {
-    case openrouter = "Openrouter"
-    case deepseek = "Deepseek"
-}
-
-enum ProviderStreamRequest {
-    case openrouter(RouterRequestBody)
-    case deepseek(Prompt)
-
-    var provider: ServiceProvider {
-        switch self {
-        case .openrouter:
-            return .openrouter
-        case .deepseek:
-            return .deepseek
-        }
-    }
-
-    func makeStream(routerApiKey: String, deepseekKey: String, showStats: Bool) -> AsyncThrowingStream<String, Error> {
-        switch self {
-        case .openrouter(let params):
-            return OpenRouterAPI.stream(apiKey: routerApiKey, reqBody: params, showStats: showStats)
-        case .deepseek(let params):
-            return DeepseekAPI.deepseekStream(apiKey: deepseekKey, reqParams: params, showStats: showStats)
-        }
-    }
-}
-
-actor TaskCenter {
-    private var tasks: [StreamKey: Task<Void, Never>] = [:]
-    
-    func register(key: StreamKey, task: Task<Void, Never>) {
-        tasks[key] = task
-        print("[TaskCenter] register key=\(key), active=\(tasks.count)")
-    }
-    
-    func cancel(key: StreamKey) {
-        print("[TaskCenter] cancel key=\(key), hadTask=\(tasks[key] != nil)")
-        tasks[key]?.cancel()
-        tasks[key] = nil
-        print("[TaskCenter] active after cancel=\(tasks.count)")
-    }
-    
-    func cancelAll(in chatID: Int, threadID: Int64) {
-        print("[TaskCenter] cancelAll chatID=\(chatID), threadID=\(threadID), activeBefore=\(tasks.count)")
-        for (k, t) in tasks where k.chatID == chatID && k.threadID == threadID {
-            t.cancel()
-            tasks[k] = nil
-            print("[TaskCenter] cancelled key=\(k)")
-        }
-        print("[TaskCenter] active after cancelAll=\(tasks.count)")
-    }
-    
-    func latest(for chatID: Int, threadID: Int64) -> StreamKey? {
-        // Not strictly LIFO, but returning any one active key is fine for /stop.
-        return tasks.keys.first(where: { $0.chatID == chatID && $0.threadID == threadID })
-    }
-}
-
-actor BotState {
-    var chatRoles: [Int: [Int64: String]] = [:]
-    var chatHistories: [Int: [Int64: [ChatMessage]]] = [:]
-    var chatTemps: [Int: [Int64: Float]] = [:]
-    var chatShowStats: [Int: [Int64: Bool]] = [:]
-    let defaultHistoryLength: Int
-    var historyLength: [Int: [Int64: Int]] = [:]
-    var serviceProvider: ServiceProvider = .openrouter
-    var model: String
-    
-    let systemPrompt: String
-    let formatOptions: String
-    let companyChatId: Int
-    let companyMembers: String
-    
-    init(model: String, systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, defaultHistoryLength: Int) {
-        self.systemPrompt = systemPrompt
-        self.formatOptions = formatOptions
-        self.companyChatId = companyChatId
-        self.companyMembers = companyMembers
-        self.defaultHistoryLength = defaultHistoryLength
-        self.model = model
-    }
-    
-    func setMaxHistory(chatID: Int, thread_id: Int64, newMax: Int) {
-        if historyLength[chatID] == nil { historyLength[chatID] = [:] }
-        historyLength[chatID]![thread_id] = newMax
-    }
-    
-    func ensureMaxHistory(chatID: Int, thread_id: Int64) -> Int {
-        if historyLength[chatID] == nil {
-            setMaxHistory(chatID: chatID, thread_id: thread_id, newMax: defaultHistoryLength)
-        }
-        return historyLength[chatID]![thread_id]!
-    }
-    
-    func setRole(chatID: Int, thread_id: Int64, role: String) {
-        if chatRoles[chatID] == nil { chatRoles[chatID] = [:] }
-        chatRoles[chatID]![thread_id] = (chatID == companyChatId) ? role + companyMembers : role
-    }
-    
-    func ensureRole(chatID: Int, thread_id: Int64) -> String {
-        if chatRoles[chatID]?[thread_id] == nil {
-            setRole(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
-        }
-        return chatRoles[chatID]![thread_id]!
-    }
-    
-    func resetHistory(chatID: Int, thread_id: Int64, role: String) {
-        if chatHistories[chatID] == nil { chatHistories[chatID] = [:] }
-        chatHistories[chatID]![thread_id] = [.init(role: "system", content: role)]
-    }
-    
-    func ensureHistory(chatID: Int, thread_id: Int64) {
-        if chatHistories[chatID] == nil { chatHistories[chatID] = [:] }
-        if chatHistories[chatID]![thread_id] == nil {
-            let role = ensureRole(chatID: chatID, thread_id: thread_id)
-            chatHistories[chatID]![thread_id] = [.init(role: "system", content: role)]
-        }
-    }
-    
-    func trimHistoryIfNeeded(chatID: Int, thread_id: Int64) {
-        guard var arr = chatHistories[chatID]?[thread_id] else { return }
-        if arr.count >= ensureMaxHistory(chatID: chatID, thread_id: thread_id), arr.count > 1 {
-            // оставляем системное 0, удаляем 1..2
-            let hi = min(2, arr.count - 1)
-            arr.removeSubrange(1...hi)
-            chatHistories[chatID]![thread_id] = arr
-        }
-    }
-    
-    func appendUser(chatID: Int, thread_id: Int64, content: String, username: String?) {
-        chatHistories[chatID]![thread_id]!.append(.init(role: "user", content: content, name: username))
-    }
-    
-    func appendAssistant(chatID: Int, thread_id: Int64, content: String) {
-        chatHistories[chatID]![thread_id]!.append(.init(role: "assistant", content: content))
-    }
-    
-    func temp(chatID: Int, thread_id: Int64) -> Float { chatTemps[chatID]?[thread_id] ?? 1.5 }
-    
-    func setTemp(chatID: Int, thread_id: Int64, value: Float) {
-        if chatTemps[chatID] == nil { chatTemps[chatID] = [:] }
-        chatTemps[chatID]![thread_id] = value
-    }
-    
-    func setModel(newModel: String) -> String{
-        let currentModel = model
-        model = newModel
-        return currentModel
-    }
-    
-    func showStats(chatID: Int, thread_id: Int64) -> Bool { chatShowStats[chatID]?[thread_id] ?? false }
-    
-    func toggleShowStats(chatID: Int, thread_id: Int64) -> Bool {
-        if chatShowStats[chatID] == nil { chatShowStats[chatID] = [:] }
-        let new = !(chatShowStats[chatID]![thread_id] ?? false)
-        chatShowStats[chatID]![thread_id] = new
-        return new
-    }
-    
-    func messages(chatID: Int, thread_id: Int64) -> [ChatMessage] {
-        chatHistories[chatID]![thread_id]!
-    }
-}
 
 @main
 struct LLM_chat_bot {
@@ -175,18 +9,17 @@ struct LLM_chat_bot {
     //    static let formatOptions = " Отвечай с внятным форматированием и аккуратно соблюдай HTML-entities для Telegram."
     
     static func main() async throws {
-        let tgToken = try Config.env(.telegramToken)
-        let deepseekKey = try Config.env(.deepseekKey)
-        let routerApiKey = try Config.env(.routerApiKey)
-        let companyChatId = try Int(Config.env(.companyChatId))
+        let appConfig = try AppConfig.load()
+        let deepseekKey = appConfig.deepseekKey
+        let routerApiKey = appConfig.routerApiKey
         
-        let telegramUrl = "https://api.telegram.org/bot\(tgToken)"
+        let telegramUrl = appConfig.telegramUrl
         
         let state = BotState(
             model: "x-ai/grok-4.1-fast",
             systemPrompt: systemPrompt,
             formatOptions: formatOptions,
-            companyChatId: companyChatId ?? 0,
+            companyChatId: appConfig.companyChatId,
             companyMembers: companyMembers,
             defaultHistoryLength: 11,
         )

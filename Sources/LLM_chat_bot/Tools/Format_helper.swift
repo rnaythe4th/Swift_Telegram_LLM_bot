@@ -377,16 +377,3 @@ struct TelegramHTMLFormatter {
         return result
     }
 }
-
-// Примеры использования:
-let input1 = "Hello <strong>world</strong> & 2 < 3!"
-let output1 = TelegramHTMLFormatter.helper(text: input1)
-// Ожидаемый результат: "Hello <strong>world</strong> &amp; 2 &lt; 3!"
-
-let input2 = "Example: <code class=\"language-python\">var x = 5 < 10</code> and a <span style=\"color:red\">red text</span>."
-let output2 = TelegramHTMLFormatter.helper(text: input2)
-// Ожидаемый результат: "Example: <code>var x = 5 &lt; 10</code> and a red text."
-
-let input3 = "Спойлер: <tg-spoiler>тайный текст</tg-spoiler> и <span class=\"tg-spoiler\">ещё тайна</span>."
-let output3 = TelegramHTMLFormatter.helper(text: input3)
-// Ожидаемый результат: "Спойлер: <tg-spoiler>тайный текст</tg-spoiler> и <span class=\"tg-spoiler\">ещё тайна</span>."
