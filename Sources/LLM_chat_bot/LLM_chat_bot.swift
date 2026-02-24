@@ -16,7 +16,7 @@ struct LLM_chat_bot {
         let telegramUrl = appConfig.telegramUrl
         
         let state = ChatContextStore(
-            model: "x-ai/grok-4.1-fast",
+            model: "google/gemini-3-flash-preview",
             systemPrompt: systemPrompt,
             formatOptions: formatOptions,
             companyChatId: appConfig.companyChatId,
