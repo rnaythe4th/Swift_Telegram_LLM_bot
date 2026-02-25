@@ -15,17 +15,6 @@ struct LLM_chat_bot {
         
         let telegramUrl = appConfig.telegramUrl
         
-        let state = ChatContextStore(
-            model: "google/gemini-3-flash-preview",
-            systemPrompt: systemPrompt,
-            formatOptions: formatOptions,
-            companyChatId: appConfig.companyChatId,
-            companyMembers: companyMembers,
-            defaultHistoryLength: 11,
-        )
-        
-        let tasks = TaskCenter()
-        
         // избегаем 409 (не знаю откуда оно взялось, потом разобраться)
         try? await TelegramAPI.deleteWebhook(telegramUrl: telegramUrl)
         let botInfo = try? await TelegramAPI.getMe(telegramUrl: telegramUrl)
@@ -33,6 +22,18 @@ struct LLM_chat_bot {
             fatalError("Unable to verify username, getMe() request returned corrupted data")
         }
         print(botUsername)
+        
+        let state = ChatContextStore(
+            model: "google/gemini-3-flash-preview",
+            systemPrompt: systemPrompt,
+            formatOptions: formatOptions,
+            companyChatId: appConfig.companyChatId,
+            companyMembers: companyMembers,
+            defaultHistoryLength: 11,
+            defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil
+        )
+        
+        let tasks = TaskCenter()
         
         var currentOffset: Int? = nil
         while true {
@@ -103,9 +104,9 @@ struct LLM_chat_bot {
         
         // обработка сообщения пользователя
         func routeMessage(msg: TelegramMessage, text: String) async throws {
-            let parsedCommand = ParsedBotCommand.parse(from: text, botUsername: botUsername)
             let chatID = msg.chat.id
             let thread_id: Int64 = msg.message_thread_id ?? 0
+            let parsedCommand = ParsedBotCommand.parse(from: text, botUsername: botUsername, suffix: await state.getSuffix(chatID: chatID, thread_id: thread_id))
             
             switch parsedCommand.name {
             case .setRole:
@@ -237,6 +238,24 @@ struct LLM_chat_bot {
                     feedback = "Invalid provider name. Available: deepseek, openrouter, yandex."
                 }
                 try await sendUserFeedback(feedback)
+                
+            case .testMode:
+                let newSuffix = await state.toggleTestMode(chatID: chatID, thread_id: thread_id)
+
+                if let suffix = newSuffix {
+                    try await sendUserFeedback("""
+                        Test mode ENABLED.
+                        
+                        New suffix = \(suffix)
+                        
+                        Use it with bot commands, for example:
+                        /help\(suffix)
+                        /setrole\(suffix) You are Donald Trump.
+                        """)
+                } else {
+                    try await sendUserFeedback("Test mode DISABLED")
+                }
+                
                 
             case .unknown:
                 // если пишут в личку, то реагировать надо на всё

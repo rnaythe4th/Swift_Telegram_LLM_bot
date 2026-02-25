@@ -10,6 +10,7 @@ struct ChatContext {
     var showCost: Bool
     var showModel: Bool
     var provider: ServiceProvider
+    var suffix: Int?
 }
 
 struct GenerationStateSnapshot: Sendable {
@@ -32,14 +33,16 @@ actor ChatContextStore {
     let formatOptions: String
     let companyChatId: Int
     let companyMembers: String
+    let defaultSuffix: Int?
 
-    init(model: String, systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, defaultHistoryLength: Int) {
+    init(model: String, systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, defaultHistoryLength: Int, defaultSuffix: Int?) {
         self.systemPrompt = systemPrompt
         self.formatOptions = formatOptions
         self.companyChatId = companyChatId
         self.companyMembers = companyMembers
         self.defaultHistoryLength = defaultHistoryLength
         self.defaultModel = model
+        self.defaultSuffix = defaultSuffix
     }
 
     private func key(chatID: Int, thread_id: Int64) -> StreamKey {
@@ -67,7 +70,8 @@ actor ChatContextStore {
                 maxHistory: defaultHistoryLength,
                 showCost: false,
                 showModel: true,
-                provider: self.serviceProvider
+                provider: self.serviceProvider,
+                suffix: defaultSuffix
             )
         }
         return contextKey
@@ -83,6 +87,24 @@ actor ChatContextStore {
         var context = contexts[contextKey]!
         mutate(&context)
         contexts[contextKey] = context
+    }
+    
+    func getSuffix(chatID: Int, thread_id: Int64) -> Int? {
+        return getContext(chatID: chatID, thread_id: thread_id).suffix
+    }
+    
+    func toggleTestMode(chatID: Int, thread_id: Int64) -> Int? {
+        guard let oldSuffix = getContext(chatID: chatID, thread_id: thread_id).suffix else {
+            let newSuffix = Int.random(in: 1...10)
+            mutateContext(chatID: chatID, thread_id: thread_id) { context in
+                context.suffix = newSuffix
+            }
+            return newSuffix
+        }
+        mutateContext(chatID: chatID, thread_id: thread_id) { context in
+            context.suffix = nil
+        }
+        return nil
     }
 
     func getCurrentMaxHistory(chatID: Int, thread_id: Int64) -> Int {
