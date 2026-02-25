@@ -28,6 +28,11 @@ struct LLM_chat_bot {
         
         // избегаем 409 (не знаю откуда оно взялось, потом разобраться)
         try? await TelegramAPI.deleteWebhook(telegramUrl: telegramUrl)
+        let botInfo = try? await TelegramAPI.getMe(telegramUrl: telegramUrl)
+        guard let botUsername = botInfo?.username else {
+            fatalError("Unable to verify username, getMe() request returned corrupted data")
+        }
+        print(botUsername)
         
         var currentOffset: Int? = nil
         while true {
@@ -98,7 +103,7 @@ struct LLM_chat_bot {
         
         // обработка сообщения пользователя
         func routeMessage(msg: TelegramMessage, text: String) async throws {
-            let parsedCommand = ParsedBotCommand.parse(from: text)
+            let parsedCommand = ParsedBotCommand.parse(from: text, botUsername: botUsername)
             let chatID = msg.chat.id
             let thread_id: Int64 = msg.message_thread_id ?? 0
             

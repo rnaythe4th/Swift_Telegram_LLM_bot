@@ -160,4 +160,31 @@ enum TelegramAPI {
             }
             // Telegram на успешный ответ возвращает {"ok":true,"result":true}, но нам ничего не нужно
         }
+    
+    static func getMe(telegramUrl: String) async throws -> TelegramUser {
+        let url = "\(telegramUrl)/getMe"
+        var request = HTTPClientRequest(url: url)
+        request.method = .GET
+        
+        let response = try await HTTPClient.shared.execute(request, timeout: .seconds(35))
+        //print("got response")
+        
+        var buf = try await response.body.collect(upTo: 1 << 22)
+        let responseData = buf.readData(length: buf.readableBytes) ?? Data()
+        let decoded = try JSONDecoder().decode(TelegramResponse<TelegramUser>.self, from: responseData)
+        
+        if decoded.ok, let result = decoded.result {
+            return result
+        }
+        
+        let raw = String(data: responseData, encoding: .utf8) ?? "<non-utf8>"
+        throw NSError(
+            domain: "TelegramAPI",
+            code: decoded.error_code ?? Int(response.status.code),
+            userInfo: [
+                NSLocalizedDescriptionKey: decoded.description ?? "Telegram returned error without description",
+                "raw": raw
+            ]
+        )
+    }
 }
