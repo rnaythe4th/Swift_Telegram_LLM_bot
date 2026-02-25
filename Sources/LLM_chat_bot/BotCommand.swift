@@ -14,6 +14,7 @@ enum BotCommandName {
     case showCost
     case showTokens
     case help
+    case provider
 
     init(rawCommand: String) {
         switch rawCommand {
@@ -39,6 +40,8 @@ enum BotCommandName {
             self = .showCost
         case "/help", "/help@SwiftPT_bot":
             self = .help
+        case "/provider":
+            self = .provider
         default:
             self = .unknown
         }

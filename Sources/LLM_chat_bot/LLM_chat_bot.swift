@@ -109,12 +109,10 @@ struct LLM_chat_bot {
                 // обратная связь юзеру
                 try await sendUserFeedback("Роль изменена + история очищена")
                 
-                
             case .clearHistory:
                 await state.clearHistory(chatID: chatID, thread_id: thread_id)
                 // обратная связь юзеру
                 try await sendUserFeedback("История очищена")
-                
                 
             case .setTemp:
                 guard let temp = Float(parsedCommand.argument), (0.0...2.0).contains(temp) else {
@@ -143,7 +141,6 @@ struct LLM_chat_bot {
 История очищена.
 """)
                 
-                
             case .showTokens:
                 let new = await state.toggleShowStats(chatID: chatID, thread_id: thread_id)
                 // обратная связь юзеру
@@ -166,7 +163,7 @@ struct LLM_chat_bot {
                 let currentShowCost = await state.getShowCost(chatID: chatID, thread_id: thread_id)
                 let currentShowModel = await state.getShowModel(chatID: chatID, thread_id: thread_id)
                 let defaultRole = await state.defaultRole(chatID: chatID)
-                
+                let currentProvider = await state.serviceProvider.rawValue
                 try await sendUserFeedback("""
                     /setrole <Новая роль> - установить новую роль боту и очистить историю сообщений
                     /clear_history - очистить историю сообщений, сохранив роль
@@ -182,6 +179,7 @@ struct LLM_chat_bot {
                     Текущие настройки для этого чата:
                     -------------------
                     
+                    • Провайдер: \(currentProvider)
                     • Модель: \(currentModel)
                     • Temperature: \(currentTemp)
                     • Длина истории: \(currentMaxHistory)
@@ -198,7 +196,6 @@ struct LLM_chat_bot {
                 // обратная связь юзеру
                 try await sendUserFeedback("Роль изменена на стандартную + история очищена")
                 
-                
             case .historyLength:
                 guard let newMax = Int(parsedCommand.argument), (0...50).contains(newMax) else {
                     let errorMessage = Int(parsedCommand.argument) == nil
@@ -212,12 +209,29 @@ struct LLM_chat_bot {
                 // обратная связь юзеру
                 try await sendUserFeedback("Длина истории: \(newMax) сообщений")
                 
-                
             case .mention:
                 print(text)
                 // обрабатываем сообщение с промптом
                 try await processMention(msg: msg, cleanText: parsedCommand.argument, chatID: chatID, thread_id: thread_id)
                 
+            case .provider:
+                var feedback: String
+//                switch parsedCommand.argument {
+//                case "deepseek":
+//                    feedback = await state.changeProvider(newProvider: .deepseek)
+//                case "openrouter":
+//                    feedback = await state.changeProvider(newProvider: .openrouter)
+//                case "yandex":
+//                    feedback = await state.changeProvider(newProvider: .yandex)
+//                default:
+//                    feedback = "Invalid provider name. Available: deepseek, openrouter, yandex."
+//                }
+                if let provider = ServiceProvider(rawValue: parsedCommand.argument.capitalized) {
+                    feedback = await state.changeProvider(chatID: chatID, thread_id: thread_id, newProvider: provider) + " ----> \(parsedCommand.argument)"
+                } else {
+                    feedback = "Invalid provider name. Available: deepseek, openrouter, yandex."
+                }
+                try await sendUserFeedback(feedback)
                 
             case .unknown:
                 // если пишут в личку, то реагировать надо на всё
@@ -357,6 +371,14 @@ struct LLM_chat_bot {
                     showStats: showStats
                 ))
                 fallbackModel = "deepseek-chat"
+            case .yandex:
+                streamRequest = .openrouter(RouterRequestBody(
+                    messages: messages,
+                    model: snapshot.model,
+                    stream: true,
+                    stream_options: showStats || showCost ? .init(include_usage: true) : nil,
+                    temperature: temp))
+                fallbackModel = snapshot.model
             }
 
             let key = StreamKey(chatID: chatID, threadID: thread_id)

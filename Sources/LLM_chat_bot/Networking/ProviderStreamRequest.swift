@@ -3,6 +3,7 @@ import Foundation
 enum ServiceProvider: String, Sendable {
     case openrouter = "Openrouter"
     case deepseek = "Deepseek"
+    case yandex = "Yandex"
 }
 
 struct StreamUsageSummary: Sendable {

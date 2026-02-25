@@ -9,6 +9,7 @@ struct ChatContext {
     var maxHistory: Int
     var showCost: Bool
     var showModel: Bool
+    var provider: ServiceProvider
 }
 
 struct GenerationStateSnapshot: Sendable {
@@ -65,7 +66,8 @@ actor ChatContextStore {
                 showStats: false,
                 maxHistory: defaultHistoryLength,
                 showCost: false,
-                showModel: true
+                showModel: true,
+                provider: self.serviceProvider
             )
         }
         return contextKey
@@ -187,6 +189,18 @@ actor ChatContextStore {
         return newValue
     }
     
+    func changeProvider(chatID: Int, thread_id: Int64, newProvider: ServiceProvider) -> String {
+        let oldProvider = getContext(chatID: chatID, thread_id: thread_id).provider.rawValue
+        mutateContext(chatID: chatID, thread_id: thread_id) { context in
+            context.provider = newProvider
+        }
+        return oldProvider
+    }
+    
+    func getProvider(chatID: Int, thread_id: Int64) -> ServiceProvider {
+        getContext(chatID: chatID, thread_id: thread_id).provider
+    }
+    
     func prepareGeneration(chatID: Int, thread_id: Int64, userContent: String, username: String?) -> GenerationStateSnapshot {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
@@ -204,7 +218,7 @@ actor ChatContextStore {
         contexts[contextKey] = context
 
         return GenerationStateSnapshot(
-            provider: serviceProvider,
+            provider: context.provider,
             model: context.model,
             temperature: context.temp,
             showStats: context.showStats,
