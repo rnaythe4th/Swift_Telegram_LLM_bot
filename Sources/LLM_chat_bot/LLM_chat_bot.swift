@@ -142,10 +142,10 @@ struct LLM_chat_bot {
                 )
                 // фидбек пользователю
                 try await sendUserFeedback("""
-Модель изменена:
-\(changedModel.oldModel) ----> \(changedModel.newModel).
-История очищена.
-""")
+                    Модель изменена:
+                    \(changedModel.oldModel) ----> \(changedModel.newModel).
+                    История очищена.
+                    """)
                 
             case .showTokens:
                 let new = await state.toggleShowStats(chatID: chatID, thread_id: thread_id)
@@ -161,23 +161,15 @@ struct LLM_chat_bot {
                 try await sendUserFeedback("Показывать использованную модель: \(new)")
                 
             case .help:
-                let currentModel = await state.getCurrentModel(chatID: chatID, thread_id: thread_id)
-                let currentRole = await state.getCurrentRole(chatID: chatID, thread_id: thread_id)
-                let currentTemp = await state.temp(chatID: chatID, thread_id: thread_id)
-                let currentMaxHistory = await state.getCurrentMaxHistory(chatID: chatID, thread_id: thread_id)
-                let currentShowTokens = await state.getShowStats(chatID: chatID, thread_id: thread_id)
-                let currentShowCost = await state.getShowCost(chatID: chatID, thread_id: thread_id)
-                let currentShowModel = await state.getShowModel(chatID: chatID, thread_id: thread_id)
-                let defaultRole = await state.defaultRole(chatID: chatID)
-                let currentProvider = await state.serviceProvider.rawValue
+                let helpData = await state.fetchHelp(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("""
-                    /setrole <Новая роль> - установить новую роль боту и очистить историю сообщений
+                    /setrole #Новая_роль# - установить новую роль боту и очистить историю сообщений
                     /clear_history - очистить историю сообщений, сохранив роль
-                    /settemp <число> - задать креативность бота. 2.0 - максимальная креативность, 0.0 - максимальна точность и стабильность ответов. (По умолчанию = 1.5)
+                    /settemp #число# - задать креативность бота. 2.0 - максимальная креативность, 0.0 - максимальна точность и стабильность ответов. (По умолчанию = 1.5)
                     /show_tokens - вкл/выкл показ расхода токенов, использованных для генерации сообщения. (По умолчанию = выкл)
                     /default_role - вернуть стандартную роль
-                    /historylength <число> - задать количество последних сообщений, которые будет помнить бот. (По умолчанию = 11)
-                    /model <новая модель> - задать новую модель ИИ для ответов (По умолчанию - \(state.defaultModel)
+                    /historylength #число# - задать количество последних сообщений, которые будет помнить бот. (По умолчанию = 11)
+                    /model #новая_модель# - задать новую модель ИИ для ответов
                     /show_model - вкл/выкл показ использованной модели (По умолчанию = вкл)
                     /show_cost - вкл/выкл показ стоимости сгенерированного сообщения в $ (По умолчанию = выкл)
                     
@@ -185,15 +177,15 @@ struct LLM_chat_bot {
                     Текущие настройки для этого чата:
                     -------------------
                     
-                    • Провайдер: \(currentProvider)
-                    • Модель: \(currentModel)
-                    • Temperature: \(currentTemp)
-                    • Длина истории: \(currentMaxHistory)
-                    • Показать расход токенов: \(currentShowTokens)
-                    • Показать стоимость сообщения: \(currentShowCost)
-                    • Показать использованную модель: \(currentShowModel)
-                    • Роль: <blockquote>\(currentRole)</blockquote>
-                    • Дефолтная роль: <blockquote>\(defaultRole)</blockquote>
+                    • Провайдер: \(helpData.provider)
+                    • Модель: \(helpData.model)
+                    • Temperature: \(helpData.temp)
+                    • Длина истории: \(helpData.maxHistory)
+                    • Показать расход токенов: \(helpData.showTokens)
+                    • Показать стоимость сообщения: \(helpData.showCost)
+                    • Показать использованную модель: \(helpData.showModel)
+                    • Роль: <blockquote>\(helpData.role)</blockquote>
+                    • Дефолтная роль: <blockquote>\(helpData.defaultRole)</blockquote>
                     """)
                 
             case .defaultRole:

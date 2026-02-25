@@ -23,6 +23,18 @@ struct GenerationStateSnapshot: Sendable {
     let showModel: Bool
 }
 
+struct HelpData {
+    let model: String
+    let role: String
+    let temp: Float
+    let maxHistory: Int
+    let showTokens: Bool
+    let showCost: Bool
+    let showModel: Bool
+    let defaultRole: String
+    let provider: ServiceProvider
+}
+
 actor ChatContextStore {
     private var contexts: [StreamKey: ChatContext] = [:]
     let defaultHistoryLength: Int
@@ -89,12 +101,26 @@ actor ChatContextStore {
         contexts[contextKey] = context
     }
     
+    func fetchHelp(chatID: Int, thread_id: Int64) -> HelpData {
+        let context = getContext(chatID: chatID, thread_id: thread_id)
+        return HelpData(
+            model: context.model,
+            role: context.role,
+            temp: context.temp,
+            maxHistory: context.maxHistory,
+            showTokens: context.showStats,
+            showCost: context.showCost,
+            showModel: context.showModel,
+            defaultRole: defaultRole(chatID: chatID),
+            provider: context.provider)
+    }
+    
     func getSuffix(chatID: Int, thread_id: Int64) -> Int? {
         return getContext(chatID: chatID, thread_id: thread_id).suffix
     }
     
     func toggleTestMode(chatID: Int, thread_id: Int64) -> Int? {
-        guard let oldSuffix = getContext(chatID: chatID, thread_id: thread_id).suffix else {
+        guard getContext(chatID: chatID, thread_id: thread_id).suffix != nil else {
             let newSuffix = Int.random(in: 1...10)
             mutateContext(chatID: chatID, thread_id: thread_id) { context in
                 context.suffix = newSuffix
