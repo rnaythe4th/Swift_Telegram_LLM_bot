@@ -21,29 +21,29 @@ enum BotCommandName {
         switch rawCommand {
         case "/setrole\(suffix)":
             self = .setRole
-        case "/clear_history\(suffix)", "/clear_history\(suffix)@\(botUsername)":
+        case "/clear_history\(suffix)", "/clear_history@\(botUsername)":
             self = .clearHistory
         case "/settemp\(suffix)":
             self = .setTemp
         case "/model\(suffix)":
             self = .model
-        case "/show_tokens\(suffix)", "/show_tokens\(suffix)@\(botUsername)":
+        case "/show_tokens\(suffix)", "/show_tokens@\(botUsername)":
             self = .showTokens
-        case "/default_role\(suffix)", "/default_role\(suffix)@\(botUsername)":
+        case "/default_role\(suffix)", "/default_role@\(botUsername)":
             self = .defaultRole
-        case "/historylength\(suffix)", "/historylength\(suffix)@\(botUsername)":
+        case "/historylength\(suffix)", "/historylength@\(botUsername)":
             self = .historyLength
         case "@\(botUsername)":
             self = .mention
-        case "/show_model\(suffix)", "/show_model\(suffix)@\(botUsername)":
+        case "/show_model\(suffix)", "/show_model@\(botUsername)":
             self = .showModel
-        case "/show_cost\(suffix)", "/show_cost\(suffix)@\(botUsername)":
+        case "/show_cost\(suffix)", "/show_cost@\(botUsername)":
             self = .showCost
-        case "/help\(suffix)", "/help\(suffix)@\(botUsername)":
+        case "/help\(suffix)", "/help@\(botUsername)":
             self = .help
         case "/provider\(suffix)":
             self = .provider
-        case "/testmode\(suffix)", "/testmode\(suffix)@\(botUsername)":
+        case "/testmode\(suffix)", "/testmode@\(botUsername)":
             self = .testMode
         default:
             self = .unknown

@@ -13,7 +13,8 @@ struct LLM_chat_bot {
         let deepseekKey = appConfig.deepseekKey
         let routerApiKey = appConfig.routerApiKey
         
-        let telegramUrl = appConfig.telegramUrl
+        let tgBotToken = appConfig.telegramToken
+        let telegramUrl = "https://api.telegram.org/bot\(tgBotToken)"
         
         // избегаем 409 (не знаю откуда оно взялось, потом разобраться)
         try? await TelegramAPI.deleteWebhook(telegramUrl: telegramUrl)
@@ -84,13 +85,17 @@ struct LLM_chat_bot {
                         }
                         continue
                     }
-                    // если текста сообщения нет, то скипаем этот апдейт
-                    guard let msg = u.message, let text = msg.text else { continue }
-                    print(text)
-                    // таска для синхронной обработки нескольких сообщений
+                    // check if there is any content
+                    guard let msg = u.message else { continue }
+                    if let text = msg.text {
+                        print(text)
+                    } else if let voiceMessage = msg.voice {
+                        print(voiceMessage.file_id)
+                    } else { continue }
+                    // async messages processing
                     Task {
                         do {
-                            try await routeMessage(msg: msg, text: text)
+                            try await routeMessage(msg: msg)
                         } catch {
                             print("routeMessage error:", error)
                         }
@@ -103,63 +108,76 @@ struct LLM_chat_bot {
         }
         
         // обработка сообщения пользователя
-        func routeMessage(msg: TelegramMessage, text: String) async throws {
+        func routeMessage(msg: TelegramMessage) async throws {
             let chatID = msg.chat.id
             let thread_id: Int64 = msg.message_thread_id ?? 0
+            
+            // filtering voice messages
+            // check if there is reply_to_message
+            if msg.reply_to_message?.from?.username == botUsername {
+                if let voice = msg.voice {
+                    // audio works only with OpenRouter
+                    // so, check the current provider
+                    if await state.getProvider(chatID: chatID, thread_id: thread_id) != .openrouter {
+                        return
+                    }
+            
+                    // process audio input
+                    let base64Audio = try await getBase64Audio(from: voice.file_id)
+                    try await processContent(msg: msg, content: .voice(base64: base64Audio, format: "ogg"), chatID: chatID, thread_id: thread_id)
+                    
+                    // update processing finished
+                    return
+                }
+            }
+            
+            let text = msg.text!
             let parsedCommand = ParsedBotCommand.parse(from: text, botUsername: botUsername, suffix: await state.getSuffix(chatID: chatID, thread_id: thread_id))
             
             switch parsedCommand.name {
             case .setRole:
-                // устанавливаем роль и сразу сбрасываем историю в одной actor-операции
                 _ = await state.setRoleAndResetHistory(chatID: chatID, thread_id: thread_id, role: parsedCommand.argument + formatOptions)
-                // обратная связь юзеру
                 try await sendUserFeedback("Роль изменена + история очищена")
-                
+// ------------------------------------------------------------------------------------------
             case .clearHistory:
                 await state.clearHistory(chatID: chatID, thread_id: thread_id)
-                // обратная связь юзеру
                 try await sendUserFeedback("История очищена")
-                
+// ------------------------------------------------------------------------------------------
             case .setTemp:
                 guard let temp = Float(parsedCommand.argument), (0.0...2.0).contains(temp) else {
                     let errorMessage = Float(parsedCommand.argument) == nil
                     ? "Ошибка: укажите ЧИСЛО от 0 до 2"
                     : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(parsedCommand.argument)!)"
-                    // обратная связь юзеру
                     try await sendUserFeedback(errorMessage)
                     return
                 }
                 await state.setTemp(chatID: chatID, thread_id: thread_id, value: temp)
-                // обратная связь юзеру
                 try await sendUserFeedback("Temperature: \(await state.temp(chatID: chatID, thread_id: thread_id))")
-                
+// ------------------------------------------------------------------------------------------
             case .model:
-                // атомарно меняем модель и сбрасываем историю
                 let changedModel = await state.setModelAndResetHistory(
                     chatID: chatID,
                     thread_id: thread_id,
                     newModel: String(parsedCommand.argument)
                 )
-                // фидбек пользователю
                 try await sendUserFeedback("""
                     Модель изменена:
                     \(changedModel.oldModel) ----> \(changedModel.newModel).
                     История очищена.
                     """)
-                
+// ------------------------------------------------------------------------------------------
             case .showTokens:
                 let new = await state.toggleShowStats(chatID: chatID, thread_id: thread_id)
-                // обратная связь юзеру
                 try await sendUserFeedback("Показывать расход токенов: \(new)")
-            
+// ------------------------------------------------------------------------------------------
             case .showCost:
                 let new = await state.toggleShowCost(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("Показывать стоимость сообщений: \(new)")
-                
+// ------------------------------------------------------------------------------------------
             case .showModel:
                 let new = await state.toggleShowModel(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("Показывать использованную модель: \(new)")
-                
+// ------------------------------------------------------------------------------------------
             case .help:
                 let helpData = await state.fetchHelp(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("""
@@ -187,31 +205,22 @@ struct LLM_chat_bot {
                     • Роль: <blockquote>\(helpData.role)</blockquote>
                     • Дефолтная роль: <blockquote>\(helpData.defaultRole)</blockquote>
                     """)
-                
+// ------------------------------------------------------------------------------------------
             case .defaultRole:
-                // устанавливаем стандартную роль и сразу сбрасываем историю
                 _ = await state.setRoleAndResetHistory(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
-                // обратная связь юзеру
                 try await sendUserFeedback("Роль изменена на стандартную + история очищена")
-                
+// ------------------------------------------------------------------------------------------
             case .historyLength:
                 guard let newMax = Int(parsedCommand.argument), (0...50).contains(newMax) else {
                     let errorMessage = Int(parsedCommand.argument) == nil
                     ? "Ошибка: укажите ЧИСЛО от 0 до 50"
                     : "Ошибка: укажите число от 0 до 50. Вы указали: \(Int(parsedCommand.argument)!)"
-                    // обратная связь юзеру
                     try await sendUserFeedback(errorMessage)
                     return
                 }
                 await state.setMaxHistory(chatID: chatID, thread_id: thread_id, newMax: newMax)
-                // обратная связь юзеру
                 try await sendUserFeedback("Длина истории: \(newMax) сообщений")
-                
-            case .mention:
-                print(text)
-                // обрабатываем сообщение с промптом
-                try await processMention(msg: msg, cleanText: parsedCommand.argument, chatID: chatID, thread_id: thread_id)
-                
+// ------------------------------------------------------------------------------------------
             case .provider:
                 var feedback: String
 //                switch parsedCommand.argument {
@@ -230,10 +239,9 @@ struct LLM_chat_bot {
                     feedback = "Invalid provider name. Available: deepseek, openrouter, yandex."
                 }
                 try await sendUserFeedback(feedback)
-                
+// ------------------------------------------------------------------------------------------
             case .testMode:
                 let newSuffix = await state.toggleTestMode(chatID: chatID, thread_id: thread_id)
-
                 if let suffix = newSuffix {
                     try await sendUserFeedback("""
                         Test mode ENABLED.
@@ -243,16 +251,24 @@ struct LLM_chat_bot {
                         Use it with bot commands, for example:
                         /help\(suffix)
                         /setrole\(suffix) You are Donald Trump.
+                        
+                        This does not affect commands with username tag:
+                        /help@Bot_username
+                        /showCost@Bot_username
                         """)
                 } else {
                     try await sendUserFeedback("Test mode DISABLED")
                 }
-                
-                
+// ------------------------------------------------------------------------------------------
+            case .mention:
+                print(text)
+                // process the prompt
+                try await processContent(msg: msg, content: .text(parsedCommand.argument), chatID: chatID, thread_id: thread_id)
+// ------------------------------------------------------------------------------------------
             case .unknown:
-                // если пишут в личку, то реагировать надо на всё
+                // procees all private messages
                 if msg.chat.type == "private" {
-                    try await processMention(msg: msg, cleanText: text, chatID: chatID, thread_id: thread_id)
+                    try await processContent(msg: msg, content: .text(parsedCommand.argument), chatID: chatID, thread_id: thread_id)
                 } else {
                     break
                 }
@@ -261,103 +277,33 @@ struct LLM_chat_bot {
             func sendUserFeedback(_ text: String) async throws {
                 _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: text, reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
             }
+        // ------------- end of routeMessage() -------------
         }
         
-        // обработка сообщения с промптом
-        func processMention(msg: TelegramMessage, cleanText: String, chatID: Int, thread_id: Int64) async throws {
-            func formatTokenValue(_ value: Double) -> String {
-                if value.rounded(.towardZero) == value {
-                    return String(Int(value))
-                }
-                return String(format: "%.3f", value)
+        func processContent(msg: TelegramMessage, content: ContentToProcess?,chatID: Int, thread_id: Int64) async throws {
+            let username = msg.from?.username
+            var snapshot: GenerationStateSnapshot
+            
+            guard let content else {
+                throw NSError(domain: "processMention()", code: 1, userInfo: [NSLocalizedDescriptionKey: "no content to process"])
             }
-
-            func formatFooter(meta: StreamMeta?, fallbackModel: String, showTokens: Bool, showCost: Bool, showModel: Bool) -> String? {
-                guard showTokens || showCost || showModel else { return nil }
-
-                var lines: [String] = ["", "━━━━━━━━━━━━━"]
-                let usage = meta?.usage
-
-                if showTokens {
-                    var hasAnyTokenData = false
-
-                    if let prompt = usage?.promptTokens {
-                        lines.append("• Prompt: \(formatTokenValue(prompt))")
-                        hasAnyTokenData = true
-                    }
-                    if let cacheHit = usage?.cacheHitTokens {
-                        lines.append("  • cache hit: \(formatTokenValue(cacheHit))")
-                        hasAnyTokenData = true
-                    }
-                    if let cacheWrite = usage?.cacheWriteTokens {
-                        lines.append("  • cache write: \(formatTokenValue(cacheWrite))")
-                        hasAnyTokenData = true
-                    }
-                    if let cacheMiss = usage?.cacheMissTokens {
-                        lines.append("  • cache miss: \(formatTokenValue(cacheMiss))")
-                        hasAnyTokenData = true
-                    }
-                    if let completion = usage?.completionTokens {
-                        lines.append("• Completion: \(formatTokenValue(completion))")
-                        hasAnyTokenData = true
-                    }
-                    if let reasoning = usage?.reasoningTokens {
-                        lines.append("  • reasoning: \(formatTokenValue(reasoning))")
-                        hasAnyTokenData = true
-                    }
-                    if let total = usage?.totalTokens {
-                        lines.append("• Total: \(formatTokenValue(total))")
-                        hasAnyTokenData = true
-                    }
-
-                    if !hasAnyTokenData {
-                        lines.append("• Токены: н/д")
-                    }
-                }
-
-                if showCost {
-                    if let cost = usage?.cost {
-                        lines.append("• Стоимость: $\(String(format: "%.6f", cost))")
-                    } else {
-                        lines.append("• Стоимость: н/д")
-                    }
-                }
-
-                if showModel {
-                    lines.append("Модель: \(meta?.model ?? fallbackModel)")
-                }
-
-                return lines.count > 2 ? lines.joined(separator: "\n") : nil
+            
+            switch content {
+            case .text(let rawText):
+                let promptText: String = {
+                    if let u = username { return "Тебе пишет @\(u): \(rawText)" }
+                    return rawText
+                }()
+                snapshot = await state.prepareGeneration(
+                    chatID: chatID,
+                    thread_id: thread_id,
+                    userContent: promptText,
+                    username: msg.from?.username
+                )
+                
+            case .voice(let base64, let format):
+                snapshot = await state.prepareGeneration(chatID: chatID, thread_id: thread_id, audioBase64: base64, audioFormat: format, username: username)
             }
-
-            // текст промпта для дипсика
-            let promptText: String = {
-                if let u = msg.from?.username { return "Тебе пишет @\(u): \(cleanText)" }
-                return cleanText
-            }()
-
-            // атомарно обновляем контекст и получаем снимок параметров генерации
-            let snapshot = await state.prepareGeneration(
-                chatID: chatID,
-                thread_id: thread_id,
-                userContent: promptText,
-                username: msg.from?.username
-            )
-
-            let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
-                .init(text: "🛑 СТОП", callback_data: "stop:\(chatID):\(thread_id)")
-            ]])
-
-            // отправить черновик чтобы юзер понял что промпт был принят
-            let placeholder = try await TelegramAPI.sendTelegramMessage(
-                telegramUrl: telegramUrl,
-                chat_id: chatID,
-                text: "Думаю...",
-                reply_parameters: ReplyParameters(message_id: msg.message_id),
-                message_thread_id: thread_id != 0 ? thread_id : nil,
-                reply_markup: stopMarkup
-            )
-
             // параметры генерации читаем из актора
             let temp = snapshot.temperature
             let showStats = snapshot.showStats
@@ -376,7 +322,9 @@ struct LLM_chat_bot {
                     model: snapshot.model,
                     stream: true,
                     stream_options: showStats || showCost ? .init(include_usage: true) : nil,
-                    temperature: temp))
+                    temperature: temp,
+                    reasoning: RouterReasoning(effort: "high", summary: "concise", enabled: false)
+                ))
                 fallbackModel = snapshot.model
             case .deepseek:
                 streamRequest = .deepseek(Prompt(
@@ -393,12 +341,50 @@ struct LLM_chat_bot {
                     model: snapshot.model,
                     stream: true,
                     stream_options: showStats || showCost ? .init(include_usage: true) : nil,
-                    temperature: temp))
+                    temperature: temp,
+                    reasoning: RouterReasoning(effort: "high", summary: "concise", enabled: true)
+                ))
                 fallbackModel = snapshot.model
             }
+            
+            try await giveTgResponse(
+                            streamRequest: streamRequest,
+                            chatID: chatID,
+                            thread_id: thread_id,
+                            replyId: msg.message_id,
+                            fallbackModel: fallbackModel,
+                            showStats: showStats,
+                            showCost: showCost,
+                            showModel: showModel
+            )
+        }
+        
+        func giveTgResponse(
+                        streamRequest: ProviderStreamRequest,
+                        chatID: Int,
+                        thread_id: Int64,
+                        replyId: Int,
+                        fallbackModel: String,
+                        showStats: Bool,
+                        showCost: Bool,
+                        showModel: Bool
+        ) async throws {
+            let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
+                .init(text: "🛑 СТОП", callback_data: "stop:\(chatID):\(thread_id)")
+            ]])
 
+            // отправить черновик чтобы юзер понял что промпт был принят
+            let placeholder = try await TelegramAPI.sendTelegramMessage(
+                telegramUrl: telegramUrl,
+                chat_id: chatID,
+                text: "Думаю...",
+                reply_parameters: ReplyParameters(message_id: replyId),
+                message_thread_id: thread_id != 0 ? thread_id : nil,
+                reply_markup: stopMarkup
+            )
+            
             let key = StreamKey(chatID: chatID, threadID: thread_id)
-            print("[Bot] starting stream key=\(key), provider=\(provider.rawValue), showStats=\(showStats)")
+            //print("[Bot] starting stream key=\(key), provider=\(provider.rawValue), showStats=\(showStats)")
 
             let streamingTask = Task {
                 var accumulator = ""
@@ -431,7 +417,7 @@ struct LLM_chat_bot {
                                 do {
                                     try await TelegramAPI.editTelegramMessage(
                                         telegramUrl: telegramUrl,
-                                        chat_id: msg.chat.id,
+                                        chat_id: chatID,
                                         message_id: placeholder.message_id,
                                         text: accumulator,
                                         reply_markup: stopMarkup
@@ -509,6 +495,81 @@ struct LLM_chat_bot {
             }
             // регистрируем задачу для этого чата/треда
             await tasks.register(key: key, task: streamingTask)
+        }
+        
+        func formatFooter(meta: StreamMeta?, fallbackModel: String, showTokens: Bool, showCost: Bool, showModel: Bool) -> String? {
+            guard showTokens || showCost || showModel else { return nil }
+
+            var lines: [String] = ["", "━━━━━━━━━━━━━"]
+            let usage = meta?.usage
+
+            if showTokens {
+                var hasAnyTokenData = false
+
+                if let prompt = usage?.promptTokens {
+                    lines.append("• Prompt: \(formatTokenValue(prompt))")
+                    hasAnyTokenData = true
+                }
+                if let cacheHit = usage?.cacheHitTokens {
+                    lines.append("  • cache hit: \(formatTokenValue(cacheHit))")
+                    hasAnyTokenData = true
+                }
+                if let cacheWrite = usage?.cacheWriteTokens {
+                    lines.append("  • cache write: \(formatTokenValue(cacheWrite))")
+                    hasAnyTokenData = true
+                }
+                if let cacheMiss = usage?.cacheMissTokens {
+                    lines.append("  • cache miss: \(formatTokenValue(cacheMiss))")
+                    hasAnyTokenData = true
+                }
+                if let completion = usage?.completionTokens {
+                    lines.append("• Completion: \(formatTokenValue(completion))")
+                    hasAnyTokenData = true
+                }
+                if let reasoning = usage?.reasoningTokens {
+                    lines.append("  • reasoning: \(formatTokenValue(reasoning))")
+                    hasAnyTokenData = true
+                }
+                if let total = usage?.totalTokens {
+                    lines.append("• Total: \(formatTokenValue(total))")
+                    hasAnyTokenData = true
+                }
+
+                if !hasAnyTokenData {
+                    lines.append("• Токены: н/д")
+                }
+            }
+
+            if showCost {
+                if let cost = usage?.cost {
+                    lines.append("• Стоимость: $\(String(format: "%.6f", cost))")
+                } else {
+                    lines.append("• Стоимость: н/д")
+                }
+            }
+
+            if showModel {
+                lines.append("Модель: \(meta?.model ?? fallbackModel)")
+            }
+
+            return lines.count > 2 ? lines.joined(separator: "\n") : nil
+        }
+        
+        func formatTokenValue(_ value: Double) -> String {
+            if value.rounded(.towardZero) == value {
+                return String(Int(value))
+            }
+            return String(format: "%.3f", value)
+        }
+        
+        func getBase64Audio(from fileId: String) async throws -> String {
+            guard let filePath = try await TelegramAPI.getFile(telegramUrl: telegramUrl, file_id: fileId).file_path else {
+                throw NSError(domain: "handleAudioInput()", code: 1, userInfo: [NSLocalizedDescriptionKey: "returned file path is nil"])
+            }
+            let file = try await TelegramAPI.downloadFile(botToken: tgBotToken, filePath: filePath)
+            
+            let base64Audio = file.base64EncodedString()
+            return base64Audio
         }
     }
     

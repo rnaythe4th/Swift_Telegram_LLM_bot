@@ -10,12 +10,25 @@ public struct StreamKey: Hashable, Codable, Sendable {
     }
 }
 
+struct TelegramError: Codable {
+    let ok: Bool
+    let error_code: Int?
+    let description: String?
+    let parameters: TelegramErrorParameters?
+}
+
+struct TelegramErrorParameters: Codable {
+    let migrate_to_chat_id: Int64?
+    let retry_after: Int?
+}
+
 // любой ответ от телеграма
 struct TelegramResponse<T: Decodable>: Decodable {
     let ok: Bool
     let result: T?
     let description: String?
     let error_code: Int?
+    let parameters: TelegramErrorParameters?
 }
 
 // обновления, которые возвращает сервер тг
@@ -26,13 +39,51 @@ struct TelegramUpdate: Codable {
 }
 
 // сообщение в телеграме
-struct TelegramMessage: Codable {
+class TelegramMessage: Codable {
     let message_id: Int
     let from: TelegramUser?
     let chat: TelegramChat
     let date: Int
     let text: String?
+    let audio: TelegramAudio?
+    let voice: TelegramVoice?
     let message_thread_id: Int64?
+    let reply_to_message: TelegramMessage?
+}
+
+struct TelegramVoice: Codable {
+    let file_id: String
+    let file_unique_id: String
+    let duration: Int
+    let mime_type: String?
+    let file_size: Int?
+}
+
+struct TelegramAudio: Codable {
+        let fileId: String
+        let fileUniqueId: String
+        let duration: Int
+        let performer: String?
+        let title: String?
+        let fileName: String?
+        let mimeType: String?
+        let fileSize: Int?
+        let thumbnail: PhotoSize?
+}
+
+struct PhotoSize: Codable {
+        let fileId: String
+        let fileUniqueId: String
+        let width: Int
+        let height: Int
+        let fileSize: Int?
+}
+
+struct TelegramFile: Codable {
+    let file_id: String
+    let file_unique_id: String
+    let file_size: Int?
+    let file_path: String?
 }
 
 struct TelegramUser: Codable {
@@ -101,11 +152,84 @@ struct AnswerCallbackQueryBody: Codable {
 }
 
 // тут пошло для дипсика
+enum ChatMessageContent: Codable, Sendable {
+    case text(String)
+    case parts([ChatMessageContentPart])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let text = try? container.decode(String.self) {
+            self = .text(text)
+            return
+        }
+        self = .parts(try container.decode([ChatMessageContentPart].self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .text(let text):
+            try container.encode(text)
+        case .parts(let parts):
+            try container.encode(parts)
+        }
+    }
+
+    static func audio(data: String, format: String) -> ChatMessageContent {
+        .parts([.inputAudio(data: data, format: format)])
+    }
+}
+
+struct ChatMessageContentPart: Codable, Sendable {
+    let type: String
+    let text: String?
+    let inputAudio: ChatMessageInputAudio?
+
+    init(type: String, text: String? = nil, inputAudio: ChatMessageInputAudio? = nil) {
+        self.type = type
+        self.text = text
+        self.inputAudio = inputAudio
+    }
+
+    static func text(_ text: String) -> Self {
+        .init(type: "text", text: text)
+    }
+
+    static func inputAudio(data: String, format: String) -> Self {
+        .init(type: "input_audio", inputAudio: .init(data: data, format: format))
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case inputAudio = "input_audio"
+    }
+}
+
+struct ChatMessageInputAudio: Codable, Sendable {
+    let data: String
+    let format: String
+}
+
 // сообщение в чате (в истории)
 struct ChatMessage: Codable, Sendable {
     let role: String
-    let content: String
+    let content: ChatMessageContent
     var name: String? = nil
+
+    init(role: String, content: ChatMessageContent, name: String? = nil) {
+        self.role = role
+        self.content = content
+        self.name = name
+    }
+
+    init(role: String, content: String, name: String? = nil) {
+        self.init(role: role, content: .text(content), name: name)
+    }
+
+    init(role: String, audioBase64: String, audioFormat: String, name: String? = nil) {
+        self.init(role: role, content: .audio(data: audioBase64, format: audioFormat), name: name)
+    }
 }
 // тело запроса при отправке промпта
 struct Prompt: Codable {
@@ -179,4 +303,9 @@ struct Usage: Decodable {
     let prompt_cache_miss_tokens: Int
     let total_tokens: Int
     let completion_details: CompletionTokenDetails?
+}
+
+enum ContentToProcess {
+    case voice(base64: String, format: String)
+    case text(String)
 }

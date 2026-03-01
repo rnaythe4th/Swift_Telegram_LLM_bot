@@ -250,6 +250,22 @@ actor ChatContextStore {
     }
     
     func prepareGeneration(chatID: Int, thread_id: Int64, userContent: String, username: String?) -> GenerationStateSnapshot {
+        prepareGeneration(
+            chatID: chatID,
+            thread_id: thread_id,
+            userMessage: .init(role: "user", content: userContent, name: username)
+        )
+    }
+
+    func prepareGeneration(chatID: Int, thread_id: Int64, audioBase64: String, audioFormat: String, username: String?) -> GenerationStateSnapshot {
+        prepareGeneration(
+            chatID: chatID,
+            thread_id: thread_id,
+            userMessage: .init(role: "user", audioBase64: audioBase64, audioFormat: audioFormat, name: username)
+        )
+    }
+
+    private func prepareGeneration(chatID: Int, thread_id: Int64, userMessage: ChatMessage) -> GenerationStateSnapshot {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
 
@@ -262,7 +278,7 @@ actor ChatContextStore {
             context.history.removeSubrange(1...hi)
         }
 
-        context.history.append(.init(role: "user", content: userContent, name: username))
+        context.history.append(userMessage)
         contexts[contextKey] = context
 
         return GenerationStateSnapshot(

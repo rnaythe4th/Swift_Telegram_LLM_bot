@@ -26,10 +26,6 @@ struct AppConfig {
     let routerApiKey: String
     let companyChatId: Int
 
-    var telegramUrl: String {
-        "https://api.telegram.org/bot\(telegramToken)"
-    }
-
     static func load() throws -> AppConfig {
         let telegramToken = try Config.env(.telegramToken)
         let deepseekKey = try Config.env(.deepseekKey)

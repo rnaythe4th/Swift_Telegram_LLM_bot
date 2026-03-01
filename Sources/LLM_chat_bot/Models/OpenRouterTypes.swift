@@ -28,6 +28,7 @@ struct RouterRequestBody: Codable {
     var stop: String? = nil
     var max_tokens: Float? = nil
     let temperature: Float // 0.0 - 2.0
+    let reasoning: RouterReasoning?
     //let tools: [ORTool?]
     //let tool_choice: ORToolChoice?
     //let response_format: ORResponseFormat?
@@ -189,4 +190,12 @@ struct RouterStreamChunk: Codable {
 
     let choices: [Choice]?
     let usage: RouterResponseUsage?
+}
+
+// --------------- REASONING ---------------
+
+struct RouterReasoning: Codable {
+    var effort: String
+    var summary: String
+    var enabled: Bool
 }
