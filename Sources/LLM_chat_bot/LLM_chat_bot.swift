@@ -131,7 +131,7 @@ struct LLM_chat_bot {
                 }
             }
             
-            let text = msg.text!
+            guard let text = msg.text else {return}
             let parsedCommand = ParsedBotCommand.parse(from: text, botUsername: botUsername, suffix: await state.getSuffix(chatID: chatID, thread_id: thread_id))
             
             switch parsedCommand.name {
@@ -260,6 +260,10 @@ struct LLM_chat_bot {
                     try await sendUserFeedback("Test mode DISABLED")
                 }
 // ------------------------------------------------------------------------------------------
+            case .reasoning:
+                let newReasoning = await state.reasoningToggle(chatID: chatID, thread_id: thread_id)
+                try await sendUserFeedback("Reasoning: \(newReasoning)")
+// ------------------------------------------------------------------------------------------
             case .mention:
                 print(text)
                 // process the prompt
@@ -310,6 +314,7 @@ struct LLM_chat_bot {
             let showCost = snapshot.showCost
             let showModel = snapshot.showModel
             let messages = snapshot.messages
+            let enableReasoning = snapshot.reasoning
 
             let provider = snapshot.provider
             let streamRequest: ProviderStreamRequest
@@ -323,7 +328,7 @@ struct LLM_chat_bot {
                     stream: true,
                     stream_options: showStats || showCost ? .init(include_usage: true) : nil,
                     temperature: temp,
-                    reasoning: RouterReasoning(effort: "high", summary: "concise", enabled: false)
+                    reasoning: RouterReasoning(effort: "high", summary: "concise", enabled: enableReasoning)
                 ))
                 fallbackModel = snapshot.model
             case .deepseek:
@@ -342,7 +347,7 @@ struct LLM_chat_bot {
                     stream: true,
                     stream_options: showStats || showCost ? .init(include_usage: true) : nil,
                     temperature: temp,
-                    reasoning: RouterReasoning(effort: "high", summary: "concise", enabled: true)
+                    reasoning: RouterReasoning(effort: "high", summary: "concise", enabled: enableReasoning)
                 ))
                 fallbackModel = snapshot.model
             }

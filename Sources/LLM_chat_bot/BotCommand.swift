@@ -16,6 +16,7 @@ enum BotCommandName {
     case help
     case provider
     case testMode
+    case reasoning
 
     init(rawCommand: String, botUsername: String, suffix: String) {
         switch rawCommand {
@@ -45,6 +46,8 @@ enum BotCommandName {
             self = .provider
         case "/testmode\(suffix)", "/testmode@\(botUsername)":
             self = .testMode
+        case "/reasoning\(suffix)", "/reasoning@\(botUsername)":
+            self = .reasoning
         default:
             self = .unknown
         }

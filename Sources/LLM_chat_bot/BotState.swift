@@ -11,6 +11,7 @@ struct ChatContext {
     var showModel: Bool
     var provider: ServiceProvider
     var suffix: Int?
+    var reasoning: Bool
 }
 
 struct GenerationStateSnapshot: Sendable {
@@ -21,6 +22,7 @@ struct GenerationStateSnapshot: Sendable {
     let messages: [ChatMessage]
     let showCost: Bool
     let showModel: Bool
+    let reasoning: Bool
 }
 
 struct HelpData {
@@ -33,6 +35,7 @@ struct HelpData {
     let showModel: Bool
     let defaultRole: String
     let provider: ServiceProvider
+    let reasoning: Bool
 }
 
 actor ChatContextStore {
@@ -83,7 +86,8 @@ actor ChatContextStore {
                 showCost: false,
                 showModel: true,
                 provider: self.serviceProvider,
-                suffix: defaultSuffix
+                suffix: defaultSuffix,
+                reasoning: false
             )
         }
         return contextKey
@@ -112,7 +116,9 @@ actor ChatContextStore {
             showCost: context.showCost,
             showModel: context.showModel,
             defaultRole: defaultRole(chatID: chatID),
-            provider: context.provider)
+            provider: context.provider,
+            reasoning: context.reasoning
+        )
     }
     
     func getSuffix(chatID: Int, thread_id: Int64) -> Int? {
@@ -131,6 +137,14 @@ actor ChatContextStore {
             context.suffix = nil
         }
         return nil
+    }
+    
+    func reasoningToggle(chatID: Int, thread_id: Int64) -> Bool {
+        let oldReasoning = getContext(chatID: chatID, thread_id: thread_id).reasoning
+        mutateContext(chatID: chatID, thread_id: thread_id) { contexts in
+            contexts.reasoning.toggle()
+        }
+        return !oldReasoning
     }
 
     func getCurrentMaxHistory(chatID: Int, thread_id: Int64) -> Int {
@@ -288,7 +302,8 @@ actor ChatContextStore {
             showStats: context.showStats,
             messages: context.history,
             showCost: context.showCost,
-            showModel: context.showModel
+            showModel: context.showModel,
+            reasoning: context.reasoning
         )
     }
 }
