@@ -91,6 +91,8 @@ struct LLM_chat_bot {
                         print(text)
                     } else if let voiceMessage = msg.voice {
                         print(voiceMessage.file_id)
+                    } else if let photos = msg.photo {
+                        print("\(photos.count) photos recieved")
                     } else { continue }
                     // async messages processing
                     Task {
@@ -115,15 +117,47 @@ struct LLM_chat_bot {
             // filtering voice messages
             // check if there is reply_to_message
             if msg.reply_to_message?.from?.username == botUsername {
+                if let photos = msg.photo {
+                    // photos works only with OpenRouter
+                    if await state.getProvider(chatID: chatID, thread_id: thread_id) != .openrouter {
+                        return
+                    }
+                    
+                    // process photo input
+                    // create tasks for faster download, will preserve images order
+                    let tasks = photos.map { photo in
+                        Task { try await getBase64File(from: photo.file_id)}
+                    }
+                    
+                    // reserve memory exactly by photos count
+                    var base64Photos = [String]()
+                    base64Photos.reserveCapacity(photos.count)
+                    
+                    for task in tasks {
+                        base64Photos.append("data:image/jpeg;base64,\(try await task.value)")
+                    }
+                    
+                    try await processContent(
+                        msg: msg,
+                        content: .images(text: msg.text, images: base64Photos),
+                        chatID: chatID,
+                        thread_id: thread_id
+                    )
+                    
+                    // update processing finished
+                    return
+                }
+                
+                
                 if let voice = msg.voice {
                     // audio works only with OpenRouter
                     // so, check the current provider
                     if await state.getProvider(chatID: chatID, thread_id: thread_id) != .openrouter {
                         return
                     }
-            
+                    
                     // process audio input
-                    let base64Audio = try await getBase64Audio(from: voice.file_id)
+                    let base64Audio = try await getBase64File(from: voice.file_id)
                     try await processContent(msg: msg, content: .voice(base64: base64Audio, format: "ogg"), chatID: chatID, thread_id: thread_id)
                     
                     // update processing finished
@@ -138,11 +172,11 @@ struct LLM_chat_bot {
             case .setRole:
                 _ = await state.setRoleAndResetHistory(chatID: chatID, thread_id: thread_id, role: parsedCommand.argument + formatOptions)
                 try await sendUserFeedback("Роль изменена + история очищена")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .clearHistory:
                 await state.clearHistory(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("История очищена")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .setTemp:
                 guard let temp = Float(parsedCommand.argument), (0.0...2.0).contains(temp) else {
                     let errorMessage = Float(parsedCommand.argument) == nil
@@ -153,7 +187,7 @@ struct LLM_chat_bot {
                 }
                 await state.setTemp(chatID: chatID, thread_id: thread_id, value: temp)
                 try await sendUserFeedback("Temperature: \(await state.temp(chatID: chatID, thread_id: thread_id))")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .model:
                 let changedModel = await state.setModelAndResetHistory(
                     chatID: chatID,
@@ -165,19 +199,19 @@ struct LLM_chat_bot {
                     \(changedModel.oldModel) ----> \(changedModel.newModel).
                     История очищена.
                     """)
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .showTokens:
                 let new = await state.toggleShowStats(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("Показывать расход токенов: \(new)")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .showCost:
                 let new = await state.toggleShowCost(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("Показывать стоимость сообщений: \(new)")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .showModel:
                 let new = await state.toggleShowModel(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("Показывать использованную модель: \(new)")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .help:
                 let helpData = await state.fetchHelp(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("""
@@ -205,11 +239,11 @@ struct LLM_chat_bot {
                     • Роль: <blockquote>\(helpData.role)</blockquote>
                     • Дефолтная роль: <blockquote>\(helpData.defaultRole)</blockquote>
                     """)
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .defaultRole:
                 _ = await state.setRoleAndResetHistory(chatID: chatID, thread_id: thread_id, role: systemPrompt + formatOptions)
                 try await sendUserFeedback("Роль изменена на стандартную + история очищена")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .historyLength:
                 guard let newMax = Int(parsedCommand.argument), (0...50).contains(newMax) else {
                     let errorMessage = Int(parsedCommand.argument) == nil
@@ -220,26 +254,26 @@ struct LLM_chat_bot {
                 }
                 await state.setMaxHistory(chatID: chatID, thread_id: thread_id, newMax: newMax)
                 try await sendUserFeedback("Длина истории: \(newMax) сообщений")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .provider:
                 var feedback: String
-//                switch parsedCommand.argument {
-//                case "deepseek":
-//                    feedback = await state.changeProvider(newProvider: .deepseek)
-//                case "openrouter":
-//                    feedback = await state.changeProvider(newProvider: .openrouter)
-//                case "yandex":
-//                    feedback = await state.changeProvider(newProvider: .yandex)
-//                default:
-//                    feedback = "Invalid provider name. Available: deepseek, openrouter, yandex."
-//                }
+                //                switch parsedCommand.argument {
+                //                case "deepseek":
+                //                    feedback = await state.changeProvider(newProvider: .deepseek)
+                //                case "openrouter":
+                //                    feedback = await state.changeProvider(newProvider: .openrouter)
+                //                case "yandex":
+                //                    feedback = await state.changeProvider(newProvider: .yandex)
+                //                default:
+                //                    feedback = "Invalid provider name. Available: deepseek, openrouter, yandex."
+                //                }
                 if let provider = ServiceProvider(rawValue: parsedCommand.argument.capitalized) {
                     feedback = await state.changeProvider(chatID: chatID, thread_id: thread_id, newProvider: provider) + " ----> \(parsedCommand.argument)"
                 } else {
                     feedback = "Invalid provider name. Available: deepseek, openrouter, yandex."
                 }
                 try await sendUserFeedback(feedback)
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .testMode:
                 let newSuffix = await state.toggleTestMode(chatID: chatID, thread_id: thread_id)
                 if let suffix = newSuffix {
@@ -259,16 +293,16 @@ struct LLM_chat_bot {
                 } else {
                     try await sendUserFeedback("Test mode DISABLED")
                 }
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .reasoning:
                 let newReasoning = await state.reasoningToggle(chatID: chatID, thread_id: thread_id)
                 try await sendUserFeedback("Reasoning: \(newReasoning)")
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .mention:
                 print(text)
                 // process the prompt
                 try await processContent(msg: msg, content: .text(parsedCommand.argument), chatID: chatID, thread_id: thread_id)
-// ------------------------------------------------------------------------------------------
+                // ------------------------------------------------------------------------------------------
             case .unknown:
                 // procees all private messages
                 if msg.chat.type == "private" {
@@ -281,7 +315,7 @@ struct LLM_chat_bot {
             func sendUserFeedback(_ text: String) async throws {
                 _ = try await TelegramAPI.sendTelegramMessage(telegramUrl: telegramUrl, chat_id: chatID, text: text, reply_parameters: nil, message_thread_id: thread_id != 0 ? thread_id : nil)
             }
-        // ------------- end of routeMessage() -------------
+            // ------------- end of routeMessage() -------------
         }
         
         func processContent(msg: TelegramMessage, content: ContentToProcess?,chatID: Int, thread_id: Int64) async throws {
@@ -302,12 +336,16 @@ struct LLM_chat_bot {
                     chatID: chatID,
                     thread_id: thread_id,
                     userContent: promptText,
-                    username: msg.from?.username
+                    username: username
                 )
                 
             case .voice(let base64, let format):
                 snapshot = await state.prepareGeneration(chatID: chatID, thread_id: thread_id, audioBase64: base64, audioFormat: format, username: username)
+                
+            case .images(text: let text, images: let images):
+                snapshot = await state.prepareGeneration(chatID: chatID, thread_id: thread_id, text: text, images: images, username: username)
             }
+            
             // параметры генерации читаем из актора
             let temp = snapshot.temperature
             let showStats = snapshot.showStats
@@ -315,11 +353,11 @@ struct LLM_chat_bot {
             let showModel = snapshot.showModel
             let messages = snapshot.messages
             let enableReasoning = snapshot.reasoning
-
+            
             let provider = snapshot.provider
             let streamRequest: ProviderStreamRequest
             let fallbackModel: String
-
+            
             switch provider {
             case .openrouter:
                 streamRequest = .openrouter(RouterRequestBody(
@@ -353,31 +391,31 @@ struct LLM_chat_bot {
             }
             
             try await giveTgResponse(
-                            streamRequest: streamRequest,
-                            chatID: chatID,
-                            thread_id: thread_id,
-                            replyId: msg.message_id,
-                            fallbackModel: fallbackModel,
-                            showStats: showStats,
-                            showCost: showCost,
-                            showModel: showModel
+                streamRequest: streamRequest,
+                chatID: chatID,
+                thread_id: thread_id,
+                replyId: msg.message_id,
+                fallbackModel: fallbackModel,
+                showStats: showStats,
+                showCost: showCost,
+                showModel: showModel
             )
         }
         
         func giveTgResponse(
-                        streamRequest: ProviderStreamRequest,
-                        chatID: Int,
-                        thread_id: Int64,
-                        replyId: Int,
-                        fallbackModel: String,
-                        showStats: Bool,
-                        showCost: Bool,
-                        showModel: Bool
+            streamRequest: ProviderStreamRequest,
+            chatID: Int,
+            thread_id: Int64,
+            replyId: Int,
+            fallbackModel: String,
+            showStats: Bool,
+            showCost: Bool,
+            showModel: Bool
         ) async throws {
             let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
                 .init(text: "🛑 СТОП", callback_data: "stop:\(chatID):\(thread_id)")
             ]])
-
+            
             // отправить черновик чтобы юзер понял что промпт был принят
             let placeholder = try await TelegramAPI.sendTelegramMessage(
                 telegramUrl: telegramUrl,
@@ -390,22 +428,22 @@ struct LLM_chat_bot {
             
             let key = StreamKey(chatID: chatID, threadID: thread_id)
             //print("[Bot] starting stream key=\(key), provider=\(provider.rawValue), showStats=\(showStats)")
-
+            
             let streamingTask = Task {
                 var accumulator = ""
                 var streamMeta: StreamMeta?
                 var lastLength = 0
                 let clock = ContinuousClock()
                 var lastEdit = clock.now // по идее теперь локально
-
+                
                 var isCancelled = false
-
+                
                 do {
                     let responseStream = streamRequest.makeStream(
                         routerApiKey: routerApiKey,
                         deepseekKey: deepseekKey
                     )
-
+                    
                     for try await event in responseStream {
                         // Проверяем отмену в начале каждой итерации
                         if Task.isCancelled {
@@ -413,7 +451,7 @@ struct LLM_chat_bot {
                             print("[Bot] stream cancelled flag observed in \(streamRequest.provider.rawValue) loop")
                             break
                         }
-
+                        
                         switch event {
                         case .text(let chunk):
                             accumulator += chunk
@@ -463,7 +501,7 @@ struct LLM_chat_bot {
                 // финальное редактирование
                 let finalText: String
                 let finalMarkup: InlineKeyboardMarkup?
-
+                
                 if isCancelled {
                     finalText = accumulator.isEmpty ?
                     "🛑 <b>Остановлено пользователем.</b>" :
@@ -477,13 +515,13 @@ struct LLM_chat_bot {
                         showCost: showCost,
                         showModel: showModel
                     ) ?? ""
-
+                    
                     finalText = accumulator.isEmpty ?
                     "Пустой ответ.\(footer)\n\n✅ <b>Ответ завершен.</b>" :
                     accumulator + footer + "\n\n✅ <b>Ответ завершен.</b>"
                     finalMarkup = InlineKeyboardMarkup(inline_keyboard: [])
                 }
-
+                
                 try? await TelegramAPI.editTelegramMessage(
                     telegramUrl: telegramUrl,
                     chat_id: chatID,
@@ -491,10 +529,10 @@ struct LLM_chat_bot {
                     text: finalText,
                     reply_markup: finalMarkup
                 )
-
+                
                 // добавляем ответ бота в историю
                 await state.appendAssistant(chatID: chatID, thread_id: thread_id, content: accumulator)
-
+                
                 await tasks.cancel(key: key)
                 print("[Bot] stream task finished key=\(key), cancelled=\(isCancelled), chars=\(accumulator.count)")
             }
@@ -504,13 +542,13 @@ struct LLM_chat_bot {
         
         func formatFooter(meta: StreamMeta?, fallbackModel: String, showTokens: Bool, showCost: Bool, showModel: Bool) -> String? {
             guard showTokens || showCost || showModel else { return nil }
-
+            
             var lines: [String] = ["", "━━━━━━━━━━━━━"]
             let usage = meta?.usage
-
+            
             if showTokens {
                 var hasAnyTokenData = false
-
+                
                 if let prompt = usage?.promptTokens {
                     lines.append("• Prompt: \(formatTokenValue(prompt))")
                     hasAnyTokenData = true
@@ -539,12 +577,12 @@ struct LLM_chat_bot {
                     lines.append("• Total: \(formatTokenValue(total))")
                     hasAnyTokenData = true
                 }
-
+                
                 if !hasAnyTokenData {
                     lines.append("• Токены: н/д")
                 }
             }
-
+            
             if showCost {
                 if let cost = usage?.cost {
                     lines.append("• Стоимость: $\(String(format: "%.6f", cost))")
@@ -552,11 +590,11 @@ struct LLM_chat_bot {
                     lines.append("• Стоимость: н/д")
                 }
             }
-
+            
             if showModel {
                 lines.append("Модель: \(meta?.model ?? fallbackModel)")
             }
-
+            
             return lines.count > 2 ? lines.joined(separator: "\n") : nil
         }
         
@@ -567,14 +605,14 @@ struct LLM_chat_bot {
             return String(format: "%.3f", value)
         }
         
-        func getBase64Audio(from fileId: String) async throws -> String {
+        func getBase64File(from fileId: String) async throws -> String {
             guard let filePath = try await TelegramAPI.getFile(telegramUrl: telegramUrl, file_id: fileId).file_path else {
-                throw NSError(domain: "handleAudioInput()", code: 1, userInfo: [NSLocalizedDescriptionKey: "returned file path is nil"])
+                throw NSError(domain: "getBase64File()", code: 1, userInfo: [NSLocalizedDescriptionKey: "returned file path is nil"])
             }
             let file = try await TelegramAPI.downloadFile(botToken: tgBotToken, filePath: filePath)
             
-            let base64Audio = file.base64EncodedString()
-            return base64Audio
+            let base64File = file.base64EncodedString()
+            return base64File
         }
     }
     

@@ -43,13 +43,13 @@ actor ChatContextStore {
     let defaultHistoryLength: Int
     var serviceProvider: ServiceProvider = .openrouter
     let defaultModel: String
-
+    
     let systemPrompt: String
     let formatOptions: String
     let companyChatId: Int
     let companyMembers: String
     let defaultSuffix: Int?
-
+    
     init(model: String, systemPrompt: String, formatOptions: String, companyChatId: Int, companyMembers: String, defaultHistoryLength: Int, defaultSuffix: Int?) {
         self.systemPrompt = systemPrompt
         self.formatOptions = formatOptions
@@ -59,19 +59,19 @@ actor ChatContextStore {
         self.defaultModel = model
         self.defaultSuffix = defaultSuffix
     }
-
+    
     private func key(chatID: Int, thread_id: Int64) -> StreamKey {
         .init(chatID: chatID, threadID: thread_id)
     }
-
+    
     private func roleWithCompanyMembers(chatID: Int, role: String) -> String {
         (chatID == companyChatId) ? role + companyMembers : role
     }
-
+    
     func defaultRole(chatID: Int) -> String {
         roleWithCompanyMembers(chatID: chatID, role: systemPrompt + formatOptions)
     }
-
+    
     private func ensureContext(chatID: Int, thread_id: Int64) -> StreamKey {
         let contextKey = key(chatID: chatID, thread_id: thread_id)
         if contexts[contextKey] == nil {
@@ -92,12 +92,12 @@ actor ChatContextStore {
         }
         return contextKey
     }
-
+    
     private func getContext(chatID: Int, thread_id: Int64) -> ChatContext {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         return contexts[contextKey]!
     }
-
+    
     private func mutateContext(chatID: Int, thread_id: Int64, _ mutate: (inout ChatContext) -> Void) {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
@@ -146,7 +146,7 @@ actor ChatContextStore {
         }
         return !oldReasoning
     }
-
+    
     func getCurrentMaxHistory(chatID: Int, thread_id: Int64) -> Int {
         getContext(chatID: chatID, thread_id: thread_id).maxHistory
     }
@@ -160,36 +160,36 @@ actor ChatContextStore {
     func getCurrentRole(chatID: Int, thread_id: Int64) -> String {
         getContext(chatID: chatID, thread_id: thread_id).role
     }
-
+    
     func setRoleAndResetHistory(chatID: Int, thread_id: Int64, role: String) -> String {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
         let effectiveRole = roleWithCompanyMembers(chatID: chatID, role: role)
-
+        
         context.role = effectiveRole
         context.history = [.init(role: "system", content: effectiveRole)]
         contexts[contextKey] = context
-
+        
         return effectiveRole
     }
-
+    
     func clearHistory(chatID: Int, thread_id: Int64) {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
         context.history = [.init(role: "system", content: context.role)]
         contexts[contextKey] = context
     }
-
+    
     func appendAssistant(chatID: Int, thread_id: Int64, content: String) {
         mutateContext(chatID: chatID, thread_id: thread_id) { context in
             context.history.append(.init(role: "assistant", content: content))
         }
     }
-
+    
     func temp(chatID: Int, thread_id: Int64) -> Float {
         getContext(chatID: chatID, thread_id: thread_id).temp
     }
-
+    
     func setTemp(chatID: Int, thread_id: Int64, value: Float) {
         mutateContext(chatID: chatID, thread_id: thread_id) {
             $0.temp = value
@@ -199,23 +199,23 @@ actor ChatContextStore {
     func getCurrentModel(chatID: Int, thread_id: Int64) -> String {
         getContext(chatID: chatID, thread_id: thread_id).model
     }
-
+    
     func setModelAndResetHistory(chatID: Int, thread_id: Int64, newModel: String) -> (oldModel: String, newModel: String) {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
         let oldModel = context.model
-
+        
         context.model = newModel
         context.history = [.init(role: "system", content: context.role)]
         contexts[contextKey] = context
-
+        
         return (oldModel: oldModel, newModel: context.model)
     }
     
     func getShowStats(chatID: Int, thread_id: Int64) -> Bool {
         getContext(chatID: chatID, thread_id: thread_id).showStats
     }
-
+    
     func toggleShowStats(chatID: Int, thread_id: Int64) -> Bool {
         var newValue = false
         mutateContext(chatID: chatID, thread_id: thread_id) { context in
@@ -270,7 +270,7 @@ actor ChatContextStore {
             userMessage: .init(role: "user", content: userContent, name: username)
         )
     }
-
+    
     func prepareGeneration(chatID: Int, thread_id: Int64, audioBase64: String, audioFormat: String, username: String?) -> GenerationStateSnapshot {
         prepareGeneration(
             chatID: chatID,
@@ -278,23 +278,31 @@ actor ChatContextStore {
             userMessage: .init(role: "user", audioBase64: audioBase64, audioFormat: audioFormat, name: username)
         )
     }
-
+    
+    func prepareGeneration(chatID: Int, thread_id: Int64, text: String?, images: [String], username: String?) -> GenerationStateSnapshot {
+        prepareGeneration(
+            chatID: chatID,
+            thread_id: thread_id,
+            userMessage: .init(role: "user", text: text, images: images, name: username)
+        )
+    }
+    
     private func prepareGeneration(chatID: Int, thread_id: Int64, userMessage: ChatMessage) -> GenerationStateSnapshot {
         let contextKey = ensureContext(chatID: chatID, thread_id: thread_id)
         var context = contexts[contextKey]!
-
+        
         if context.history.isEmpty {
             context.history = [.init(role: "system", content: context.role)]
         }
-
+        
         if context.history.count >= context.maxHistory, context.history.count > 1 {
             let hi = min(2, context.history.count - 1)
             context.history.removeSubrange(1...hi)
         }
-
+        
         context.history.append(userMessage)
         contexts[contextKey] = context
-
+        
         return GenerationStateSnapshot(
             provider: context.provider,
             model: context.model,

@@ -49,6 +49,7 @@ class TelegramMessage: Codable {
     let voice: TelegramVoice?
     let message_thread_id: Int64?
     let reply_to_message: TelegramMessage?
+    let photo: [PhotoSize]?
 }
 
 struct TelegramVoice: Codable {
@@ -72,11 +73,11 @@ struct TelegramAudio: Codable {
 }
 
 struct PhotoSize: Codable {
-        let fileId: String
-        let fileUniqueId: String
+        let file_id: String
+        let file_unique_id: String
         let width: Int
         let height: Int
-        let fileSize: Int?
+        let file_size: Int?
 }
 
 struct TelegramFile: Codable {
@@ -178,17 +179,30 @@ enum ChatMessageContent: Codable, Sendable {
     static func audio(data: String, format: String) -> ChatMessageContent {
         .parts([.inputAudio(data: data, format: format)])
     }
+    
+    static func image(images: [String], text: String?) -> ChatMessageContent {
+        var contentParts = [ChatMessageContentPart]()
+        if let attachedText = text {
+            contentParts.append(.text(attachedText))
+        }
+        for image in images {
+            contentParts.append(.inputImage(data: image))
+        }
+        return .parts(contentParts)
+    }
 }
 
 struct ChatMessageContentPart: Codable, Sendable {
     let type: String
     let text: String?
     let inputAudio: ChatMessageInputAudio?
+    let inputImage: ChatMessageInputImage?
 
-    init(type: String, text: String? = nil, inputAudio: ChatMessageInputAudio? = nil) {
+    init(type: String, text: String? = nil, inputAudio: ChatMessageInputAudio? = nil, inputImage: ChatMessageInputImage? = nil) {
         self.type = type
         self.text = text
         self.inputAudio = inputAudio
+        self.inputImage = inputImage
     }
 
     static func text(_ text: String) -> Self {
@@ -198,17 +212,26 @@ struct ChatMessageContentPart: Codable, Sendable {
     static func inputAudio(data: String, format: String) -> Self {
         .init(type: "input_audio", inputAudio: .init(data: data, format: format))
     }
+    
+    static func inputImage(data: String) -> Self {
+        .init(type: "image_url", inputImage: .init(url: data))
+    }
 
     enum CodingKeys: String, CodingKey {
         case type
         case text
         case inputAudio = "input_audio"
+        case inputImage = "image_url"
     }
 }
 
 struct ChatMessageInputAudio: Codable, Sendable {
     let data: String
     let format: String
+}
+
+struct ChatMessageInputImage: Codable, Sendable {
+    let url: String
 }
 
 // сообщение в чате (в истории)
@@ -229,6 +252,10 @@ struct ChatMessage: Codable, Sendable {
 
     init(role: String, audioBase64: String, audioFormat: String, name: String? = nil) {
         self.init(role: role, content: .audio(data: audioBase64, format: audioFormat), name: name)
+    }
+    
+    init(role: String, text: String?, images: [String], name: String? = nil) {
+        self.init(role: role, content: .image(images: images, text: text), name: name)
     }
 }
 // тело запроса при отправке промпта
@@ -308,4 +335,5 @@ struct Usage: Decodable {
 enum ContentToProcess {
     case voice(base64: String, format: String)
     case text(String)
+    case images(text: String?, images: [String])
 }
