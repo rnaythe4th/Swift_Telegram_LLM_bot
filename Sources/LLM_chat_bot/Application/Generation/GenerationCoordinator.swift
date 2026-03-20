@@ -1,0 +1,323 @@
+import Foundation
+
+private enum ReplyContentResolution {
+    case none
+    case unsupported(String)
+    case content(UserInputContent)
+}
+
+final class GenerationCoordinator: @unchecked Sendable {
+    private let telegram: TelegramGatewayPort
+    private let state: ChatContextStore
+    private let sessionRegistry: SessionRegistry
+    private let mediaResolver: MediaResolverPort
+    private let gateways: ProviderGatewayRegistry
+    private let logger: LoggerPort
+    private let botUsername: String
+    
+    init(
+        telegram: TelegramGatewayPort,
+        state: ChatContextStore,
+        sessionRegistry: SessionRegistry,
+        mediaResolver: MediaResolverPort,
+        gateways: ProviderGatewayRegistry,
+        logger: LoggerPort,
+        botUsername: String
+    ) {
+        self.telegram = telegram
+        self.state = state
+        self.sessionRegistry = sessionRegistry
+        self.mediaResolver = mediaResolver
+        self.gateways = gateways
+        self.logger = logger
+        self.botUsername = botUsername
+    }
+    
+    func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
+        switch try await resolveProcessableContent(message: message, chatKey: chatKey) {
+        case .content(let content):
+            try await processContent(message: message, content: content, chatKey: chatKey)
+        case .unsupported(let feedback):
+            try await sendUserFeedback(chatKey: chatKey, text: feedback)
+        case .none:
+            break
+        }
+    }
+    
+    private func resolveProcessableContent(message: TelegramMessage, chatKey: ChatKey) async throws -> ReplyContentResolution {
+        let routing = MessageRoutingPolicy.evaluate(message: message, botUsername: botUsername)
+        let refs = extractMediaRefs(from: message)
+        
+        guard routing.shouldHandle else {
+            return .none
+        }
+        
+        let normalizedText = routing.normalizedText
+        guard normalizedText != nil || !refs.isEmpty else {
+            return .none
+        }
+        
+        if !refs.isEmpty {
+            let provider = await state.provider(chatKey: chatKey)
+            let adapter = try gateways.gateway(for: provider)
+            
+            let unsupportedKinds = unsupportedMediaKinds(in: refs, capabilities: adapter.capabilities)
+            if !unsupportedKinds.isEmpty {
+                let kinds = unsupportedKinds.map(\.displayName).joined(separator: ", ")
+                return .unsupported(
+                    "Провайдер \(provider.commandValue) не поддерживает \(kinds). Смените провайдера или отправьте текст."
+                )
+            }
+        }
+        
+        let resolved = refs.isEmpty ? [] : try await mediaResolver.resolveMedia(refs)
+        return .content(.init(text: normalizedText, attachments: resolved))
+    }
+    
+    private func processContent(message: TelegramMessage, content: UserInputContent, chatKey: ChatKey) async throws {
+        let username = message.from?.username
+        let generationID = await sessionRegistry.register(chatKey: chatKey)
+        
+        var processedContent = content
+        if let username, let text = processedContent.text, !text.isEmpty {
+            processedContent.text = "Тебе пишет @\(username): \(text)"
+        }
+        
+        let snapshot = await state.snapshotAndAppend(
+            chatKey: chatKey,
+            generationID: generationID,
+            content: processedContent,
+            username: username
+        )
+        let provider = snapshot.provider
+        
+        do {
+            let gateway = try gateways.gateway(for: provider)
+            
+            let plan = ProviderGenerationPlan(
+                model: snapshot.model,
+                messages: snapshot.messages,
+                temperature: snapshot.temperature,
+                includeUsage: snapshot.options.showStats || snapshot.options.showCost,
+                reasoningEnabled: snapshot.options.reasoningEnabled
+            )
+            
+            let request = gateway.makeRequest(plan)
+            let fallbackModel = gateway.fallbackModel(for: plan)
+            
+            try await streamReply(
+                gateway: gateway,
+                request: request,
+                fallbackModel: fallbackModel,
+                options: snapshot.options,
+                chatKey: chatKey,
+                replyToMessageID: message.message_id,
+                generationID: generationID
+            )
+        } catch {
+            await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await sessionRegistry.finish(generationID: generationID)
+            throw error
+        }
+    }
+    
+    private func streamReply(
+        gateway: ProviderGatewayPort,
+        request: ProviderGatewayRequest,
+        fallbackModel: String,
+        options: GenerationOptions,
+        chatKey: ChatKey,
+        replyToMessageID: Int,
+        generationID: GenerationID
+    ) async throws {
+        let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
+            .init(text: "🛑 СТОП", callback_data: BotCallbackAction.stop(generationID).rawData)
+        ]])
+        let placeholder: TelegramMessage
+        
+        do {
+            placeholder = try await telegram.sendMessage(
+                .init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: replyToMessageID,
+                    text: "Думаю...",
+                    replyMarkup: stopMarkup
+                )
+            )
+        } catch {
+            await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await sessionRegistry.finish(generationID: generationID)
+            throw error
+        }
+        
+        let logger = self.logger
+        
+        let streamTask = Task<Void, Never> {
+            var accumulator = ""
+            var streamMeta: StreamMeta?
+            var lastLength = 0
+            let clock = ContinuousClock()
+            var lastEdit = clock.now
+            var isCancelled = false
+            
+            do {
+                // A stop callback can arrive in the tiny gap between Task creation and
+                // SessionRegistry.attach(...). If that happens, attach cancels the task.
+                // We must observe cancellation before opening the provider stream so the
+                // stop action remains real and does not briefly start extra work.
+                try Task.checkCancellation()
+                let stream = gateway.stream(request)
+                
+                for try await event in stream {
+                    if Task.isCancelled {
+                        isCancelled = true
+                        break
+                    }
+                    
+                    switch event {
+                    case .text(let chunk):
+                        accumulator += chunk
+                        
+                        if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
+                            do {
+                                try await self.telegram.editMessage(
+                                    .init(
+                                        chatID: chatKey.chatID,
+                                        messageID: placeholder.message_id,
+                                        text: accumulator,
+                                        replyMarkup: stopMarkup
+                                    )
+                                )
+                                lastEdit = clock.now
+                                lastLength = accumulator.count
+                            } catch {
+                                if let telegramError = error as? TelegramAPIError,
+                                   let retryAfter = telegramError.retryAfter {
+                                    try? await Task.sleep(nanoseconds: UInt64(retryAfter) * 1_000_000_000)
+                                } else {
+                                    throw error
+                                }
+                            }
+                        }
+                        
+                    case .meta(let meta):
+                        streamMeta = meta
+                    }
+                }
+            } catch is CancellationError {
+                isCancelled = true
+            } catch {
+                logger.error("stream failed: \(error)")
+                try? await self.telegram.editMessage(
+                    .init(
+                        chatID: chatKey.chatID,
+                        messageID: placeholder.message_id,
+                        text: "❌ Ошибка: \(error)",
+                        replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
+                    )
+                )
+                await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+                await self.sessionRegistry.finish(generationID: generationID)
+                return
+            }
+            
+            if Task.isCancelled {
+                isCancelled = true
+            }
+            
+            let finalText: String
+            if isCancelled {
+                let stopNotice = await self.cancellationNotice(for: generationID)
+                finalText = accumulator.isEmpty
+                ? stopNotice
+                : accumulator + "\n\n" + stopNotice
+            } else {
+                let footer = ResponseFooterFormatter.formatFooter(
+                    meta: streamMeta,
+                    fallbackModel: fallbackModel,
+                    showTokens: options.showStats,
+                    showCost: options.showCost,
+                    showModel: options.showModel
+                ) ?? ""
+                
+                finalText = accumulator.isEmpty
+                ? "Пустой ответ.\(footer)\n\n✅ <b>Ответ завершен.</b>"
+                : accumulator + footer + "\n\n✅ <b>Ответ завершен.</b>"
+            }
+            
+            try? await self.telegram.editMessage(
+                .init(
+                    chatID: chatKey.chatID,
+                    messageID: placeholder.message_id,
+                    text: finalText,
+                    replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
+                )
+            )
+            
+            if isCancelled {
+                await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            } else if !accumulator.isEmpty {
+                await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: accumulator)
+            } else {
+                await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            }
+            await self.sessionRegistry.finish(generationID: generationID)
+        }
+        
+        await sessionRegistry.attach(generationID: generationID, task: streamTask)
+    }
+    
+    private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
+        _ = try await telegram.sendMessage(
+            .init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: text,
+                replyMarkup: nil
+            )
+        )
+    }
+    
+    private func unsupportedMediaKinds(
+        in refs: [InboundMediaRef],
+        capabilities: ProviderCapabilities
+    ) -> [InboundMediaKind] {
+        var unsupportedKinds: [InboundMediaKind] = []
+        
+        for kind in refs.map(\.kind) where !capabilities.supports(kind) && !unsupportedKinds.contains(kind) {
+            unsupportedKinds.append(kind)
+        }
+        
+        return unsupportedKinds
+    }
+    
+    private func extractMediaRefs(from message: TelegramMessage) -> [InboundMediaRef] {
+        var refs: [InboundMediaRef] = []
+        
+        // Synthetic merged albums expose one already-selected photo per album item here.
+        if let albumPhotos = message.album_photos, !albumPhotos.isEmpty {
+            refs.append(contentsOf: albumPhotos.map { .photo(fileID: $0.file_id) })
+        } else if let photos = message.photo, let bestPhoto = TelegramPhotoAlbumBuffer.selectPrimaryPhoto(from: photos) {
+            refs.append(.photo(fileID: bestPhoto.file_id))
+        }
+        if let voice = message.voice {
+            refs.append(.voice(fileID: voice.file_id, mimeType: voice.mime_type))
+        }
+        if let video = message.video {
+            refs.append(.video(fileID: video.file_id, mimeType: video.mime_type))
+        }
+        
+        return refs
+    }
+    
+    private func cancellationNotice(for generationID: GenerationID) async -> String {
+        let reason = await sessionRegistry.cancellationReason(for: generationID) ?? .userRequested
+        
+        switch reason {
+        case .userRequested:
+            return "🛑 <b>Остановлено пользователем.</b>"
+        }
+    }
+}
