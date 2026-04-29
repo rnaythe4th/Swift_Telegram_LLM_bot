@@ -68,7 +68,9 @@ enum BotCommandName: CaseIterable, Equatable {
             return .unknown
         }
         
-        return allCases.first { $0.matches(commandToken: commandToken, suffix: suffix) } ?? .unknown
+        let effectiveSuffix = (parts.count > 1 && parts[1] == botUsername) ? "" : suffix
+        
+        return allCases.first { $0.matches(commandToken: commandToken, suffix: effectiveSuffix) } ?? .unknown
     }
     
     private func matches(commandToken: String, suffix: String) -> Bool {
