@@ -84,6 +84,21 @@ final class BotCommandHandler: @unchecked Sendable {
         case .help:
             let help = await state.fetchHelp(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: """
+                Текущие настройки для этого чата:
+                -------------------
+                • Провайдер: \(help.provider.commandValue)
+                • Модель: \(help.model)
+                • Temperature: \(help.temp)
+                • Длина истории: \(help.maxHistory)
+                • Показать расход токенов: \(help.showTokens)
+                • Показать стоимость сообщения: \(help.showCost)
+                • Показать использованную модель: \(help.showModel)
+                • Reasoning: \(help.reasoning)
+                • Роль: <blockquote>\(help.role)</blockquote>
+                • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
+                -------------------
+                Команды:
+                -------------------                
                 /setrole #Новая_роль# - установить новую роль боту и очистить историю сообщений
                 /clear_history - очистить историю сообщений, сохранив роль
                 /settemp #число# - задать креативность бота. 2.0 - максимальная креативность, 0.0 - максимальна точность и стабильность ответов. (По умолчанию = 1.5)
@@ -96,21 +111,10 @@ final class BotCommandHandler: @unchecked Sendable {
                 /provider #deepseek|openrouter|yandex# - сменить провайдер
                 /testmode - включить/выключить суффикс команд
                 /reasoning - включить/выключить reasoning
-                
                 -------------------
-                Текущие настройки для этого чата:
+                Дефолтная роль:
                 -------------------
-                
-                • Провайдер: \(help.provider.commandValue)
-                • Модель: \(help.model)
-                • Temperature: \(help.temp)
-                • Длина истории: \(help.maxHistory)
-                • Показать расход токенов: \(help.showTokens)
-                • Показать стоимость сообщения: \(help.showCost)
-                • Показать использованную модель: \(help.showModel)
-                • Reasoning: \(help.reasoning)
-                • Роль: <blockquote>\(help.role)</blockquote>
-                • Дефолтная роль: <blockquote>\(help.defaultRole)</blockquote>
+                <blockquote>\(help.defaultRole)</blockquote>
                 """)
             
         case .defaultRole:

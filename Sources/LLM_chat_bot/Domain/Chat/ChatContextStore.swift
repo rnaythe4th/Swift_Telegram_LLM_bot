@@ -46,6 +46,7 @@ struct HelpData: Sendable {
     let defaultRole: String
     let provider: ServiceProvider
     let reasoning: Bool
+    let testModeSuffix: Int?
 }
 
 actor ChatContextStore {
@@ -158,7 +159,8 @@ actor ChatContextStore {
             showModel: context.showModel,
             defaultRole: defaultRole(chatID: chatKey.chatID),
             provider: context.provider,
-            reasoning: context.reasoning
+            reasoning: context.reasoning,
+            testModeSuffix: context.suffix
         )
     }
     
