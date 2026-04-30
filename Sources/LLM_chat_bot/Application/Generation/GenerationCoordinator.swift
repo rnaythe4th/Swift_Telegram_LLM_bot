@@ -132,6 +132,10 @@ final class GenerationCoordinator: @unchecked Sendable {
         }
     }
     
+    private static let telegramMaxChars = 4096
+    private static let footerReserve = 200
+    private static let messageCharLimit = telegramMaxChars - footerReserve
+
     private func streamReply(
         gateway: ProviderGatewayPort,
         request: ProviderGatewayRequest,
@@ -144,8 +148,10 @@ final class GenerationCoordinator: @unchecked Sendable {
         let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
             .init(text: "🛑 СТОП", callback_data: BotCallbackAction.stop(generationID).rawData)
         ]])
+        let emptyMarkup = InlineKeyboardMarkup(inline_keyboard: [])
+
         let placeholder: TelegramMessage
-        
+
         do {
             placeholder = try await telegram.sendMessage(
                 .init(
@@ -161,47 +167,84 @@ final class GenerationCoordinator: @unchecked Sendable {
             await sessionRegistry.finish(generationID: generationID)
             throw error
         }
-        
+
         let logger = self.logger
-        
+
         let streamTask = Task<Void, Never> {
-            var accumulator = ""
+            var fullAccumulator = ""
+            var messageAccumulator = ""
+            var currentPlaceholder = placeholder
             var streamMeta: StreamMeta?
             var lastLength = 0
             let clock = ContinuousClock()
             var lastEdit = clock.now
             var isCancelled = false
-            
+            var isFirstMessage = true
+
+            func sendContinuationPlaceholder() async -> TelegramMessage? {
+                try? await telegram.sendMessage(
+                    .init(
+                        chatID: chatKey.chatID,
+                        threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                        replyTo: nil,
+                        text: "Думаю...",
+                        replyMarkup: stopMarkup
+                    )
+                )
+            }
+
+            func splitAndContinue() async throws {
+                let (done, remaining) = Self.splitMessage(messageAccumulator, limit: Self.messageCharLimit)
+                try? await telegram.editMessage(
+                    .init(
+                        chatID: chatKey.chatID,
+                        messageID: currentPlaceholder.message_id,
+                        text: done + "\n\n📄 продолжение ⬇️",
+                        replyMarkup: emptyMarkup
+                    )
+                )
+                guard let next = await sendContinuationPlaceholder() else {
+                    throw CancellationError()
+                }
+                currentPlaceholder = next
+                messageAccumulator = remaining
+                lastLength = 0
+                lastEdit = clock.now
+                isFirstMessage = false
+            }
+
             do {
-                // A stop callback can arrive in the tiny gap between Task creation and
-                // SessionRegistry.attach(...). If that happens, attach cancels the task.
-                // We must observe cancellation before opening the provider stream so the
-                // stop action remains real and does not briefly start extra work.
                 try Task.checkCancellation()
                 let stream = gateway.stream(request)
-                
+
                 for try await event in stream {
                     if Task.isCancelled {
                         isCancelled = true
                         break
                     }
-                    
+
                     switch event {
                     case .text(let chunk):
-                        accumulator += chunk
-                        
-                        if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
+                        fullAccumulator += chunk
+                        messageAccumulator += chunk
+
+                        if messageAccumulator.count >= Self.messageCharLimit {
+                            try await splitAndContinue()
+                            continue
+                        }
+
+                        if clock.now - lastEdit > .seconds(3) || (messageAccumulator.count - lastLength) > 300 {
                             do {
                                 try await self.telegram.editMessage(
                                     .init(
                                         chatID: chatKey.chatID,
-                                        messageID: placeholder.message_id,
-                                        text: accumulator,
+                                        messageID: currentPlaceholder.message_id,
+                                        text: messageAccumulator,
                                         replyMarkup: stopMarkup
                                     )
                                 )
                                 lastEdit = clock.now
-                                lastLength = accumulator.count
+                                lastLength = messageAccumulator.count
                             } catch {
                                 if let telegramError = error as? TelegramAPIError,
                                    let retryAfter = telegramError.retryAfter {
@@ -211,7 +254,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                                 }
                             }
                         }
-                        
+
                     case .meta(let meta):
                         streamMeta = meta
                     }
@@ -223,26 +266,26 @@ final class GenerationCoordinator: @unchecked Sendable {
                 try? await self.telegram.editMessage(
                     .init(
                         chatID: chatKey.chatID,
-                        messageID: placeholder.message_id,
+                        messageID: currentPlaceholder.message_id,
                         text: "❌ Ошибка: \(error)",
-                        replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
+                        replyMarkup: emptyMarkup
                     )
                 )
                 await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
                 await self.sessionRegistry.finish(generationID: generationID)
                 return
             }
-            
+
             if Task.isCancelled {
                 isCancelled = true
             }
-            
+
             let finalText: String
             if isCancelled {
                 let stopNotice = await self.cancellationNotice(for: generationID)
-                finalText = accumulator.isEmpty
-                ? stopNotice
-                : accumulator + "\n\n" + stopNotice
+                finalText = messageAccumulator.isEmpty
+                    ? stopNotice
+                    : (isFirstMessage ? "" : "⬆️ продолжение\n\n") + messageAccumulator + "\n\n" + stopNotice
             } else {
                 let footer = ResponseFooterFormatter.formatFooter(
                     meta: streamMeta,
@@ -251,32 +294,49 @@ final class GenerationCoordinator: @unchecked Sendable {
                     showCost: options.showCost,
                     showModel: options.showModel
                 ) ?? ""
-                
-                finalText = accumulator.isEmpty
-                ? "Пустой ответ.\(footer)\n\n✅ <b>Ответ завершен.</b>"
-                : accumulator + footer + "\n\n✅ <b>Ответ завершен.</b>"
+
+                let prefix = isFirstMessage ? "" : "⬆️ продолжение\n\n"
+                finalText = messageAccumulator.isEmpty
+                    ? "Пустой ответ.\(footer)\n\n✅ <b>Ответ завершен.</b>"
+                    : prefix + messageAccumulator + footer + "\n\n✅ <b>Ответ завершен.</b>"
             }
-            
+
             try? await self.telegram.editMessage(
                 .init(
                     chatID: chatKey.chatID,
-                    messageID: placeholder.message_id,
+                    messageID: currentPlaceholder.message_id,
                     text: finalText,
-                    replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
+                    replyMarkup: emptyMarkup
                 )
             )
-            
+
             if isCancelled {
                 await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            } else if !accumulator.isEmpty {
-                await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: accumulator)
+            } else if !fullAccumulator.isEmpty {
+                await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator)
             } else {
                 await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             }
             await self.sessionRegistry.finish(generationID: generationID)
         }
-        
+
         await sessionRegistry.attach(generationID: generationID, task: streamTask)
+    }
+
+    private static func splitMessage(_ text: String, limit: Int) -> (done: String, remaining: String) {
+        let safeLimit = min(limit, text.count)
+        let cutoff = text.index(text.startIndex, offsetBy: safeLimit)
+
+        if let nl = text[..<cutoff].lastIndex(of: "\n"),
+           text.distance(from: text.startIndex, to: nl) > limit / 2 {
+            return (String(text[..<nl]), String(text[text.index(after: nl)...]))
+        }
+        if let sp = text[..<cutoff].lastIndex(of: " "),
+           text.distance(from: text.startIndex, to: sp) > limit / 2 {
+            return (String(text[..<sp]), String(text[text.index(after: sp)...]))
+        }
+        let hardCut = text.index(text.startIndex, offsetBy: safeLimit)
+        return (String(text[..<hardCut]), String(text[hardCut...]))
     }
     
     private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
