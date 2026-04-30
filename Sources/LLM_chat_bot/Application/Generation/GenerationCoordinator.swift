@@ -83,12 +83,23 @@ final class GenerationCoordinator: @unchecked Sendable {
             processedContent.text = "Тебе пишет @\(username): \(text)"
         }
         
+        let hasAttachments = !processedContent.attachments.isEmpty
+        
+        let historyContent = hasAttachments
+            ? UserInputContent(text: processedContent.text, attachments: [])
+            : processedContent
+        
         let snapshot = await state.snapshotAndAppend(
             chatKey: chatKey,
             generationID: generationID,
-            content: processedContent,
+            content: historyContent,
             username: username
         )
+        
+        let messages: [ChatMessage] = hasAttachments
+            ? Array(snapshot.messages.dropLast()) + [ChatMessage.userContent(processedContent, username: username)]
+            : snapshot.messages
+        
         let provider = snapshot.provider
         
         do {
@@ -96,7 +107,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             
             let plan = ProviderGenerationPlan(
                 model: snapshot.model,
-                messages: snapshot.messages,
+                messages: messages,
                 temperature: snapshot.temperature,
                 includeUsage: snapshot.options.showStats || snapshot.options.showCost,
                 reasoningEnabled: snapshot.options.reasoningEnabled
