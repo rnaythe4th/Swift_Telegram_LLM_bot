@@ -52,13 +52,15 @@ struct HelpData: Sendable {
 actor ChatContextStore {
     private var contexts: [ChatKey: ChatContext] = [:]
     
-    let defaultHistoryLength: Int
-    let defaultModel: String
-    let systemPrompt: String
-    let formatOptions: String
+    var defaultHistoryLength: Int
+    var defaultModel: String
+    var systemPrompt: String
+    var formatOptions: String
     let companyChatId: Int
     let companyMembers: String
     let defaultSuffix: Int?
+    private var adminUsernames: Set<String>
+    private var whitelistedUserIDs: Set<Int>
     
     init(
         model: String,
@@ -76,6 +78,8 @@ actor ChatContextStore {
         self.companyMembers = companyMembers
         self.defaultHistoryLength = defaultHistoryLength
         self.defaultSuffix = defaultSuffix
+        self.adminUsernames = ["maythe4th"]
+        self.whitelistedUserIDs = []
     }
     
     private func roleWithCompanyMembers(chatID: Int, role: String) -> String {
@@ -307,5 +311,69 @@ actor ChatContextStore {
             context.pendingTurns[index].state = .cancelled
             flushResolvedTurns(&context)
         }
+    }
+    
+    func isAdmin(username: String?) -> Bool {
+        guard let username else { return false }
+        return adminUsernames.contains(username.lowercased())
+    }
+    
+    func isWhitelisted(userID: Int) -> Bool {
+        whitelistedUserIDs.contains(userID)
+    }
+    
+    func addToWhitelist(userID: Int) {
+        whitelistedUserIDs.insert(userID)
+    }
+    
+    func removeFromWhitelist(userID: Int) {
+        whitelistedUserIDs.remove(userID)
+    }
+    
+    func listWhitelisted() -> Set<Int> {
+        whitelistedUserIDs
+    }
+    
+    func addAdmin(username: String) {
+        adminUsernames.insert(username.lowercased())
+    }
+    
+    func removeAdmin(username: String) {
+        adminUsernames.remove(username.lowercased())
+    }
+    
+    func listAdmins() -> Set<String> {
+        adminUsernames
+    }
+    
+    func setDefaultModel(_ model: String) -> String {
+        defaultModel = model
+        return model
+    }
+    
+    func setDefaultRole(_ role: String) -> String {
+        systemPrompt = role
+        return role
+    }
+    
+    func setDefaultHistoryLength(_ length: Int) -> Int {
+        defaultHistoryLength = max(1, length)
+        return defaultHistoryLength
+    }
+    
+    func privateChats() -> [(chatID: Int, threadID: Int64)] {
+        contexts.keys
+            .filter { $0.chatID > 0 }
+            .map { (chatID: $0.chatID, threadID: $0.threadID) }
+    }
+    
+    func groupChats() -> [(chatID: Int, threadID: Int64)] {
+        contexts.keys
+            .filter { $0.chatID < 0 }
+            .map { (chatID: $0.chatID, threadID: $0.threadID) }
+    }
+    
+    func getDefaults() -> (model: String, role: String, historyLength: Int) {
+        (defaultModel, systemPrompt, defaultHistoryLength)
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 
 final class BotOrchestrator: @unchecked Sendable {
     private let telegram: TelegramGatewayPort
+    private let state: ChatContextStore
     private let logger: LoggerPort
     private let callbackHandler: BotCallbackHandler
     private let commandHandler: BotCommandHandler
@@ -20,6 +21,7 @@ final class BotOrchestrator: @unchecked Sendable {
         formatOptions: String
     ) {
         self.telegram = telegram
+        self.state = state
         self.logger = logger
         
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
@@ -98,7 +100,27 @@ final class BotOrchestrator: @unchecked Sendable {
     }
     
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
-        if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey) {
+        if message.chat.type == "private" {
+            let userID = message.from?.id ?? 0
+            let username = message.from?.username
+            let isAdmin = await state.isAdmin(username: username)
+            let isWhitelisted = await state.isWhitelisted(userID: userID)
+            
+            guard isAdmin || isWhitelisted else {
+                _ = try? await telegram.sendMessage(
+                    .init(
+                        chatID: chatKey.chatID,
+                        threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                        replyTo: nil,
+                        text: "Доступ запрещён. Ваш ID: \(userID)\nОбратитесь к администратору @maythe4th для добавления в белый список.",
+                        replyMarkup: nil
+                    )
+                )
+                return
+            }
+        }
+        
+        if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey, fromUser: message.from) {
             return
         }
         
