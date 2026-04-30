@@ -6,19 +6,22 @@ final class BotCommandHandler: @unchecked Sendable {
     private let gateways: ProviderGatewayRegistry
     private let botUsername: String
     private let formatOptions: String
+    private let menuHandler: BotMenuHandler
     
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
         gateways: ProviderGatewayRegistry,
         botUsername: String,
-        formatOptions: String
+        formatOptions: String,
+        menuHandler: BotMenuHandler
     ) {
         self.telegram = telegram
         self.state = state
         self.gateways = gateways
         self.botUsername = botUsername
         self.formatOptions = formatOptions
+        self.menuHandler = menuHandler
     }
     
     func handleIfCommand(text: String?, chatKey: ChatKey) async throws -> Bool {
@@ -182,6 +185,9 @@ final class BotCommandHandler: @unchecked Sendable {
             
             let enabled = await state.toggleReasoning(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "Reasoning: \(enabled)")
+            
+        case .menu:
+            await menuHandler.sendMenu(chatKey: chatKey)
             
         case .mention, .unknown:
             return

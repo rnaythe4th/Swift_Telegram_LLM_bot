@@ -5,17 +5,20 @@ final class BotCallbackHandler: @unchecked Sendable {
     private let state: ChatContextStore
     private let sessionRegistry: SessionRegistry
     private let logger: LoggerPort
+    private let menuHandler: BotMenuHandler
     
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
         sessionRegistry: SessionRegistry,
-        logger: LoggerPort
+        logger: LoggerPort,
+        menuHandler: BotMenuHandler
     ) {
         self.telegram = telegram
         self.state = state
         self.sessionRegistry = sessionRegistry
         self.logger = logger
+        self.menuHandler = menuHandler
     }
     
     func handleIfSupported(_ callback: CallbackQuery) async {
@@ -36,8 +39,6 @@ final class BotCallbackHandler: @unchecked Sendable {
                 return
             }
             
-            // We clear the pending turn immediately so a cancelled prompt cannot leak
-            // into history snapshots for later messages from the same chat/thread.
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             
             if let message = callback.message {
@@ -52,6 +53,9 @@ final class BotCallbackHandler: @unchecked Sendable {
             }
             
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Остановлено")
+            
+        case .menu(let action):
+            await menuHandler.handle(action: action, callback: callback)
         }
     }
 }

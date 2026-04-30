@@ -21,20 +21,30 @@ final class BotOrchestrator: @unchecked Sendable {
     ) {
         self.telegram = telegram
         self.logger = logger
+        
+        let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
+        let menuHandler = BotMenuHandler(
+            telegram: telegram,
+            state: state,
+            gateways: gatewayRegistry,
+            logger: logger
+        )
+        
         self.callbackHandler = BotCallbackHandler(
             telegram: telegram,
             state: state,
             sessionRegistry: sessionRegistry,
-            logger: logger
+            logger: logger,
+            menuHandler: menuHandler
         )
         
-        let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
         self.commandHandler = BotCommandHandler(
             telegram: telegram,
             state: state,
             gateways: gatewayRegistry,
             botUsername: botUsername,
-            formatOptions: formatOptions
+            formatOptions: formatOptions,
+            menuHandler: menuHandler
         )
         self.generationCoordinator = GenerationCoordinator(
             telegram: telegram,
@@ -57,9 +67,6 @@ final class BotOrchestrator: @unchecked Sendable {
                     currentOffset = maxUpdateID + 1
                 }
                 
-                // Albums can span several Telegram updates, so we normalize them before routing.
-                // After that, chats/threads are dispatched independently: one busy chat
-                // must not stall unrelated chats, while per-chat order is still preserved.
                 for update in photoAlbumBuffer.ingest(updates) {
                     await self.dispatch(update: update)
                 }
