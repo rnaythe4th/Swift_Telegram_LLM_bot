@@ -155,17 +155,28 @@ actor ChatContextStore {
         let context = ensure(chatKey: chatKey)
         return .init(
             model: context.model,
-            role: context.role,
+            role: displayRole(context.role, chatID: chatKey.chatID),
             temp: context.temp,
             maxHistory: context.maxHistory,
             showTokens: context.showStats,
             showCost: context.showCost,
             showModel: context.showModel,
-            defaultRole: defaultRole(chatID: chatKey.chatID),
+            defaultRole: displayRole(defaultRole(chatID: chatKey.chatID), chatID: chatKey.chatID),
             provider: context.provider,
             reasoning: context.reasoning,
             testModeSuffix: context.suffix
         )
+    }
+
+    private func displayRole(_ role: String, chatID: Int) -> String {
+        var s = role
+        if !companyMembers.isEmpty, chatID == companyChatId, s.hasSuffix(companyMembers) {
+            s = String(s.dropLast(companyMembers.count))
+        }
+        if s.hasSuffix(formatOptions) {
+            s = String(s.dropLast(formatOptions.count))
+        }
+        return s
     }
     
     func suffix(chatKey: ChatKey) -> Int? {
@@ -375,6 +386,10 @@ actor ChatContextStore {
     
     func getDefaults() -> (model: String, role: String, historyLength: Int) {
         (defaultModel, systemPrompt, defaultHistoryLength)
+    }
+
+    func history(chatKey: ChatKey) -> [ChatMessage] {
+        ensure(chatKey: chatKey).history
     }
 
     func resetChat(chatKey: ChatKey) {

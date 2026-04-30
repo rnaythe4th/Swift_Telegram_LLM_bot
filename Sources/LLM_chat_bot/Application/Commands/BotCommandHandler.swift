@@ -223,6 +223,9 @@ final class BotCommandHandler: @unchecked Sendable {
             await state.resetChat(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "Настройки сброшены к дефолтным.")
             
+        case .history:
+            try await handleHistory(chatKey: chatKey)
+            
         case .mention, .unknown:
             return
         }
@@ -368,6 +371,61 @@ final class BotCommandHandler: @unchecked Sendable {
         try await sendUserFeedback(chatKey: chatKey, text: "Пользователи в личке (\(sorted.count)):\n\(list)\n\nДля добавления: /whitelist add <ID>")
     }
     
+    private func handleHistory(chatKey: ChatKey) async throws {
+        let messages = await state.history(chatKey: chatKey)
+        guard !messages.isEmpty else {
+            try await sendUserFeedback(chatKey: chatKey, text: "История пуста.")
+            return
+        }
+
+        var lines: [String] = ["История сообщений (\(messages.count)):"]
+        for msg in messages {
+            let roleLabel: String
+            switch msg.role {
+            case "system":
+                roleLabel = "⚙️ система"
+            case "user":
+                roleLabel = "👤"
+            case "assistant":
+                roleLabel = "🤖"
+            default:
+                roleLabel = msg.role
+            }
+
+            let content: String
+            switch msg.content {
+            case .text(let text):
+                content = text
+            case .parts(let parts):
+                let textParts = parts.compactMap { $0.text }
+                let mediaTags = parts.compactMap { part -> String? in
+                    if part.inputImage != nil { return "[изображение]" }
+                    if part.inputAudio != nil { return "[аудио]" }
+                    if part.inputVideo != nil { return "[видео]" }
+                    return nil
+                }
+                content = (textParts.joined(separator: " ") + " " + mediaTags.joined(separator: " ")).trimmingCharacters(in: .whitespaces)
+            }
+            let displayContent = content.isEmpty ? "(пусто)" : content
+            lines.append("\n\(roleLabel): \(displayContent)")
+        }
+
+        try await sendLongMessage(chatKey: chatKey, text: lines.joined(separator: "\n"))
+    }
+
+    private func sendLongMessage(chatKey: ChatKey, text: String) async throws {
+        var remaining = text
+        while !remaining.isEmpty {
+            if remaining.count <= GenerationCoordinator.messageCharLimit {
+                try await sendUserFeedback(chatKey: chatKey, text: remaining)
+                break
+            }
+            let (chunk, rest) = GenerationCoordinator.splitMessage(remaining, limit: GenerationCoordinator.messageCharLimit)
+            try await sendUserFeedback(chatKey: chatKey, text: chunk)
+            remaining = rest
+        }
+    }
+
     private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
         _ = try await telegram.sendMessage(
             .init(

@@ -17,6 +17,7 @@ enum BotCommandName: CaseIterable, Equatable {
     case reasoning
     case menu
     case reset
+    case history
     case whitelist
     case defaults
     case chats
@@ -55,6 +56,8 @@ enum BotCommandName: CaseIterable, Equatable {
             return "menu"
         case .reset:
             return "reset"
+        case .history:
+            return "history"
         case .whitelist:
             return "whitelist"
         case .defaults:

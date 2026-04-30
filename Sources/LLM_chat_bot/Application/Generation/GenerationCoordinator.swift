@@ -132,9 +132,9 @@ final class GenerationCoordinator: @unchecked Sendable {
         }
     }
     
-    private static let telegramMaxChars = 4096
+    static let telegramMaxChars = 4096
     private static let footerReserve = 200
-    private static let messageCharLimit = telegramMaxChars - footerReserve
+    static let messageCharLimit = telegramMaxChars - footerReserve
 
     private func streamReply(
         gateway: ProviderGatewayPort,
@@ -323,7 +323,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         await sessionRegistry.attach(generationID: generationID, task: streamTask)
     }
 
-    private static func splitMessage(_ text: String, limit: Int) -> (done: String, remaining: String) {
+    static func splitMessage(_ text: String, limit: Int) -> (done: String, remaining: String) {
         let safeLimit = min(limit, text.count)
         let cutoff = text.index(text.startIndex, offsetBy: safeLimit)
 
