@@ -410,20 +410,7 @@ final class BotCommandHandler: @unchecked Sendable {
             lines.append("\n\(roleLabel): \(displayContent)")
         }
 
-        try await sendLongMessage(chatKey: chatKey, text: lines.joined(separator: "\n"))
-    }
-
-    private func sendLongMessage(chatKey: ChatKey, text: String) async throws {
-        var remaining = text
-        while !remaining.isEmpty {
-            if remaining.count <= GenerationCoordinator.messageCharLimit {
-                try await sendUserFeedback(chatKey: chatKey, text: remaining)
-                break
-            }
-            let (chunk, rest) = GenerationCoordinator.splitMessage(remaining, limit: GenerationCoordinator.messageCharLimit)
-            try await sendUserFeedback(chatKey: chatKey, text: chunk)
-            remaining = rest
-        }
+        try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
     }
 
     private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {

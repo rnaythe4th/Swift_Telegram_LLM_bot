@@ -72,9 +72,40 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage {
+        let html = TelegramHTMLFormatter.helper(text: request.text)
+        if html.count <= MessageSplitter.charLimit {
+            return try await sendSingle(request, html: html)
+        }
+        var remaining = request.text
+        var lastMessage: TelegramMessage?
+        var isFirst = true
+        while !remaining.isEmpty {
+            let chunk: String
+            if remaining.count <= MessageSplitter.charLimit {
+                chunk = remaining
+                remaining = ""
+            } else {
+                let (done, rest) = MessageSplitter.split(remaining)
+                chunk = done
+                remaining = rest
+            }
+            let chunkRequest = SendMessageRequest(
+                chatID: request.chatID,
+                threadID: request.threadID,
+                replyTo: isFirst ? request.replyTo : nil,
+                text: chunk,
+                replyMarkup: isFirst ? request.replyMarkup : nil
+            )
+            lastMessage = try await sendSingle(chunkRequest, html: TelegramHTMLFormatter.helper(text: chunk))
+            isFirst = false
+        }
+        return lastMessage!
+    }
+
+    private func sendSingle(_ request: SendMessageRequest, html: String) async throws -> TelegramMessage {
         let body = TelegramSendMessageBody(
             chat_id: request.chatID,
-            text: TelegramHTMLFormatter.helper(text: request.text),
+            text: html,
             reply_parameters: request.replyTo.map { ReplyParameters(message_id: $0) },
             message_thread_id: request.threadID,
             parse_mode: "HTML",

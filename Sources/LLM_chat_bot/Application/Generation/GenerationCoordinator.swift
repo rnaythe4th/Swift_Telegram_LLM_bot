@@ -131,10 +131,6 @@ final class GenerationCoordinator: @unchecked Sendable {
             throw error
         }
     }
-    
-    static let telegramMaxChars = 4096
-    private static let footerReserve = 200
-    static let messageCharLimit = telegramMaxChars - footerReserve
 
     private func streamReply(
         gateway: ProviderGatewayPort,
@@ -194,7 +190,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             }
 
             func splitAndContinue() async throws {
-                let (done, remaining) = Self.splitMessage(messageAccumulator, limit: Self.messageCharLimit)
+                let (done, remaining) = MessageSplitter.split(messageAccumulator)
                 try? await telegram.editMessage(
                     .init(
                         chatID: chatKey.chatID,
@@ -228,7 +224,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                         fullAccumulator += chunk
                         messageAccumulator += chunk
 
-                        if messageAccumulator.count >= Self.messageCharLimit {
+                        if messageAccumulator.count >= MessageSplitter.charLimit {
                             try await splitAndContinue()
                             continue
                         }
@@ -323,22 +319,6 @@ final class GenerationCoordinator: @unchecked Sendable {
         await sessionRegistry.attach(generationID: generationID, task: streamTask)
     }
 
-    static func splitMessage(_ text: String, limit: Int) -> (done: String, remaining: String) {
-        let safeLimit = min(limit, text.count)
-        let cutoff = text.index(text.startIndex, offsetBy: safeLimit)
-
-        if let nl = text[..<cutoff].lastIndex(of: "\n"),
-           text.distance(from: text.startIndex, to: nl) > limit / 2 {
-            return (String(text[..<nl]), String(text[text.index(after: nl)...]))
-        }
-        if let sp = text[..<cutoff].lastIndex(of: " "),
-           text.distance(from: text.startIndex, to: sp) > limit / 2 {
-            return (String(text[..<sp]), String(text[text.index(after: sp)...]))
-        }
-        let hardCut = text.index(text.startIndex, offsetBy: safeLimit)
-        return (String(text[..<hardCut]), String(text[hardCut...]))
-    }
-    
     private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
         _ = try await telegram.sendMessage(
             .init(

@@ -120,3 +120,25 @@ struct MaybeInaccessibleMessage: Codable, Sendable {
     let date: Int
     let text: String?
 }
+
+enum MessageSplitter {
+    static let telegramMaxChars = 4096
+    static let footerReserve = 200
+    static let charLimit = telegramMaxChars - footerReserve
+
+    static func split(_ text: String, limit: Int = charLimit) -> (done: String, remaining: String) {
+        let safeLimit = min(limit, text.count)
+        let cutoff = text.index(text.startIndex, offsetBy: safeLimit)
+
+        if let nl = text[..<cutoff].lastIndex(of: "\n"),
+           text.distance(from: text.startIndex, to: nl) > limit / 2 {
+            return (String(text[..<nl]), String(text[text.index(after: nl)...]))
+        }
+        if let sp = text[..<cutoff].lastIndex(of: " "),
+           text.distance(from: text.startIndex, to: sp) > limit / 2 {
+            return (String(text[..<sp]), String(text[text.index(after: sp)...]))
+        }
+        let hardCut = text.index(text.startIndex, offsetBy: safeLimit)
+        return (String(text[..<hardCut]), String(text[hardCut...]))
+    }
+}
