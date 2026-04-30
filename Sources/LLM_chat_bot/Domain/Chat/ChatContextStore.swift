@@ -377,6 +377,24 @@ actor ChatContextStore {
         (defaultModel, systemPrompt, defaultHistoryLength)
     }
 
+    func resetChat(chatKey: ChatKey) {
+        let role = defaultRole(chatID: chatKey.chatID)
+        contexts[chatKey] = ChatContext(
+            role: role,
+            history: [.init(role: "system", content: role)],
+            pendingTurns: [],
+            model: defaultModel,
+            temp: 1.5,
+            showStats: false,
+            maxHistory: defaultHistoryLength,
+            showCost: true,
+            showModel: true,
+            provider: .openrouter,
+            suffix: defaultSuffix,
+            reasoning: false
+        )
+    }
+
     func exportSnapshot(telegramUpdateOffset: Int) -> BotStateSnapshot {
         var ctxSnapshots: [String: ChatContextSnapshot] = [:]
         for (chatKey, context) in contexts {

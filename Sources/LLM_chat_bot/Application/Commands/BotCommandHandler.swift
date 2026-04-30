@@ -219,6 +219,10 @@ final class BotCommandHandler: @unchecked Sendable {
         case .menu:
             await menuHandler.sendMenu(chatKey: chatKey)
             
+        case .reset:
+            await state.resetChat(chatKey: chatKey)
+            try await sendUserFeedback(chatKey: chatKey, text: "Настройки сброшены к дефолтным.")
+            
         case .mention, .unknown:
             return
         }

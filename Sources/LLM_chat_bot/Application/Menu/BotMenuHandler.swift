@@ -175,6 +175,10 @@ final class BotMenuHandler: @unchecked Sendable {
             }
             try await showPage(.reasoning, chatKey: chatKey, callback: callback, message: message)
 
+        case "reset":
+            await state.resetChat(chatKey: chatKey)
+            try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+
         case "help":
             try await showPage(.helpPage, chatKey: chatKey, callback: callback, message: message)
 
@@ -263,6 +267,7 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton("🎭 Роль", action: "nav:role"), menuButton("🔧 Модель", action: "nav:model")],
             [menuButton("🌡️ Температура", action: "nav:temp"), menuButton("📊 Статистика", action: "nav:stats")],
             [menuButton("📝 История", action: "nav:history"), menuButton("🔌 Провайдер", action: "nav:provider")],
+            [menuButton("🧠 Reasoning", action: "nav:reasoning"), menuButton("🔄 Сброс", action: "reset")],
             [menuButton("📋 Помощь", action: "nav:help")],
             [menuButton("❌ Закрыть", action: "close")],
         ]
