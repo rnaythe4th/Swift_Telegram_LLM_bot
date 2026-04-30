@@ -23,14 +23,14 @@ struct BlueprintBotApp {
         let logger = ConsoleLogger()
         let network = NetworkClient()
         let telegram = TelegramHTTPGateway(network: network, botToken: config.telegramToken)
-        
+
         try? await telegram.deleteWebhook()
-        
+
         let me = try await telegram.getMe()
         guard let botUsername = me.username else {
             throw AppBootstrapError.missingBotUsername
         }
-        
+
         let state = ChatContextStore(
             model: "google/gemini-3-flash-preview",
             systemPrompt: systemPrompt,
@@ -40,13 +40,26 @@ struct BlueprintBotApp {
             defaultHistoryLength: 11,
             defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil
         )
-        
+
+        let persistence: StatePersistencePort?
+        if let supabaseURL = config.supabaseURL, let supabaseAnonKey = config.supabaseAnonKey {
+            persistence = SupabaseStatePersistence(
+                network: network,
+                baseURL: supabaseURL,
+                apiKey: supabaseAnonKey
+            )
+            logger.info("Supabase persistence enabled")
+        } else {
+            persistence = nil
+            logger.info("Supabase persistence disabled (missing SUPABASE_URL or SUPABASE_ANON_KEY)")
+        }
+
         let sessionRegistry = SessionRegistry()
         let mediaResolver = TelegramMediaResolver(telegram: telegram)
-        
+
         let openrouter = OpenRouterProviderAdapter(network: network, apiKey: config.routerApiKey)
         let deepseek = DeepSeekProviderAdapter(network: network, apiKey: config.deepseekKey)
-        
+
         let orchestrator = BotOrchestrator(
             telegram: telegram,
             state: state,
@@ -57,6 +70,7 @@ struct BlueprintBotApp {
                 .deepseek: deepseek,
                 .yandex: openrouter
             ],
+            persistence: persistence,
             logger: logger,
             botUsername: botUsername,
             formatOptions: formatOptions

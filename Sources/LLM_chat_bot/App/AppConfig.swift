@@ -5,6 +5,8 @@ enum EnvironmentKey: String {
     case deepseekKey = "DEEPSEEK_API_KEY"
     case routerApiKey = "ROUTER_API_KEY"
     case companyChatId = "COMPANY_CHAT_ID"
+    case supabaseURL = "SUPABASE_URL"
+    case supabaseAnonKey = "SUPABASE_ANON_KEY"
 }
 
 enum AppConfigError: LocalizedError {
@@ -27,6 +29,8 @@ struct AppConfig: Sendable {
     let deepseekKey: String
     let routerApiKey: String
     let companyChatId: Int
+    let supabaseURL: String?
+    let supabaseAnonKey: String?
     
     static func load() throws -> AppConfig {
         let telegramToken = try env(.telegramToken)
@@ -38,17 +42,29 @@ struct AppConfig: Sendable {
             throw AppConfigError.invalidCompanyChatId(companyChatIdRaw)
         }
         
+        let supabaseURL = optionalEnv(.supabaseURL)
+        let supabaseAnonKey = optionalEnv(.supabaseAnonKey)
+        
         return .init(
             telegramToken: telegramToken,
             deepseekKey: deepseekKey,
             routerApiKey: routerApiKey,
-            companyChatId: companyChatId
+            companyChatId: companyChatId,
+            supabaseURL: supabaseURL,
+            supabaseAnonKey: supabaseAnonKey
         )
     }
     
     private static func env(_ key: EnvironmentKey) throws -> String {
         guard let value = ProcessInfo.processInfo.environment[key.rawValue], !value.isEmpty else {
             throw AppConfigError.missingEnvironment(key)
+        }
+        return value
+    }
+
+    private static func optionalEnv(_ key: EnvironmentKey) -> String? {
+        guard let value = ProcessInfo.processInfo.environment[key.rawValue], !value.isEmpty else {
+            return nil
         }
         return value
     }

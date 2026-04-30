@@ -5,6 +5,7 @@ import NIOFoundationCompat
 enum RequestMethod {
     case get
     case post
+    case patch
 }
 
 struct AnyEncodable: Encodable, @unchecked Sendable {
@@ -202,6 +203,8 @@ final class NetworkClient: @unchecked Sendable {
             request.method = .GET
         case .post:
             request.method = .POST
+        case .patch:
+            request.method = .PATCH
         }
         
         for (name, value) in spec.headers {

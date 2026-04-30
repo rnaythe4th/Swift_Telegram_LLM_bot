@@ -3,27 +3,32 @@ import Foundation
 final class BotOrchestrator: @unchecked Sendable {
     private let telegram: TelegramGatewayPort
     private let state: ChatContextStore
+    private let persistence: StatePersistencePort?
     private let logger: LoggerPort
     private let callbackHandler: BotCallbackHandler
     private let commandHandler: BotCommandHandler
     private let generationCoordinator: GenerationCoordinator
     private let updateDispatcher = ChatUpdateDispatcher()
     private var photoAlbumBuffer = TelegramPhotoAlbumBuffer()
-    
+
+    private static let backupIntervalSeconds: Int64 = 60
+
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
         sessionRegistry: SessionRegistry,
         mediaResolver: MediaResolverPort,
         providers: [ServiceProvider: ProviderGatewayPort],
+        persistence: StatePersistencePort?,
         logger: LoggerPort,
         botUsername: String,
         formatOptions: String
     ) {
         self.telegram = telegram
         self.state = state
+        self.persistence = persistence
         self.logger = logger
-        
+
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
         let menuHandler = BotMenuHandler(
             telegram: telegram,
@@ -31,7 +36,7 @@ final class BotOrchestrator: @unchecked Sendable {
             gateways: gatewayRegistry,
             logger: logger
         )
-        
+
         self.callbackHandler = BotCallbackHandler(
             telegram: telegram,
             state: state,
@@ -39,7 +44,7 @@ final class BotOrchestrator: @unchecked Sendable {
             logger: logger,
             menuHandler: menuHandler
         )
-        
+
         self.commandHandler = BotCommandHandler(
             telegram: telegram,
             state: state,
@@ -58,17 +63,33 @@ final class BotOrchestrator: @unchecked Sendable {
             botUsername: botUsername
         )
     }
-    
+
     func run() async {
-        var currentOffset: Int? = nil
-        
+        var currentOffset = await restoreState()
+        let lastBackupOffset = LockedValue(currentOffset ?? 0)
+
+        let backupTask = Task { [weak self] in
+            guard let self, let persistence = self.persistence else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.backupIntervalSeconds) * 1_000_000_000)
+                do {
+                    let offset = lastBackupOffset.value
+                    let snapshot = await self.state.exportSnapshot(telegramUpdateOffset: offset)
+                    try await persistence.saveState(snapshot)
+                } catch {
+                    self.logger.error("state backup failed: \(error)")
+                }
+            }
+        }
+
         while true {
             do {
                 let updates = try await telegram.getUpdates(offset: currentOffset)
                 if let maxUpdateID = updates.map(\.update_id).max() {
                     currentOffset = maxUpdateID + 1
+                    lastBackupOffset.value = currentOffset!
                 }
-                
+
                 for update in photoAlbumBuffer.ingest(updates) {
                     await self.dispatch(update: update)
                 }
@@ -77,8 +98,26 @@ final class BotOrchestrator: @unchecked Sendable {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
+
+        backupTask.cancel()
     }
-    
+
+    private func restoreState() async -> Int? {
+        guard let persistence else { return nil }
+        do {
+            guard let snapshot = try await persistence.loadState() else {
+                logger.info("no saved state found, starting fresh")
+                return nil
+            }
+            await state.restoreFromSnapshot(snapshot)
+            logger.info("state restored (offset: \(snapshot.telegramUpdateOffset), chats: \(snapshot.contexts.count))")
+            return snapshot.telegramUpdateOffset
+        } catch {
+            logger.error("state restore failed: \(error)")
+            return nil
+        }
+    }
+
     private func dispatch(update: TelegramUpdate) async {
         if let callback = update.callback_query {
             Task {
@@ -86,10 +125,10 @@ final class BotOrchestrator: @unchecked Sendable {
             }
             return
         }
-        
+
         guard let message = update.message else { return }
         let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
-        
+
         await updateDispatcher.submit(chatKey: chatKey) { [self] in
             do {
                 try await route(message: message, chatKey: chatKey)
@@ -98,14 +137,14 @@ final class BotOrchestrator: @unchecked Sendable {
             }
         }
     }
-    
+
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
         if message.chat.type == "private" {
             let userID = message.from?.id ?? 0
             let username = message.from?.username
             let isAdmin = await state.isAdmin(username: username)
             let isWhitelisted = await state.isWhitelisted(userID: userID)
-            
+
             guard isAdmin || isWhitelisted else {
                 _ = try? await telegram.sendMessage(
                     .init(
@@ -119,11 +158,25 @@ final class BotOrchestrator: @unchecked Sendable {
                 return
             }
         }
-        
+
         if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey, fromUser: message.from) {
             return
         }
-        
+
         try await generationCoordinator.handleIfNeeded(message: message, chatKey: chatKey)
+    }
+}
+
+private final class LockedValue<Value: Sendable>: @unchecked Sendable {
+    private var _value: Value
+    private let lock = NSLock()
+
+    init(_ value: Value) {
+        self._value = value
+    }
+
+    var value: Value {
+        get { lock.withLock { _value } }
+        set { lock.withLock { _value = newValue } }
     }
 }

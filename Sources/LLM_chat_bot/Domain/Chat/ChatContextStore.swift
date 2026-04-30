@@ -376,4 +376,59 @@ actor ChatContextStore {
     func getDefaults() -> (model: String, role: String, historyLength: Int) {
         (defaultModel, systemPrompt, defaultHistoryLength)
     }
+
+    func exportSnapshot(telegramUpdateOffset: Int) -> BotStateSnapshot {
+        var ctxSnapshots: [String: ChatContextSnapshot] = [:]
+        for (chatKey, context) in contexts {
+            ctxSnapshots[chatKey.snapshotKey] = ChatContextSnapshot(
+                role: context.role,
+                history: context.history,
+                model: context.model,
+                temp: context.temp,
+                showStats: context.showStats,
+                maxHistory: context.maxHistory,
+                showCost: context.showCost,
+                showModel: context.showModel,
+                provider: context.provider,
+                suffix: context.suffix,
+                reasoning: context.reasoning
+            )
+        }
+        return BotStateSnapshot(
+            contexts: ctxSnapshots,
+            whitelistedUserIDs: Array(whitelistedUserIDs),
+            adminUsernames: Array(adminUsernames),
+            defaultModel: defaultModel,
+            defaultRole: systemPrompt,
+            defaultHistoryLength: defaultHistoryLength,
+            telegramUpdateOffset: telegramUpdateOffset
+        )
+    }
+
+    func restoreFromSnapshot(_ snapshot: BotStateSnapshot) {
+        defaultModel = snapshot.defaultModel
+        systemPrompt = snapshot.defaultRole
+        defaultHistoryLength = snapshot.defaultHistoryLength
+        adminUsernames = Set(snapshot.adminUsernames)
+        whitelistedUserIDs = Set(snapshot.whitelistedUserIDs)
+
+        contexts.removeAll()
+        for (key, ctxSnapshot) in snapshot.contexts {
+            guard let chatKey = ChatKey(snapshotKey: key) else { continue }
+            contexts[chatKey] = ChatContext(
+                role: ctxSnapshot.role,
+                history: ctxSnapshot.history,
+                pendingTurns: [],
+                model: ctxSnapshot.model,
+                temp: ctxSnapshot.temp,
+                showStats: ctxSnapshot.showStats,
+                maxHistory: ctxSnapshot.maxHistory,
+                showCost: ctxSnapshot.showCost,
+                showModel: ctxSnapshot.showModel,
+                provider: ctxSnapshot.provider,
+                suffix: ctxSnapshot.suffix,
+                reasoning: ctxSnapshot.reasoning
+            )
+        }
+    }
 }
