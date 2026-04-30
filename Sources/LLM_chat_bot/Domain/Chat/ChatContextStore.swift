@@ -100,7 +100,7 @@ actor ChatContextStore {
             temp: 1.5,
             showStats: false,
             maxHistory: defaultHistoryLength,
-            showCost: false,
+            showCost: true,
             showModel: true,
             provider: .openrouter,
             suffix: defaultSuffix,
