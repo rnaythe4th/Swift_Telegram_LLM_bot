@@ -24,7 +24,7 @@ struct ChatContext: Sendable {
     var showModel: Bool
     var provider: ServiceProvider
     var suffix: Int?
-    var reasoning: Bool
+    var reasoningEffort: ReasoningEffort?
 }
 
 struct GenerationSnapshot: Sendable {
@@ -45,7 +45,7 @@ struct HelpData: Sendable {
     let showModel: Bool
     let defaultRole: String
     let provider: ServiceProvider
-    let reasoning: Bool
+    let reasoningEffort: ReasoningEffort?
     let testModeSuffix: Int?
 }
 
@@ -108,7 +108,7 @@ actor ChatContextStore {
             showModel: true,
             provider: .openrouter,
             suffix: defaultSuffix,
-            reasoning: false
+            reasoningEffort: nil
         )
         contexts[chatKey] = context
         return context
@@ -163,7 +163,7 @@ actor ChatContextStore {
             showModel: context.showModel,
             defaultRole: displayRole(defaultRole(chatID: chatKey.chatID), chatID: chatKey.chatID),
             provider: context.provider,
-            reasoning: context.reasoning,
+            reasoningEffort: context.reasoningEffort,
             testModeSuffix: context.suffix
         )
     }
@@ -194,17 +194,29 @@ actor ChatContextStore {
         return nil
     }
     
-    func toggleReasoning(chatKey: ChatKey) -> Bool {
-        mutate(chatKey: chatKey) { $0.reasoning.toggle() }
-        return ensure(chatKey: chatKey).reasoning
+    func toggleReasoning(chatKey: ChatKey) -> ReasoningEffort? {
+        let current = ensure(chatKey: chatKey).reasoningEffort
+        let next: ReasoningEffort?
+        switch current {
+        case nil:       next = .high
+        case .high:     next = .medium
+        case .medium:   next = .low
+        case .low:      next = nil
+        }
+        mutate(chatKey: chatKey) { $0.reasoningEffort = next }
+        return next
     }
     
-    func setReasoning(chatKey: ChatKey, enabled: Bool) {
-        mutate(chatKey: chatKey) { $0.reasoning = enabled }
+    func setReasoningEffort(chatKey: ChatKey, effort: ReasoningEffort?) {
+        mutate(chatKey: chatKey) { $0.reasoningEffort = effort }
     }
     
     func reasoningEnabled(chatKey: ChatKey) -> Bool {
-        ensure(chatKey: chatKey).reasoning
+        ensure(chatKey: chatKey).reasoningEffort != nil
+    }
+
+    func reasoningEffort(chatKey: ChatKey) -> ReasoningEffort? {
+        ensure(chatKey: chatKey).reasoningEffort
     }
     
     func setMaxHistory(chatKey: ChatKey, newMax: Int) {
@@ -296,7 +308,7 @@ actor ChatContextStore {
                 showStats: context.showStats,
                 showCost: context.showCost,
                 showModel: context.showModel,
-                reasoningEnabled: context.reasoning
+                reasoningEffort: context.reasoningEffort
             ),
             messages: messages
         )
@@ -406,7 +418,7 @@ actor ChatContextStore {
             showModel: true,
             provider: .openrouter,
             suffix: defaultSuffix,
-            reasoning: false
+            reasoningEffort: nil
         )
     }
 
@@ -424,7 +436,7 @@ actor ChatContextStore {
                 showModel: context.showModel,
                 provider: context.provider,
                 suffix: context.suffix,
-                reasoning: context.reasoning
+                reasoningEffort: context.reasoningEffort
             )
         }
         return BotStateSnapshot(
@@ -460,7 +472,7 @@ actor ChatContextStore {
                 showModel: ctxSnapshot.showModel,
                 provider: ctxSnapshot.provider,
                 suffix: ctxSnapshot.suffix,
-                reasoning: ctxSnapshot.reasoning
+                reasoningEffort: ctxSnapshot.reasoningEffort
             )
         }
     }

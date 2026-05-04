@@ -5,7 +5,7 @@ struct ProviderGenerationPlan: Sendable {
     let messages: [ChatMessage]
     let temperature: Float
     let includeUsage: Bool
-    let reasoningEnabled: Bool
+    let reasoningEffort: ReasoningEffort?
 }
 
 protocol ProviderGatewayPort: Sendable {

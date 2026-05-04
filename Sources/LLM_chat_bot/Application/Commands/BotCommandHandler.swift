@@ -115,6 +115,7 @@ final class BotCommandHandler: @unchecked Sendable {
         case .help:
             let help = await state.fetchHelp(chatKey: chatKey)
             let adminInfo = await isAdmin(fromUser) ? "\n\nВы — администратор. Доступны: /whitelist, /defaults, /chats, /users" : ""
+            let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
             try await sendUserFeedback(chatKey: chatKey, text: """
                 Текущие настройки для этого чата:
                 -------------------
@@ -125,7 +126,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 • Показать расход токенов: \(help.showTokens)
                 • Показать стоимость сообщения: \(help.showCost)
                 • Показать использованную модель: \(help.showModel)
-                • Reasoning: \(help.reasoning)
+                • Reasoning: \(reasoningLabel)
                 • Роль: <blockquote>\(help.role)</blockquote>
                 • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
                 -------------------
@@ -142,7 +143,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 /show_cost - вкл/выкл показ стоимости сгенерированного сообщения в $ (По умолчанию = выкл)
                 /provider #deepseek|openrouter|yandex# - сменить провайдер
                 /testmode - включить/выключить суффикс команд
-                /reasoning - включить/выключить reasoning
+                /reasoning [low|medium|high|off] - включить/выключить reasoning с выбором усилия (по умолчанию high)
                 \(adminInfo)
                 -------------------
                 Дефолтная роль:
@@ -175,7 +176,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 let gateway = try gateways.gateway(for: provider)
                 let reasoningEnabled = await state.reasoningEnabled(chatKey: chatKey)
                 if reasoningEnabled, !gateway.capabilities.supportsReasoning {
-                    await state.setReasoning(chatKey: chatKey, enabled: false)
+                    await state.setReasoningEffort(chatKey: chatKey, effort: nil)
                     lines.append("Reasoning автоматически отключен: провайдер не поддерживает reasoning.")
                 }
                 
@@ -213,8 +214,19 @@ final class BotCommandHandler: @unchecked Sendable {
                 return
             }
             
-            let enabled = await state.toggleReasoning(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Reasoning: \(enabled)")
+            let arg = parsed.argument.trimmingCharacters(in: .whitespaces).lowercased()
+            if let effort = ReasoningEffort(rawValue: arg) {
+                await state.setReasoningEffort(chatKey: chatKey, effort: effort)
+            } else if arg == "off" || arg == "выкл" {
+                await state.setReasoningEffort(chatKey: chatKey, effort: nil)
+            } else if arg.isEmpty {
+                _ = await state.toggleReasoning(chatKey: chatKey)
+            } else {
+                try await sendUserFeedback(chatKey: chatKey, text: "Укажите: /reasoning [low|medium|high|off]")
+                return
+            }
+            let current = await state.reasoningEffort(chatKey: chatKey)
+            try await sendUserFeedback(chatKey: chatKey, text: "Reasoning: \(current?.rawValue ?? "выкл")")
             
         case .menu:
             await menuHandler.sendMenu(chatKey: chatKey)

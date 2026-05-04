@@ -152,7 +152,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 _ = await state.changeProvider(chatKey: chatKey, newProvider: provider)
                 let gateway = try gateways.gateway(for: provider)
                 if await state.reasoningEnabled(chatKey: chatKey), !gateway.capabilities.supportsReasoning {
-                    await state.setReasoning(chatKey: chatKey, enabled: false)
+                     await state.setReasoningEffort(chatKey: chatKey, effort: nil)
                     try? await telegram.answerCallback(
                         callbackQueryID: callback.id,
                         text: "Reasoning отключен: провайдер не поддерживает"
@@ -162,11 +162,15 @@ final class BotMenuHandler: @unchecked Sendable {
             try await showPage(.provider, chatKey: chatKey, callback: callback, message: message)
 
         case "reasoning":
-            guard parts.count >= 2, parts[1] == "toggle" else { return }
+            guard parts.count >= 3, parts[1] == "set" else { return }
             let provider = await state.provider(chatKey: chatKey)
             let gateway = try gateways.gateway(for: provider)
             if gateway.capabilities.supportsReasoning {
-                _ = await state.toggleReasoning(chatKey: chatKey)
+                if parts[2] == "off" {
+                    await state.setReasoningEffort(chatKey: chatKey, effort: nil)
+                } else if let effort = ReasoningEffort(rawValue: parts[2]) {
+                    await state.setReasoningEffort(chatKey: chatKey, effort: effort)
+                }
             } else {
                 try? await telegram.answerCallback(
                     callbackQueryID: callback.id,
@@ -262,7 +266,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderMain(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let reasoningLabel = help.reasoning ? "ВКЛ" : "ВЫКЛ"
+        let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
         let rows: [[InlineKeyboardButton]] = [
             [menuButton("🎭 Роль", action: "nav:role"), menuButton("🔧 Модель", action: "nav:model")],
             [menuButton("🌡️ Температура", action: "nav:temp"), menuButton("📊 Статистика", action: "nav:stats")],
@@ -364,11 +368,13 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderReasoning(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
+        let current = help.reasoningEffort?.rawValue ?? "выкл"
         let rows: [[InlineKeyboardButton]] = [
-            [menuButton("🧠 ВКЛ", action: "reasoning:toggle"), menuButton("🧠 ВЫКЛ", action: "reasoning:toggle")],
+            [menuButton("🧠 high", action: "reasoning:set:high"), menuButton("🧠 medium", action: "reasoning:set:medium")],
+            [menuButton("🧠 low", action: "reasoning:set:low"), menuButton("❌ выкл", action: "reasoning:set:off")],
             navButtons(page: .reasoning),
         ]
-        let text = "🧠 Reasoning: \(help.reasoning ? "ВКЛ" : "ВЫКЛ")"
+        let text = "🧠 Reasoning: \(current)"
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
@@ -407,7 +413,7 @@ final class BotMenuHandler: @unchecked Sendable {
         • Показать расход токенов: \(help.showTokens)
         • Показать стоимость сообщения: \(help.showCost)
         • Показать использованную модель: \(help.showModel)
-        • Reasoning: \(help.reasoning)
+        • Reasoning: \(help.reasoningEffort?.rawValue ?? "выкл")
         • Роль: <blockquote>\(help.role)</blockquote>
         • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
         -------------------
@@ -424,7 +430,7 @@ final class BotMenuHandler: @unchecked Sendable {
         /show_cost - вкл/выкл показ стоимости сгенерированного сообщения в $ (По умолчанию = выкл)
         /provider #deepseek|openrouter|yandex# - сменить провайдер
         /testmode - включить/выключить суффикс команд
-        /reasoning - включить/выключить reasoning
+        /reasoning [low|medium|high|off] - включить/выключить reasoning с выбором усилия (по умолчанию high)
         -------------------
         Дефолтная роль:
         -------------------

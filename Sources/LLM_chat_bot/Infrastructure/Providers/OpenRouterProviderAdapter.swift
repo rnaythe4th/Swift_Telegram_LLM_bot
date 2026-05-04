@@ -28,9 +28,9 @@ final class OpenRouterProviderAdapter: ProviderGatewayPort, @unchecked Sendable 
                 max_tokens: nil,
                 temperature: plan.temperature,
                 reasoning: OpenRouterReasoning(
-                    effort: "high",
+                    effort: plan.reasoningEffort?.rawValue ?? "high",
                     summary: "concise",
-                    enabled: plan.reasoningEnabled
+                    enabled: plan.reasoningEffort != nil
                 )
             )
         )

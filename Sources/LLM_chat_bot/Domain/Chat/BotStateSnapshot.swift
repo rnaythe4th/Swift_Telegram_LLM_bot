@@ -11,7 +11,7 @@ struct ChatContextSnapshot: Codable, Sendable {
     var showModel: Bool
     var provider: ServiceProvider
     var suffix: Int?
-    var reasoning: Bool
+    var reasoningEffort: ReasoningEffort?
 }
 
 struct BotStateSnapshot: Codable, Sendable {

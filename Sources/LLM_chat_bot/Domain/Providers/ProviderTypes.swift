@@ -84,5 +84,11 @@ struct GenerationOptions: Sendable {
     let showStats: Bool
     let showCost: Bool
     let showModel: Bool
-    let reasoningEnabled: Bool
+    let reasoningEffort: ReasoningEffort?
+}
+
+enum ReasoningEffort: String, Codable, Sendable, CaseIterable {
+    case low = "low"
+    case medium = "medium"
+    case high = "high"
 }

@@ -110,7 +110,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 messages: messages,
                 temperature: snapshot.temperature,
                 includeUsage: snapshot.options.showStats || snapshot.options.showCost,
-                reasoningEnabled: snapshot.options.reasoningEnabled
+                reasoningEffort: snapshot.options.reasoningEffort
             )
             
             let request = gateway.makeRequest(plan)
