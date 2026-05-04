@@ -3,6 +3,7 @@ import Foundation
 enum BotCallbackAction: Equatable, Sendable {
     case stop(GenerationID)
     case menu(action: String)
+    case faq
 
     init?(rawData: String) {
         let parts = rawData.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
@@ -19,6 +20,8 @@ enum BotCallbackAction: Equatable, Sendable {
             self = .stop(GenerationID(raw: uuid))
         case "menu":
             self = .menu(action: parts.count > 1 ? String(parts[1]) : "")
+        case "faq":
+            self = .faq
         default:
             return nil
         }
@@ -30,6 +33,8 @@ enum BotCallbackAction: Equatable, Sendable {
             return "stop:\(generationID.raw.uuidString)"
         case .menu(let action):
             return action.isEmpty ? "menu" : "menu:\(action)"
+        case .faq:
+            return "faq"
         }
     }
 }

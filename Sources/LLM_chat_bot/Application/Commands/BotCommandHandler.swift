@@ -118,9 +118,16 @@ final class BotCommandHandler: @unchecked Sendable {
             
         case .help:
             let help = await state.fetchHelp(chatKey: chatKey)
-            let adminInfo = await isAdmin(fromUser) ? "\n\nВы — администратор. Доступны: /whitelist, /defaults, /presets, /chats, /users" : ""
+            let adminInfo = await isAdmin(fromUser) ? "\nВы — администратор. Доступны: /whitelist, /defaults, /presets, /chats, /users" : ""
             let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
-            try await sendUserFeedback(chatKey: chatKey, text: """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[
+                InlineKeyboardButton(text: "Открыть инструкцию к боту", callback_data: BotCallbackAction.faq.rawData)
+            ]])
+            _ = try await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: """
                 Текущие настройки для этого чата:
                 -------------------
                 • Провайдер: \(help.provider.commandValue)
@@ -133,27 +140,17 @@ final class BotCommandHandler: @unchecked Sendable {
                 • Reasoning: \(reasoningLabel)
                 • Роль: <blockquote>\(help.role)</blockquote>
                 • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
-                -------------------
-                Команды:
-                -------------------                
-                /setrole #Новая_роль# - установить новую роль боту и очистить историю сообщений
-                /clear_history - очистить историю сообщений, сохранив роль
-                /settemp #число# - задать креативность бота. 2.0 - максимальная креативность, 0.0 - максимальна точность и стабильность ответов. (По умолчанию = 1.5)
-                /show_tokens - вкл/выкл показ расхода токенов, использованных для генерации сообщения. (По умолчанию = выкл)
-                /default_role - вернуть стандартную роль
-                /historylength #число# - задать количество последних сообщений, которые будет помнить бот. (По умолчанию = 11)
-                /model #новая_модель# - задать новую модель ИИ для ответов
-                /show_model - вкл/выкл показ использованной модели (По умолчанию = вкл)
-                /show_cost - вкл/выкл показ стоимости сгенерированного сообщения в $ (По умолчанию = выкл)
-                /provider #deepseek|openrouter|yandex# - сменить провайдер
-                /testmode - включить/выключить суффикс команд
-                /reasoning [low|medium|high|off] - включить/выключить reasoning с выбором усилия (по умолчанию high)
-                \(adminInfo)
+                -------------------\(adminInfo)
                 -------------------
                 Дефолтная роль:
                 -------------------
                 <blockquote>\(help.defaultRole)</blockquote>
-                """)
+                """,
+                replyMarkup: markup
+            ))
+            
+        case .faq:
+            try await sendUserFeedback(chatKey: chatKey, text: BotCallbackHandler.faqText)
             
         case .defaultRole:
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
