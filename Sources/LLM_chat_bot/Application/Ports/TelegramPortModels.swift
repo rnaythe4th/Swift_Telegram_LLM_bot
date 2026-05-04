@@ -119,6 +119,7 @@ struct MaybeInaccessibleMessage: Codable, Sendable {
     let message_id: Int
     let date: Int
     let text: String?
+    let message_thread_id: Int64?
 }
 
 enum MessageSplitter {

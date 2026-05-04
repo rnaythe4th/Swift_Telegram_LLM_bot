@@ -40,7 +40,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
         }
 
-        let chatKey = ChatKey(chatID: message.chat.id, threadID: 0)
+        let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
         let action = rawAction.isEmpty ? "open" : rawAction
         let parts = action.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
 

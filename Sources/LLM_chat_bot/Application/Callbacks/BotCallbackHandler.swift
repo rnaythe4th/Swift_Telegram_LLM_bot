@@ -61,7 +61,7 @@ final class BotCallbackHandler: @unchecked Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Сообщение недоступно")
                 return
             }
-            let chatKey = ChatKey(chatID: message.chat.id, threadID: 0)
+            let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
             try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,

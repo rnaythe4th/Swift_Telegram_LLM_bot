@@ -303,7 +303,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             chat: map(message.chat),
             message_id: message.message_id,
             date: message.date,
-            text: message.text
+            text: message.text,
+            message_thread_id: message.message_thread_id
         )
     }
     
