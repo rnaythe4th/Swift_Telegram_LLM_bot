@@ -73,12 +73,30 @@ final class BotOrchestrator: @unchecked Sendable {
             guard let self, let persistence = self.persistence else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(Self.backupIntervalSeconds) * 1_000_000_000)
+                let offset = lastBackupOffset.value
+                let dateFormatter = ISO8601DateFormatter()
+                dateFormatter.timeZone = TimeZone(abbreviation: "UTC")
+                let timeString = dateFormatter.string(from: Date())
+                let success: String
                 do {
-                    let offset = lastBackupOffset.value
                     let snapshot = await self.state.exportSnapshot(telegramUpdateOffset: offset)
                     try await persistence.saveState(snapshot)
+                    success = "✅ Успешно"
                 } catch {
                     self.logger.error("state backup failed: \(error)")
+                    success = "❌ Ошибка: \(error)"
+                }
+                let chatKeys = await self.state.chatsWithBackupNotify()
+                for chatKey in chatKeys {
+                    _ = try? await self.telegram.sendMessage(
+                        .init(
+                            chatID: chatKey.chatID,
+                            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                            replyTo: nil,
+                            text: "Бэкап: \(success)\nВремя: \(timeString)\nOffset: \(offset)",
+                            replyMarkup: nil
+                        )
+                    )
                 }
             }
         }

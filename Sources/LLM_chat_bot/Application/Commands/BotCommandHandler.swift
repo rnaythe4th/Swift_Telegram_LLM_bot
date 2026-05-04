@@ -116,6 +116,10 @@ final class BotCommandHandler: @unchecked Sendable {
             let new = await state.toggleShowModel(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "Показывать использованную модель: \(new)")
             
+        case .backupNotify:
+            let new = await state.toggleBackupNotify(chatKey: chatKey)
+            try await sendUserFeedback(chatKey: chatKey, text: "Уведомления о бэкапе: \(new ? "вкл ✅" : "выкл ❌")")
+            
         case .help:
             let help = await state.fetchHelp(chatKey: chatKey)
             let adminInfo = await isAdmin(fromUser) ? "\nВы — администратор. Доступны: /whitelist, /defaults, /presets, /chats, /users" : ""
@@ -138,6 +142,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 • Показать стоимость сообщения: \(help.showCost)
                 • Показать использованную модель: \(help.showModel)
                 • Reasoning: \(reasoningLabel)
+                • Уведомления о бэкапе: \(help.backupNotify)
                 • Роль: <blockquote>\(help.role)</blockquote>
                 • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
                 -------------------\(adminInfo)

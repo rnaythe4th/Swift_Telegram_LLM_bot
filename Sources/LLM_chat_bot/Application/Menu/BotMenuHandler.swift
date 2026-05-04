@@ -132,6 +132,8 @@ final class BotMenuHandler: @unchecked Sendable {
                 _ = await state.toggleShowCost(chatKey: chatKey)
             case "model":
                 _ = await state.toggleShowModel(chatKey: chatKey)
+            case "backup":
+                _ = await state.toggleBackupNotify(chatKey: chatKey)
             default:
                 break
             }
@@ -346,9 +348,11 @@ final class BotMenuHandler: @unchecked Sendable {
         let tokensLabel = "Токены: \(help.showTokens ? "✅" : "❌")"
         let costLabel = "Стоимость: \(help.showCost ? "✅" : "❌")"
         let modelLabel = "Модель: \(help.showModel ? "✅" : "❌")"
+        let backupLabel = "Уведомления о бэкапе: \(help.backupNotify ? "✅" : "❌")"
         let rows: [[InlineKeyboardButton]] = [
             [menuButton(tokensLabel, action: "stats:toggle:tokens"), menuButton(costLabel, action: "stats:toggle:cost")],
             [menuButton(modelLabel, action: "stats:toggle:model")],
+            [menuButton(backupLabel, action: "stats:toggle:backup")],
             navButtons(page: .stats),
         ]
         let text = "📊 Показывать в ответах:"
@@ -437,6 +441,7 @@ final class BotMenuHandler: @unchecked Sendable {
         • Показать стоимость сообщения: \(help.showCost)
         • Показать использованную модель: \(help.showModel)
         • Reasoning: \(help.reasoningEffort?.rawValue ?? "выкл")
+        • Уведомления о бэкапе: \(help.backupNotify)
         • Роль: <blockquote>\(help.role)</blockquote>
         • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
         -------------------

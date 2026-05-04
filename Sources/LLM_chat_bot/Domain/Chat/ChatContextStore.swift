@@ -25,6 +25,7 @@ struct ChatContext: Sendable {
     var provider: ServiceProvider
     var suffix: Int?
     var reasoningEffort: ReasoningEffort?
+    var backupNotify: Bool
 }
 
 struct GenerationSnapshot: Sendable {
@@ -47,6 +48,7 @@ struct HelpData: Sendable {
     let provider: ServiceProvider
     let reasoningEffort: ReasoningEffort?
     let testModeSuffix: Int?
+    let backupNotify: Bool
 }
 
 actor ChatContextStore {
@@ -114,7 +116,8 @@ actor ChatContextStore {
             showModel: true,
             provider: .openrouter,
             suffix: defaultSuffix,
-            reasoningEffort: nil
+            reasoningEffort: nil,
+            backupNotify: false
         )
         contexts[chatKey] = context
         return context
@@ -170,7 +173,8 @@ actor ChatContextStore {
             defaultRole: displayRole(defaultRole(chatID: chatKey.chatID), chatID: chatKey.chatID),
             provider: context.provider,
             reasoningEffort: context.reasoningEffort,
-            testModeSuffix: context.suffix
+            testModeSuffix: context.suffix,
+            backupNotify: context.backupNotify
         )
     }
 
@@ -280,6 +284,11 @@ actor ChatContextStore {
     func toggleShowModel(chatKey: ChatKey) -> Bool {
         mutate(chatKey: chatKey) { $0.showModel.toggle() }
         return ensure(chatKey: chatKey).showModel
+    }
+    
+    func toggleBackupNotify(chatKey: ChatKey) -> Bool {
+        mutate(chatKey: chatKey) { $0.backupNotify.toggle() }
+        return ensure(chatKey: chatKey).backupNotify
     }
     
     func changeProvider(chatKey: ChatKey, newProvider: ServiceProvider) -> ServiceProvider {
@@ -465,6 +474,10 @@ actor ChatContextStore {
     func getDefaults() -> (model: String, role: String, historyLength: Int) {
         (defaultModel, systemPrompt, defaultHistoryLength)
     }
+    
+    func chatsWithBackupNotify() -> [ChatKey] {
+        contexts.filter { $0.value.backupNotify }.map(\.key)
+    }
 
     func history(chatKey: ChatKey) -> [ChatMessage] {
         ensure(chatKey: chatKey).history
@@ -484,7 +497,8 @@ actor ChatContextStore {
             showModel: true,
             provider: .openrouter,
             suffix: defaultSuffix,
-            reasoningEffort: nil
+            reasoningEffort: nil,
+            backupNotify: false
         )
     }
 
@@ -502,7 +516,8 @@ actor ChatContextStore {
                 showModel: context.showModel,
                 provider: context.provider,
                 suffix: context.suffix,
-                reasoningEffort: context.reasoningEffort
+                reasoningEffort: context.reasoningEffort,
+                backupNotify: context.backupNotify
             )
         }
         return BotStateSnapshot(
@@ -546,7 +561,8 @@ actor ChatContextStore {
                 showModel: ctxSnapshot.showModel,
                 provider: ctxSnapshot.provider,
                 suffix: ctxSnapshot.suffix,
-                reasoningEffort: ctxSnapshot.reasoningEffort
+                reasoningEffort: ctxSnapshot.reasoningEffort,
+                backupNotify: ctxSnapshot.backupNotify
             )
         }
     }
