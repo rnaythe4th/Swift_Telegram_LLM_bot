@@ -230,7 +230,7 @@ final class BotMenuHandler: @unchecked Sendable {
             _ = try? await telegram.sendMessage(
                 .init(
                     chatID: message.chat.id,
-                    threadID: nil,
+                    threadID: message.message_thread_id,
                     replyTo: nil,
                     text: text,
                     replyMarkup: markup
