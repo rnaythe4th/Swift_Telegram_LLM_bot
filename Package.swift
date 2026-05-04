@@ -17,7 +17,9 @@ let package = Package(
             name: "LLM_chat_bot",
             dependencies: [
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
-                .product(name: "NIOFoundationCompat", package: "swift-nio")
+                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
         ),
     ]

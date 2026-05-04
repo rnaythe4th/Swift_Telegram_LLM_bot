@@ -23,8 +23,12 @@ struct BlueprintBotApp {
     
     static func main() async throws {
         let config = try AppConfig.load()
-        
+
         let logger = ConsoleLogger()
+        let healthServer = HealthCheckServer(port: config.healthPort)
+        try await healthServer.start()
+        logger.info("Health check server started on port \(config.healthPort)")
+
         let network = NetworkClient()
         let telegram = TelegramHTTPGateway(network: network, botToken: config.telegramToken)
 

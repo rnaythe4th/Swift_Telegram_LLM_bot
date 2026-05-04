@@ -7,6 +7,7 @@ enum EnvironmentKey: String {
     case companyChatId = "COMPANY_CHAT_ID"
     case supabaseURL = "SUPABASE_URL"
     case supabaseAnonKey = "SUPABASE_ANON_KEY"
+    case healthPort = "PORT"
 }
 
 enum AppConfigError: LocalizedError {
@@ -31,6 +32,7 @@ struct AppConfig: Sendable {
     let companyChatId: Int
     let supabaseURL: String?
     let supabaseAnonKey: String?
+    let healthPort: Int
     
     static func load() throws -> AppConfig {
         let telegramToken = try env(.telegramToken)
@@ -44,6 +46,7 @@ struct AppConfig: Sendable {
         
         let supabaseURL = optionalEnv(.supabaseURL)
         let supabaseAnonKey = optionalEnv(.supabaseAnonKey)
+        let healthPort = Int(optionalEnv(.healthPort) ?? "") ?? 8000
         
         return .init(
             telegramToken: telegramToken,
@@ -51,7 +54,8 @@ struct AppConfig: Sendable {
             routerApiKey: routerApiKey,
             companyChatId: companyChatId,
             supabaseURL: supabaseURL,
-            supabaseAnonKey: supabaseAnonKey
+            supabaseAnonKey: supabaseAnonKey,
+            healthPort: healthPort
         )
     }
     
