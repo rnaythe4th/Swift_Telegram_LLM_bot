@@ -17,6 +17,10 @@ struct BlueprintBotApp {
     static let systemPrompt = "Ты физик, тебя зовут Анатолий."
     static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api). При упоминании или обращении к участникам никогда не ставь @ перед их именами, чтобы не тегать их."
     
+    private static func presets<T: CustomStringConvertible>(from values: [T]) -> [Preset] {
+        values.map { Preset(display: String(describing: $0), value: String(describing: $0)) }
+    }
+    
     static func main() async throws {
         let config = try AppConfig.load()
         
@@ -40,6 +44,20 @@ struct BlueprintBotApp {
             defaultHistoryLength: 11,
             defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil
         )
+
+        await state.setModelPresets([
+            Preset(display: "Gemini 3 Flash preview", value: "google/gemini-3-flash-preview"),
+            Preset(display: "Gemini Flash latest", value: "google/gemini-flash-latest"),
+            Preset(display: "Gemini 3.1 Flash Lite", value: "google/gemini-3.1-flash-lite-preview"),
+            Preset(display: "DeepSeek V4 Pro", value: "deepseek/deepseek-v4-pro"),
+            Preset(display: "DeepSeek V4 Flash", value: "deepseek/deepseek-v4-flash"),
+            Preset(display: "Grok 4.3", value: "x-ai/grok-4.3"),
+        ])
+        await state.setTempPresets(presets(from: [0.0, 0.5, 1.0, 1.5, 2.0]))
+        await state.setHistoryLengthPresets(presets(from: [10, 15, 20, 30, 50]))
+        await state.setRolePresets([
+            Preset(display: "Физик Анатолий", value: "Ты физик, тебя зовут Анатолий."),
+        ])
 
         let persistence: StatePersistencePort?
         if let supabaseURL = config.supabaseURL, let supabaseAnonKey = config.supabaseAnonKey {

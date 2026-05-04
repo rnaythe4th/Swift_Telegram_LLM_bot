@@ -62,6 +62,12 @@ actor ChatContextStore {
     private var adminUsernames: Set<String>
     private var whitelistedUserIDs: Set<Int>
     
+    // MARK: Presets
+    private var _modelPresets: [Preset] = []
+    private var _tempPresets: [Preset] = []
+    private var _historyLengthPresets: [Preset] = []
+    private var _rolePresets: [Preset] = []
+    
     init(
         model: String,
         systemPrompt: String,
@@ -396,6 +402,66 @@ actor ChatContextStore {
             .map { (chatID: $0.chatID, threadID: $0.threadID) }
     }
     
+    // MARK: - Preset management
+    
+    func modelPresets() -> [Preset] { _modelPresets }
+    func tempPresets() -> [Preset] { _tempPresets }
+    func historyLengthPresets() -> [Preset] { _historyLengthPresets }
+    func rolePresets() -> [Preset] { _rolePresets }
+    
+    func setModelPresets(_ presets: [Preset]) { _modelPresets = presets }
+    func setTempPresets(_ presets: [Preset]) { _tempPresets = presets }
+    func setHistoryLengthPresets(_ presets: [Preset]) { _historyLengthPresets = presets }
+    func setRolePresets(_ presets: [Preset]) { _rolePresets = presets }
+    
+    func addModelPreset(display: String, value: String) -> Preset {
+        let preset = Preset(display: display, value: value)
+        _modelPresets.append(preset)
+        return preset
+    }
+    
+    func removeModelPreset(value: String) -> Bool {
+        let count = _modelPresets.count
+        _modelPresets.removeAll { $0.value == value }
+        return _modelPresets.count < count
+    }
+    
+    func addTempPreset(display: String, value: String) -> Preset {
+        let preset = Preset(display: display, value: value)
+        _tempPresets.append(preset)
+        return preset
+    }
+    
+    func removeTempPreset(value: String) -> Bool {
+        let count = _tempPresets.count
+        _tempPresets.removeAll { $0.value == value }
+        return _tempPresets.count < count
+    }
+    
+    func addHistoryLengthPreset(display: String, value: String) -> Preset {
+        let preset = Preset(display: display, value: value)
+        _historyLengthPresets.append(preset)
+        return preset
+    }
+    
+    func removeHistoryLengthPreset(value: String) -> Bool {
+        let count = _historyLengthPresets.count
+        _historyLengthPresets.removeAll { $0.value == value }
+        return _historyLengthPresets.count < count
+    }
+    
+    func addRolePreset(display: String, value: String) -> Preset {
+        let preset = Preset(display: display, value: value)
+        _rolePresets.append(preset)
+        return preset
+    }
+    
+    func removeRolePreset(value: String) -> Bool {
+        let count = _rolePresets.count
+        _rolePresets.removeAll { $0.value == value }
+        return _rolePresets.count < count
+    }
+    
     func getDefaults() -> (model: String, role: String, historyLength: Int) {
         (defaultModel, systemPrompt, defaultHistoryLength)
     }
@@ -446,7 +512,11 @@ actor ChatContextStore {
             defaultModel: defaultModel,
             defaultRole: systemPrompt,
             defaultHistoryLength: defaultHistoryLength,
-            telegramUpdateOffset: telegramUpdateOffset
+            telegramUpdateOffset: telegramUpdateOffset,
+            modelPresets: _modelPresets,
+            tempPresets: _tempPresets,
+            historyLengthPresets: _historyLengthPresets,
+            rolePresets: _rolePresets
         )
     }
 
@@ -456,6 +526,10 @@ actor ChatContextStore {
         defaultHistoryLength = snapshot.defaultHistoryLength
         adminUsernames = Set(snapshot.adminUsernames)
         whitelistedUserIDs = Set(snapshot.whitelistedUserIDs)
+        _modelPresets = snapshot.modelPresets
+        _tempPresets = snapshot.tempPresets
+        _historyLengthPresets = snapshot.historyLengthPresets
+        _rolePresets = snapshot.rolePresets
 
         contexts.removeAll()
         for (key, ctxSnapshot) in snapshot.contexts {

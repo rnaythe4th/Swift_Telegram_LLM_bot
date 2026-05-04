@@ -34,7 +34,8 @@ final class BotOrchestrator: @unchecked Sendable {
             telegram: telegram,
             state: state,
             gateways: gatewayRegistry,
-            logger: logger
+            logger: logger,
+            formatOptions: formatOptions
         )
 
         self.callbackHandler = BotCallbackHandler(

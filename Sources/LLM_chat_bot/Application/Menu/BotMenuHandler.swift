@@ -18,28 +18,20 @@ final class BotMenuHandler: @unchecked Sendable {
     private let state: ChatContextStore
     private let gateways: ProviderGatewayRegistry
     private let logger: LoggerPort
-
-    private static let modelPresets: [[String]] = [
-        ["google/gemini-3-flash-preview", "google/gemini-2.5-pro-preview"],
-        ["anthropic/claude-sonnet-4.5", "openai/o4-mini"],
-        ["openai/gpt-4.1", "deepseek/deepseek-chat-v3-0324"],
-        ["deepseek/deepseek-r1-0528"],
-    ]
-
-    private static let tempPresets: [Float] = [0.0, 0.5, 1.0, 1.5, 2.0]
-
-    private static let historyLengthPresets: [Int] = [10, 15, 20, 30, 50]
+    private let formatOptions: String
 
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
         gateways: ProviderGatewayRegistry,
-        logger: LoggerPort
+        logger: LoggerPort,
+        formatOptions: String
     ) {
         self.telegram = telegram
         self.state = state
         self.gateways = gateways
         self.logger = logger
+        self.formatOptions = formatOptions
     }
 
     func handle(action rawAction: String, callback: CallbackQuery) async {
@@ -108,6 +100,15 @@ final class BotMenuHandler: @unchecked Sendable {
             if parts[1] == "default" {
                 let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
                 _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: defaultRole)
+                try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
+            } else if parts[1] == "select", parts.count >= 3, let index = Int(parts[2]) {
+                let presets = await state.rolePresets()
+                guard index >= 0, index < presets.count else {
+                    try await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    return
+                }
+                let roleValue = presets[index].value + formatOptions
+                _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: roleValue)
                 try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             }
 
@@ -281,18 +282,39 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderRole(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton("🔄 По умолчанию", action: "role:default")],
-            navButtons(page: .role),
-        ]
+        let presets = await state.rolePresets()
+        var rows: [[InlineKeyboardButton]] = []
+        var currentRow: [InlineKeyboardButton] = []
+        for (i, preset) in presets.enumerated() {
+            currentRow.append(menuButton(preset.display, action: "role:select:\(i)"))
+            if currentRow.count == 2 {
+                rows.append(currentRow)
+                currentRow = []
+            }
+        }
+        if !currentRow.isEmpty {
+            rows.append(currentRow)
+        }
+        rows.append([menuButton("🔄 По умолчанию", action: "role:default")])
+        rows.append(navButtons(page: .role))
         let text = "🎭 Текущая роль:\n\n<blockquote>\(help.role)</blockquote>\n\nИспользуйте /setrole для произвольной роли."
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
     private func renderModel(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        var rows: [[InlineKeyboardButton]] = Self.modelPresets.map { row in
-            row.map { menuButton(shortModelName($0), action: "model:select:\($0)") }
+        let presets = await state.modelPresets()
+        var rows: [[InlineKeyboardButton]] = []
+        var currentRow: [InlineKeyboardButton] = []
+        for preset in presets {
+            currentRow.append(menuButton(preset.display, action: "model:select:\(preset.value)"))
+            if currentRow.count == 2 {
+                rows.append(currentRow)
+                currentRow = []
+            }
+        }
+        if !currentRow.isEmpty {
+            rows.append(currentRow)
         }
         rows.append(navButtons(page: .model))
         let text = "🔧 Текущая модель: \(help.model)\n\nВыберите модель (история будет очищена):"
@@ -301,17 +323,18 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderTemp(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let buttons = Self.tempPresets.map { temp in
-            menuButton(String(format: "%.1f", temp), action: "temp:\(temp)")
-        }
-
+        let presets = await state.tempPresets()
         var rows: [[InlineKeyboardButton]] = []
-        for i in stride(from: 0, to: buttons.count, by: 2) {
-            if i + 1 < buttons.count {
-                rows.append([buttons[i], buttons[i + 1]])
-            } else {
-                rows.append([buttons[i]])
+        var currentRow: [InlineKeyboardButton] = []
+        for preset in presets {
+            currentRow.append(menuButton(preset.display, action: "temp:\(preset.value)"))
+            if currentRow.count == 2 {
+                rows.append(currentRow)
+                currentRow = []
             }
+        }
+        if !currentRow.isEmpty {
+            rows.append(currentRow)
         }
         rows.append(navButtons(page: .temp))
         let text = "🌡️ Temperature: \(help.temp)"
@@ -334,16 +357,18 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderHistory(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
+        let presets = await state.historyLengthPresets()
         var rows: [[InlineKeyboardButton]] = []
-        let lengthButtons = Self.historyLengthPresets.map { len in
-            menuButton("\(len)", action: "history:length:\(len)")
-        }
-        for i in stride(from: 0, to: lengthButtons.count, by: 2) {
-            if i + 1 < lengthButtons.count {
-                rows.append([lengthButtons[i], lengthButtons[i + 1]])
-            } else {
-                rows.append([lengthButtons[i]])
+        var currentRow: [InlineKeyboardButton] = []
+        for preset in presets {
+            currentRow.append(menuButton(preset.display, action: "history:length:\(preset.value)"))
+            if currentRow.count == 2 {
+                rows.append(currentRow)
+                currentRow = []
             }
+        }
+        if !currentRow.isEmpty {
+            rows.append(currentRow)
         }
         rows.append([menuButton("🗑️ Очистить историю", action: "history:clear")])
         rows.append(navButtons(page: .history))
@@ -397,11 +422,6 @@ final class BotMenuHandler: @unchecked Sendable {
         ]
     }
 
-    private func shortModelName(_ model: String) -> String {
-        let parts = model.split(separator: "/")
-        return parts.count == 2 ? String(parts[1]) : model
-    }
-
     private func formatHelpText(_ help: HelpData) -> String {
         """
         Текущие настройки для этого чата:
@@ -431,6 +451,8 @@ final class BotMenuHandler: @unchecked Sendable {
         /provider #deepseek|openrouter|yandex# - сменить провайдер
         /testmode - включить/выключить суффикс команд
         /reasoning [low|medium|high|off] - включить/выключить reasoning с выбором усилия (по умолчанию high)
+        -------------------
+        Админ: /whitelist, /defaults, /presets, /chats, /users
         -------------------
         Дефолтная роль:
         -------------------

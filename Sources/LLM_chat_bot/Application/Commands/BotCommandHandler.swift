@@ -73,6 +73,10 @@ final class BotCommandHandler: @unchecked Sendable {
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
             try await handleUsers(chatKey: chatKey)
             
+        case .presets:
+            guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
+            try await handlePresets(chatKey: chatKey, argument: parsed.argument)
+            
         case .setRole:
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: parsed.argument + formatOptions)
             try await sendUserFeedback(chatKey: chatKey, text: "Роль изменена + история очищена")
@@ -114,7 +118,7 @@ final class BotCommandHandler: @unchecked Sendable {
             
         case .help:
             let help = await state.fetchHelp(chatKey: chatKey)
-            let adminInfo = await isAdmin(fromUser) ? "\n\nВы — администратор. Доступны: /whitelist, /defaults, /chats, /users" : ""
+            let adminInfo = await isAdmin(fromUser) ? "\n\nВы — администратор. Доступны: /whitelist, /defaults, /presets, /chats, /users" : ""
             let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
             try await sendUserFeedback(chatKey: chatKey, text: """
                 Текущие настройки для этого чата:
@@ -335,6 +339,8 @@ final class BotCommandHandler: @unchecked Sendable {
                 /defaults model <модель> - изменить дефолтную модель
                 /defaults role <роль> - изменить дефолтную роль
                 /defaults historylength <число> - изменить дефолтную длину истории
+                -------------------
+                Для управления пресетами меню: /presets
                 """)
         }
     }
@@ -381,6 +387,148 @@ final class BotCommandHandler: @unchecked Sendable {
         let sorted = privates.sorted(by: { $0.chatID < $1.chatID })
         let list = sorted.map { "• ID: \($0.chatID)" }.joined(separator: "\n")
         try await sendUserFeedback(chatKey: chatKey, text: "Пользователи в личке (\(sorted.count)):\n\(list)\n\nДля добавления: /whitelist add <ID>")
+    }
+    
+    private func handlePresets(chatKey: ChatKey, argument: String) async throws {
+        let parts = argument.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true).map(String.init)
+        let presetType = parts.first ?? ""
+        let subcommand = parts.count > 1 ? parts[1] : ""
+        let value = parts.count > 2 ? parts[2] : ""
+        
+        switch presetType.lowercased() {
+        case "model":
+            try await handlePresetsSub(
+                chatKey: chatKey,
+                subcommand: subcommand,
+                value: value,
+                typeName: "моделей",
+                list: { await state.modelPresets() },
+                add: { display, val in await state.addModelPreset(display: display, value: val) },
+                remove: { val in await state.removeModelPreset(value: val) }
+            )
+            
+        case "temp":
+            try await handlePresetsSub(
+                chatKey: chatKey,
+                subcommand: subcommand,
+                value: value,
+                typeName: "температуры",
+                list: { await state.tempPresets() },
+                add: { display, val in await state.addTempPreset(display: display, value: val) },
+                remove: { val in await state.removeTempPreset(value: val) }
+            )
+            
+        case "history", "historylength":
+            try await handlePresetsSub(
+                chatKey: chatKey,
+                subcommand: subcommand,
+                value: value,
+                typeName: "длины истории",
+                list: { await state.historyLengthPresets() },
+                add: { display, val in await state.addHistoryLengthPreset(display: display, value: val) },
+                remove: { val in await state.removeHistoryLengthPreset(value: val) }
+            )
+            
+        case "role":
+            try await handlePresetsSub(
+                chatKey: chatKey,
+                subcommand: subcommand,
+                value: value,
+                typeName: "ролей",
+                list: { await state.rolePresets() },
+                add: { display, val in await state.addRolePreset(display: display, value: val) },
+                remove: { val in await state.removeRolePreset(value: val) }
+            )
+            
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                Управление пресетами:
+                -------------------
+                /presets model add <display> | <value> - добавить пресет модели
+                /presets model remove <value> - удалить пресет модели
+                /presets model list - показать пресеты моделей
+                -------------------
+                /presets temp add <display> | <value> - добавить пресет температуры
+                /presets temp remove <value> - удалить пресет температуры
+                /presets temp list - показать пресеты температуры
+                -------------------
+                /presets history add <display> | <value> - добавить пресет истории
+                /presets history remove <value> - удалить пресет истории
+                /presets history list - показать пресеты истории
+                -------------------
+                /presets role add <display> | <value> - добавить пресет роли
+                /presets role remove <value> - удалить пресет роли
+                /presets role list - показать пресеты ролей
+                """)
+        }
+    }
+    
+    private func handlePresetsSub(
+        chatKey: ChatKey,
+        subcommand: String,
+        value: String,
+        typeName: String,
+        list: @Sendable () async -> [Preset],
+        add: @Sendable (String, String) async -> Preset,
+        remove: @Sendable (String) async -> Bool
+    ) async throws {
+        switch subcommand.lowercased() {
+        case "add":
+            let separator = value.contains("|") ? "|" : " ~ "
+            let addParts = value
+                .components(separatedBy: separator)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            
+            guard addParts.count >= 2 else {
+                try await sendUserFeedback(
+                    chatKey: chatKey,
+                    text: "Формат: /presets \(typeName) add <display> | <value>\nПример: /presets model add Gemini 3 Flash | google/gemini-3-flash-preview"
+                )
+                return
+            }
+            
+            let display = addParts[0]
+            let presetValue = addParts.dropFirst().joined(separator: " ")
+            let preset = await add(display, presetValue)
+            try await sendUserFeedback(
+                chatKey: chatKey,
+                text: "Пресет \(typeName) добавлен:\n\"\(preset.display)\" → \(preset.value)"
+            )
+            
+        case "remove":
+            guard !value.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "Формат: /presets \(typeName) remove <value>")
+                return
+            }
+            let removed = await remove(value)
+            try await sendUserFeedback(
+                chatKey: chatKey,
+                text: removed
+                    ? "Пресет \(typeName) со значением \"\(value)\" удалён."
+                    : "Пресет \(typeName) со значением \"\(value)\" не найден."
+            )
+            
+        case "list":
+            let presets = await list()
+            if presets.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "Пресеты \(typeName) пусты.")
+            } else {
+                var lines = ["Пресеты \(typeName) (\(presets.count)):"]
+                for (i, p) in presets.enumerated() {
+                    lines.append("\(i). \"\(p.display)\" → \(p.value)")
+                }
+                try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+            }
+            
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                Использование:
+                /presets \(typeName) add <display> | <value>
+                /presets \(typeName) remove <value>
+                /presets \(typeName) list
+                """)
+        }
     }
     
     private func handleHistory(chatKey: ChatKey) async throws {

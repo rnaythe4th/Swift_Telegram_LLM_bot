@@ -22,6 +22,10 @@ struct BotStateSnapshot: Codable, Sendable {
     var defaultRole: String
     var defaultHistoryLength: Int
     var telegramUpdateOffset: Int
+    var modelPresets: [Preset]
+    var tempPresets: [Preset]
+    var historyLengthPresets: [Preset]
+    var rolePresets: [Preset]
 
     var isEmpty: Bool {
         contexts.isEmpty && whitelistedUserIDs.isEmpty && adminUsernames == ["maythe4th"]

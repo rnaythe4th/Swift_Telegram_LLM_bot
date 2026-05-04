@@ -22,6 +22,7 @@ enum BotCommandName: CaseIterable, Equatable {
     case defaults
     case chats
     case users
+    case presets
     case unknown
     
     private var baseCommand: String {
@@ -66,6 +67,8 @@ enum BotCommandName: CaseIterable, Equatable {
             return "chats"
         case .users:
             return "users"
+        case .presets:
+            return "presets"
         case .mention, .unknown:
             return ""
         }
