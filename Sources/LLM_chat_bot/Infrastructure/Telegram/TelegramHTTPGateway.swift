@@ -211,8 +211,9 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     func downloadFile(filePath: String) async throws -> Data {
+        let safePath = try Self.sanitizeFilePath(filePath)
         let spec = HTTPRequestSpec(
-            url: "https://api.telegram.org/file/bot\(botToken)/\(filePath)",
+            url: "https://api.telegram.org/file/bot\(botToken)/\(safePath)",
             method: .get,
             timeoutSeconds: 35,
             maxBodyBytes: 20 << 20,
@@ -225,6 +226,34 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         return raw.data
     }
     
+    private static func sanitizeFilePath(_ filePath: String) throws -> String {
+        let segments = filePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        for segment in segments {
+            guard !segment.isEmpty, segment != "." , segment != ".." else {
+                throw TelegramAPIError(
+                    action: "downloadFile",
+                    statusCode: 0,
+                    descriptionText: "Invalid file_path",
+                    retryAfter: nil,
+                    migrateToChatID: nil,
+                    rawBody: ""
+                )
+            }
+            guard segment.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+                throw TelegramAPIError(
+                    action: "downloadFile",
+                    statusCode: 0,
+                    descriptionText: "Invalid file_path",
+                    retryAfter: nil,
+                    migrateToChatID: nil,
+                    rawBody: ""
+                )
+            }
+        }
+        return segments.joined(separator: "/")
+    }
+
     private func decodeEnvelope<T: Decodable>(action: String, statusCode: Int, data: Data) throws -> TelegramResponse<T> {
         do {
             return try JSONDecoder().decode(TelegramResponse<T>.self, from: data)
