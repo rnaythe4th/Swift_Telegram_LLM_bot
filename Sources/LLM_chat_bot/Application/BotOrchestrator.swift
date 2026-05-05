@@ -83,10 +83,10 @@ final class BotOrchestrator: @unchecked Sendable {
                 do {
                     let snapshot = await self.state.exportSnapshot(telegramUpdateOffset: offset)
                     try await persistence.saveState(snapshot)
-                    success = "✅ Успешно"
+                    success = "✓ Успешно"
                 } catch {
                     self.logger.error("state backup failed: \(error)")
-                    success = "❌ " + UserFacingError.message(error)
+                    success = "✗ " + UserFacingError.message(error)
                 }
                 let chatKeys = await self.state.chatsWithBackupNotify()
                 for chatKey in chatKeys {
@@ -95,7 +95,7 @@ final class BotOrchestrator: @unchecked Sendable {
                             chatID: chatKey.chatID,
                             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                             replyTo: nil,
-                            text: "Бэкап: \(success)\nВремя: \(timeString)\nOffset: \(offset)",
+                            text: "💾 <b>Бэкап</b> · \(success)\n<i>\(timeString) · offset \(offset)</i>",
                             replyMarkup: nil
                         )
                     )
@@ -161,7 +161,7 @@ final class BotOrchestrator: @unchecked Sendable {
             } catch {
                 logger.error("routeMessage failed: \(error)")
                 if !(error is CancellationError) {
-                    let text = "❌ " + UserFacingError.message(error)
+                    let text = "⚠️ " + UserFacingError.message(error)
                     _ = try? await telegram.sendMessage(
                         .init(
                             chatID: chatKey.chatID,
@@ -189,7 +189,13 @@ final class BotOrchestrator: @unchecked Sendable {
                         chatID: chatKey.chatID,
                         threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                         replyTo: nil,
-                        text: "Доступ запрещён. Ваш ID: \(userID)\nОбратитесь к администратору @maythe4th для добавления в белый список.",
+                        text: """
+                        🔒 <b>Доступ закрыт</b>
+
+                        Ваш ID · <code>\(userID)</code>
+
+                        Чтобы получить доступ, отправьте этот ID администратору · @maythe4th
+                        """,
                         replyMarkup: nil
                     )
                 )

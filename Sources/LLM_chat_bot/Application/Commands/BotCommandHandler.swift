@@ -7,7 +7,7 @@ final class BotCommandHandler: @unchecked Sendable {
     private let botUsername: String
     private let formatOptions: String
     private let menuHandler: BotMenuHandler
-    
+
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
@@ -23,203 +23,199 @@ final class BotCommandHandler: @unchecked Sendable {
         self.formatOptions = formatOptions
         self.menuHandler = menuHandler
     }
-    
+
     func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?) async throws -> Bool {
         guard let text else {
             return false
         }
-        
+
         let parsed = ParsedBotCommand.parse(
             from: text,
             botUsername: botUsername,
             suffix: await state.suffix(chatKey: chatKey)
         )
-        
+
         guard parsed.name != .unknown, parsed.name != .mention else {
             return false
         }
-        
+
         try await handle(parsed, chatKey: chatKey, fromUser: fromUser)
         return true
     }
-    
+
     private func isAdmin(_ user: TelegramUser?) async -> Bool {
         await state.isAdmin(username: user?.username)
     }
-    
+
     private func requireAdmin(_ user: TelegramUser?, chatKey: ChatKey) async throws -> Bool {
         guard await isAdmin(user) else {
-            try await sendUserFeedback(chatKey: chatKey, text: "Эта команда доступна только администратору.")
+            try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для администратора.")
             return false
         }
         return true
     }
-    
+
     private func handle(_ parsed: ParsedBotCommand, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         switch parsed.name {
         case .whitelist:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
             try await handleWhitelist(chatKey: chatKey, argument: parsed.argument)
-            
+
         case .defaults:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
             try await handleDefaults(chatKey: chatKey, argument: parsed.argument)
-            
+
         case .chats:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
             try await handleChats(chatKey: chatKey)
-            
+
         case .users:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
             try await handleUsers(chatKey: chatKey)
-            
+
         case .presets:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
             try await handlePresets(chatKey: chatKey, argument: parsed.argument)
-            
+
+        case .start:
+            try await handleStart(chatKey: chatKey)
+
         case .setRole:
-            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: parsed.argument + formatOptions)
-            try await sendUserFeedback(chatKey: chatKey, text: "Роль изменена + история очищена")
-            
+            let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: """
+                    🎭 Укажите текст роли.
+                    <i>Пример:</i> <code>/setrole Ты — эксперт по математике, отвечай кратко.</code>
+                    """)
+                return
+            }
+            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: trimmed + formatOptions)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль обновлена. История очищена.")
+
         case .clearHistory:
             await state.clearHistory(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "История очищена")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "🧹 История очищена.")
+
         case .setTemp:
             guard let temp = Float(parsed.argument), (0.0...2.0).contains(temp) else {
-                let err = Float(parsed.argument) == nil
-                ? "Ошибка: укажите ЧИСЛО от 0 до 2"
-                : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(parsed.argument)!)"
-                try await sendUserFeedback(chatKey: chatKey, text: err)
+                let hint = "<i>Нужно число от 0.0 до 2.0.</i>\n<i>Пример:</i> <code>/settemp 1.0</code>"
+                try await sendUserFeedback(chatKey: chatKey, text: hint)
                 return
             }
             await state.setTemperature(chatKey: chatKey, value: temp)
-            try await sendUserFeedback(chatKey: chatKey, text: "Temperature: \(await state.temperature(chatKey: chatKey))")
-            
+            let bucket = BotMenuHandler.tempBucket(temp)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Темп: <b>\(BotMenuHandler.formatTemp(temp))</b> — \(bucket)")
+
         case .model:
-            let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: parsed.argument)
+            let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: """
+                    🤖 Укажите модель.
+                    <i>Пример:</i> <code>/model openai/gpt-4o</code>
+                    Готовые варианты — /menu → Модель
+                    """)
+                return
+            }
+            let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: trimmed)
             try await sendUserFeedback(chatKey: chatKey, text: """
-                Модель изменена:
-                \(changed.old) ----> \(changed.new).
+                ✓ Модель: <code>\(changed.new)</code>
+                <i>Была:</i> <code>\(changed.old)</code>
                 История очищена.
                 """)
-            
+
         case .showTokens:
             let new = await state.toggleShowStats(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Показывать расход токенов: \(new)")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "📊 Показ токенов · <b>\(onOff(new))</b>")
+
         case .showCost:
             let new = await state.toggleShowCost(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Показывать стоимость сообщений: \(new)")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "💵 Показ стоимости · <b>\(onOff(new))</b>")
+
         case .showModel:
             let new = await state.toggleShowModel(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Показывать использованную модель: \(new)")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "🤖 Показ модели · <b>\(onOff(new))</b>")
+
         case .backupNotify:
             let new = await state.toggleBackupNotify(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Уведомления о бэкапе: \(new ? "вкл ✅" : "выкл ❌")")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "💾 Уведомления о бэкапе · <b>\(onOff(new))</b>")
+
         case .help:
             let help = await state.fetchHelp(chatKey: chatKey)
-            let adminInfo = await isAdmin(fromUser) ? "\nВы — администратор. Доступны: /whitelist, /defaults, /presets, /chats, /users" : ""
-            let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[
-                InlineKeyboardButton(text: "Открыть инструкцию к боту", callback_data: BotCallbackAction.faq.rawData)
-            ]])
+            let isAdminUser = await isAdmin(fromUser)
+            let markup = InlineKeyboardMarkup(inline_keyboard: [
+                [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
+                [InlineKeyboardButton(text: "📘 Полная инструкция", callback_data: BotCallbackAction.faq.rawData)],
+            ])
             _ = try await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
-                text: """
-                Текущие настройки для этого чата:
-                -------------------
-                • Провайдер: \(help.provider.commandValue)
-                • Модель: \(help.model)
-                • Temperature: \(help.temp)
-                • Длина истории: \(help.maxHistory)
-                • Показать расход токенов: \(help.showTokens)
-                • Показать стоимость сообщения: \(help.showCost)
-                • Показать использованную модель: \(help.showModel)
-                • Reasoning: \(reasoningLabel)
-                • Уведомления о бэкапе: \(help.backupNotify)
-                • Роль: <blockquote>\(help.role)</blockquote>
-                • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
-                -------------------\(adminInfo)
-                -------------------
-                Дефолтная роль:
-                -------------------
-                <blockquote>\(help.defaultRole)</blockquote>
-                """,
+                text: formatHelp(help, isAdmin: isAdminUser),
                 replyMarkup: markup
             ))
-            
+
         case .faq:
             try await sendUserFeedback(chatKey: chatKey, text: BotCallbackHandler.faqText)
-            
+
         case .defaultRole:
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: defaultRole)
-            try await sendUserFeedback(chatKey: chatKey, text: "Роль изменена на стандартную + история очищена")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль сброшена к стандартной. История очищена.")
+
         case .historyLength:
             guard let newMax = Int(parsed.argument), (1...50).contains(newMax) else {
-                let err = Int(parsed.argument) == nil
-                ? "Ошибка: укажите ЧИСЛО от 1 до 50"
-                : "Ошибка: укажите число от 1 до 50. Вы указали: \(Int(parsed.argument)!)"
-                try await sendUserFeedback(chatKey: chatKey, text: err)
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50.</i>\n<i>Пример:</i> <code>/historylength 11</code>")
                 return
             }
             await state.setMaxHistory(chatKey: chatKey, newMax: newMax)
-            try await sendUserFeedback(chatKey: chatKey, text: "Длина истории: \(newMax) сообщений")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Длина истории: <b>\(newMax) сообщ.</b>")
+
         case .provider:
-            let feedback: String
             if let provider = ServiceProvider.parse(parsed.argument) {
                 let old = await state.changeProvider(chatKey: chatKey, newProvider: provider)
-                var lines = ["\(old.commandValue) ----> \(provider.commandValue)"]
-                
+                var lines = ["✓ Провайдер: <b>\(provider.commandValue)</b>"]
+                if old != provider {
+                    lines.append("<i>Был:</i> <b>\(old.commandValue)</b>")
+                }
+
                 let gateway = try gateways.gateway(for: provider)
                 let reasoningEnabled = await state.reasoningEnabled(chatKey: chatKey)
                 if reasoningEnabled, !gateway.capabilities.supportsReasoning {
                     await state.setReasoningEffort(chatKey: chatKey, effort: nil)
-                    lines.append("Reasoning автоматически отключен: провайдер не поддерживает reasoning.")
+                    lines.append("<i>Reasoning отключён — провайдер не поддерживает.</i>")
                 }
-                
-                feedback = lines.joined(separator: "\n")
+                try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             } else {
-                feedback = "Неверный провайдер. Доступны: deepseek, openrouter, yandex."
+                try await sendUserFeedback(chatKey: chatKey, text: "Неизвестный провайдер. Доступны: <code>deepseek</code>, <code>openrouter</code>, <code>yandex</code>.")
             }
-            try await sendUserFeedback(chatKey: chatKey, text: feedback)
-            
+
         case .testMode:
             let suffix = await state.toggleTestMode(chatKey: chatKey)
             if let suffix {
                 try await sendUserFeedback(chatKey: chatKey, text: """
-                    Test mode ENABLED.
-                    
-                    New suffix = \(suffix)
-                    
-                    Use it with bot commands, for example:
-                    /help\(suffix)
-                    /setrole\(suffix) You are Donald Trump.
+                    🧪 <b>Test mode включён.</b>
+                    Суффикс · <code>\(suffix)</code>
+
+                    Используйте суффикс с командами:
+                    <code>/help\(suffix)</code>
+                    <code>/setrole\(suffix) Ты — Дональд Трамп.</code>
                     """)
             } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Test mode DISABLED")
+                try await sendUserFeedback(chatKey: chatKey, text: "🧪 Test mode выключен.")
             }
-            
+
         case .reasoning:
             let provider = await state.provider(chatKey: chatKey)
             let gateway = try gateways.gateway(for: provider)
-            
+
             guard gateway.capabilities.supportsReasoning else {
                 try await sendUserFeedback(
                     chatKey: chatKey,
-                    text: "Провайдер \(provider.commandValue) не поддерживает reasoning."
+                    text: "🧠 Провайдер <b>\(provider.commandValue)</b> не поддерживает reasoning."
                 )
                 return
             }
-            
+
             let arg = parsed.argument.trimmingCharacters(in: .whitespaces).lowercased()
             if let effort = ReasoningEffort(rawValue: arg) {
                 await state.setReasoningEffort(chatKey: chatKey, effort: effort)
@@ -228,247 +224,312 @@ final class BotCommandHandler: @unchecked Sendable {
             } else if arg.isEmpty {
                 _ = await state.toggleReasoning(chatKey: chatKey)
             } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Укажите: /reasoning [low|medium|high|off]")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reasoning low|medium|high|off</code>")
                 return
             }
             let current = await state.reasoningEffort(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Reasoning: \(current?.rawValue ?? "выкл")")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "🧠 Reasoning · <b>\(current?.rawValue ?? "выкл")</b>")
+
         case .menu:
             await menuHandler.sendMenu(chatKey: chatKey)
-            
+
         case .reset:
             await state.resetChat(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Настройки сброшены к дефолтным.")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "↺ Настройки сброшены к стандартным.")
+
         case .history:
             try await handleHistory(chatKey: chatKey)
-            
+
         case .mention, .unknown:
             return
         }
     }
-    
+
+    private func handleStart(chatKey: ChatKey) async throws {
+        let text = """
+        <b>👋 Привет!</b>
+
+        Я — LLM-чатбот. Просто пишите — я отвечу.
+
+        <b>Что умею:</b>
+        • Отвечаю на любые вопросы
+        • Понимаю изображения, голос и видео
+        • Помню контекст беседы
+        • Несколько провайдеров и моделей
+
+        <b>Быстрый старт:</b>
+        ⚙️ /menu — настройки в один клик
+        📘 /faq — полная инструкция
+        🎭 /setrole — задать характер бота
+        ↺ /reset — сбросить всё к стандарту
+        """
+        let markup = InlineKeyboardMarkup(inline_keyboard: [
+            [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
+            [InlineKeyboardButton(text: "📘 Инструкция", callback_data: BotCallbackAction.faq.rawData)],
+        ])
+        _ = try await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: text,
+            replyMarkup: markup
+        ))
+    }
+
+    private func formatHelp(_ help: HelpData, isAdmin: Bool) -> String {
+        let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
+        let suffix = help.testModeSuffix.map(String.init) ?? "выкл"
+        let adminLine = isAdmin
+            ? "\n<i>Вы администратор · /whitelist /defaults /presets /chats /users</i>"
+            : ""
+        return """
+        <b>⚙️ Настройки чата</b>
+
+        🔌 Провайдер · <b>\(help.provider.commandValue)</b>
+        🤖 Модель · <code>\(help.model)</code>
+        🌡 Темп · <b>\(BotMenuHandler.formatTemp(help.temp))</b> — \(BotMenuHandler.tempBucket(help.temp))
+        📝 История · <b>\(help.maxHistory) сообщ.</b>
+        🧠 Reasoning · <b>\(reasoningLabel)</b>
+
+        <b>Показ в ответе:</b>
+        \(yesNo(help.showTokens)) Токены
+        \(yesNo(help.showCost)) Стоимость
+        \(yesNo(help.showModel)) Модель
+        \(yesNo(help.backupNotify)) Уведомления о бэкапе
+
+        <b>🎭 Роль:</b>
+        <blockquote expandable>\(help.role)</blockquote>
+
+        <i>Test mode · \(suffix)</i>\(adminLine)
+        """
+    }
+
+    private func yesNo(_ v: Bool) -> String { v ? "✓" : "·" }
+    private func onOff(_ v: Bool) -> String { v ? "вкл" : "выкл" }
+
     private func handleWhitelist(chatKey: ChatKey, argument: String) async throws {
         let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
         let subcommand = parts.first ?? ""
         let value = parts.count > 1 ? parts[1] : ""
-        
+
         switch subcommand.lowercased() {
         case "add":
             guard let userID = Int(value) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Укажите ID пользователя: /whitelist add 123456789")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/whitelist add &lt;ID&gt;</code>")
                 return
             }
             await state.addToWhitelist(userID: userID)
-            try await sendUserFeedback(chatKey: chatKey, text: "Пользователь \(userID) добавлен в белый список.")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Пользователь <code>\(userID)</code> добавлен в белый список.")
+
         case "remove":
             guard let userID = Int(value) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Укажите ID пользователя: /whitelist remove 123456789")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/whitelist remove &lt;ID&gt;</code>")
                 return
             }
             await state.removeFromWhitelist(userID: userID)
-            try await sendUserFeedback(chatKey: chatKey, text: "Пользователь \(userID) удалён из белого списка.")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Пользователь <code>\(userID)</code> удалён из белого списка.")
+
         case "list":
             let ids = await state.listWhitelisted()
             if ids.isEmpty {
                 try await sendUserFeedback(chatKey: chatKey, text: "Белый список пуст.")
             } else {
                 let sorted = ids.sorted()
-                let list = sorted.map { "• \($0)" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "Белый список (\(sorted.count)):\n\(list)")
+                let list = sorted.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>Белый список</b> (\(sorted.count))\n\(list)")
             }
-            
+
         default:
             try await sendUserFeedback(chatKey: chatKey, text: """
-                Использование:
-                /whitelist add <ID> - добавить пользователя
-                /whitelist remove <ID> - удалить пользователя
-                /whitelist list - показать список
+                <b>/whitelist</b>
+                <code>/whitelist add &lt;ID&gt;</code> — добавить
+                <code>/whitelist remove &lt;ID&gt;</code> — удалить
+                <code>/whitelist list</code> — показать
                 """)
         }
     }
-    
+
     private func handleDefaults(chatKey: ChatKey, argument: String) async throws {
         let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
         let subcommand = parts.first ?? ""
         let value = parts.count > 1 ? parts[1] : ""
-        
+
         switch subcommand.lowercased() {
         case "model":
             guard !value.isEmpty else {
                 let defs = await state.getDefaults()
-                try await sendUserFeedback(chatKey: chatKey, text: "Дефолтная модель: \(defs.model)")
+                try await sendUserFeedback(chatKey: chatKey, text: "Модель по умолчанию · <code>\(defs.model)</code>")
                 return
             }
             let new = await state.setDefaultModel(value)
-            try await sendUserFeedback(chatKey: chatKey, text: "Дефолтная модель изменена на: \(new)")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Модель по умолчанию · <code>\(new)</code>")
+
         case "role":
             guard !value.isEmpty else {
                 let defs = await state.getDefaults()
-                try await sendUserFeedback(chatKey: chatKey, text: "Дефолтная роль: \(defs.role)")
+                try await sendUserFeedback(chatKey: chatKey, text: "Роль по умолчанию:\n<blockquote expandable>\(defs.role)</blockquote>")
                 return
             }
             let new = await state.setDefaultRole(value)
-            try await sendUserFeedback(chatKey: chatKey, text: "Дефолтная роль изменена на:\n<blockquote>\(new)</blockquote>")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль по умолчанию обновлена:\n<blockquote expandable>\(new)</blockquote>")
+
         case "historylength":
             guard !value.isEmpty, let length = Int(value), (1...50).contains(length) else {
                 if value.isEmpty {
                     let defs = await state.getDefaults()
-                    try await sendUserFeedback(chatKey: chatKey, text: "Дефолтная длина истории: \(defs.historyLength)")
+                    try await sendUserFeedback(chatKey: chatKey, text: "Длина истории по умолчанию · <b>\(defs.historyLength)</b>")
                 } else {
-                    try await sendUserFeedback(chatKey: chatKey, text: "Укажите число от 1 до 50: /defaults historylength 11")
+                    try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50.</i>\n<i>Пример:</i> <code>/defaults historylength 11</code>")
                 }
                 return
             }
             let new = await state.setDefaultHistoryLength(length)
-            try await sendUserFeedback(chatKey: chatKey, text: "Дефолтная длина истории изменена на: \(new)")
-            
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Длина истории по умолчанию · <b>\(new)</b>")
+
         default:
             let defs = await state.getDefaults()
             try await sendUserFeedback(chatKey: chatKey, text: """
-                Дефолтные настройки:
-                -------------------
-                • Модель: \(defs.model)
-                • Длина истории: \(defs.historyLength)
-                • Роль: <blockquote>\(defs.role)</blockquote>
-                -------------------
-                Команды:
-                /defaults model <модель> - изменить дефолтную модель
-                /defaults role <роль> - изменить дефолтную роль
-                /defaults historylength <число> - изменить дефолтную длину истории
-                -------------------
-                Для управления пресетами меню: /presets
+                <b>⚙️ Значения по умолчанию</b>
+
+                🤖 Модель · <code>\(defs.model)</code>
+                📝 История · <b>\(defs.historyLength) сообщ.</b>
+                🎭 Роль:
+                <blockquote expandable>\(defs.role)</blockquote>
+
+                <b>Команды:</b>
+                <code>/defaults model &lt;id&gt;</code>
+                <code>/defaults role &lt;текст&gt;</code>
+                <code>/defaults historylength &lt;1–50&gt;</code>
+
+                <i>Управление пресетами меню — /presets</i>
                 """)
         }
     }
-    
+
     private func handleChats(chatKey: ChatKey) async throws {
         let groups = await state.groupChats()
         let privates = await state.privateChats()
-        
+
         var lines: [String] = []
-        
-        if !groups.isEmpty {
-            lines.append("Групповые чаты (\(groups.count)):")
+
+        lines.append("<b>👥 Групповые чаты</b> (\(groups.count))")
+        if groups.isEmpty {
+            lines.append("<i>нет</i>")
+        } else {
             for (chatID, threadID) in groups.sorted(by: { $0.chatID < $1.chatID }) {
-                let threadInfo = threadID != 0 ? " (thread: \(threadID))" : ""
-                lines.append("• \(chatID)\(threadInfo)")
+                let threadInfo = threadID != 0 ? " · thread \(threadID)" : ""
+                lines.append("• <code>\(chatID)</code>\(threadInfo)")
             }
-        } else {
-            lines.append("Групповые чаты: нет")
         }
-        
+
         lines.append("")
-        
-        if !privates.isEmpty {
-            lines.append("Личные чаты (\(privates.count)):")
-            for (chatID, threadID) in privates.sorted(by: { $0.chatID < $1.chatID }) {
-                let threadInfo = threadID != 0 ? " (thread: \(threadID))" : ""
-                lines.append("• \(chatID)\(threadInfo)")
-            }
+        lines.append("<b>👤 Личные чаты</b> (\(privates.count))")
+        if privates.isEmpty {
+            lines.append("<i>нет</i>")
         } else {
-            lines.append("Личные чаты: нет")
+            for (chatID, threadID) in privates.sorted(by: { $0.chatID < $1.chatID }) {
+                let threadInfo = threadID != 0 ? " · thread \(threadID)" : ""
+                lines.append("• <code>\(chatID)</code>\(threadInfo)")
+            }
         }
-        
+
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
     }
-    
+
     private func handleUsers(chatKey: ChatKey) async throws {
         let privates = await state.privateChats()
-        
+
         if privates.isEmpty {
-            try await sendUserFeedback(chatKey: chatKey, text: "Никто не общается с ботом в личке.")
+            try await sendUserFeedback(chatKey: chatKey, text: "В личке пока пусто.")
             return
         }
-        
+
         let sorted = privates.sorted(by: { $0.chatID < $1.chatID })
-        let list = sorted.map { "• ID: \($0.chatID)" }.joined(separator: "\n")
-        try await sendUserFeedback(chatKey: chatKey, text: "Пользователи в личке (\(sorted.count)):\n\(list)\n\nДля добавления: /whitelist add <ID>")
+        let list = sorted.map { "• <code>\($0.chatID)</code>" }.joined(separator: "\n")
+        try await sendUserFeedback(chatKey: chatKey, text: """
+            <b>👤 Пользователи в личке</b> (\(sorted.count))
+            \(list)
+
+            <i>Добавить в whitelist:</i> <code>/whitelist add &lt;ID&gt;</code>
+            """)
     }
-    
+
     private func handlePresets(chatKey: ChatKey, argument: String) async throws {
         let parts = argument.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true).map(String.init)
         let presetType = parts.first ?? ""
         let subcommand = parts.count > 1 ? parts[1] : ""
         let value = parts.count > 2 ? parts[2] : ""
-        
+
         switch presetType.lowercased() {
         case "model":
             try await handlePresetsSub(
                 chatKey: chatKey,
                 subcommand: subcommand,
                 value: value,
+                typeKey: "model",
                 typeName: "моделей",
                 list: { await state.modelPresets() },
                 add: { display, val in await state.addModelPreset(display: display, value: val) },
                 remove: { val in await state.removeModelPreset(value: val) }
             )
-            
+
         case "temp":
             try await handlePresetsSub(
                 chatKey: chatKey,
                 subcommand: subcommand,
                 value: value,
+                typeKey: "temp",
                 typeName: "температуры",
                 list: { await state.tempPresets() },
                 add: { display, val in await state.addTempPreset(display: display, value: val) },
                 remove: { val in await state.removeTempPreset(value: val) }
             )
-            
+
         case "history", "historylength":
             try await handlePresetsSub(
                 chatKey: chatKey,
                 subcommand: subcommand,
                 value: value,
+                typeKey: "history",
                 typeName: "длины истории",
                 list: { await state.historyLengthPresets() },
                 add: { display, val in await state.addHistoryLengthPreset(display: display, value: val) },
                 remove: { val in await state.removeHistoryLengthPreset(value: val) }
             )
-            
+
         case "role":
             try await handlePresetsSub(
                 chatKey: chatKey,
                 subcommand: subcommand,
                 value: value,
+                typeKey: "role",
                 typeName: "ролей",
                 list: { await state.rolePresets() },
                 add: { display, val in await state.addRolePreset(display: display, value: val) },
                 remove: { val in await state.removeRolePreset(value: val) }
             )
-            
+
         default:
             try await sendUserFeedback(chatKey: chatKey, text: """
-                Управление пресетами:
-                -------------------
-                /presets model add <display> | <value> - добавить пресет модели
-                /presets model remove <value> - удалить пресет модели
-                /presets model list - показать пресеты моделей
-                -------------------
-                /presets temp add <display> | <value> - добавить пресет температуры
-                /presets temp remove <value> - удалить пресет температуры
-                /presets temp list - показать пресеты температуры
-                -------------------
-                /presets history add <display> | <value> - добавить пресет истории
-                /presets history remove <value> - удалить пресет истории
-                /presets history list - показать пресеты истории
-                -------------------
-                /presets role add <display> | <value> - добавить пресет роли
-                /presets role remove <value> - удалить пресет роли
-                /presets role list - показать пресеты ролей
+                <b>🎛 Пресеты меню</b>
+
+                <code>/presets &lt;тип&gt; add &lt;label&gt; | &lt;value&gt;</code>
+                <code>/presets &lt;тип&gt; remove &lt;value&gt;</code>
+                <code>/presets &lt;тип&gt; list</code>
+
+                <b>Типы:</b> <code>model</code>, <code>temp</code>, <code>history</code>, <code>role</code>
+
+                <i>Пример:</i>
+                <code>/presets model add GPT-4o | openai/gpt-4o</code>
                 """)
         }
     }
-    
+
     private func handlePresetsSub(
         chatKey: ChatKey,
         subcommand: String,
         value: String,
+        typeKey: String,
         typeName: String,
         list: @Sendable () async -> [Preset],
         add: @Sendable (String, String) async -> Preset,
@@ -481,71 +542,74 @@ final class BotCommandHandler: @unchecked Sendable {
                 .components(separatedBy: separator)
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
-            
+
             guard addParts.count >= 2 else {
                 try await sendUserFeedback(
                     chatKey: chatKey,
-                    text: "Формат: /presets \(typeName) add <display> | <value>\nПример: /presets model add Gemini 3 Flash | google/gemini-3-flash-preview"
+                    text: """
+                    <i>Использование:</i> <code>/presets \(typeKey) add &lt;label&gt; | &lt;value&gt;</code>
+                    <i>Пример:</i> <code>/presets model add Gemini 3 Flash | google/gemini-3-flash-preview</code>
+                    """
                 )
                 return
             }
-            
+
             let display = addParts[0]
             let presetValue = addParts.dropFirst().joined(separator: " ")
             let preset = await add(display, presetValue)
             try await sendUserFeedback(
                 chatKey: chatKey,
-                text: "Пресет \(typeName) добавлен:\n\"\(preset.display)\" → \(preset.value)"
+                text: "✓ Пресет \(typeName): <b>\(preset.display)</b> → <code>\(preset.value)</code>"
             )
-            
+
         case "remove":
             guard !value.isEmpty else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Формат: /presets \(typeName) remove <value>")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/presets \(typeKey) remove &lt;value&gt;</code>")
                 return
             }
             let removed = await remove(value)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: removed
-                    ? "Пресет \(typeName) со значением \"\(value)\" удалён."
-                    : "Пресет \(typeName) со значением \"\(value)\" не найден."
+                    ? "✓ Пресет \(typeName) <code>\(value)</code> удалён."
+                    : "Пресет \(typeName) <code>\(value)</code> не найден."
             )
-            
+
         case "list":
             let presets = await list()
             if presets.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "Пресеты \(typeName) пусты.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Пресеты \(typeName): пусто.")
             } else {
-                var lines = ["Пресеты \(typeName) (\(presets.count)):"]
+                var lines = ["<b>Пресеты \(typeName)</b> (\(presets.count))"]
                 for (i, p) in presets.enumerated() {
-                    lines.append("\(i). \"\(p.display)\" → \(p.value)")
+                    lines.append("\(i). <b>\(p.display)</b> → <code>\(p.value)</code>")
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             }
-            
+
         default:
             try await sendUserFeedback(chatKey: chatKey, text: """
-                Использование:
-                /presets \(typeName) add <display> | <value>
-                /presets \(typeName) remove <value>
-                /presets \(typeName) list
+                <b>/presets \(typeKey)</b>
+                <code>/presets \(typeKey) add &lt;label&gt; | &lt;value&gt;</code>
+                <code>/presets \(typeKey) remove &lt;value&gt;</code>
+                <code>/presets \(typeKey) list</code>
                 """)
         }
     }
-    
+
     private func handleHistory(chatKey: ChatKey) async throws {
         let messages = await state.history(chatKey: chatKey)
         guard !messages.isEmpty else {
-            try await sendUserFeedback(chatKey: chatKey, text: "История пуста.")
+            try await sendUserFeedback(chatKey: chatKey, text: "📝 История пуста.")
             return
         }
 
-        var lines: [String] = ["История сообщений (\(messages.count)):"]
+        var lines: [String] = ["<b>📝 История</b> (\(messages.count))"]
         for msg in messages {
             let roleLabel: String
             switch msg.role {
             case "system":
-                roleLabel = "⚙️ система"
+                roleLabel = "⚙️"
             case "user":
                 roleLabel = "👤"
             case "assistant":
@@ -568,11 +632,18 @@ final class BotCommandHandler: @unchecked Sendable {
                 }
                 content = (textParts.joined(separator: " ") + " " + mediaTags.joined(separator: " ")).trimmingCharacters(in: .whitespaces)
             }
-            let displayContent = content.isEmpty ? "(пусто)" : content
-            lines.append("\n\(roleLabel): \(displayContent)")
+            let displayContent = content.isEmpty ? "<i>(пусто)</i>" : truncateForHistory(content)
+            lines.append("\n\(roleLabel) \(displayContent)")
         }
 
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+    }
+
+    private func truncateForHistory(_ text: String) -> String {
+        let limit = 280
+        guard text.count > limit else { return text }
+        let endIndex = text.index(text.startIndex, offsetBy: limit)
+        return String(text[..<endIndex]) + "…"
     }
 
     private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {

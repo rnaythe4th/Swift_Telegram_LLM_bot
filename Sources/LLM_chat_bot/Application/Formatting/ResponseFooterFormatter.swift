@@ -9,45 +9,88 @@ enum ResponseFooterFormatter {
         showModel: Bool
     ) -> String? {
         guard showTokens || showCost || showModel else { return nil }
-        
-        var lines: [String] = ["", "━━━━━━━━━━━━━"]
+
         let usage = meta?.usage
-        
+        var lines: [String] = []
+
         if showTokens {
-            let tokenLines = [
-                ("• Prompt", usage?.promptTokens),
-                ("  • cache hit", usage?.cacheHitTokens),
-                ("  • cache write", usage?.cacheWriteTokens),
-                ("  • cache miss", usage?.cacheMissTokens),
-                ("• Completion", usage?.completionTokens),
-                ("  • reasoning", usage?.reasoningTokens),
-                ("• Total", usage?.totalTokens)
-            ]
-                .compactMap { label, value in
-                    value.map { "\(label): \(formatTokenValue($0))" }
-                }
-            
-            lines.append(contentsOf: tokenLines.isEmpty ? ["• Токены: н/д"] : tokenLines)
+            lines.append(contentsOf: tokenLines(usage: usage))
         }
-        
+
         if showCost {
-            let costLine = usage?.cost.map { cost in
-                "• Стоимость: $\(String(format: "%.6f", cost))"
-            } ?? "• Стоимость: н/д"
-            lines.append(costLine)
+            if let cost = usage?.cost {
+                lines.append("💵 $\(formatCost(cost))")
+            } else {
+                lines.append("💵 —")
+            }
         }
-        
+
         if showModel {
-            lines.append("Модель: \(meta?.model ?? fallbackModel)")
+            lines.append("🤖 <code>\(meta?.model ?? fallbackModel)</code>")
         }
-        
-        return lines.count > 2 ? lines.joined(separator: "\n") : nil
+
+        guard !lines.isEmpty else { return nil }
+
+        return "\n\n──────────\n" + lines.joined(separator: "\n")
     }
-    
+
+    private static func tokenLines(usage: StreamUsageSummary?) -> [String] {
+        guard let usage else {
+            return ["📊 Токены · —"]
+        }
+
+        let prompt = usage.promptTokens
+        let completion = usage.completionTokens
+        let total = usage.totalTokens
+
+        var primary = "📊"
+        var primaryParts: [String] = []
+        if let prompt { primaryParts.append("вход \(formatTokenValue(prompt))") }
+        if let completion { primaryParts.append("выход \(formatTokenValue(completion))") }
+        if let total { primaryParts.append("всего <b>\(formatTokenValue(total))</b>") }
+
+        if primaryParts.isEmpty {
+            return ["📊 Токены · —"]
+        }
+
+        primary += " " + primaryParts.joined(separator: " · ")
+
+        var lines = [primary]
+
+        var detailParts: [String] = []
+        if let hit = usage.cacheHitTokens, hit > 0 {
+            detailParts.append("cache hit \(formatTokenValue(hit))")
+        }
+        if let write = usage.cacheWriteTokens, write > 0 {
+            detailParts.append("cache write \(formatTokenValue(write))")
+        }
+        if let reasoning = usage.reasoningTokens, reasoning > 0 {
+            detailParts.append("reasoning \(formatTokenValue(reasoning))")
+        }
+        if !detailParts.isEmpty {
+            lines.append("   <i>\(detailParts.joined(separator: " · "))</i>")
+        }
+
+        return lines
+    }
+
     static func formatTokenValue(_ value: Double) -> String {
         if value.rounded(.towardZero) == value {
             return String(Int(value))
         }
         return String(format: "%.3f", value)
+    }
+
+    private static func formatCost(_ cost: Double) -> String {
+        if cost == 0 {
+            return "0"
+        }
+        if cost < 0.0001 {
+            return String(format: "%.6f", cost)
+        }
+        if cost < 0.01 {
+            return String(format: "%.5f", cost)
+        }
+        return String(format: "%.4f", cost)
     }
 }

@@ -35,23 +35,23 @@ final class BotCallbackHandler: @unchecked Sendable {
         switch action {
         case .stop(let generationID):
             guard let chatKey = await sessionRegistry.cancel(generationID: generationID, reason: .userRequested) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Уже завершено")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Уже готово")
                 return
             }
-            
+
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            
+
             if let message = callback.message {
                 try? await telegram.editMessage(
                     .init(
                         chatID: message.chat.id,
                         messageID: message.message_id,
-                        text: (message.text ?? "") + "\n\n🛑 Остановлено пользователем.",
+                        text: (message.text ?? "") + "\n\n⏹ <i>Остановлено</i>",
                         replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
                     )
                 )
             }
-            
+
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Остановлено")
             
         case .menu(let action):
@@ -62,7 +62,7 @@ final class BotCallbackHandler: @unchecked Sendable {
                 return
             }
             let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
-            try? await telegram.sendMessage(.init(
+            _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
@@ -74,92 +74,60 @@ final class BotCallbackHandler: @unchecked Sendable {
     }
     
     static let faqText: String = """
-<b>Инструкция по использованию бота</b>
+<b>📘 Инструкция</b>
 
-<b>Команды для всех пользователей:</b>
+Просто пишите сообщения — бот ответит. Понимает текст, картинки, голос, видео.
 
-/setrole #Роль# — установить роль боту (очищает историю).
-Пример: <blockquote>/setrole Ты — эксперт по математике. Отвечай кратко.</blockquote>
+Большинство настроек проще менять через <b>/menu</b>. Команды ниже — на случай, если хочется быстро.
 
-/clear_history — очистить историю сообщений, роль сохраняется.
+<b>━━━ 💬 Чат ━━━</b>
 
-/settemp #число# — задать температуру (креативность). 0.0 — точность, 2.0 — креативность. По умолчанию: 1.5.
-Пример: <blockquote>/settemp 1.0</blockquote>
+<code>/setrole &lt;текст&gt;</code> — задать характер бота (история очищается)
+<blockquote>/setrole Ты — эксперт по математике, отвечай кратко.</blockquote>
 
-/model #модель# — сменить модель ИИ (очищает историю).
-Пример: <blockquote>/model openai/gpt-4o</blockquote>
+<code>/default_role</code> — вернуть стандартную роль
+<code>/clear_history</code> — забыть историю, роль сохранить
+<code>/history</code> — показать что бот помнит
 
-/provider #deepseek|openrouter|yandex# — сменить провайдера.
-Пример: <blockquote>/provider openrouter</blockquote>
+<b>━━━ 🤖 Модель и поведение ━━━</b>
 
-/show_tokens — вкл/выкл показ расхода токенов после ответа.
+<code>/model &lt;id&gt;</code> — сменить модель (история очищается)
+<blockquote>/model openai/gpt-4o</blockquote>
 
-/show_cost — вкл/выкл показ стоимости сообщения в USD.
+<code>/settemp &lt;0.0–2.0&gt;</code> — креативность (0 — точно, 2 — хаотично)
+<code>/historylength &lt;1–50&gt;</code> — сколько сообщений помнить
+<code>/provider &lt;deepseek|openrouter|yandex&gt;</code> — сменить провайдера
+<code>/reasoning &lt;low|medium|high|off&gt;</code> — глубина размышлений (если поддерживается)
 
-/show_model — вкл/выкл показ названия модели после ответа.
+<b>━━━ 📊 Что показывать в ответе ━━━</b>
 
-/historylength #число# — сколько последних сообщений помнит бот (1-50). По умолчанию: 11.
-Пример: <blockquote>/historylength 20</blockquote>
+<code>/show_tokens</code> · <code>/show_cost</code> · <code>/show_model</code>
+<code>/backup_notify</code> — уведомлять о бэкапах состояния
 
-/default_role — вернуть стандартную роль и очистить историю.
+<b>━━━ 🛠 Прочее ━━━</b>
 
-/reasoning [low|medium|high|off] — управление режимом размышлений (доступно на поддерживающих провайдерах).
-Пример: <blockquote>/reasoning off</blockquote>
+<code>/menu</code> — интерактивные настройки
+<code>/help</code> — текущие настройки чата
+<code>/reset</code> — сбросить чат к стандарту
+<code>/testmode</code> — добавить суффикс к командам для тестов
+<code>/faq</code> — эта справка
 
-/menu — открыть интерактивное меню с кнопками.
+<b>━━━ 🔒 Только администратор ━━━</b>
 
-/history — показать текущую историю сообщений.
+<b>Whitelist:</b>
+<code>/whitelist add|remove &lt;ID&gt;</code> · <code>/whitelist list</code>
 
-/reset — сбросить все настройки чата к значениям по умолчанию.
+<b>Дефолты для новых чатов:</b>
+<code>/defaults</code> — показать
+<code>/defaults model|role|historylength &lt;значение&gt;</code>
 
-/testmode — вкл/выкл режим тестирования (добавляет суффикс к командам).
+<b>Пресеты меню</b> (типы: <code>model</code>, <code>temp</code>, <code>history</code>, <code>role</code>):
+<code>/presets &lt;тип&gt; add &lt;label&gt; | &lt;value&gt;</code>
+<code>/presets &lt;тип&gt; remove &lt;value&gt;</code>
+<code>/presets &lt;тип&gt; list</code>
+<blockquote>/presets model add GPT-4o | openai/gpt-4o</blockquote>
 
-/help — показать текущие настройки чата.
-
-/faq — открыть эту инструкцию.
-
-
-<b>Команды для администраторов:</b>
-
-/whitelist add #ID# — добавить пользователя в белый список.
-Пример: <blockquote>/whitelist add 123456789</blockquote>
-
-/whitelist remove #ID# — удалить пользователя из белого списка.
-Пример: <blockquote>/whitelist remove 123456789</blockquote>
-
-/whitelist list — показать белый список.
-
-/defaults model #модель# — задать модель по умолчанию для новых чатов.
-Пример: <blockquote>/defaults model openai/gpt-4o-mini</blockquote>
-
-/defaults role #роль# — задать роль по умолчанию.
-Пример: <blockquote>/defaults role Ты — полезный ассистент.</blockquote>
-
-/defaults historylength #число# — задать длину истории по умолчанию.
-Пример: <blockquote>/defaults historylength 15</blockquote>
-
-/defaults — показать текущие значения по умолчанию.
-
-/presets model add #название# | #значение# — добавить пресет модели в меню.
-Пример: <blockquote>/presets model add GPT-4o | openai/gpt-4o</blockquote>
-
-/presets model remove #значение# — удалить пресет модели.
-/presets model list — показать пресеты моделей.
-
-/presets temp add #название# | #значение# — добавить пресет температуры.
-/presets temp remove #значение# — удалить пресет температуры.
-/presets temp list — показать пресеты температуры.
-
-/presets history add #название# | #значение# — добавить пресет длины истории.
-/presets history remove #значение# — удалить пресет длины истории.
-/presets history list — показать пресеты длины истории.
-
-/presets role add #название# | #значение# — добавить пресет роли.
-/presets role remove #значение# — удалить пресет роли.
-/presets role list — показать пресеты ролей.
-
-/chats — показать список всех чатов (групповых и личных).
-
-/users — показать список пользователей в личных чатах.
+<b>Просмотр чатов и пользователей:</b>
+<code>/chats</code> — все чаты · <code>/users</code> — пользователи в личке
 """
 }

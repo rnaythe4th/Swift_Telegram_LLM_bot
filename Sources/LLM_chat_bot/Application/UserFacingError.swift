@@ -31,21 +31,21 @@ enum UserFacingError {
         if let registry = error as? ProviderGatewayRegistryError {
             switch registry {
             case .missingAdapter(let provider):
-                return "Провайдер \(provider.commandValue) не настроен на сервере"
+                return "Провайдер \(provider.commandValue) не настроен. Выберите другой через /menu."
             }
         }
 
         if let media = error as? TelegramMediaResolverError {
             switch media {
             case .missingFilePath:
-                return "Telegram не вернул путь к файлу. Попробуйте отправить медиа ещё раз."
+                return "Telegram не отдал файл. Попробуйте отправить медиа ещё раз."
             }
         }
 
         if let adapter = error as? ProviderAdapterError {
             switch adapter {
             case .invalidRequestType(let provider):
-                return "Внутренняя ошибка адаптера провайдера \(provider.commandValue)"
+                return "Внутренний сбой адаптера \(provider.commandValue). Сообщите администратору."
             }
         }
 
@@ -74,10 +74,10 @@ enum UserFacingError {
             return "\(statusReason). \(truncate(trimmed, limit: bodyPreviewLimit))"
 
         case .decodeFailure:
-            return "Не удалось разобрать ответ сервера"
+            return "Не удалось разобрать ответ сервера. Попробуйте ещё раз."
 
         case .encodeFailure:
-            return "Не удалось подготовить запрос"
+            return "Не удалось подготовить запрос. Попробуйте ещё раз."
         }
     }
 

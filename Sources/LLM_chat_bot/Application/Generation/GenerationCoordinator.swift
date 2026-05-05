@@ -65,7 +65,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             if !unsupportedKinds.isEmpty {
                 let kinds = unsupportedKinds.map(\.displayName).joined(separator: ", ")
                 return .unsupported(
-                    "Провайдер \(provider.commandValue) не поддерживает \(kinds). Смените провайдера или отправьте текст."
+                    "⚠️ Провайдер <b>\(provider.commandValue)</b> не поддерживает: \(kinds).\nСмените провайдера через /menu или отправьте только текст."
                 )
             }
         }
@@ -142,7 +142,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         generationID: GenerationID
     ) async throws {
         let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
-            .init(text: "🛑 СТОП", callback_data: BotCallbackAction.stop(generationID).rawData)
+            .init(text: "⏹ Остановить", callback_data: BotCallbackAction.stop(generationID).rawData)
         ]])
         let emptyMarkup = InlineKeyboardMarkup(inline_keyboard: [])
 
@@ -154,7 +154,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                     replyTo: replyToMessageID,
-                    text: "Думаю...",
+                    text: "💭 <i>Думаю…</i>",
                     replyMarkup: stopMarkup
                 )
             )
@@ -183,7 +183,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                         chatID: chatKey.chatID,
                         threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                         replyTo: nil,
-                        text: "Думаю...",
+                        text: "💭 <i>Продолжаю…</i>",
                         replyMarkup: stopMarkup
                     )
                 )
@@ -195,7 +195,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                     .init(
                         chatID: chatKey.chatID,
                         messageID: currentPlaceholder.message_id,
-                        text: done + "\n\n📄 продолжение ⬇️",
+                        text: done + "\n\n<i>↓ продолжение ниже</i>",
                         replyMarkup: emptyMarkup
                     )
                 )
@@ -259,7 +259,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 isCancelled = true
             } catch {
                 logger.error("stream failed: \(error)")
-                let userText = "❌ " + UserFacingError.message(error, context: "Ошибка генерации")
+                let userText = "⚠️ <b>Ошибка генерации</b>\n" + UserFacingError.message(error)
                 try? await self.telegram.editMessage(
                     .init(
                         chatID: chatKey.chatID,
@@ -282,7 +282,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 let stopNotice = await self.cancellationNotice(for: generationID)
                 finalText = messageAccumulator.isEmpty
                     ? stopNotice
-                    : (isFirstMessage ? "" : "⬆️ продолжение\n\n") + messageAccumulator + "\n\n" + stopNotice
+                    : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + "\n\n" + stopNotice
             } else {
                 let footer = ResponseFooterFormatter.formatFooter(
                     meta: streamMeta,
@@ -292,10 +292,10 @@ final class GenerationCoordinator: @unchecked Sendable {
                     showModel: options.showModel
                 ) ?? ""
 
-                let prefix = isFirstMessage ? "" : "⬆️ продолжение\n\n"
+                let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
                 finalText = messageAccumulator.isEmpty
-                    ? "Пустой ответ.\(footer)\n\n✅ <b>Ответ завершен.</b>"
-                    : prefix + messageAccumulator + footer + "\n\n✅ <b>Ответ завершен.</b>"
+                    ? "<i>Пустой ответ.</i>\(footer)"
+                    : prefix + messageAccumulator + footer
             }
 
             try? await self.telegram.editMessage(
@@ -369,7 +369,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         
         switch reason {
         case .userRequested:
-            return "🛑 <b>Остановлено пользователем.</b>"
+            return "⏹ <i>Остановлено</i>"
         }
     }
 }
