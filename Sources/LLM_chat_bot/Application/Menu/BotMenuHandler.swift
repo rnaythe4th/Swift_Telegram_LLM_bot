@@ -48,7 +48,8 @@ final class BotMenuHandler: @unchecked Sendable {
             try await processAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
         } catch {
             logger.error("menu action failed: \(error)")
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Ошибка")
+            let alertText = UserFacingError.shortMessage(error, context: "Ошибка")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: alertText)
         }
     }
 

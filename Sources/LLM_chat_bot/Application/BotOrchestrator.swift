@@ -86,7 +86,7 @@ final class BotOrchestrator: @unchecked Sendable {
                     success = "✅ Успешно"
                 } catch {
                     self.logger.error("state backup failed: \(error)")
-                    success = "❌ Ошибка"
+                    success = "❌ " + UserFacingError.message(error)
                 }
                 let chatKeys = await self.state.chatsWithBackupNotify()
                 for chatKey in chatKeys {
@@ -160,6 +160,18 @@ final class BotOrchestrator: @unchecked Sendable {
                 try await route(message: message, chatKey: chatKey)
             } catch {
                 logger.error("routeMessage failed: \(error)")
+                if !(error is CancellationError) {
+                    let text = "❌ " + UserFacingError.message(error)
+                    _ = try? await telegram.sendMessage(
+                        .init(
+                            chatID: chatKey.chatID,
+                            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                            replyTo: nil,
+                            text: text,
+                            replyMarkup: nil
+                        )
+                    )
+                }
             }
         }
     }

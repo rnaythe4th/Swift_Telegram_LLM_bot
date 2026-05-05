@@ -259,11 +259,12 @@ final class GenerationCoordinator: @unchecked Sendable {
                 isCancelled = true
             } catch {
                 logger.error("stream failed: \(error)")
+                let userText = "❌ " + UserFacingError.message(error, context: "Ошибка генерации")
                 try? await self.telegram.editMessage(
                     .init(
                         chatID: chatKey.chatID,
                         messageID: currentPlaceholder.message_id,
-                        text: "❌ Ошибка генерации. Попробуйте ещё раз или смените провайдера/модель.",
+                        text: userText,
                         replyMarkup: emptyMarkup
                     )
                 )
