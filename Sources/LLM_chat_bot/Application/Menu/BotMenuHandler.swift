@@ -115,6 +115,11 @@ final class BotMenuHandler: @unchecked Sendable {
         case "model":
             guard parts.count >= 3, parts[1] == "select" else { return }
             let model = parts[2]
+            let presets = await state.modelPresets()
+            guard presets.contains(where: { $0.value == model }) else {
+                try await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
+                return
+            }
             _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: model)
             try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
 
@@ -144,7 +149,7 @@ final class BotMenuHandler: @unchecked Sendable {
             if parts[1] == "clear" {
                 await state.clearHistory(chatKey: chatKey)
                 try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
-            } else if parts.count >= 3, parts[1] == "length", let length = Int(parts[2]) {
+            } else if parts.count >= 3, parts[1] == "length", let length = Int(parts[2]), (1...50).contains(length) {
                 await state.setMaxHistory(chatKey: chatKey, newMax: length)
                 try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
             }
