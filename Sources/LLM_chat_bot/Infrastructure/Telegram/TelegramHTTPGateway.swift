@@ -99,7 +99,10 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             lastMessage = try await sendSingle(chunkRequest, html: TelegramHTMLFormatter.helper(text: chunk))
             isFirst = false
         }
-        return lastMessage!
+        guard let lastMessage else {
+            return try await sendSingle(request, html: html)
+        }
+        return lastMessage
     }
 
     private func sendSingle(_ request: SendMessageRequest, html: String) async throws -> TelegramMessage {
