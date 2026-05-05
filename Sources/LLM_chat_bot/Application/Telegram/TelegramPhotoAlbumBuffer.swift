@@ -118,7 +118,7 @@ struct TelegramPhotoAlbumBuffer {
                 guard let album = pendingAlbums.removeValue(forKey: key) else {
                     return nil
                 }
-                
+
                 decrementPendingAlbumCount(in: chatKey)
                 return Self.mergeAlbum(album.orderedUpdates)
             }
@@ -148,10 +148,12 @@ struct TelegramPhotoAlbumBuffer {
         }
     }
     
-    private static func mergeAlbum(_ updates: [TelegramUpdate]) -> TelegramUpdate {
+    private static func mergeAlbum(_ updates: [TelegramUpdate]) -> TelegramUpdate? {
         let sortedUpdates = updates.sorted { $0.update_id < $1.update_id }
-        let firstUpdate = sortedUpdates[0]
-        let firstMessage = firstUpdate.message!
+        guard let firstUpdate = sortedUpdates.first,
+              let firstMessage = firstUpdate.message else {
+            return nil
+        }
         let albumPhotos = sortedUpdates.compactMap { update in
             update.message?.photo.flatMap(selectPrimaryPhoto(from:))
         }
