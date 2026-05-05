@@ -66,11 +66,13 @@ final class BotOrchestrator: @unchecked Sendable {
     }
 
     func run() async {
-        var currentOffset = await restoreState()
+        let restored = await restoreState()
+        var currentOffset = restored.offset
         let lastBackupOffset = LockedValue(currentOffset ?? 0)
+        let backupsEnabled = restored.canBackup
 
         let backupTask = Task { [weak self] in
-            guard let self, let persistence = self.persistence else { return }
+            guard let self, let persistence = self.persistence, backupsEnabled else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(Self.backupIntervalSeconds) * 1_000_000_000)
                 let offset = lastBackupOffset.value
@@ -121,19 +123,24 @@ final class BotOrchestrator: @unchecked Sendable {
         backupTask.cancel()
     }
 
-    private func restoreState() async -> Int? {
-        guard let persistence else { return nil }
+    private struct RestoreResult {
+        let offset: Int?
+        let canBackup: Bool
+    }
+
+    private func restoreState() async -> RestoreResult {
+        guard let persistence else { return RestoreResult(offset: nil, canBackup: true) }
         do {
             guard let snapshot = try await persistence.loadState() else {
                 logger.info("no saved state found, starting fresh")
-                return nil
+                return RestoreResult(offset: nil, canBackup: true)
             }
             await state.restoreFromSnapshot(snapshot)
             logger.info("state restored (offset: \(snapshot.telegramUpdateOffset), chats: \(snapshot.contexts.count))")
-            return snapshot.telegramUpdateOffset
+            return RestoreResult(offset: snapshot.telegramUpdateOffset, canBackup: true)
         } catch {
-            logger.error("state restore failed: \(error)")
-            return nil
+            logger.error("state restore failed; backups disabled to avoid overwriting saved state: \(error)")
+            return RestoreResult(offset: nil, canBackup: false)
         }
     }
 

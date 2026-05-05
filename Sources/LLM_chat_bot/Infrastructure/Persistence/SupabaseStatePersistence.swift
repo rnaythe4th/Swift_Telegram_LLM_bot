@@ -47,12 +47,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
             timeoutSeconds: 15,
             validStatusCodes: 200..<300
         )
-        do {
-            let rows = try await network.send(spec, as: [SupabaseRow].self, decoder: decoder)
-            return rows.first?.data
-        } catch {
-            return nil
-        }
+        let rows = try await network.send(spec, as: [SupabaseRow].self, decoder: decoder)
+        return rows.first?.data
     }
 
     private var authHeaders: [String: String] {
