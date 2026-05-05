@@ -263,7 +263,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                     .init(
                         chatID: chatKey.chatID,
                         messageID: currentPlaceholder.message_id,
-                        text: "❌ Ошибка: \(error)",
+                        text: "❌ Ошибка генерации. Попробуйте ещё раз или смените провайдера/модель.",
                         replyMarkup: emptyMarkup
                     )
                 )

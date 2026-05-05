@@ -84,7 +84,7 @@ final class BotOrchestrator: @unchecked Sendable {
                     success = "✅ Успешно"
                 } catch {
                     self.logger.error("state backup failed: \(error)")
-                    success = "❌ Ошибка: \(error)"
+                    success = "❌ Ошибка"
                 }
                 let chatKeys = await self.state.chatsWithBackupNotify()
                 for chatKey in chatKeys {
