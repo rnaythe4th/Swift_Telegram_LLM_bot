@@ -25,5 +25,7 @@ protocol TelegramGatewayPort: Sendable {
     func answerCallback(callbackQueryID: String, text: String?) async throws
     func getFile(fileID: String) async throws -> TelegramFile
     func downloadFile(filePath: String) async throws -> Data
+    func sendInvoice(_ request: SendInvoiceRequest) async throws
+    func answerPreCheckoutQuery(queryID: String, ok: Bool, errorMessage: String?) async throws
 }
 

@@ -7,6 +7,7 @@ final class BotCommandHandler: @unchecked Sendable {
     private let botUsername: String
     private let formatOptions: String
     private let menuHandler: BotMenuHandler
+    private let modelPriceMonitor: ModelPriceMonitor?
 
     init(
         telegram: TelegramGatewayPort,
@@ -14,7 +15,8 @@ final class BotCommandHandler: @unchecked Sendable {
         gateways: ProviderGatewayRegistry,
         botUsername: String,
         formatOptions: String,
-        menuHandler: BotMenuHandler
+        menuHandler: BotMenuHandler,
+        modelPriceMonitor: ModelPriceMonitor? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -22,6 +24,7 @@ final class BotCommandHandler: @unchecked Sendable {
         self.botUsername = botUsername
         self.formatOptions = formatOptions
         self.menuHandler = menuHandler
+        self.modelPriceMonitor = modelPriceMonitor
     }
 
     func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?) async throws -> Bool {
@@ -88,6 +91,9 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             try await handleTenant(chatKey: chatKey, argument: parsed.argument)
 
+        case .buy:
+            try await handleBuy(chatKey: chatKey, fromUser: fromUser)
+
         case .start:
             try await handleStart(chatKey: chatKey)
 
@@ -125,6 +131,14 @@ final class BotCommandHandler: @unchecked Sendable {
                     <i>Пример:</i> <code>/model openai/gpt-4o</code>
                     Готовые варианты — /menu → Модель
                     """)
+                return
+            }
+            let hasAccess = await state.hasFullModelAccess(username: fromUser?.username)
+            let effectiveFree = await state.effectiveFreeModelIDs()
+            if !hasAccess, let eff = effectiveFree, !eff.contains(trimmed) {
+                let price = await state.starsPrice()
+                let buyHint = price.map { "\n\nКупить полный доступ (\($0) ⭐): /buy" } ?? "\n\nОформите полный доступ: /buy"
+                try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(trimmed)</b> — модель с полным доступом.\(buyHint)")
                 return
             }
             let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: trimmed)
@@ -242,7 +256,7 @@ final class BotCommandHandler: @unchecked Sendable {
             try await sendUserFeedback(chatKey: chatKey, text: "🧠 Reasoning · <b>\(current?.rawValue ?? "выкл")</b>")
 
         case .menu:
-            await menuHandler.sendMenu(chatKey: chatKey)
+            await menuHandler.sendMenu(chatKey: chatKey, username: fromUser?.username)
 
         case .reset:
             await state.resetChat(chatKey: chatKey)
@@ -663,6 +677,27 @@ final class BotCommandHandler: @unchecked Sendable {
                 ? "✓ Chat <code>\(chatID)</code> назначен @\(username)."
                 : "Tenant @\(username) не найден.")
 
+        case "freemodels":
+            try await handleFreeModels(chatKey: chatKey, subcommand: arg1, value: arg2)
+
+        case "price":
+            if arg1.isEmpty {
+                let price = await state.starsPrice()
+                if let price {
+                    try await sendUserFeedback(chatKey: chatKey, text: "💫 Цена доступа: <b>\(price) Stars</b>")
+                } else {
+                    try await sendUserFeedback(chatKey: chatKey, text: "💫 Продажа доступа отключена.")
+                }
+            } else if arg1 == "0" || arg1.lowercased() == "off" {
+                await state.setStarsPrice(nil)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Продажа доступа отключена.")
+            } else if let price = Int(arg1), price > 0 {
+                await state.setStarsPrice(price)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Цена доступа: <b>\(price) Stars</b>")
+            } else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant price &lt;число&gt;</code> или <code>/tenant price 0</code> (отключить)")
+            }
+
         default:
             try await sendUserFeedback(chatKey: chatKey, text: """
                 <b>🏢 Управление tenants</b>
@@ -671,8 +706,104 @@ final class BotCommandHandler: @unchecked Sendable {
                 <code>/tenant remove @username</code> — удалить
                 <code>/tenant list</code> — список
                 <code>/tenant assign @username &lt;chatID&gt;</code> — назначить чат
+                <code>/tenant price &lt;число&gt;</code> — цена доступа в Stars (0 = отключить)
+                <code>/tenant freemodels add &lt;id&gt;</code> — добавить бесплатную модель
+                <code>/tenant freemodels remove &lt;id&gt;</code> — удалить
+                <code>/tenant freemodels list</code> — список (пусто = все бесплатны)
+                <code>/tenant freemodels available</code> — бесплатные модели OpenRouter сейчас
                 """)
         }
+    }
+
+    private func handleFreeModels(chatKey: ChatKey, subcommand: String, value: String) async throws {
+        switch subcommand.lowercased() {
+        case "add":
+            let id = value.trimmingCharacters(in: .whitespaces)
+            guard !id.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant freemodels add &lt;model-id&gt;</code>")
+                return
+            }
+            let added = await state.addFreeModel(id)
+            try await sendUserFeedback(chatKey: chatKey, text: added
+                ? "✓ Бесплатная модель добавлена: <code>\(id)</code>"
+                : "Модель <code>\(id)</code> уже в списке.")
+
+        case "remove":
+            let id = value.trimmingCharacters(in: .whitespaces)
+            guard !id.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant freemodels remove &lt;model-id&gt;</code>")
+                return
+            }
+            let removed = await state.removeFreeModel(id)
+            try await sendUserFeedback(chatKey: chatKey, text: removed
+                ? "✓ Модель <code>\(id)</code> удалена из бесплатных."
+                : "Модель <code>\(id)</code> не найдена в списке.")
+
+        case "list":
+            let ids = await state.freeModelIDs()
+            if ids.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "💡 Список бесплатных моделей пуст — все модели доступны всем.")
+            } else {
+                let list = ids.enumerated().map { "\($0.offset + 1). <code>\($0.element)</code>" }.joined(separator: "\n")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>Бесплатные модели</b> (\(ids.count))\n\(list)")
+            }
+
+        case "available":
+            guard let monitor = modelPriceMonitor else {
+                try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Мониторинг моделей недоступен.")
+                return
+            }
+            try await sendUserFeedback(chatKey: chatKey, text: "⏳ Запрашиваю список бесплатных моделей OpenRouter…")
+            let freeModels = try await monitor.fetchCurrentFreeModels()
+            if freeModels.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "Бесплатных моделей на OpenRouter сейчас нет.")
+            } else {
+                let list = freeModels.map { "• <code>\($0.id)</code>" }.joined(separator: "\n")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>🆓 Бесплатные модели OpenRouter сейчас</b> (\(freeModels.count))\n\(list)")
+            }
+
+        default:
+            let ids = await state.freeModelIDs()
+            let status = ids.isEmpty
+                ? "<i>Список пуст — все модели доступны всем.</i>"
+                : ids.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                <b>🆓 Бесплатные модели</b>
+
+                \(status)
+
+                <code>/tenant freemodels add &lt;id&gt;</code>
+                <code>/tenant freemodels remove &lt;id&gt;</code>
+                <code>/tenant freemodels list</code>
+                <code>/tenant freemodels available</code> — актуальный список от OpenRouter
+                """)
+        }
+    }
+
+    private func handleBuy(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+        guard let price = await state.starsPrice(), price > 0 else {
+            try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Продажа доступа сейчас недоступна.")
+            return
+        }
+        guard let username = fromUser?.username else {
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                ⚠️ <b>Для покупки нужен username в Telegram.</b>
+
+                Установите @username в настройках Telegram и попробуйте снова.
+                """)
+            return
+        }
+        if await state.isTenant(username: username) {
+            try await sendUserFeedback(chatKey: chatKey, text: "✅ У вас уже есть доступ к боту.")
+            return
+        }
+        try await telegram.sendInvoice(.init(
+            chatID: chatKey.chatID,
+            title: "Доступ к боту",
+            description: "Персональная копия ИИ-бота — единоразовая покупка",
+            payload: "buy_access",
+            starsAmount: price
+        ))
     }
 
     private func handleHistory(chatKey: ChatKey) async throws {

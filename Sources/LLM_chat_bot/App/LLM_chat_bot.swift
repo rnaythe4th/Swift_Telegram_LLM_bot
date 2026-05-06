@@ -84,6 +84,14 @@ struct BlueprintBotApp {
         let openrouter = OpenRouterProviderAdapter(network: network, apiKey: config.routerApiKey)
         let deepseek = DeepSeekProviderAdapter(network: network, apiKey: config.deepseekKey)
 
+        let modelPriceMonitor = ModelPriceMonitor(
+            network: network,
+            apiKey: config.routerApiKey,
+            state: state,
+            telegram: telegram,
+            logger: logger
+        )
+
         let orchestrator = BotOrchestrator(
             telegram: telegram,
             state: state,
@@ -97,7 +105,8 @@ struct BlueprintBotApp {
             persistence: persistence,
             logger: logger,
             botUsername: botUsername,
-            formatOptions: formatOptions
+            formatOptions: formatOptions,
+            modelPriceMonitor: modelPriceMonitor
         )
         
         logger.info("Bot started as @\(botUsername)")

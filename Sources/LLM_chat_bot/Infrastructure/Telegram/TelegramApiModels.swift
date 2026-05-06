@@ -24,6 +24,7 @@ struct TelegramAPIUpdate: Decodable {
     let update_id: Int
     let message: TelegramAPIMessage?
     let callback_query: TelegramAPICallbackQuery?
+    let pre_checkout_query: TelegramAPIPreCheckoutQuery?
 }
 
 final class TelegramAPIMessage: Decodable, @unchecked Sendable {
@@ -39,6 +40,7 @@ final class TelegramAPIMessage: Decodable, @unchecked Sendable {
     let media_group_id: String?
     let reply_to_message: TelegramAPIMessage?
     let photo: [TelegramAPIPhotoSize]?
+    let successful_payment: TelegramAPISuccessfulPayment?
 }
 
 struct TelegramAPIVoice: Decodable, Sendable {
@@ -126,4 +128,41 @@ struct AnswerCallbackQueryBody: Codable {
     let callback_query_id: String
     let text: String?
     let show_alert: Bool?
+}
+
+struct TelegramAPIPreCheckoutQuery: Decodable, Sendable {
+    let id: String
+    let from: TelegramAPIUser
+    let currency: String
+    let total_amount: Int
+    let invoice_payload: String
+}
+
+struct TelegramAPISuccessfulPayment: Decodable, Sendable {
+    let currency: String
+    let total_amount: Int
+    let invoice_payload: String
+    let telegram_payment_charge_id: String
+    let provider_payment_charge_id: String
+}
+
+struct TelegramLabeledPrice: Codable, Sendable {
+    let label: String
+    let amount: Int
+}
+
+struct TelegramSendInvoiceBody: Codable {
+    let chat_id: Int
+    let title: String
+    let description: String
+    let payload: String
+    let currency: String
+    let prices: [TelegramLabeledPrice]
+    let provider_token: String
+}
+
+struct TelegramAnswerPreCheckoutQueryBody: Codable {
+    let pre_checkout_query_id: String
+    let ok: Bool
+    let error_message: String?
 }

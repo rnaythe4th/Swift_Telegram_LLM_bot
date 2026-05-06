@@ -88,6 +88,11 @@ actor ChatContextStore {
     private let initialDefaultHistoryLength: Int
 
     private var _pendingInputs: [ChatKey: PendingInput] = [:]
+    private var _starsPrice: Int? = nil
+    private var _pendingStarsPriceInputs: [ChatKey: Int] = [:]
+    private var _pendingFreeModelInputs: [ChatKey: Int] = [:]
+    private var _freeModelIDs: [String] = []
+    private var _openRouterFreeModelIDs: Set<String>? = nil
 
     init(
         ownerUsername: String,
@@ -820,6 +825,112 @@ actor ChatContextStore {
         _pendingInputs[chatKey] != nil
     }
 
+    // MARK: - Stars price
+
+    func starsPrice() -> Int? { _starsPrice }
+
+    func setStarsPrice(_ price: Int?) {
+        _starsPrice = price.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    func setPendingStarsPriceInput(menuMessageID: Int, chatKey: ChatKey) {
+        _pendingStarsPriceInputs[chatKey] = menuMessageID
+    }
+
+    func consumePendingStarsPriceInput(chatKey: ChatKey) -> Int? {
+        _pendingStarsPriceInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasPendingStarsPriceInput(chatKey: ChatKey) -> Bool {
+        _pendingStarsPriceInputs[chatKey] != nil
+    }
+
+    func clearPendingStarsPriceInput(chatKey: ChatKey) {
+        _pendingStarsPriceInputs.removeValue(forKey: chatKey)
+    }
+
+    // MARK: - Pending free model input
+
+    func setPendingFreeModelInput(menuMessageID: Int, chatKey: ChatKey) {
+        _pendingFreeModelInputs[chatKey] = menuMessageID
+    }
+
+    func consumePendingFreeModelInput(chatKey: ChatKey) -> Int? {
+        _pendingFreeModelInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasPendingFreeModelInput(chatKey: ChatKey) -> Bool {
+        _pendingFreeModelInputs[chatKey] != nil
+    }
+
+    func clearPendingFreeModelInput(chatKey: ChatKey) {
+        _pendingFreeModelInputs.removeValue(forKey: chatKey)
+    }
+
+    // MARK: - Free model access
+
+    func freeModelIDs() -> [String] { _freeModelIDs }
+
+    func setFreeModelIDs(_ ids: [String]) {
+        _freeModelIDs = ids.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    @discardableResult
+    func addFreeModel(_ id: String) -> Bool {
+        let trimmed = id.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !_freeModelIDs.contains(trimmed) else { return false }
+        _freeModelIDs.append(trimmed)
+        return true
+    }
+
+    @discardableResult
+    func removeFreeModel(_ id: String) -> Bool {
+        let before = _freeModelIDs.count
+        _freeModelIDs.removeAll { $0 == id }
+        return _freeModelIDs.count < before
+    }
+
+    func effectiveFreeModelIDs() -> Set<String>? {
+        let pinned = _freeModelIDs
+        let openRouter = _openRouterFreeModelIDs
+        guard !pinned.isEmpty || openRouter != nil else { return nil }
+        var result = Set(pinned)
+        if let openRouter { result.formUnion(openRouter) }
+        return result
+    }
+
+    func isFreeModel(_ id: String) -> Bool {
+        guard let effective = effectiveFreeModelIDs() else { return true }
+        return effective.contains(id)
+    }
+
+    func firstFreeModel() -> String? {
+        effectiveFreeModelIDs()?.first
+    }
+
+    func openRouterFreeModelIDs() -> Set<String>? { _openRouterFreeModelIDs }
+
+    func updateOpenRouterFreeModelIDs(_ ids: Set<String>) {
+        _openRouterFreeModelIDs = ids
+    }
+
+    func superAdminPrivateChats() -> [ChatKey] {
+        contexts.keys.filter { $0.chatID > 0 && chatOwnership[$0.chatID] == defaultOwnerUsername }.map { $0 }
+    }
+
+    func hasFullModelAccess(username: String?) -> Bool {
+        guard let u = username?.lowercased() else { return false }
+        return tenants[u] != nil
+    }
+
+    func model(chatKey: ChatKey) -> String {
+        ensure(chatKey: chatKey).model
+    }
+
+    func setModelOnly(chatKey: ChatKey, model: String) {
+        mutate(chatKey: chatKey) { $0.model = model }
+    }
+
     // MARK: - Chat listings
 
     func privateChats(ownedBy owner: String? = nil) -> [(chatID: Int, threadID: Int64)] {
@@ -838,6 +949,23 @@ actor ChatContextStore {
 
     func chatsWithBackupNotify() -> [ChatKey] {
         contexts.filter { $0.value.backupNotify }.map(\.key)
+    }
+
+    func chatsUsing(model: String) -> [ChatKey] {
+        contexts.filter { $0.value.model == model }.map(\.key)
+    }
+
+    func allTrackedModelIDs() -> Set<String> {
+        var ids = Set<String>()
+        for tenant in tenants.values {
+            ids.insert(tenant.defaultModel)
+            tenant.modelPresets.forEach { ids.insert($0.value) }
+        }
+        for ctx in contexts.values {
+            ids.insert(ctx.model)
+            ctx.chatModelPresets.forEach { ids.insert($0.value) }
+        }
+        return ids
     }
 
     func history(chatKey: ChatKey) -> [ChatMessage] {
@@ -920,7 +1048,9 @@ actor ChatContextStore {
             contexts: ctxSnapshots,
             tenants: tenantSnapshots,
             chatOwnership: ownershipStrings,
-            telegramUpdateOffset: telegramUpdateOffset
+            telegramUpdateOffset: telegramUpdateOffset,
+            starsPrice: _starsPrice,
+            freeModelIDs: _freeModelIDs.isEmpty ? nil : _freeModelIDs
         )
     }
 
@@ -1016,5 +1146,8 @@ actor ChatContextStore {
                 userTenantMap[userID] = owner
             }
         }
+
+        _starsPrice = snapshot.starsPrice
+        _freeModelIDs = snapshot.freeModelIDs ?? []
     }
 }

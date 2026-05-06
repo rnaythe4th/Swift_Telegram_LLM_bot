@@ -76,6 +76,27 @@ final class GenerationCoordinator: @unchecked Sendable {
     
     private func processContent(message: TelegramMessage, content: UserInputContent, chatKey: ChatKey) async throws {
         let username = message.from?.username
+
+        // Enforce free model restriction for non-tenants
+        if let effectiveFree = await state.effectiveFreeModelIDs(),
+           !(await state.hasFullModelAccess(username: username)) {
+            let currentModel = await state.model(chatKey: chatKey)
+            if !effectiveFree.contains(currentModel) {
+                guard let firstFree = effectiveFree.first else {
+                    try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Бесплатные модели не настроены. Обратитесь к администратору.")
+                    return
+                }
+                await state.setModelOnly(chatKey: chatKey, model: firstFree)
+                _ = try? await telegram.sendMessage(.init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: "ℹ️ Это платная модель. Переключаю на бесплатную — <code>\(firstFree)</code>\n\nДля доступа к платным моделям: /buy",
+                    replyMarkup: nil
+                ))
+            }
+        }
+
         let generationID = await sessionRegistry.register(chatKey: chatKey)
 
         let typingTask = Task {

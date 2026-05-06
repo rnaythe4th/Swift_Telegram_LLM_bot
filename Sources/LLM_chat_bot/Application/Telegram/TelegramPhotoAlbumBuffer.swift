@@ -182,6 +182,6 @@ struct TelegramPhotoAlbumBuffer {
             album_photos: albumPhotos
         )
         
-        return TelegramUpdate(update_id: firstUpdate.update_id, message: mergedMessage, callback_query: nil)
+        return TelegramUpdate(update_id: firstUpdate.update_id, message: mergedMessage, callback_query: nil, pre_checkout_query: nil)
     }
 }

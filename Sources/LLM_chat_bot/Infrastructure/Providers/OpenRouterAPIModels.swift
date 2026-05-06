@@ -73,6 +73,25 @@ struct OpenRouterResponseUsage: Codable {
     let server_tool_use: ServerToolUse?
 }
 
+struct OpenRouterModelsResponse: Decodable {
+    let data: [OpenRouterModelInfo]
+}
+
+struct OpenRouterModelInfo: Decodable {
+    let id: String
+    let pricing: OpenRouterModelPricing?
+
+    var isFree: Bool {
+        guard let p = pricing else { return false }
+        return p.prompt == "0" && p.completion == "0"
+    }
+}
+
+struct OpenRouterModelPricing: Decodable {
+    let prompt: String
+    let completion: String
+}
+
 struct OpenRouterStreamChunk: Codable {
     struct Choice: Codable {
         struct Delta: Codable {

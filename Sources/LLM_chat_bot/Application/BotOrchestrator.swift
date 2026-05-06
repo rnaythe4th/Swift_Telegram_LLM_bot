@@ -11,6 +11,7 @@ final class BotOrchestrator: @unchecked Sendable {
     private let menuHandler: BotMenuHandler
     private let updateDispatcher = ChatUpdateDispatcher()
     private var photoAlbumBuffer = TelegramPhotoAlbumBuffer()
+    private let modelPriceMonitor: ModelPriceMonitor?
 
     private static let backupIntervalSeconds: Int64 = 60
 
@@ -23,12 +24,14 @@ final class BotOrchestrator: @unchecked Sendable {
         persistence: StatePersistencePort?,
         logger: LoggerPort,
         botUsername: String,
-        formatOptions: String
+        formatOptions: String,
+        modelPriceMonitor: ModelPriceMonitor? = nil
     ) {
         self.telegram = telegram
         self.state = state
         self.persistence = persistence
         self.logger = logger
+        self.modelPriceMonitor = modelPriceMonitor
 
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
         let menuHandler = BotMenuHandler(
@@ -36,7 +39,8 @@ final class BotOrchestrator: @unchecked Sendable {
             state: state,
             gateways: gatewayRegistry,
             logger: logger,
-            formatOptions: formatOptions
+            formatOptions: formatOptions,
+            modelPriceMonitor: modelPriceMonitor
         )
 
         self.menuHandler = menuHandler
@@ -55,7 +59,8 @@ final class BotOrchestrator: @unchecked Sendable {
             gateways: gatewayRegistry,
             botUsername: botUsername,
             formatOptions: formatOptions,
-            menuHandler: menuHandler
+            menuHandler: menuHandler,
+            modelPriceMonitor: modelPriceMonitor
         )
         self.generationCoordinator = GenerationCoordinator(
             telegram: telegram,
@@ -73,6 +78,10 @@ final class BotOrchestrator: @unchecked Sendable {
         var currentOffset = restored.offset
         let lastBackupOffset = LockedValue(currentOffset ?? 0)
         let backupsEnabled = restored.canBackup
+
+        let priceMonitorTask = Task { [weak self] in
+            await self?.modelPriceMonitor?.run()
+        }
 
         let backupTask = Task { [weak self] in
             guard let self, let persistence = self.persistence, backupsEnabled else { return }
@@ -123,6 +132,7 @@ final class BotOrchestrator: @unchecked Sendable {
             }
         }
 
+        priceMonitorTask.cancel()
         backupTask.cancel()
     }
 
@@ -155,6 +165,13 @@ final class BotOrchestrator: @unchecked Sendable {
             return
         }
 
+        if let preCheckout = update.pre_checkout_query {
+            Task {
+                await self.handlePreCheckoutQuery(preCheckout)
+            }
+            return
+        }
+
         guard let message = update.message else { return }
         let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
 
@@ -179,38 +196,41 @@ final class BotOrchestrator: @unchecked Sendable {
         }
     }
 
+    private func handlePreCheckoutQuery(_ query: TelegramPreCheckoutQuery) async {
+        do {
+            let price = await state.starsPrice()
+            if let price, query.total_amount == price {
+                try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: true, errorMessage: nil)
+            } else {
+                try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Цена изменилась. Попробуйте снова с командой /buy.")
+            }
+        } catch {
+            logger.error("answerPreCheckoutQuery failed: \(error)")
+            try? await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Внутренняя ошибка. Попробуйте позже.")
+        }
+    }
+
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
         let senderUsername = message.from?.username
         let senderUserID = message.from?.id
 
-        // Auto-assign unowned chat to tenant if sender is a registered tenant or whitelisted user
-        await state.autoAssignIfNeeded(chatID: chatKey.chatID, senderUsername: senderUsername, senderUserID: senderUserID)
+        // Successful payment — handle before access gate since payer isn't a tenant yet
+        if let payment = message.successful_payment {
+            await handleSuccessfulPayment(message: message, payment: payment)
+            return
+        }
 
-        if message.chat.type == "private" {
-            let userID = senderUserID ?? 0
-            let isAdmin = await state.isAdmin(username: senderUsername, chatID: chatKey.chatID)
-            let isWhitelisted = await state.isWhitelisted(userID: userID, chatID: chatKey.chatID)
-
-            guard isAdmin || isWhitelisted else {
-                let ownerUsername = await state.effectiveOwnerUsername(chatID: chatKey.chatID)
-                _ = try? await telegram.sendMessage(
-                    .init(
-                        chatID: chatKey.chatID,
-                        threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                        replyTo: nil,
-                        text: """
-                        🔒 <b>Доступ закрыт</b>
-
-                        Ваш ID · <code>\(userID)</code>
-
-                        Чтобы получить доступ, отправьте этот ID администратору · @\(ownerUsername)
-                        """,
-                        replyMarkup: nil
-                    )
-                )
+        // /buy and /start are allowed before the access gate
+        if let text = message.text {
+            let isBuyOrStart = text.hasPrefix("/buy") || text.hasPrefix("/start")
+            if isBuyOrStart {
+                _ = try? await commandHandler.handleIfCommand(text: text, chatKey: chatKey, fromUser: message.from)
                 return
             }
         }
+
+        // Auto-assign unowned private chat to sender's tenant if they own one
+        await state.autoAssignIfNeeded(chatID: chatKey.chatID, senderUsername: senderUsername, senderUserID: senderUserID)
 
         if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey, fromUser: message.from) {
             return
@@ -221,6 +241,35 @@ final class BotOrchestrator: @unchecked Sendable {
         }
 
         try await generationCoordinator.handleIfNeeded(message: message, chatKey: chatKey)
+    }
+
+    private func handleSuccessfulPayment(message: TelegramMessage, payment: TelegramSuccessfulPayment) async {
+        guard let username = message.from?.username else {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: message.chat.id,
+                threadID: message.message_thread_id,
+                replyTo: nil,
+                text: "✅ Оплата получена! Но у вас нет @username в Telegram — обратитесь к администратору для активации доступа.",
+                replyMarkup: nil
+            ))
+            return
+        }
+        await state.registerTenant(username: username)
+        _ = try? await telegram.sendMessage(.init(
+            chatID: message.chat.id,
+            threadID: message.message_thread_id,
+            replyTo: nil,
+            text: """
+            ✅ <b>Оплата получена!</b>
+
+            Добро пожаловать, @\(username)!
+            Ваша персональная копия бота активирована.
+
+            Используйте /menu для настройки или просто начните общение.
+            """,
+            replyMarkup: nil
+        ))
+        logger.info("new tenant registered via Stars payment: @\(username), amount: \(payment.total_amount) XTR")
     }
 }
 

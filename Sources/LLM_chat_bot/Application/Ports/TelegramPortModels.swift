@@ -4,6 +4,7 @@ struct TelegramUpdate: Codable, Sendable {
     let update_id: Int
     let message: TelegramMessage?
     let callback_query: CallbackQuery?
+    let pre_checkout_query: TelegramPreCheckoutQuery?
 }
 
 final class TelegramMessage: Codable, @unchecked Sendable {
@@ -21,7 +22,8 @@ final class TelegramMessage: Codable, @unchecked Sendable {
     let photo: [PhotoSize]?
     // Internal marker for a synthetic merged album: one primary photo per album item.
     let album_photos: [PhotoSize]?
-    
+    let successful_payment: TelegramSuccessfulPayment?
+
     init(
         message_id: Int,
         from: TelegramUser?,
@@ -35,7 +37,8 @@ final class TelegramMessage: Codable, @unchecked Sendable {
         media_group_id: String?,
         reply_to_message: TelegramMessage?,
         photo: [PhotoSize]?,
-        album_photos: [PhotoSize]? = nil
+        album_photos: [PhotoSize]? = nil,
+        successful_payment: TelegramSuccessfulPayment? = nil
     ) {
         self.message_id = message_id
         self.from = from
@@ -50,6 +53,7 @@ final class TelegramMessage: Codable, @unchecked Sendable {
         self.reply_to_message = reply_to_message
         self.photo = photo
         self.album_photos = album_photos
+        self.successful_payment = successful_payment
     }
 }
 
@@ -120,6 +124,30 @@ struct MaybeInaccessibleMessage: Codable, Sendable {
     let date: Int
     let text: String?
     let message_thread_id: Int64?
+}
+
+struct TelegramPreCheckoutQuery: Codable, Sendable {
+    let id: String
+    let from: TelegramUser
+    let currency: String
+    let total_amount: Int
+    let invoice_payload: String
+}
+
+struct TelegramSuccessfulPayment: Codable, Sendable {
+    let currency: String
+    let total_amount: Int
+    let invoice_payload: String
+    let telegram_payment_charge_id: String
+    let provider_payment_charge_id: String
+}
+
+struct SendInvoiceRequest: Sendable {
+    let chatID: Int
+    let title: String
+    let description: String
+    let payload: String
+    let starsAmount: Int
 }
 
 enum MessageSplitter {

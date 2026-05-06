@@ -274,6 +274,46 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         return segments.joined(separator: "/")
     }
 
+    func sendInvoice(_ request: SendInvoiceRequest) async throws {
+        let body = TelegramSendInvoiceBody(
+            chat_id: request.chatID,
+            title: request.title,
+            description: request.description,
+            payload: request.payload,
+            currency: "XTR",
+            prices: [TelegramLabeledPrice(label: request.title, amount: request.starsAmount)],
+            provider_token: ""
+        )
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/sendInvoice",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 30,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "sendInvoice", statusCode: raw.statusCode, data: raw.data)
+    }
+
+    func answerPreCheckoutQuery(queryID: String, ok: Bool, errorMessage: String?) async throws {
+        let body = TelegramAnswerPreCheckoutQueryBody(
+            pre_checkout_query_id: queryID,
+            ok: ok,
+            error_message: errorMessage
+        )
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/answerPreCheckoutQuery",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 10,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "answerPreCheckoutQuery", statusCode: raw.statusCode, data: raw.data)
+    }
+
     private func decodeEnvelope<T: Decodable>(action: String, statusCode: Int, data: Data) throws -> TelegramResponse<T> {
         do {
             return try JSONDecoder().decode(TelegramResponse<T>.self, from: data)
@@ -320,7 +360,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         TelegramUpdate(
             update_id: update.update_id,
             message: update.message.map(map),
-            callback_query: update.callback_query.map(map)
+            callback_query: update.callback_query.map(map),
+            pre_checkout_query: update.pre_checkout_query.map(map)
         )
     }
     
@@ -337,7 +378,28 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             message_thread_id: message.message_thread_id,
             media_group_id: message.media_group_id,
             reply_to_message: message.reply_to_message.map(map),
-            photo: message.photo?.map(map)
+            photo: message.photo?.map(map),
+            successful_payment: message.successful_payment.map(map)
+        )
+    }
+
+    private func map(_ preCheckout: TelegramAPIPreCheckoutQuery) -> TelegramPreCheckoutQuery {
+        TelegramPreCheckoutQuery(
+            id: preCheckout.id,
+            from: map(preCheckout.from),
+            currency: preCheckout.currency,
+            total_amount: preCheckout.total_amount,
+            invoice_payload: preCheckout.invoice_payload
+        )
+    }
+
+    private func map(_ payment: TelegramAPISuccessfulPayment) -> TelegramSuccessfulPayment {
+        TelegramSuccessfulPayment(
+            currency: payment.currency,
+            total_amount: payment.total_amount,
+            invoice_payload: payment.invoice_payload,
+            telegram_payment_charge_id: payment.telegram_payment_charge_id,
+            provider_payment_charge_id: payment.provider_payment_charge_id
         )
     }
     
