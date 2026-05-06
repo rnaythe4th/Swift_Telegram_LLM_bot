@@ -93,6 +93,7 @@ actor ChatContextStore {
     private var _pendingFreeModelInputs: [ChatKey: Int] = [:]
     private var _freeModelIDs: [String] = []
     private var _openRouterFreeModelIDs: Set<String>? = nil
+    private var _openRouterModelPrices: [String: ModelPriceInfo] = [:]
 
     init(
         ownerUsername: String,
@@ -912,6 +913,14 @@ actor ChatContextStore {
 
     func updateOpenRouterFreeModelIDs(_ ids: Set<String>) {
         _openRouterFreeModelIDs = ids
+    }
+
+    func openRouterModelPrice(for id: String) -> ModelPriceInfo? { _openRouterModelPrices[id] }
+
+    func openRouterModelPrices() -> [String: ModelPriceInfo] { _openRouterModelPrices }
+
+    func updateOpenRouterModelPrices(_ prices: [String: ModelPriceInfo]) {
+        for (k, v) in prices { _openRouterModelPrices[k] = v }
     }
 
     func superAdminPrivateChats() -> [ChatKey] {

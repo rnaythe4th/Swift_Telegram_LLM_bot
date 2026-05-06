@@ -79,6 +79,8 @@ final class BotOrchestrator: @unchecked Sendable {
         let lastBackupOffset = LockedValue(currentOffset ?? 0)
         let backupsEnabled = restored.canBackup
 
+        await modelPriceMonitor?.performInitialFetch()
+
         let priceMonitorTask = Task { [weak self] in
             await self?.modelPriceMonitor?.run()
         }

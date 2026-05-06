@@ -27,6 +27,11 @@ enum PresetCategory: String, Sendable {
     }
 }
 
+struct ModelPriceInfo: Sendable {
+    let inputPerToken: Double
+    let outputPerToken: Double
+}
+
 struct PendingInput: Sendable {
     enum Scope: Sendable {
         case global

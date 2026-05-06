@@ -162,6 +162,10 @@ final class BotMenuHandler: @unchecked Sendable {
         let value = components[1]
         let toastText: String
 
+        if pending.category == .model {
+            await modelPriceMonitor?.refreshPricesIfNeeded(for: value)
+        }
+
         switch (pending.scope, pending.kind) {
         case (.global, .add):
             _ = await state.addPreset(category: pending.category, display: display, value: value, chatID: chatKey.chatID)
@@ -804,6 +808,14 @@ final class BotMenuHandler: @unchecked Sendable {
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
+    static func formatPriceM(_ perTokenPrice: Double) -> String {
+        let perM = perTokenPrice * 1_000_000
+        if perM == 0 { return "0" }
+        if perM >= 1 { return String(format: "%.2f", perM) }
+        if perM >= 0.01 { return String(format: "%.4f", perM) }
+        return String(format: "%.6f", perM)
+    }
+
     private static func formatCost(_ cost: Double) -> String {
         if cost == 0 { return "0" }
         if cost < 0.0001 { return String(format: "%.6f", cost) }
@@ -866,6 +878,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let hasFullAccess = await state.hasFullModelAccess(username: username)
         let isSuperAdmin = await state.isSuperAdmin(username: username)
         let restrictionsActive = effectiveFreeModels != nil
+        let modelPrices = await state.openRouterModelPrices()
         var rows: [[InlineKeyboardButton]] = []
 
         func isEffectivelyFree(_ id: String) -> Bool {
@@ -930,10 +943,24 @@ final class BotMenuHandler: @unchecked Sendable {
             accessLine = "\n\n\(pinnedHint)"
         }
 
+        let allPresets = globalPresets + chatPresets
+        var priceSection = ""
+        if !modelPrices.isEmpty {
+            let lines = allPresets.compactMap { preset -> String? in
+                guard let price = modelPrices[preset.value] else { return nil }
+                let inP = Self.formatPriceM(price.inputPerToken)
+                let outP = Self.formatPriceM(price.outputPerToken)
+                return "• \(preset.display) — ⬇️$\(inP)/M | ⬆️$\(outP)/M"
+            }
+            if !lines.isEmpty {
+                priceSection = "\n\n" + lines.joined(separator: "\n")
+            }
+        }
+
         let text = """
         <b>🤖 Модель</b>
 
-        Текущая · <code>\(help.model)</code>\(legendLine)
+        Текущая · <code>\(help.model)</code>\(legendLine)\(priceSection)
 
         <i>Смена модели очистит историю.</i>
         Своя модель — /model &lt;id&gt;
@@ -1172,6 +1199,7 @@ final class BotMenuHandler: @unchecked Sendable {
     private func renderPresetManagement(category: PresetCategory, chatKey: ChatKey, canManageGlobal: Bool) async -> (String, InlineKeyboardMarkup) {
         let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
+        let modelPrices = category == .model ? await state.openRouterModelPrices() : [:]
 
         var text = "<b>📋 Управление пресетами · \(category.displayName)</b>\n\n"
 
@@ -1183,7 +1211,11 @@ final class BotMenuHandler: @unchecked Sendable {
                 if category == .role {
                     text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
                 } else {
-                    text += "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>\n"
+                    var line = "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>"
+                    if let price = modelPrices[preset.value] {
+                        line += " — ⬇️$\(Self.formatPriceM(price.inputPerToken))/M | ⬆️$\(Self.formatPriceM(price.outputPerToken))/M"
+                    }
+                    text += line + "\n"
                 }
             }
         }
@@ -1198,7 +1230,11 @@ final class BotMenuHandler: @unchecked Sendable {
                 if category == .role {
                     text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
                 } else {
-                    text += "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>\n"
+                    var line = "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>"
+                    if let price = modelPrices[preset.value] {
+                        line += " — ⬇️$\(Self.formatPriceM(price.inputPerToken))/M | ⬆️$\(Self.formatPriceM(price.outputPerToken))/M"
+                    }
+                    text += line + "\n"
                 }
             }
         }

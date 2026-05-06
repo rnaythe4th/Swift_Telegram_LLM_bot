@@ -28,8 +28,11 @@ actor ModelPriceMonitor {
         return response.data.filter { $0.isFree }
     }
 
-    func run() async {
+    func performInitialFetch() async {
         await checkPriceChanges()
+    }
+
+    func run() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: Self.checkIntervalNanos)
             guard !Task.isCancelled else { return }
@@ -37,9 +40,30 @@ actor ModelPriceMonitor {
         }
     }
 
+    func refreshPricesIfNeeded(for modelID: String) async {
+        if await state.openRouterModelPrice(for: modelID) != nil { return }
+        do {
+            let response = try await fetchOpenRouterModels()
+            await state.updateOpenRouterModelPrices(buildPriceMap(from: response))
+            await state.updateOpenRouterFreeModelIDs(Set(response.data.filter { $0.isFree }.map { $0.id }))
+        } catch {
+            logger.error("ModelPriceMonitor: on-demand price fetch failed: \(error)")
+        }
+    }
+
+    private func buildPriceMap(from response: OpenRouterModelsResponse) -> [String: ModelPriceInfo] {
+        response.data.reduce(into: [:]) { dict, model in
+            guard let p = model.pricing,
+                  let input = Double(p.prompt),
+                  let output = Double(p.completion) else { return }
+            dict[model.id] = ModelPriceInfo(inputPerToken: input, outputPerToken: output)
+        }
+    }
+
     private func checkPriceChanges() async {
         do {
             let response = try await fetchOpenRouterModels()
+            await state.updateOpenRouterModelPrices(buildPriceMap(from: response))
             let newFreeSet = Set(response.data.filter { $0.isFree }.map { $0.id })
 
             let previousFreeSet = await state.openRouterFreeModelIDs()

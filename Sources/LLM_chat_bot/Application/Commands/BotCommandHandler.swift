@@ -142,10 +142,19 @@ final class BotCommandHandler: @unchecked Sendable {
                 return
             }
             let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: trimmed)
+            if modelPriceMonitor != nil {
+                await modelPriceMonitor?.refreshPricesIfNeeded(for: trimmed)
+            }
+            var priceNote = ""
+            if let price = await state.openRouterModelPrice(for: trimmed) {
+                let inP = BotMenuHandler.formatPriceM(price.inputPerToken)
+                let outP = BotMenuHandler.formatPriceM(price.outputPerToken)
+                priceNote = "\n⬇️$\(inP)/M · ⬆️$\(outP)/M"
+            }
             try await sendUserFeedback(chatKey: chatKey, text: """
                 ✓ Модель: <code>\(changed.new)</code>
                 <i>Была:</i> <code>\(changed.old)</code>
-                История очищена.
+                История очищена.\(priceNote)
                 """)
 
         case .showTokens:
