@@ -43,12 +43,16 @@ final class BotCommandHandler: @unchecked Sendable {
         return true
     }
 
-    private func isAdmin(_ user: TelegramUser?) async -> Bool {
-        await state.isAdmin(username: user?.username)
+    private func isSuperAdmin(_ user: TelegramUser?) async -> Bool {
+        await state.isSuperAdmin(username: user?.username)
+    }
+
+    private func isAdmin(_ user: TelegramUser?, chatID: Int) async -> Bool {
+        await state.isAdmin(username: user?.username, chatID: chatID)
     }
 
     private func requireAdmin(_ user: TelegramUser?, chatKey: ChatKey) async throws -> Bool {
-        guard await isAdmin(user) else {
+        guard await isAdmin(user, chatID: chatKey.chatID) else {
             try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для администратора.")
             return false
         }
@@ -67,15 +71,22 @@ final class BotCommandHandler: @unchecked Sendable {
 
         case .chats:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
-            try await handleChats(chatKey: chatKey)
+            try await handleChats(chatKey: chatKey, fromUser: fromUser)
 
         case .users:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
-            try await handleUsers(chatKey: chatKey)
+            try await handleUsers(chatKey: chatKey, fromUser: fromUser)
 
         case .presets:
             guard try await requireAdmin(fromUser, chatKey: chatKey) else { return }
             try await handlePresets(chatKey: chatKey, argument: parsed.argument)
+
+        case .tenant:
+            guard await isSuperAdmin(fromUser) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                return
+            }
+            try await handleTenant(chatKey: chatKey, argument: parsed.argument)
 
         case .start:
             try await handleStart(chatKey: chatKey)
@@ -141,7 +152,7 @@ final class BotCommandHandler: @unchecked Sendable {
 
         case .help:
             let help = await state.fetchHelp(chatKey: chatKey)
-            let isAdminUser = await isAdmin(fromUser)
+            let isAdminUser = await isAdmin(fromUser, chatID: chatKey.chatID)
             let markup = InlineKeyboardMarkup(inline_keyboard: [
                 [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
                 [InlineKeyboardButton(text: "📘 Полная инструкция", callback_data: BotCallbackAction.faq.rawData)],
@@ -318,7 +329,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/whitelist add &lt;ID&gt;</code>")
                 return
             }
-            await state.addToWhitelist(userID: userID)
+            await state.addToWhitelist(userID: userID, chatID: chatKey.chatID)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Пользователь <code>\(userID)</code> добавлен в белый список.")
 
         case "remove":
@@ -326,11 +337,11 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/whitelist remove &lt;ID&gt;</code>")
                 return
             }
-            await state.removeFromWhitelist(userID: userID)
+            await state.removeFromWhitelist(userID: userID, chatID: chatKey.chatID)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Пользователь <code>\(userID)</code> удалён из белого списка.")
 
         case "list":
-            let ids = await state.listWhitelisted()
+            let ids = await state.listWhitelisted(chatID: chatKey.chatID)
             if ids.isEmpty {
                 try await sendUserFeedback(chatKey: chatKey, text: "Белый список пуст.")
             } else {
@@ -357,37 +368,37 @@ final class BotCommandHandler: @unchecked Sendable {
         switch subcommand.lowercased() {
         case "model":
             guard !value.isEmpty else {
-                let defs = await state.getDefaults()
+                let defs = await state.getDefaults(chatID: chatKey.chatID)
                 try await sendUserFeedback(chatKey: chatKey, text: "Модель по умолчанию · <code>\(defs.model)</code>")
                 return
             }
-            let new = await state.setDefaultModel(value)
+            let new = await state.setDefaultModel(value, chatID: chatKey.chatID)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Модель по умолчанию · <code>\(new)</code>")
 
         case "role":
             guard !value.isEmpty else {
-                let defs = await state.getDefaults()
+                let defs = await state.getDefaults(chatID: chatKey.chatID)
                 try await sendUserFeedback(chatKey: chatKey, text: "Роль по умолчанию:\n<blockquote expandable>\(defs.role)</blockquote>")
                 return
             }
-            let new = await state.setDefaultRole(value)
+            let new = await state.setDefaultRole(value, chatID: chatKey.chatID)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль по умолчанию обновлена:\n<blockquote expandable>\(new)</blockquote>")
 
         case "historylength":
             guard !value.isEmpty, let length = Int(value), (1...50).contains(length) else {
                 if value.isEmpty {
-                    let defs = await state.getDefaults()
+                    let defs = await state.getDefaults(chatID: chatKey.chatID)
                     try await sendUserFeedback(chatKey: chatKey, text: "Длина истории по умолчанию · <b>\(defs.historyLength)</b>")
                 } else {
                     try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50.</i>\n<i>Пример:</i> <code>/defaults historylength 11</code>")
                 }
                 return
             }
-            let new = await state.setDefaultHistoryLength(length)
+            let new = await state.setDefaultHistoryLength(length, chatID: chatKey.chatID)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Длина истории по умолчанию · <b>\(new)</b>")
 
         default:
-            let defs = await state.getDefaults()
+            let defs = await state.getDefaults(chatID: chatKey.chatID)
             try await sendUserFeedback(chatKey: chatKey, text: """
                 <b>⚙️ Значения по умолчанию</b>
 
@@ -406,9 +417,11 @@ final class BotCommandHandler: @unchecked Sendable {
         }
     }
 
-    private func handleChats(chatKey: ChatKey) async throws {
-        let groups = await state.groupChats()
-        let privates = await state.privateChats()
+    private func handleChats(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+        let isSuperAdmin = await self.isSuperAdmin(fromUser)
+        let ownerFilter: String? = isSuperAdmin ? nil : fromUser?.username?.lowercased()
+        let groups = await state.groupChats(ownedBy: ownerFilter)
+        let privates = await state.privateChats(ownedBy: ownerFilter)
 
         var lines: [String] = []
 
@@ -436,8 +449,10 @@ final class BotCommandHandler: @unchecked Sendable {
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
     }
 
-    private func handleUsers(chatKey: ChatKey) async throws {
-        let privates = await state.privateChats()
+    private func handleUsers(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+        let isSuperAdmin = await self.isSuperAdmin(fromUser)
+        let ownerFilter: String? = isSuperAdmin ? nil : fromUser?.username?.lowercased()
+        let privates = await state.privateChats(ownedBy: ownerFilter)
 
         if privates.isEmpty {
             try await sendUserFeedback(chatKey: chatKey, text: "В личке пока пусто.")
@@ -468,9 +483,9 @@ final class BotCommandHandler: @unchecked Sendable {
                 value: value,
                 typeKey: "model",
                 typeName: "моделей",
-                list: { await state.modelPresets() },
-                add: { display, val in await state.addModelPreset(display: display, value: val) },
-                remove: { val in await state.removeModelPreset(value: val) }
+                list: { [self] in await state.modelPresets(chatID: chatKey.chatID) },
+                add: { [self] display, val in await state.addModelPreset(display: display, value: val, chatID: chatKey.chatID) },
+                remove: { [self] val in await state.removeModelPreset(value: val, chatID: chatKey.chatID) }
             )
 
         case "temp":
@@ -480,9 +495,9 @@ final class BotCommandHandler: @unchecked Sendable {
                 value: value,
                 typeKey: "temp",
                 typeName: "температуры",
-                list: { await state.tempPresets() },
-                add: { display, val in await state.addTempPreset(display: display, value: val) },
-                remove: { val in await state.removeTempPreset(value: val) }
+                list: { [self] in await state.tempPresets(chatID: chatKey.chatID) },
+                add: { [self] display, val in await state.addTempPreset(display: display, value: val, chatID: chatKey.chatID) },
+                remove: { [self] val in await state.removeTempPreset(value: val, chatID: chatKey.chatID) }
             )
 
         case "history", "historylength":
@@ -492,9 +507,9 @@ final class BotCommandHandler: @unchecked Sendable {
                 value: value,
                 typeKey: "history",
                 typeName: "длины истории",
-                list: { await state.historyLengthPresets() },
-                add: { display, val in await state.addHistoryLengthPreset(display: display, value: val) },
-                remove: { val in await state.removeHistoryLengthPreset(value: val) }
+                list: { [self] in await state.historyLengthPresets(chatID: chatKey.chatID) },
+                add: { [self] display, val in await state.addHistoryLengthPreset(display: display, value: val, chatID: chatKey.chatID) },
+                remove: { [self] val in await state.removeHistoryLengthPreset(value: val, chatID: chatKey.chatID) }
             )
 
         case "role":
@@ -504,9 +519,9 @@ final class BotCommandHandler: @unchecked Sendable {
                 value: value,
                 typeKey: "role",
                 typeName: "ролей",
-                list: { await state.rolePresets() },
-                add: { display, val in await state.addRolePreset(display: display, value: val) },
-                remove: { val in await state.removeRolePreset(value: val) }
+                list: { [self] in await state.rolePresets(chatID: chatKey.chatID) },
+                add: { [self] display, val in await state.addRolePreset(display: display, value: val, chatID: chatKey.chatID) },
+                remove: { [self] val in await state.removeRolePreset(value: val, chatID: chatKey.chatID) }
             )
 
         default:
@@ -597,6 +612,69 @@ final class BotCommandHandler: @unchecked Sendable {
         }
     }
 
+    private func handleTenant(chatKey: ChatKey, argument: String) async throws {
+        let parts = argument.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true).map(String.init)
+        let subcommand = parts.first ?? ""
+        let arg1 = parts.count > 1 ? parts[1] : ""
+        let arg2 = parts.count > 2 ? parts[2] : ""
+
+        func normalizeUsername(_ raw: String) -> String {
+            raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        }
+
+        switch subcommand.lowercased() {
+        case "add":
+            let username = normalizeUsername(arg1)
+            guard !username.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant add @username</code>")
+                return
+            }
+            await state.registerTenant(username: username)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Tenant @\(username) зарегистрирован.")
+
+        case "remove":
+            let username = normalizeUsername(arg1)
+            guard !username.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant remove @username</code>")
+                return
+            }
+            let removed = await state.removeTenant(username: username)
+            try await sendUserFeedback(chatKey: chatKey, text: removed
+                ? "✓ Tenant @\(username) удалён."
+                : "Tenant @\(username) не найден или является владельцем.")
+
+        case "list":
+            let tenants = await state.listTenants()
+            if tenants.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "Tenants: пусто.")
+            } else {
+                let list = tenants.map { "• @\($0)" }.joined(separator: "\n")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>🏢 Tenants</b> (\(tenants.count))\n\(list)")
+            }
+
+        case "assign":
+            let username = normalizeUsername(arg1)
+            guard !username.isEmpty, let chatID = Int(arg2) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant assign @username &lt;chatID&gt;</code>")
+                return
+            }
+            let ok = await state.assignChat(chatID: chatID, to: username)
+            try await sendUserFeedback(chatKey: chatKey, text: ok
+                ? "✓ Chat <code>\(chatID)</code> назначен @\(username)."
+                : "Tenant @\(username) не найден.")
+
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                <b>🏢 Управление tenants</b>
+
+                <code>/tenant add @username</code> — зарегистрировать
+                <code>/tenant remove @username</code> — удалить
+                <code>/tenant list</code> — список
+                <code>/tenant assign @username &lt;chatID&gt;</code> — назначить чат
+                """)
+        }
+    }
+
     private func handleHistory(chatKey: ChatKey) async throws {
         let messages = await state.history(chatKey: chatKey)
         guard !messages.isEmpty else {
@@ -608,14 +686,10 @@ final class BotCommandHandler: @unchecked Sendable {
         for msg in messages {
             let roleLabel: String
             switch msg.role {
-            case "system":
-                roleLabel = "⚙️"
-            case "user":
-                roleLabel = "👤"
-            case "assistant":
-                roleLabel = "🤖"
-            default:
-                roleLabel = msg.role
+            case "system": roleLabel = "⚙️"
+            case "user": roleLabel = "👤"
+            case "assistant": roleLabel = "🤖"
+            default: roleLabel = msg.role
             }
 
             let content: String

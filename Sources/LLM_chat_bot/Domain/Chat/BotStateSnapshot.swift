@@ -14,6 +14,19 @@ struct CumulativeUsage: Codable, Sendable {
     }
 }
 
+struct TenantStateSnapshot: Codable, Sendable {
+    var ownerUsername: String
+    var defaultModel: String
+    var defaultRole: String
+    var defaultHistoryLength: Int
+    var modelPresets: [Preset]
+    var tempPresets: [Preset]
+    var historyLengthPresets: [Preset]
+    var rolePresets: [Preset]
+    var whitelistedUserIDs: [Int]
+    var adminUsernames: [String]
+}
+
 struct ChatContextSnapshot: Codable, Sendable {
     var role: String
     var history: [ChatMessage]
@@ -36,18 +49,18 @@ struct ChatContextSnapshot: Codable, Sendable {
 
 struct BotStateSnapshot: Codable, Sendable {
     var contexts: [String: ChatContextSnapshot]
-    var whitelistedUserIDs: [Int]
-    var adminUsernames: [String]
-    var defaultModel: String
-    var defaultRole: String
-    var defaultHistoryLength: Int
+    var tenants: [String: TenantStateSnapshot]?
+    var chatOwnership: [String: String]?
     var telegramUpdateOffset: Int
-    var modelPresets: [Preset]
-    var tempPresets: [Preset]
-    var historyLengthPresets: [Preset]
-    var rolePresets: [Preset]
 
-    var isEmpty: Bool {
-        contexts.isEmpty && whitelistedUserIDs.isEmpty && adminUsernames == ["maythe4th"]
-    }
+    // Legacy fields — present in pre-tenant snapshots, absent in new ones
+    var whitelistedUserIDs: [Int]?
+    var adminUsernames: [String]?
+    var defaultModel: String?
+    var defaultRole: String?
+    var defaultHistoryLength: Int?
+    var modelPresets: [Preset]?
+    var tempPresets: [Preset]?
+    var historyLengthPresets: [Preset]?
+    var rolePresets: [Preset]?
 }

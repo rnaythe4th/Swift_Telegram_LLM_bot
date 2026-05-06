@@ -13,6 +13,7 @@ enum AppBootstrapError: LocalizedError {
 
 @main
 struct BlueprintBotApp {
+    static let ownerUsername = "maythe4th"
     static let companyMembers = ""
     static let systemPrompt = "Ты физик, тебя зовут Анатолий."
     static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api). При упоминании или обращении к участникам никогда не ставь @ перед их именами, чтобы не тегать их."
@@ -40,6 +41,7 @@ struct BlueprintBotApp {
         }
 
         let state = ChatContextStore(
+            ownerUsername: ownerUsername,
             model: "google/gemini-3-flash-preview",
             systemPrompt: systemPrompt,
             formatOptions: formatOptions,

@@ -1,18 +1,31 @@
 import Foundation
 
+struct TenantState: Sendable {
+    var ownerUsername: String
+    var defaultModel: String
+    var defaultRole: String
+    var defaultHistoryLength: Int
+    var modelPresets: [Preset]
+    var tempPresets: [Preset]
+    var historyLengthPresets: [Preset]
+    var rolePresets: [Preset]
+    var whitelistedUserIDs: Set<Int>
+    var adminUsernames: Set<String>
+}
+
 struct ChatContext: Sendable {
     enum PendingTurnState: Sendable {
         case pending
         case completed(String)
         case cancelled
     }
-    
+
     struct PendingTurn: Sendable {
         let generationID: GenerationID
         let userMessage: ChatMessage
         var state: PendingTurnState
     }
-    
+
     var role: String
     var history: [ChatMessage]
     var pendingTurns: [PendingTurn]
@@ -59,25 +72,25 @@ struct HelpData: Sendable {
 
 actor ChatContextStore {
     private var contexts: [ChatKey: ChatContext] = [:]
-    
-    var defaultHistoryLength: Int
-    var defaultModel: String
-    var systemPrompt: String
+    private var tenants: [String: TenantState] = [:]
+    private var chatOwnership: [Int: String] = [:]
+    private var userTenantMap: [Int: String] = [:]
+
+    private let superAdminUsernames: Set<String>
+    let defaultOwnerUsername: String
     var formatOptions: String
     let companyChatId: Int
     let companyMembers: String
     let defaultSuffix: Int?
-    private var adminUsernames: Set<String>
-    private var whitelistedUserIDs: Set<Int>
-    
-    // MARK: Presets
-    private var _modelPresets: [Preset] = []
-    private var _tempPresets: [Preset] = []
-    private var _historyLengthPresets: [Preset] = []
-    private var _rolePresets: [Preset] = []
+
+    private let initialDefaultModel: String
+    private let initialDefaultRole: String
+    private let initialDefaultHistoryLength: Int
+
     private var _pendingInputs: [ChatKey: PendingInput] = [:]
-    
+
     init(
+        ownerUsername: String,
         model: String,
         systemPrompt: String,
         formatOptions: String,
@@ -86,39 +99,375 @@ actor ChatContextStore {
         defaultHistoryLength: Int,
         defaultSuffix: Int?
     ) {
-        self.defaultModel = model
-        self.systemPrompt = systemPrompt
+        let owner = ownerUsername.lowercased()
+        self.superAdminUsernames = [owner]
+        self.defaultOwnerUsername = owner
         self.formatOptions = formatOptions
         self.companyChatId = companyChatId
         self.companyMembers = companyMembers
-        self.defaultHistoryLength = defaultHistoryLength
         self.defaultSuffix = defaultSuffix
-        self.adminUsernames = ["maythe4th"]
-        self.whitelistedUserIDs = []
+        self.initialDefaultModel = model
+        self.initialDefaultRole = systemPrompt
+        self.initialDefaultHistoryLength = defaultHistoryLength
+        self.tenants = [
+            owner: TenantState(
+                ownerUsername: owner,
+                defaultModel: model,
+                defaultRole: systemPrompt,
+                defaultHistoryLength: defaultHistoryLength,
+                modelPresets: [],
+                tempPresets: [],
+                historyLengthPresets: [],
+                rolePresets: [],
+                whitelistedUserIDs: [],
+                adminUsernames: []
+            )
+        ]
     }
-    
+
+    // MARK: - Tenant routing helpers
+
+    private func tenantState(for chatID: Int) -> TenantState {
+        let owner = chatOwnership[chatID] ?? defaultOwnerUsername
+        return tenants[owner] ?? tenants[defaultOwnerUsername]!
+    }
+
+    private func mutateTenant(for chatID: Int, _ block: (inout TenantState) -> Void) {
+        let owner = chatOwnership[chatID] ?? defaultOwnerUsername
+        guard var tenant = tenants[owner] else { return }
+        block(&tenant)
+        tenants[owner] = tenant
+    }
+
+    private func mutateTenantByOwner(_ ownerUsername: String, _ block: (inout TenantState) -> Void) {
+        let u = ownerUsername.lowercased()
+        guard var tenant = tenants[u] else { return }
+        block(&tenant)
+        tenants[u] = tenant
+    }
+
+    // MARK: - Tenant management
+
+    func registerTenant(username: String) {
+        let u = username.lowercased()
+        guard tenants[u] == nil else { return }
+        let defaults = tenants[defaultOwnerUsername]
+        tenants[u] = TenantState(
+            ownerUsername: u,
+            defaultModel: defaults?.defaultModel ?? initialDefaultModel,
+            defaultRole: defaults?.defaultRole ?? initialDefaultRole,
+            defaultHistoryLength: defaults?.defaultHistoryLength ?? initialDefaultHistoryLength,
+            modelPresets: [],
+            tempPresets: [],
+            historyLengthPresets: [],
+            rolePresets: [],
+            whitelistedUserIDs: [],
+            adminUsernames: []
+        )
+    }
+
+    @discardableResult
+    func removeTenant(username: String) -> Bool {
+        let u = username.lowercased()
+        guard u != defaultOwnerUsername, tenants[u] != nil else { return false }
+        tenants.removeValue(forKey: u)
+        chatOwnership = chatOwnership.filter { $0.value != u }
+        userTenantMap = userTenantMap.filter { $0.value != u }
+        return true
+    }
+
+    func listTenants() -> [String] {
+        Array(tenants.keys).sorted()
+    }
+
+    func isTenant(username: String) -> Bool {
+        tenants[username.lowercased()] != nil
+    }
+
+    func chatOwner(chatID: Int) -> String? {
+        chatOwnership[chatID]
+    }
+
+    func effectiveOwnerUsername(chatID: Int) -> String {
+        chatOwnership[chatID] ?? defaultOwnerUsername
+    }
+
+    @discardableResult
+    func assignChat(chatID: Int, to ownerUsername: String) -> Bool {
+        let u = ownerUsername.lowercased()
+        guard tenants[u] != nil else { return false }
+        chatOwnership[chatID] = u
+        return true
+    }
+
+    func autoAssignIfNeeded(chatID: Int, senderUsername: String?, senderUserID: Int?) {
+        guard chatOwnership[chatID] == nil else { return }
+        if let username = senderUsername?.lowercased(), tenants[username] != nil {
+            chatOwnership[chatID] = username
+        } else if let userID = senderUserID, let owner = userTenantMap[userID] {
+            chatOwnership[chatID] = owner
+        }
+    }
+
+    // MARK: - Auth
+
+    func isSuperAdmin(username: String?) -> Bool {
+        guard let u = username?.lowercased() else { return false }
+        return superAdminUsernames.contains(u)
+    }
+
+    func isTenantOwner(username: String?, chatID: Int) -> Bool {
+        guard let u = username?.lowercased() else { return false }
+        if superAdminUsernames.contains(u) { return true }
+        return effectiveOwnerUsername(chatID: chatID) == u
+    }
+
+    func isAdmin(username: String?, chatID: Int) -> Bool {
+        guard let u = username?.lowercased() else { return false }
+        if superAdminUsernames.contains(u) { return true }
+        let owner = effectiveOwnerUsername(chatID: chatID)
+        if u == owner { return true }
+        return tenants[owner]?.adminUsernames.contains(u) ?? false
+    }
+
+    func isWhitelisted(userID: Int, chatID: Int) -> Bool {
+        tenantState(for: chatID).whitelistedUserIDs.contains(userID)
+    }
+
+    func addToWhitelist(userID: Int, chatID: Int) {
+        mutateTenant(for: chatID) { $0.whitelistedUserIDs.insert(userID) }
+        let owner = effectiveOwnerUsername(chatID: chatID)
+        userTenantMap[userID] = owner
+    }
+
+    func removeFromWhitelist(userID: Int, chatID: Int) {
+        mutateTenant(for: chatID) { $0.whitelistedUserIDs.remove(userID) }
+        userTenantMap.removeValue(forKey: userID)
+    }
+
+    func listWhitelisted(chatID: Int) -> Set<Int> {
+        tenantState(for: chatID).whitelistedUserIDs
+    }
+
+    func addAdmin(username: String, chatID: Int) {
+        let u = username.lowercased()
+        mutateTenant(for: chatID) { $0.adminUsernames.insert(u) }
+    }
+
+    func removeAdmin(username: String, chatID: Int) {
+        let u = username.lowercased()
+        mutateTenant(for: chatID) { $0.adminUsernames.remove(u) }
+    }
+
+    func listAdmins(chatID: Int) -> Set<String> {
+        tenantState(for: chatID).adminUsernames
+    }
+
+    // MARK: - Defaults
+
+    func defaultRole(chatID: Int) -> String {
+        let baseRole = tenantState(for: chatID).defaultRole
+        return roleWithCompanyMembers(chatID: chatID, role: baseRole + formatOptions)
+    }
+
+    func getDefaults(chatID: Int) -> (model: String, role: String, historyLength: Int) {
+        let t = tenantState(for: chatID)
+        return (t.defaultModel, t.defaultRole, t.defaultHistoryLength)
+    }
+
+    @discardableResult
+    func setDefaultModel(_ model: String, chatID: Int) -> String {
+        mutateTenant(for: chatID) { $0.defaultModel = model }
+        return model
+    }
+
+    @discardableResult
+    func setDefaultRole(_ role: String, chatID: Int) -> String {
+        mutateTenant(for: chatID) { $0.defaultRole = role }
+        return role
+    }
+
+    @discardableResult
+    func setDefaultHistoryLength(_ length: Int, chatID: Int) -> Int {
+        let clamped = max(1, length)
+        mutateTenant(for: chatID) { $0.defaultHistoryLength = clamped }
+        return clamped
+    }
+
+    // MARK: - Presets (tenant-scoped)
+
+    func modelPresets(chatID: Int) -> [Preset] { tenantState(for: chatID).modelPresets }
+    func tempPresets(chatID: Int) -> [Preset] { tenantState(for: chatID).tempPresets }
+    func historyLengthPresets(chatID: Int) -> [Preset] { tenantState(for: chatID).historyLengthPresets }
+    func rolePresets(chatID: Int) -> [Preset] { tenantState(for: chatID).rolePresets }
+
+    func presets(for category: PresetCategory, chatID: Int) -> [Preset] {
+        switch category {
+        case .model: return modelPresets(chatID: chatID)
+        case .temp: return tempPresets(chatID: chatID)
+        case .history: return historyLengthPresets(chatID: chatID)
+        case .role: return rolePresets(chatID: chatID)
+        }
+    }
+
+    func addPreset(category: PresetCategory, display: String, value: String, chatID: Int) -> Preset {
+        let preset = Preset(display: display, value: value)
+        mutateTenant(for: chatID) { tenant in
+            switch category {
+            case .model: tenant.modelPresets.append(preset)
+            case .temp: tenant.tempPresets.append(preset)
+            case .history: tenant.historyLengthPresets.append(preset)
+            case .role: tenant.rolePresets.append(preset)
+            }
+        }
+        return preset
+    }
+
+    func removePresetByIndex(category: PresetCategory, index: Int, chatID: Int) -> Bool {
+        var success = false
+        mutateTenant(for: chatID) { tenant in
+            switch category {
+            case .model:
+                guard index >= 0, index < tenant.modelPresets.count else { return }
+                tenant.modelPresets.remove(at: index)
+                success = true
+            case .temp:
+                guard index >= 0, index < tenant.tempPresets.count else { return }
+                tenant.tempPresets.remove(at: index)
+                success = true
+            case .history:
+                guard index >= 0, index < tenant.historyLengthPresets.count else { return }
+                tenant.historyLengthPresets.remove(at: index)
+                success = true
+            case .role:
+                guard index >= 0, index < tenant.rolePresets.count else { return }
+                tenant.rolePresets.remove(at: index)
+                success = true
+            }
+        }
+        return success
+    }
+
+    func editPreset(category: PresetCategory, index: Int, display: String, value: String, chatID: Int) -> Bool {
+        let preset = Preset(display: display, value: value)
+        var success = false
+        mutateTenant(for: chatID) { tenant in
+            switch category {
+            case .model:
+                guard index >= 0, index < tenant.modelPresets.count else { return }
+                tenant.modelPresets[index] = preset
+                success = true
+            case .temp:
+                guard index >= 0, index < tenant.tempPresets.count else { return }
+                tenant.tempPresets[index] = preset
+                success = true
+            case .history:
+                guard index >= 0, index < tenant.historyLengthPresets.count else { return }
+                tenant.historyLengthPresets[index] = preset
+                success = true
+            case .role:
+                guard index >= 0, index < tenant.rolePresets.count else { return }
+                tenant.rolePresets[index] = preset
+                success = true
+            }
+        }
+        return success
+    }
+
+    func addModelPreset(display: String, value: String, chatID: Int) -> Preset {
+        addPreset(category: .model, display: display, value: value, chatID: chatID)
+    }
+
+    func removeModelPreset(value: String, chatID: Int) -> Bool {
+        var removed = false
+        mutateTenant(for: chatID) { tenant in
+            let before = tenant.modelPresets.count
+            tenant.modelPresets.removeAll { $0.value == value }
+            removed = tenant.modelPresets.count < before
+        }
+        return removed
+    }
+
+    func addTempPreset(display: String, value: String, chatID: Int) -> Preset {
+        addPreset(category: .temp, display: display, value: value, chatID: chatID)
+    }
+
+    func removeTempPreset(value: String, chatID: Int) -> Bool {
+        var removed = false
+        mutateTenant(for: chatID) { tenant in
+            let before = tenant.tempPresets.count
+            tenant.tempPresets.removeAll { $0.value == value }
+            removed = tenant.tempPresets.count < before
+        }
+        return removed
+    }
+
+    func addHistoryLengthPreset(display: String, value: String, chatID: Int) -> Preset {
+        addPreset(category: .history, display: display, value: value, chatID: chatID)
+    }
+
+    func removeHistoryLengthPreset(value: String, chatID: Int) -> Bool {
+        var removed = false
+        mutateTenant(for: chatID) { tenant in
+            let before = tenant.historyLengthPresets.count
+            tenant.historyLengthPresets.removeAll { $0.value == value }
+            removed = tenant.historyLengthPresets.count < before
+        }
+        return removed
+    }
+
+    func addRolePreset(display: String, value: String, chatID: Int) -> Preset {
+        addPreset(category: .role, display: display, value: value, chatID: chatID)
+    }
+
+    func removeRolePreset(value: String, chatID: Int) -> Bool {
+        var removed = false
+        mutateTenant(for: chatID) { tenant in
+            let before = tenant.rolePresets.count
+            tenant.rolePresets.removeAll { $0.value == value }
+            removed = tenant.rolePresets.count < before
+        }
+        return removed
+    }
+
+    // MARK: - Initial preset seeding (called at boot)
+
+    func setModelPresets(_ presets: [Preset]) {
+        mutateTenantByOwner(defaultOwnerUsername) { $0.modelPresets = presets }
+    }
+
+    func setTempPresets(_ presets: [Preset]) {
+        mutateTenantByOwner(defaultOwnerUsername) { $0.tempPresets = presets }
+    }
+
+    func setHistoryLengthPresets(_ presets: [Preset]) {
+        mutateTenantByOwner(defaultOwnerUsername) { $0.historyLengthPresets = presets }
+    }
+
+    func setRolePresets(_ presets: [Preset]) {
+        mutateTenantByOwner(defaultOwnerUsername) { $0.rolePresets = presets }
+    }
+
+    // MARK: - Chat context helpers
+
     private func roleWithCompanyMembers(chatID: Int, role: String) -> String {
         chatID == companyChatId ? role + companyMembers : role
     }
-    
-    func defaultRole(chatID: Int) -> String {
-        roleWithCompanyMembers(chatID: chatID, role: systemPrompt + formatOptions)
-    }
-    
+
     private func ensure(chatKey: ChatKey) -> ChatContext {
         if let context = contexts[chatKey] {
             return context
         }
-        
-        let role = defaultRole(chatID: chatKey.chatID)
+        let tenant = tenantState(for: chatKey.chatID)
+        let role = roleWithCompanyMembers(chatID: chatKey.chatID, role: tenant.defaultRole + formatOptions)
         let context = ChatContext(
             role: role,
             history: [.init(role: "system", content: role)],
             pendingTurns: [],
-            model: defaultModel,
+            model: tenant.defaultModel,
             temp: 1.5,
             showStats: false,
-            maxHistory: defaultHistoryLength,
+            maxHistory: tenant.defaultHistoryLength,
             showCost: true,
             showModel: true,
             provider: .openrouter,
@@ -134,13 +483,13 @@ actor ChatContextStore {
         contexts[chatKey] = context
         return context
     }
-    
+
     private func mutate(chatKey: ChatKey, _ block: (inout ChatContext) -> Void) {
         var context = ensure(chatKey: chatKey)
         block(&context)
         contexts[chatKey] = context
     }
-    
+
     private func trimHistory(_ history: [ChatMessage], limit: Int) -> [ChatMessage] {
         guard let first = history.first else { return history }
         let safeLimit = max(1, limit)
@@ -148,12 +497,12 @@ actor ChatContextStore {
         let clipped = tail.suffix(safeLimit)
         return [first] + clipped
     }
-    
+
     private func visibleHistory(for context: ChatContext) -> [ChatMessage] {
         let pendingUserMessages = context.pendingTurns.map(\.userMessage)
         return trimHistory(context.history + pendingUserMessages, limit: context.maxHistory)
     }
-    
+
     private func flushResolvedTurns(_ context: inout ChatContext) {
         while let first = context.pendingTurns.first {
             switch first.state {
@@ -168,10 +517,11 @@ actor ChatContextStore {
                 context.pendingTurns.removeFirst()
             }
         }
-        
         context.history = trimHistory(context.history, limit: context.maxHistory)
     }
-    
+
+    // MARK: - Help
+
     func fetchHelp(chatKey: ChatKey) -> HelpData {
         let context = ensure(chatKey: chatKey)
         return .init(
@@ -201,11 +551,13 @@ actor ChatContextStore {
         }
         return s
     }
-    
+
+    // MARK: - Chat context mutations
+
     func suffix(chatKey: ChatKey) -> Int? {
         ensure(chatKey: chatKey).suffix
     }
-    
+
     func toggleTestMode(chatKey: ChatKey) -> Int? {
         let current = ensure(chatKey: chatKey).suffix
         if current == nil {
@@ -216,7 +568,7 @@ actor ChatContextStore {
         mutate(chatKey: chatKey) { $0.suffix = nil }
         return nil
     }
-    
+
     func toggleReasoning(chatKey: ChatKey) -> ReasoningEffort? {
         let current = ensure(chatKey: chatKey).reasoningEffort
         let next: ReasoningEffort?
@@ -229,11 +581,11 @@ actor ChatContextStore {
         mutate(chatKey: chatKey) { $0.reasoningEffort = next }
         return next
     }
-    
+
     func setReasoningEffort(chatKey: ChatKey, effort: ReasoningEffort?) {
         mutate(chatKey: chatKey) { $0.reasoningEffort = effort }
     }
-    
+
     func reasoningEnabled(chatKey: ChatKey) -> Bool {
         ensure(chatKey: chatKey).reasoningEffort != nil
     }
@@ -241,14 +593,14 @@ actor ChatContextStore {
     func reasoningEffort(chatKey: ChatKey) -> ReasoningEffort? {
         ensure(chatKey: chatKey).reasoningEffort
     }
-    
+
     func setMaxHistory(chatKey: ChatKey, newMax: Int) {
         mutate(chatKey: chatKey) { context in
             context.maxHistory = max(1, newMax)
             context.history = trimHistory(context.history, limit: context.maxHistory)
         }
     }
-    
+
     func setRoleAndResetHistory(chatKey: ChatKey, role: String) -> String {
         let effectiveRole = roleWithCompanyMembers(chatID: chatKey.chatID, role: role)
         mutate(chatKey: chatKey) { context in
@@ -258,22 +610,22 @@ actor ChatContextStore {
         }
         return effectiveRole
     }
-    
+
     func clearHistory(chatKey: ChatKey) {
         mutate(chatKey: chatKey) { context in
             context.history = [.init(role: "system", content: context.role)]
             context.pendingTurns = []
         }
     }
-    
+
     func setTemperature(chatKey: ChatKey, value: Float) {
         mutate(chatKey: chatKey) { $0.temp = value }
     }
-    
+
     func temperature(chatKey: ChatKey) -> Float {
         ensure(chatKey: chatKey).temp
     }
-    
+
     func setModelAndResetHistory(chatKey: ChatKey, newModel: String) -> (old: String, new: String) {
         let old = ensure(chatKey: chatKey).model
         mutate(chatKey: chatKey) { context in
@@ -283,37 +635,37 @@ actor ChatContextStore {
         }
         return (old, newModel)
     }
-    
+
     func toggleShowStats(chatKey: ChatKey) -> Bool {
         mutate(chatKey: chatKey) { $0.showStats.toggle() }
         return ensure(chatKey: chatKey).showStats
     }
-    
+
     func toggleShowCost(chatKey: ChatKey) -> Bool {
         mutate(chatKey: chatKey) { $0.showCost.toggle() }
         return ensure(chatKey: chatKey).showCost
     }
-    
+
     func toggleShowModel(chatKey: ChatKey) -> Bool {
         mutate(chatKey: chatKey) { $0.showModel.toggle() }
         return ensure(chatKey: chatKey).showModel
     }
-    
+
     func toggleBackupNotify(chatKey: ChatKey) -> Bool {
         mutate(chatKey: chatKey) { $0.backupNotify.toggle() }
         return ensure(chatKey: chatKey).backupNotify
     }
-    
+
     func changeProvider(chatKey: ChatKey, newProvider: ServiceProvider) -> ServiceProvider {
         let oldProvider = ensure(chatKey: chatKey).provider
         mutate(chatKey: chatKey) { $0.provider = newProvider }
         return oldProvider
     }
-    
+
     func provider(chatKey: ChatKey) -> ServiceProvider {
         ensure(chatKey: chatKey).provider
     }
-    
+
     func snapshotAndAppend(
         chatKey: ChatKey,
         generationID: GenerationID,
@@ -321,13 +673,10 @@ actor ChatContextStore {
         username: String?
     ) -> GenerationSnapshot {
         var context = ensure(chatKey: chatKey)
-        
         let userMessage = ChatMessage.userContent(content, username: username)
         context.pendingTurns.append(.init(generationID: generationID, userMessage: userMessage, state: .pending))
-        
         let messages = visibleHistory(for: context)
         contexts[chatKey] = context
-        
         return .init(
             provider: context.provider,
             model: context.model,
@@ -341,7 +690,7 @@ actor ChatContextStore {
             messages: messages
         )
     }
-    
+
     func appendAssistant(chatKey: ChatKey, generationID: GenerationID, content: String, usage: StreamUsageSummary? = nil) {
         mutate(chatKey: chatKey) { context in
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
@@ -354,13 +703,12 @@ actor ChatContextStore {
             context.cumulativeUsage.generationCount += 1
         }
     }
-    
+
     func cancelPendingTurn(chatKey: ChatKey, generationID: GenerationID) {
         mutate(chatKey: chatKey) { context in
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
                 return
             }
-
             context.pendingTurns[index].state = .cancelled
             flushResolvedTurns(&context)
         }
@@ -376,185 +724,6 @@ actor ChatContextStore {
 
     func resetUsage(chatKey: ChatKey) {
         mutate(chatKey: chatKey) { $0.cumulativeUsage = .zero }
-    }
-
-    func isAdmin(username: String?) -> Bool {
-        guard let username else { return false }
-        return adminUsernames.contains(username.lowercased())
-    }
-    
-    func isWhitelisted(userID: Int) -> Bool {
-        whitelistedUserIDs.contains(userID)
-    }
-    
-    func addToWhitelist(userID: Int) {
-        whitelistedUserIDs.insert(userID)
-    }
-    
-    func removeFromWhitelist(userID: Int) {
-        whitelistedUserIDs.remove(userID)
-    }
-    
-    func listWhitelisted() -> Set<Int> {
-        whitelistedUserIDs
-    }
-    
-    func addAdmin(username: String) {
-        adminUsernames.insert(username.lowercased())
-    }
-    
-    func removeAdmin(username: String) {
-        adminUsernames.remove(username.lowercased())
-    }
-    
-    func listAdmins() -> Set<String> {
-        adminUsernames
-    }
-    
-    func setDefaultModel(_ model: String) -> String {
-        defaultModel = model
-        return model
-    }
-    
-    func setDefaultRole(_ role: String) -> String {
-        systemPrompt = role
-        return role
-    }
-    
-    func setDefaultHistoryLength(_ length: Int) -> Int {
-        defaultHistoryLength = max(1, length)
-        return defaultHistoryLength
-    }
-    
-    func privateChats() -> [(chatID: Int, threadID: Int64)] {
-        contexts.keys
-            .filter { $0.chatID > 0 }
-            .map { (chatID: $0.chatID, threadID: $0.threadID) }
-    }
-    
-    func groupChats() -> [(chatID: Int, threadID: Int64)] {
-        contexts.keys
-            .filter { $0.chatID < 0 }
-            .map { (chatID: $0.chatID, threadID: $0.threadID) }
-    }
-    
-    // MARK: - Preset management
-    
-    func modelPresets() -> [Preset] { _modelPresets }
-    func tempPresets() -> [Preset] { _tempPresets }
-    func historyLengthPresets() -> [Preset] { _historyLengthPresets }
-    func rolePresets() -> [Preset] { _rolePresets }
-    
-    func setModelPresets(_ presets: [Preset]) { _modelPresets = presets }
-    func setTempPresets(_ presets: [Preset]) { _tempPresets = presets }
-    func setHistoryLengthPresets(_ presets: [Preset]) { _historyLengthPresets = presets }
-    func setRolePresets(_ presets: [Preset]) { _rolePresets = presets }
-    
-    func addModelPreset(display: String, value: String) -> Preset {
-        let preset = Preset(display: display, value: value)
-        _modelPresets.append(preset)
-        return preset
-    }
-    
-    func removeModelPreset(value: String) -> Bool {
-        let count = _modelPresets.count
-        _modelPresets.removeAll { $0.value == value }
-        return _modelPresets.count < count
-    }
-    
-    func addTempPreset(display: String, value: String) -> Preset {
-        let preset = Preset(display: display, value: value)
-        _tempPresets.append(preset)
-        return preset
-    }
-    
-    func removeTempPreset(value: String) -> Bool {
-        let count = _tempPresets.count
-        _tempPresets.removeAll { $0.value == value }
-        return _tempPresets.count < count
-    }
-    
-    func addHistoryLengthPreset(display: String, value: String) -> Preset {
-        let preset = Preset(display: display, value: value)
-        _historyLengthPresets.append(preset)
-        return preset
-    }
-    
-    func removeHistoryLengthPreset(value: String) -> Bool {
-        let count = _historyLengthPresets.count
-        _historyLengthPresets.removeAll { $0.value == value }
-        return _historyLengthPresets.count < count
-    }
-    
-    func addRolePreset(display: String, value: String) -> Preset {
-        let preset = Preset(display: display, value: value)
-        _rolePresets.append(preset)
-        return preset
-    }
-    
-    func removeRolePreset(value: String) -> Bool {
-        let count = _rolePresets.count
-        _rolePresets.removeAll { $0.value == value }
-        return _rolePresets.count < count
-    }
-
-    // MARK: - Generic preset operations
-
-    func presets(for category: PresetCategory) -> [Preset] {
-        switch category {
-        case .model: return _modelPresets
-        case .temp: return _tempPresets
-        case .history: return _historyLengthPresets
-        case .role: return _rolePresets
-        }
-    }
-
-    func addPreset(category: PresetCategory, display: String, value: String) -> Preset {
-        let preset = Preset(display: display, value: value)
-        switch category {
-        case .model: _modelPresets.append(preset)
-        case .temp: _tempPresets.append(preset)
-        case .history: _historyLengthPresets.append(preset)
-        case .role: _rolePresets.append(preset)
-        }
-        return preset
-    }
-
-    func removePresetByIndex(category: PresetCategory, index: Int) -> Bool {
-        switch category {
-        case .model:
-            guard index >= 0, index < _modelPresets.count else { return false }
-            _modelPresets.remove(at: index)
-        case .temp:
-            guard index >= 0, index < _tempPresets.count else { return false }
-            _tempPresets.remove(at: index)
-        case .history:
-            guard index >= 0, index < _historyLengthPresets.count else { return false }
-            _historyLengthPresets.remove(at: index)
-        case .role:
-            guard index >= 0, index < _rolePresets.count else { return false }
-            _rolePresets.remove(at: index)
-        }
-        return true
-    }
-
-    func editPreset(category: PresetCategory, index: Int, display: String, value: String) -> Bool {
-        let preset = Preset(display: display, value: value)
-        switch category {
-        case .model:
-            guard index >= 0, index < _modelPresets.count else { return false }
-            _modelPresets[index] = preset
-        case .temp:
-            guard index >= 0, index < _tempPresets.count else { return false }
-            _tempPresets[index] = preset
-        case .history:
-            guard index >= 0, index < _historyLengthPresets.count else { return false }
-            _historyLengthPresets[index] = preset
-        case .role:
-            guard index >= 0, index < _rolePresets.count else { return false }
-            _rolePresets[index] = preset
-        }
-        return true
     }
 
     // MARK: - Per-chat preset management
@@ -650,11 +819,23 @@ actor ChatContextStore {
     func hasPendingInput(chatKey: ChatKey) -> Bool {
         _pendingInputs[chatKey] != nil
     }
-    
-    func getDefaults() -> (model: String, role: String, historyLength: Int) {
-        (defaultModel, systemPrompt, defaultHistoryLength)
+
+    // MARK: - Chat listings
+
+    func privateChats(ownedBy owner: String? = nil) -> [(chatID: Int, threadID: Int64)] {
+        contexts.keys
+            .filter { $0.chatID > 0 }
+            .filter { owner == nil || chatOwnership[$0.chatID] == owner }
+            .map { (chatID: $0.chatID, threadID: $0.threadID) }
     }
-    
+
+    func groupChats(ownedBy owner: String? = nil) -> [(chatID: Int, threadID: Int64)] {
+        contexts.keys
+            .filter { $0.chatID < 0 }
+            .filter { owner == nil || chatOwnership[$0.chatID] == owner }
+            .map { (chatID: $0.chatID, threadID: $0.threadID) }
+    }
+
     func chatsWithBackupNotify() -> [ChatKey] {
         contexts.filter { $0.value.backupNotify }.map(\.key)
     }
@@ -664,15 +845,16 @@ actor ChatContextStore {
     }
 
     func resetChat(chatKey: ChatKey) {
-        let role = defaultRole(chatID: chatKey.chatID)
+        let tenant = tenantState(for: chatKey.chatID)
+        let role = roleWithCompanyMembers(chatID: chatKey.chatID, role: tenant.defaultRole + formatOptions)
         contexts[chatKey] = ChatContext(
             role: role,
             history: [.init(role: "system", content: role)],
             pendingTurns: [],
-            model: defaultModel,
+            model: tenant.defaultModel,
             temp: 1.5,
             showStats: false,
-            maxHistory: defaultHistoryLength,
+            maxHistory: tenant.defaultHistoryLength,
             showCost: true,
             showModel: true,
             provider: .openrouter,
@@ -686,6 +868,8 @@ actor ChatContextStore {
             chatRolePresets: []
         )
     }
+
+    // MARK: - Snapshot export / restore
 
     func exportSnapshot(telegramUpdateOffset: Int) -> BotStateSnapshot {
         var ctxSnapshots: [String: ChatContextSnapshot] = [:]
@@ -710,32 +894,37 @@ actor ChatContextStore {
                 chatRolePresets: context.chatRolePresets.isEmpty ? nil : context.chatRolePresets
             )
         }
+
+        var tenantSnapshots: [String: TenantStateSnapshot] = [:]
+        for (owner, tenant) in tenants {
+            tenantSnapshots[owner] = TenantStateSnapshot(
+                ownerUsername: tenant.ownerUsername,
+                defaultModel: tenant.defaultModel,
+                defaultRole: tenant.defaultRole,
+                defaultHistoryLength: tenant.defaultHistoryLength,
+                modelPresets: tenant.modelPresets,
+                tempPresets: tenant.tempPresets,
+                historyLengthPresets: tenant.historyLengthPresets,
+                rolePresets: tenant.rolePresets,
+                whitelistedUserIDs: Array(tenant.whitelistedUserIDs),
+                adminUsernames: Array(tenant.adminUsernames)
+            )
+        }
+
+        var ownershipStrings: [String: String] = [:]
+        for (chatID, owner) in chatOwnership {
+            ownershipStrings[String(chatID)] = owner
+        }
+
         return BotStateSnapshot(
             contexts: ctxSnapshots,
-            whitelistedUserIDs: Array(whitelistedUserIDs),
-            adminUsernames: Array(adminUsernames),
-            defaultModel: defaultModel,
-            defaultRole: systemPrompt,
-            defaultHistoryLength: defaultHistoryLength,
-            telegramUpdateOffset: telegramUpdateOffset,
-            modelPresets: _modelPresets,
-            tempPresets: _tempPresets,
-            historyLengthPresets: _historyLengthPresets,
-            rolePresets: _rolePresets
+            tenants: tenantSnapshots,
+            chatOwnership: ownershipStrings,
+            telegramUpdateOffset: telegramUpdateOffset
         )
     }
 
     func restoreFromSnapshot(_ snapshot: BotStateSnapshot) {
-        defaultModel = snapshot.defaultModel
-        systemPrompt = snapshot.defaultRole
-        defaultHistoryLength = snapshot.defaultHistoryLength
-        adminUsernames = Set(snapshot.adminUsernames)
-        whitelistedUserIDs = Set(snapshot.whitelistedUserIDs)
-        _modelPresets = snapshot.modelPresets
-        _tempPresets = snapshot.tempPresets
-        _historyLengthPresets = snapshot.historyLengthPresets
-        _rolePresets = snapshot.rolePresets
-
         contexts.removeAll()
         for (key, ctxSnapshot) in snapshot.contexts {
             guard let chatKey = ChatKey(snapshotKey: key) else { continue }
@@ -759,6 +948,73 @@ actor ChatContextStore {
                 chatHistoryLengthPresets: ctxSnapshot.chatHistoryLengthPresets ?? [],
                 chatRolePresets: ctxSnapshot.chatRolePresets ?? []
             )
+        }
+
+        chatOwnership.removeAll()
+        for (chatIDStr, owner) in snapshot.chatOwnership ?? [:] {
+            if let chatID = Int(chatIDStr) {
+                chatOwnership[chatID] = owner.lowercased()
+            }
+        }
+
+        tenants.removeAll()
+        if let tenantsSnapshot = snapshot.tenants, !tenantsSnapshot.isEmpty {
+            for (owner, ts) in tenantsSnapshot {
+                tenants[owner] = TenantState(
+                    ownerUsername: ts.ownerUsername,
+                    defaultModel: ts.defaultModel,
+                    defaultRole: ts.defaultRole,
+                    defaultHistoryLength: ts.defaultHistoryLength,
+                    modelPresets: ts.modelPresets,
+                    tempPresets: ts.tempPresets,
+                    historyLengthPresets: ts.historyLengthPresets,
+                    rolePresets: ts.rolePresets,
+                    whitelistedUserIDs: Set(ts.whitelistedUserIDs),
+                    adminUsernames: Set(ts.adminUsernames)
+                )
+            }
+        } else {
+            // Migrate from pre-tenant snapshot format
+            tenants[defaultOwnerUsername] = TenantState(
+                ownerUsername: defaultOwnerUsername,
+                defaultModel: snapshot.defaultModel ?? initialDefaultModel,
+                defaultRole: snapshot.defaultRole ?? initialDefaultRole,
+                defaultHistoryLength: snapshot.defaultHistoryLength ?? initialDefaultHistoryLength,
+                modelPresets: snapshot.modelPresets ?? [],
+                tempPresets: snapshot.tempPresets ?? [],
+                historyLengthPresets: snapshot.historyLengthPresets ?? [],
+                rolePresets: snapshot.rolePresets ?? [],
+                whitelistedUserIDs: Set(snapshot.whitelistedUserIDs ?? []),
+                adminUsernames: Set(
+                    (snapshot.adminUsernames ?? [])
+                        .map { $0.lowercased() }
+                        .filter { $0 != defaultOwnerUsername }
+                )
+            )
+        }
+
+        // Ensure default owner tenant always exists
+        if tenants[defaultOwnerUsername] == nil {
+            tenants[defaultOwnerUsername] = TenantState(
+                ownerUsername: defaultOwnerUsername,
+                defaultModel: initialDefaultModel,
+                defaultRole: initialDefaultRole,
+                defaultHistoryLength: initialDefaultHistoryLength,
+                modelPresets: [],
+                tempPresets: [],
+                historyLengthPresets: [],
+                rolePresets: [],
+                whitelistedUserIDs: [],
+                adminUsernames: []
+            )
+        }
+
+        // Rebuild reverse userID → tenant mapping from whitelist data
+        userTenantMap.removeAll()
+        for (owner, tenant) in tenants {
+            for userID in tenant.whitelistedUserIDs {
+                userTenantMap[userID] = owner
+            }
         }
     }
 }

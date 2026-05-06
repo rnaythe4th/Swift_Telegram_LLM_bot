@@ -58,9 +58,9 @@ final class BotMenuHandler: @unchecked Sendable {
         if text.hasPrefix("/") { return false }
         guard let pending = await state.consumePendingInput(chatKey: chatKey) else { return false }
 
-        let isAdmin = await state.isAdmin(username: username)
+        let canManageGlobal = await state.isTenantOwner(username: username, chatID: chatKey.chatID)
 
-        if pending.scope == .global, !isAdmin {
+        if pending.scope == .global, !canManageGlobal {
             _ = try? await telegram.sendMessage(
                 .init(
                     chatID: chatKey.chatID,
@@ -94,10 +94,10 @@ final class BotMenuHandler: @unchecked Sendable {
 
         switch (pending.scope, pending.kind) {
         case (.global, .add):
-            _ = await state.addPreset(category: pending.category, display: display, value: value)
+            _ = await state.addPreset(category: pending.category, display: display, value: value, chatID: chatKey.chatID)
             toastText = "✓ Глобальный пресет добавлен: \(display)"
         case (.global, .edit(let index)):
-            let ok = await state.editPreset(category: pending.category, index: index, display: display, value: value)
+            let ok = await state.editPreset(category: pending.category, index: index, display: display, value: value, chatID: chatKey.chatID)
             toastText = ok ? "✓ Обновлён: \(display)" : "⚠️ Пресет не найден"
         case (.chat, .add):
             _ = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value)
@@ -107,7 +107,7 @@ final class BotMenuHandler: @unchecked Sendable {
             toastText = ok ? "✓ Обновлён: \(display)" : "⚠️ Пресет не найден"
         }
 
-        let (menuText, markup) = await renderPresetManagement(category: pending.category, chatKey: chatKey, isAdmin: isAdmin)
+        let (menuText, markup) = await renderPresetManagement(category: pending.category, chatKey: chatKey, canManageGlobal: canManageGlobal)
         try? await telegram.editMessage(
             .init(
                 chatID: chatKey.chatID,
@@ -184,7 +184,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
                 return
             } else if parts[1] == "gsel", parts.count >= 3, let index = Int(parts[2]) {
-                let presets = await state.rolePresets()
+                let presets = await state.rolePresets(chatID: chatKey.chatID)
                 guard index >= 0, index < presets.count else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
                     return
@@ -207,7 +207,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             } else if parts[1] == "select", parts.count >= 3, let index = Int(parts[2]) {
                 // Legacy: treat as global
-                let presets = await state.rolePresets()
+                let presets = await state.rolePresets(chatID: chatKey.chatID)
                 guard index >= 0, index < presets.count else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
                     return
@@ -223,7 +223,7 @@ final class BotMenuHandler: @unchecked Sendable {
             guard parts.count >= 3 else { return }
             let modelValue = parts[2]
             if parts[1] == "select" || parts[1] == "gsel" {
-                let presets = await state.modelPresets()
+                let presets = await state.modelPresets(chatID: chatKey.chatID)
                 guard let preset = presets.first(where: { $0.value == modelValue }) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
                     return
@@ -351,10 +351,10 @@ final class BotMenuHandler: @unchecked Sendable {
         case "pm":
             guard parts.count >= 2, let category = PresetCategory(rawValue: parts[1]) else { return }
             await state.clearPendingInput(chatKey: chatKey)
-            let isAdmin = await state.isAdmin(username: callback.from.username)
+            let canManageGlobal = await state.isTenantOwner(username: callback.from.username, chatID: chatKey.chatID)
 
             if parts.count == 2 {
-                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, isAdmin: isAdmin)
+                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
                 return
             }
@@ -381,13 +381,13 @@ final class BotMenuHandler: @unchecked Sendable {
                 guard parts.count >= 4, let index = Int(parts[3]) else { return }
                 let removed = await state.removeChatPresetByIndex(category: category, chatKey: chatKey, index: index)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Пресет удалён" : "Пресет не найден")
-                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, isAdmin: isAdmin)
+                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
-            // Global actions (admin-only)
+            // Global actions (owner-only)
             case "gadd":
-                guard isAdmin else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                guard canManageGlobal else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только владелец")
                     return
                 }
                 let pending = PendingInput(category: category, scope: .global, kind: .add, menuMessageID: message.message_id)
@@ -395,12 +395,12 @@ final class BotMenuHandler: @unchecked Sendable {
                 let (text, markup) = renderAwaitingInput(category: category, scope: .global, kind: .add, preset: nil)
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
             case "gedit":
-                guard isAdmin else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                guard canManageGlobal else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только владелец")
                     return
                 }
                 guard parts.count >= 4, let index = Int(parts[3]) else { return }
-                let globalPresets = await state.presets(for: category)
+                let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
                 guard index >= 0, index < globalPresets.count else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
                     return
@@ -410,14 +410,14 @@ final class BotMenuHandler: @unchecked Sendable {
                 let (text, markup) = renderAwaitingInput(category: category, scope: .global, kind: .edit(index: index), preset: globalPresets[index])
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
             case "gdel":
-                guard isAdmin else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                guard canManageGlobal else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только владелец")
                     return
                 }
                 guard parts.count >= 4, let index = Int(parts[3]) else { return }
-                let removed = await state.removePresetByIndex(category: category, index: index)
+                let removed = await state.removePresetByIndex(category: category, index: index, chatID: chatKey.chatID)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Пресет удалён" : "Пресет не найден")
-                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, isAdmin: isAdmin)
+                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
             default:
@@ -565,7 +565,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderRole(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let globalPresets = await state.rolePresets()
+        let globalPresets = await state.rolePresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .role, chatKey: chatKey)
         let activeRole = help.role
 
@@ -610,7 +610,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderModel(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let globalPresets = await state.modelPresets()
+        let globalPresets = await state.modelPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
         var rows: [[InlineKeyboardButton]] = []
 
@@ -650,7 +650,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderTemp(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let globalPresets = await state.tempPresets()
+        let globalPresets = await state.tempPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .temp, chatKey: chatKey)
         var rows: [[InlineKeyboardButton]] = []
 
@@ -710,7 +710,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderHistory(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let globalPresets = await state.historyLengthPresets()
+        let globalPresets = await state.historyLengthPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .history, chatKey: chatKey)
         var rows: [[InlineKeyboardButton]] = []
 
@@ -827,8 +827,8 @@ final class BotMenuHandler: @unchecked Sendable {
 
     // MARK: - Preset management renderers
 
-    private func renderPresetManagement(category: PresetCategory, chatKey: ChatKey, isAdmin: Bool) async -> (String, InlineKeyboardMarkup) {
-        let globalPresets = await state.presets(for: category)
+    private func renderPresetManagement(category: PresetCategory, chatKey: ChatKey, canManageGlobal: Bool) async -> (String, InlineKeyboardMarkup) {
+        let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
 
         var text = "<b>📋 Управление пресетами · \(category.displayName)</b>\n\n"
@@ -863,7 +863,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         var rows: [[InlineKeyboardButton]] = []
 
-        if isAdmin {
+        if canManageGlobal {
             rows.append([menuButton("🌐 ➕ Добавить глобальный", action: "pm:\(category.rawValue):gadd")])
             for (i, preset) in globalPresets.enumerated() {
                 rows.append([

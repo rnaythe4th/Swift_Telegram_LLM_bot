@@ -180,13 +180,19 @@ final class BotOrchestrator: @unchecked Sendable {
     }
 
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
+        let senderUsername = message.from?.username
+        let senderUserID = message.from?.id
+
+        // Auto-assign unowned chat to tenant if sender is a registered tenant or whitelisted user
+        await state.autoAssignIfNeeded(chatID: chatKey.chatID, senderUsername: senderUsername, senderUserID: senderUserID)
+
         if message.chat.type == "private" {
-            let userID = message.from?.id ?? 0
-            let username = message.from?.username
-            let isAdmin = await state.isAdmin(username: username)
-            let isWhitelisted = await state.isWhitelisted(userID: userID)
+            let userID = senderUserID ?? 0
+            let isAdmin = await state.isAdmin(username: senderUsername, chatID: chatKey.chatID)
+            let isWhitelisted = await state.isWhitelisted(userID: userID, chatID: chatKey.chatID)
 
             guard isAdmin || isWhitelisted else {
+                let ownerUsername = await state.effectiveOwnerUsername(chatID: chatKey.chatID)
                 _ = try? await telegram.sendMessage(
                     .init(
                         chatID: chatKey.chatID,
@@ -197,7 +203,7 @@ final class BotOrchestrator: @unchecked Sendable {
 
                         Ваш ID · <code>\(userID)</code>
 
-                        Чтобы получить доступ, отправьте этот ID администратору · @maythe4th
+                        Чтобы получить доступ, отправьте этот ID администратору · @\(ownerUsername)
                         """,
                         replyMarkup: nil
                     )
