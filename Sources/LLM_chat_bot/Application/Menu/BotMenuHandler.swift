@@ -789,11 +789,11 @@ final class BotMenuHandler: @unchecked Sendable {
         if reasoningSupported {
             rows[2].append(menuButton("🧠 Reasoning", action: "nav:reasoning"))
         }
-        rows.append([menuButton("📊 Что показывать", action: "nav:stats")])
+        rows.append([menuButton("📊 Что показывать в ответе", action: "nav:stats")])
         if usage.generationCount > 0 {
             rows.append([menuButton("🗑 Сбросить статистику", action: "stats:usage-reset")])
         }
-        rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сброс", action: "reset")])
+        rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сбросить", action: "reset")])
         if await state.isSuperAdmin(username: username) {
             let price = await state.starsPrice()
             let starsLabel = price.map { "💫 Stars · \($0) ⭐" } ?? "💫 Продажа (выкл)"
@@ -841,7 +841,7 @@ final class BotMenuHandler: @unchecked Sendable {
             if !currentRow.isEmpty { rows.append(currentRow) }
         }
 
-        rows.append([menuButton("↺ По умолчанию", action: "role:default")])
+        rows.append([menuButton("↺ Стандартная роль", action: "role:default")])
         rows.append([menuButton("⚙️ Управление пресетами", action: "pm:role")])
         rows.append(navButtons())
 
@@ -851,7 +851,8 @@ final class BotMenuHandler: @unchecked Sendable {
         Текущая:
         <blockquote expandable>\(help.role)</blockquote>
 
-        Выберите готовую или задайте свою — /setrole &lt;текст&gt;
+        <i>🌐 — общая для всех чатов · 💬 — только для этого</i>
+        Своя роль — /setrole &lt;текст&gt;
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -935,7 +936,8 @@ final class BotMenuHandler: @unchecked Sendable {
         Текущая · <code>\(help.model)</code>\(legendLine)
 
         <i>Смена модели очистит историю.</i>
-        Своя модель — /model &lt;id&gt;\(accessLine)
+        Своя модель — /model &lt;id&gt;
+        <i>ID моделей можно найти на openrouter.ai</i>\(accessLine)
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -994,6 +996,12 @@ final class BotMenuHandler: @unchecked Sendable {
         ]
         let text = """
         <b>📊 Что показывать в ответе</b>
+
+        🟢 — включено · ⚪️ — выключено
+
+        <i>Токены — сколько слов обработано
+        Стоимость — цена одного запроса в $
+        Модель — какая модель ответила</i>
 
         Нажмите, чтобы переключить.
         """
@@ -1061,11 +1069,13 @@ final class BotMenuHandler: @unchecked Sendable {
         }
         rows.append(navButtons())
         let text = """
-        <b>🔌 Провайдер</b>
+        <b>🔌 Провайдер AI</b>
 
         Текущий · <b>\(help.provider.commandValue)</b>
 
-        <i>Разные провайдеры — разные модели и возможности.</i>
+        <i>OpenRouter — тысячи моделей (GPT, Claude, Gemini, DeepSeek…)
+        DeepSeek — только модели DeepSeek, напрямую
+        Yandex — YandexGPT</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -1099,11 +1109,14 @@ final class BotMenuHandler: @unchecked Sendable {
             navButtons(),
         ]
         let text = """
-        <b>🧠 Reasoning</b>
+        <b>🧠 Reasoning — глубина рассуждений</b>
 
         Текущий · <b>\(current ?? "выкл")</b>
 
-        <i>Глубина рассуждений модели перед ответом. Больше — точнее, но дольше и дороже.</i>
+        <i>Модель «думает» перед ответом — результат точнее.
+        Low — быстро и дёшево
+        Medium — баланс скорости и качества
+        High — максимальная точность, медленнее</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -1308,7 +1321,7 @@ final class BotMenuHandler: @unchecked Sendable {
         <b>Роль по умолчанию:</b>
         <blockquote expandable>\(help.defaultRole)</blockquote>
 
-        <i>Test mode suffix · \(suffix)</i>
+        <i>Тест-режим · \(suffix)</i>
         """
     }
 

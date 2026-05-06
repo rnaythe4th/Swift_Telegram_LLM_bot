@@ -218,7 +218,7 @@ final class BotCommandHandler: @unchecked Sendable {
             let suffix = await state.toggleTestMode(chatKey: chatKey)
             if let suffix {
                 try await sendUserFeedback(chatKey: chatKey, text: """
-                    🧪 <b>Test mode включён.</b>
+                    🧪 <b>Тест-режим включён.</b>
                     Суффикс · <code>\(suffix)</code>
 
                     Используйте суффикс с командами:
@@ -226,7 +226,7 @@ final class BotCommandHandler: @unchecked Sendable {
                     <code>/setrole\(suffix) Ты — Дональд Трамп.</code>
                     """)
             } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🧪 Test mode выключен.")
+                try await sendUserFeedback(chatKey: chatKey, text: "🧪 Тест-режим выключен.")
             }
 
         case .reasoning:
@@ -274,19 +274,19 @@ final class BotCommandHandler: @unchecked Sendable {
         let text = """
         <b>👋 Привет!</b>
 
-        Я — LLM-чатбот. Просто пишите — я отвечу.
+        Я — ИИ-ассистент в Telegram. Просто напишите — отвечу.
 
-        <b>Что умею:</b>
-        • Отвечаю на любые вопросы
-        • Понимаю изображения, голос и видео
-        • Помню контекст беседы
-        • Несколько провайдеров и моделей
+        <b>Умею:</b>
+        • Отвечать на вопросы, помогать и рассуждать
+        • Понимать картинки, голосовые и видео
+        • Помнить контекст разговора
+        • Работать с GPT, Claude, Gemini, DeepSeek и другими
 
         <b>Быстрый старт:</b>
-        ⚙️ /menu — настройки в один клик
+        ⚙️ /menu — все настройки
         📘 /faq — полная инструкция
         🎭 /setrole — задать характер бота
-        ↺ /reset — сбросить всё к стандарту
+        ↺ /reset — сбросить к стандарту
         """
         let markup = InlineKeyboardMarkup(inline_keyboard: [
             [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
@@ -325,7 +325,7 @@ final class BotCommandHandler: @unchecked Sendable {
         <b>🎭 Роль:</b>
         <blockquote expandable>\(help.role)</blockquote>
 
-        <i>Test mode · \(suffix)</i>\(adminLine)
+        <i>Тест-режим · \(suffix)</i>\(adminLine)
         """
     }
 
