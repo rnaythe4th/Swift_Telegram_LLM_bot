@@ -28,6 +28,10 @@ struct ChatContextSnapshot: Codable, Sendable {
     var reasoningEffort: ReasoningEffort?
     var backupNotify: Bool
     var cumulativeUsage: CumulativeUsage?
+    var chatModelPresets: [Preset]?
+    var chatTempPresets: [Preset]?
+    var chatHistoryLengthPresets: [Preset]?
+    var chatRolePresets: [Preset]?
 }
 
 struct BotStateSnapshot: Codable, Sendable {

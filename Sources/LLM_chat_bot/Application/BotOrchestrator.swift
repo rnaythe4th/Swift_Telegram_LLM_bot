@@ -8,6 +8,7 @@ final class BotOrchestrator: @unchecked Sendable {
     private let callbackHandler: BotCallbackHandler
     private let commandHandler: BotCommandHandler
     private let generationCoordinator: GenerationCoordinator
+    private let menuHandler: BotMenuHandler
     private let updateDispatcher = ChatUpdateDispatcher()
     private var photoAlbumBuffer = TelegramPhotoAlbumBuffer()
 
@@ -37,6 +38,8 @@ final class BotOrchestrator: @unchecked Sendable {
             logger: logger,
             formatOptions: formatOptions
         )
+
+        self.menuHandler = menuHandler
 
         self.callbackHandler = BotCallbackHandler(
             telegram: telegram,
@@ -204,6 +207,10 @@ final class BotOrchestrator: @unchecked Sendable {
         }
 
         if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey, fromUser: message.from) {
+            return
+        }
+
+        if let text = message.text, await menuHandler.processTextInput(text: text, chatKey: chatKey, username: message.from?.username) {
             return
         }
 

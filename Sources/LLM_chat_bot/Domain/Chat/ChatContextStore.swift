@@ -27,6 +27,10 @@ struct ChatContext: Sendable {
     var reasoningEffort: ReasoningEffort?
     var backupNotify: Bool
     var cumulativeUsage: CumulativeUsage
+    var chatModelPresets: [Preset]
+    var chatTempPresets: [Preset]
+    var chatHistoryLengthPresets: [Preset]
+    var chatRolePresets: [Preset]
 }
 
 struct GenerationSnapshot: Sendable {
@@ -71,6 +75,7 @@ actor ChatContextStore {
     private var _tempPresets: [Preset] = []
     private var _historyLengthPresets: [Preset] = []
     private var _rolePresets: [Preset] = []
+    private var _pendingInputs: [ChatKey: PendingInput] = [:]
     
     init(
         model: String,
@@ -120,7 +125,11 @@ actor ChatContextStore {
             suffix: defaultSuffix,
             reasoningEffort: nil,
             backupNotify: false,
-            cumulativeUsage: .zero
+            cumulativeUsage: .zero,
+            chatModelPresets: [],
+            chatTempPresets: [],
+            chatHistoryLengthPresets: [],
+            chatRolePresets: []
         )
         contexts[chatKey] = context
         return context
@@ -488,6 +497,159 @@ actor ChatContextStore {
         _rolePresets.removeAll { $0.value == value }
         return _rolePresets.count < count
     }
+
+    // MARK: - Generic preset operations
+
+    func presets(for category: PresetCategory) -> [Preset] {
+        switch category {
+        case .model: return _modelPresets
+        case .temp: return _tempPresets
+        case .history: return _historyLengthPresets
+        case .role: return _rolePresets
+        }
+    }
+
+    func addPreset(category: PresetCategory, display: String, value: String) -> Preset {
+        let preset = Preset(display: display, value: value)
+        switch category {
+        case .model: _modelPresets.append(preset)
+        case .temp: _tempPresets.append(preset)
+        case .history: _historyLengthPresets.append(preset)
+        case .role: _rolePresets.append(preset)
+        }
+        return preset
+    }
+
+    func removePresetByIndex(category: PresetCategory, index: Int) -> Bool {
+        switch category {
+        case .model:
+            guard index >= 0, index < _modelPresets.count else { return false }
+            _modelPresets.remove(at: index)
+        case .temp:
+            guard index >= 0, index < _tempPresets.count else { return false }
+            _tempPresets.remove(at: index)
+        case .history:
+            guard index >= 0, index < _historyLengthPresets.count else { return false }
+            _historyLengthPresets.remove(at: index)
+        case .role:
+            guard index >= 0, index < _rolePresets.count else { return false }
+            _rolePresets.remove(at: index)
+        }
+        return true
+    }
+
+    func editPreset(category: PresetCategory, index: Int, display: String, value: String) -> Bool {
+        let preset = Preset(display: display, value: value)
+        switch category {
+        case .model:
+            guard index >= 0, index < _modelPresets.count else { return false }
+            _modelPresets[index] = preset
+        case .temp:
+            guard index >= 0, index < _tempPresets.count else { return false }
+            _tempPresets[index] = preset
+        case .history:
+            guard index >= 0, index < _historyLengthPresets.count else { return false }
+            _historyLengthPresets[index] = preset
+        case .role:
+            guard index >= 0, index < _rolePresets.count else { return false }
+            _rolePresets[index] = preset
+        }
+        return true
+    }
+
+    // MARK: - Per-chat preset management
+
+    func chatPresets(category: PresetCategory, chatKey: ChatKey) -> [Preset] {
+        let ctx = ensure(chatKey: chatKey)
+        switch category {
+        case .model: return ctx.chatModelPresets
+        case .temp: return ctx.chatTempPresets
+        case .history: return ctx.chatHistoryLengthPresets
+        case .role: return ctx.chatRolePresets
+        }
+    }
+
+    func addChatPreset(category: PresetCategory, chatKey: ChatKey, display: String, value: String) -> Preset {
+        let preset = Preset(display: display, value: value)
+        mutate(chatKey: chatKey) { ctx in
+            switch category {
+            case .model: ctx.chatModelPresets.append(preset)
+            case .temp: ctx.chatTempPresets.append(preset)
+            case .history: ctx.chatHistoryLengthPresets.append(preset)
+            case .role: ctx.chatRolePresets.append(preset)
+            }
+        }
+        return preset
+    }
+
+    func removeChatPresetByIndex(category: PresetCategory, chatKey: ChatKey, index: Int) -> Bool {
+        var success = false
+        mutate(chatKey: chatKey) { ctx in
+            switch category {
+            case .model:
+                guard index >= 0, index < ctx.chatModelPresets.count else { return }
+                ctx.chatModelPresets.remove(at: index)
+                success = true
+            case .temp:
+                guard index >= 0, index < ctx.chatTempPresets.count else { return }
+                ctx.chatTempPresets.remove(at: index)
+                success = true
+            case .history:
+                guard index >= 0, index < ctx.chatHistoryLengthPresets.count else { return }
+                ctx.chatHistoryLengthPresets.remove(at: index)
+                success = true
+            case .role:
+                guard index >= 0, index < ctx.chatRolePresets.count else { return }
+                ctx.chatRolePresets.remove(at: index)
+                success = true
+            }
+        }
+        return success
+    }
+
+    func editChatPreset(category: PresetCategory, chatKey: ChatKey, index: Int, display: String, value: String) -> Bool {
+        let preset = Preset(display: display, value: value)
+        var success = false
+        mutate(chatKey: chatKey) { ctx in
+            switch category {
+            case .model:
+                guard index >= 0, index < ctx.chatModelPresets.count else { return }
+                ctx.chatModelPresets[index] = preset
+                success = true
+            case .temp:
+                guard index >= 0, index < ctx.chatTempPresets.count else { return }
+                ctx.chatTempPresets[index] = preset
+                success = true
+            case .history:
+                guard index >= 0, index < ctx.chatHistoryLengthPresets.count else { return }
+                ctx.chatHistoryLengthPresets[index] = preset
+                success = true
+            case .role:
+                guard index >= 0, index < ctx.chatRolePresets.count else { return }
+                ctx.chatRolePresets[index] = preset
+                success = true
+            }
+        }
+        return success
+    }
+
+    // MARK: - Pending input
+
+    func setPendingInput(_ input: PendingInput, chatKey: ChatKey) {
+        _pendingInputs[chatKey] = input
+    }
+
+    func consumePendingInput(chatKey: ChatKey) -> PendingInput? {
+        _pendingInputs.removeValue(forKey: chatKey)
+    }
+
+    func clearPendingInput(chatKey: ChatKey) {
+        _pendingInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasPendingInput(chatKey: ChatKey) -> Bool {
+        _pendingInputs[chatKey] != nil
+    }
     
     func getDefaults() -> (model: String, role: String, historyLength: Int) {
         (defaultModel, systemPrompt, defaultHistoryLength)
@@ -517,7 +679,11 @@ actor ChatContextStore {
             suffix: defaultSuffix,
             reasoningEffort: nil,
             backupNotify: false,
-            cumulativeUsage: .zero
+            cumulativeUsage: .zero,
+            chatModelPresets: [],
+            chatTempPresets: [],
+            chatHistoryLengthPresets: [],
+            chatRolePresets: []
         )
     }
 
@@ -537,7 +703,11 @@ actor ChatContextStore {
                 suffix: context.suffix,
                 reasoningEffort: context.reasoningEffort,
                 backupNotify: context.backupNotify,
-                cumulativeUsage: context.cumulativeUsage
+                cumulativeUsage: context.cumulativeUsage,
+                chatModelPresets: context.chatModelPresets.isEmpty ? nil : context.chatModelPresets,
+                chatTempPresets: context.chatTempPresets.isEmpty ? nil : context.chatTempPresets,
+                chatHistoryLengthPresets: context.chatHistoryLengthPresets.isEmpty ? nil : context.chatHistoryLengthPresets,
+                chatRolePresets: context.chatRolePresets.isEmpty ? nil : context.chatRolePresets
             )
         }
         return BotStateSnapshot(
@@ -583,7 +753,11 @@ actor ChatContextStore {
                 suffix: ctxSnapshot.suffix,
                 reasoningEffort: ctxSnapshot.reasoningEffort,
                 backupNotify: ctxSnapshot.backupNotify,
-                cumulativeUsage: ctxSnapshot.cumulativeUsage ?? .zero
+                cumulativeUsage: ctxSnapshot.cumulativeUsage ?? .zero,
+                chatModelPresets: ctxSnapshot.chatModelPresets ?? [],
+                chatTempPresets: ctxSnapshot.chatTempPresets ?? [],
+                chatHistoryLengthPresets: ctxSnapshot.chatHistoryLengthPresets ?? [],
+                chatRolePresets: ctxSnapshot.chatRolePresets ?? []
             )
         }
     }

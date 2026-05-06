@@ -53,7 +53,85 @@ final class BotMenuHandler: @unchecked Sendable {
         }
     }
 
+    func processTextInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard await state.hasPendingInput(chatKey: chatKey) else { return false }
+        if text.hasPrefix("/") { return false }
+        guard let pending = await state.consumePendingInput(chatKey: chatKey) else { return false }
+
+        let isAdmin = await state.isAdmin(username: username)
+
+        if pending.scope == .global, !isAdmin {
+            _ = try? await telegram.sendMessage(
+                .init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: "🔒 Только администратор может редактировать глобальные пресеты.",
+                    replyMarkup: nil
+                )
+            )
+            return true
+        }
+
+        let components = text.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard components.count == 2, !components[0].isEmpty, !components[1].isEmpty else {
+            await state.setPendingInput(pending, chatKey: chatKey)
+            _ = try? await telegram.sendMessage(
+                .init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: "⚠️ Неверный формат. Используйте: <code>Название | Значение</code>",
+                    replyMarkup: nil
+                )
+            )
+            return true
+        }
+
+        let display = components[0]
+        let value = components[1]
+        let toastText: String
+
+        switch (pending.scope, pending.kind) {
+        case (.global, .add):
+            _ = await state.addPreset(category: pending.category, display: display, value: value)
+            toastText = "✓ Глобальный пресет добавлен: \(display)"
+        case (.global, .edit(let index)):
+            let ok = await state.editPreset(category: pending.category, index: index, display: display, value: value)
+            toastText = ok ? "✓ Обновлён: \(display)" : "⚠️ Пресет не найден"
+        case (.chat, .add):
+            _ = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value)
+            toastText = "✓ Пресет чата добавлен: \(display)"
+        case (.chat, .edit(let index)):
+            let ok = await state.editChatPreset(category: pending.category, chatKey: chatKey, index: index, display: display, value: value)
+            toastText = ok ? "✓ Обновлён: \(display)" : "⚠️ Пресет не найден"
+        }
+
+        let (menuText, markup) = await renderPresetManagement(category: pending.category, chatKey: chatKey, isAdmin: isAdmin)
+        try? await telegram.editMessage(
+            .init(
+                chatID: chatKey.chatID,
+                messageID: pending.menuMessageID,
+                text: menuText,
+                replyMarkup: markup
+            )
+        )
+
+        _ = try? await telegram.sendMessage(
+            .init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: toastText,
+                replyMarkup: nil
+            )
+        )
+
+        return true
+    }
+
     func sendMenu(chatKey: ChatKey) async {
+        await state.clearPendingInput(chatKey: chatKey)
         let (text, markup) = await renderPage(.main, chatKey: chatKey)
         _ = try? await telegram.sendMessage(
             .init(
@@ -79,6 +157,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         switch command {
         case "open":
+            await state.clearPendingInput(chatKey: chatKey)
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
 
         case "close":
@@ -104,10 +183,33 @@ final class BotMenuHandler: @unchecked Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль по умолчанию")
                 try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
                 return
-            } else if parts[1] == "select", parts.count >= 3, let index = Int(parts[2]) {
+            } else if parts[1] == "gsel", parts.count >= 3, let index = Int(parts[2]) {
                 let presets = await state.rolePresets()
                 guard index >= 0, index < presets.count else {
-                    try await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    return
+                }
+                let roleValue = presets[index].value + formatOptions
+                _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: roleValue)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(presets[index].display)")
+                try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
+                return
+            } else if parts[1] == "csel", parts.count >= 3, let index = Int(parts[2]) {
+                let presets = await state.chatPresets(category: .role, chatKey: chatKey)
+                guard index >= 0, index < presets.count else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    return
+                }
+                let roleValue = presets[index].value + formatOptions
+                _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: roleValue)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(presets[index].display)")
+                try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
+                return
+            } else if parts[1] == "select", parts.count >= 3, let index = Int(parts[2]) {
+                // Legacy: treat as global
+                let presets = await state.rolePresets()
+                guard index >= 0, index < presets.count else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
                     return
                 }
                 let roleValue = presets[index].value + formatOptions
@@ -118,17 +220,29 @@ final class BotMenuHandler: @unchecked Sendable {
             }
 
         case "model":
-            guard parts.count >= 3, parts[1] == "select" else { return }
-            let model = parts[2]
-            let presets = await state.modelPresets()
-            guard let preset = presets.first(where: { $0.value == model }) else {
-                try await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
+            guard parts.count >= 3 else { return }
+            let modelValue = parts[2]
+            if parts[1] == "select" || parts[1] == "gsel" {
+                let presets = await state.modelPresets()
+                guard let preset = presets.first(where: { $0.value == modelValue }) else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
+                    return
+                }
+                _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель: \(preset.display)")
+                try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
+                return
+            } else if parts[1] == "csel" {
+                let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
+                guard let preset = chatPresets.first(where: { $0.value == modelValue }) else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
+                    return
+                }
+                _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель: \(preset.display)")
+                try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
                 return
             }
-            _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: model)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель: \(preset.display)")
-            try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
-            return
 
         case "temp":
             guard parts.count >= 2, let temp = Float(parts[1]), (0.0...2.0).contains(temp) else { return }
@@ -221,6 +335,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "reset":
+            await state.clearPendingInput(chatKey: chatKey)
             await state.resetChat(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Настройки сброшены")
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
@@ -231,6 +346,83 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "noop":
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            return
+
+        case "pm":
+            guard parts.count >= 2, let category = PresetCategory(rawValue: parts[1]) else { return }
+            await state.clearPendingInput(chatKey: chatKey)
+            let isAdmin = await state.isAdmin(username: callback.from.username)
+
+            if parts.count == 2 {
+                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, isAdmin: isAdmin)
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+                return
+            }
+
+            switch parts[2] {
+            // Per-chat actions (anyone)
+            case "add":
+                let pending = PendingInput(category: category, scope: .chat, kind: .add, menuMessageID: message.message_id)
+                await state.setPendingInput(pending, chatKey: chatKey)
+                let (text, markup) = renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil)
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            case "edit":
+                guard parts.count >= 4, let index = Int(parts[3]) else { return }
+                let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
+                guard index >= 0, index < chatPresets.count else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    return
+                }
+                let pending = PendingInput(category: category, scope: .chat, kind: .edit(index: index), menuMessageID: message.message_id)
+                await state.setPendingInput(pending, chatKey: chatKey)
+                let (text, markup) = renderAwaitingInput(category: category, scope: .chat, kind: .edit(index: index), preset: chatPresets[index])
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            case "del":
+                guard parts.count >= 4, let index = Int(parts[3]) else { return }
+                let removed = await state.removeChatPresetByIndex(category: category, chatKey: chatKey, index: index)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Пресет удалён" : "Пресет не найден")
+                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, isAdmin: isAdmin)
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+            // Global actions (admin-only)
+            case "gadd":
+                guard isAdmin else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                    return
+                }
+                let pending = PendingInput(category: category, scope: .global, kind: .add, menuMessageID: message.message_id)
+                await state.setPendingInput(pending, chatKey: chatKey)
+                let (text, markup) = renderAwaitingInput(category: category, scope: .global, kind: .add, preset: nil)
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            case "gedit":
+                guard isAdmin else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                    return
+                }
+                guard parts.count >= 4, let index = Int(parts[3]) else { return }
+                let globalPresets = await state.presets(for: category)
+                guard index >= 0, index < globalPresets.count else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    return
+                }
+                let pending = PendingInput(category: category, scope: .global, kind: .edit(index: index), menuMessageID: message.message_id)
+                await state.setPendingInput(pending, chatKey: chatKey)
+                let (text, markup) = renderAwaitingInput(category: category, scope: .global, kind: .edit(index: index), preset: globalPresets[index])
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            case "gdel":
+                guard isAdmin else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                    return
+                }
+                guard parts.count >= 4, let index = Int(parts[3]) else { return }
+                let removed = await state.removePresetByIndex(category: category, index: index)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Пресет удалён" : "Пресет не найден")
+                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, isAdmin: isAdmin)
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+            default:
+                return
+            }
             return
 
         default:
@@ -244,6 +436,8 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func closeMenu(callback: CallbackQuery, message: MaybeInaccessibleMessage) async throws {
+        let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+        await state.clearPendingInput(chatKey: chatKey)
         try await telegram.editMessage(
             .init(
                 chatID: message.chat.id,
@@ -371,23 +565,36 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderRole(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let presets = await state.rolePresets()
-        let activeIndex = presets.firstIndex(where: { (help.role).hasPrefix($0.value) })
+        let globalPresets = await state.rolePresets()
+        let chatPresets = await state.chatPresets(category: .role, chatKey: chatKey)
+        let activeRole = help.role
 
         var rows: [[InlineKeyboardButton]] = []
-        var currentRow: [InlineKeyboardButton] = []
-        for (i, preset) in presets.enumerated() {
-            let label = (i == activeIndex ? "✓ " : "") + preset.display
-            currentRow.append(menuButton(label, action: "role:select:\(i)"))
-            if currentRow.count == 2 {
-                rows.append(currentRow)
-                currentRow = []
+
+        if !globalPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for (i, preset) in globalPresets.enumerated() {
+                let isActive = activeRole.hasPrefix(preset.value)
+                let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
+                currentRow.append(menuButton(label, action: "role:gsel:\(i)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
             }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
-        if !currentRow.isEmpty {
-            rows.append(currentRow)
+
+        if !chatPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for (i, preset) in chatPresets.enumerated() {
+                let isActive = activeRole.hasPrefix(preset.value)
+                let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
+                currentRow.append(menuButton(label, action: "role:csel:\(i)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+            }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
+
         rows.append([menuButton("↺ По умолчанию", action: "role:default")])
+        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:role")])
         rows.append(navButtons())
 
         let text = """
@@ -403,20 +610,31 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderModel(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let presets = await state.modelPresets()
+        let globalPresets = await state.modelPresets()
+        let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
         var rows: [[InlineKeyboardButton]] = []
-        var currentRow: [InlineKeyboardButton] = []
-        for preset in presets {
-            let label = (preset.value == help.model ? "✓ " : "") + preset.display
-            currentRow.append(menuButton(label, action: "model:select:\(preset.value)"))
-            if currentRow.count == 2 {
-                rows.append(currentRow)
-                currentRow = []
+
+        if !globalPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for preset in globalPresets {
+                let label = (preset.value == help.model ? "✓ " : "") + "🌐 \(preset.display)"
+                currentRow.append(menuButton(label, action: "model:gsel:\(preset.value)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
             }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
-        if !currentRow.isEmpty {
-            rows.append(currentRow)
+
+        if !chatPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for preset in chatPresets {
+                let label = (preset.value == help.model ? "✓ " : "") + "💬 \(preset.display)"
+                currentRow.append(menuButton(label, action: "model:csel:\(preset.value)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+            }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
+
+        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:model")])
         rows.append(navButtons())
 
         let text = """
@@ -432,21 +650,33 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderTemp(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let presets = await state.tempPresets()
+        let globalPresets = await state.tempPresets()
+        let chatPresets = await state.chatPresets(category: .temp, chatKey: chatKey)
         var rows: [[InlineKeyboardButton]] = []
-        var currentRow: [InlineKeyboardButton] = []
-        for preset in presets {
-            let isActive = Float(preset.value).map { abs($0 - help.temp) < 0.001 } ?? false
-            let label = (isActive ? "✓ " : "") + preset.display
-            currentRow.append(menuButton(label, action: "temp:\(preset.value)"))
-            if currentRow.count == 2 {
-                rows.append(currentRow)
-                currentRow = []
+
+        if !globalPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for preset in globalPresets {
+                let isActive = Float(preset.value).map { abs($0 - help.temp) < 0.001 } ?? false
+                let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
+                currentRow.append(menuButton(label, action: "temp:\(preset.value)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
             }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
-        if !currentRow.isEmpty {
-            rows.append(currentRow)
+
+        if !chatPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for preset in chatPresets {
+                let isActive = Float(preset.value).map { abs($0 - help.temp) < 0.001 } ?? false
+                let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
+                currentRow.append(menuButton(label, action: "temp:\(preset.value)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+            }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
+
+        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:temp")])
         rows.append(navButtons())
 
         let bucket = Self.tempBucket(help.temp)
@@ -480,22 +710,34 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderHistory(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let presets = await state.historyLengthPresets()
+        let globalPresets = await state.historyLengthPresets()
+        let chatPresets = await state.chatPresets(category: .history, chatKey: chatKey)
         var rows: [[InlineKeyboardButton]] = []
-        var currentRow: [InlineKeyboardButton] = []
-        for preset in presets {
-            let isActive = Int(preset.value) == help.maxHistory
-            let label = (isActive ? "✓ " : "") + preset.display
-            currentRow.append(menuButton(label, action: "history:length:\(preset.value)"))
-            if currentRow.count == 2 {
-                rows.append(currentRow)
-                currentRow = []
+
+        if !globalPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for preset in globalPresets {
+                let isActive = Int(preset.value) == help.maxHistory
+                let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
+                currentRow.append(menuButton(label, action: "history:length:\(preset.value)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
             }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
-        if !currentRow.isEmpty {
-            rows.append(currentRow)
+
+        if !chatPresets.isEmpty {
+            var currentRow: [InlineKeyboardButton] = []
+            for preset in chatPresets {
+                let isActive = Int(preset.value) == help.maxHistory
+                let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
+                currentRow.append(menuButton(label, action: "history:length:\(preset.value)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+            }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
+
         rows.append([menuButton("🧹 Очистить историю", action: "history:clear")])
+        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:history")])
         rows.append(navButtons())
 
         let text = """
@@ -581,6 +823,101 @@ final class BotMenuHandler: @unchecked Sendable {
             navButtons(),
         ]
         return (formatHelpText(help), InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    // MARK: - Preset management renderers
+
+    private func renderPresetManagement(category: PresetCategory, chatKey: ChatKey, isAdmin: Bool) async -> (String, InlineKeyboardMarkup) {
+        let globalPresets = await state.presets(for: category)
+        let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
+
+        var text = "<b>📋 Управление пресетами · \(category.displayName)</b>\n\n"
+
+        if globalPresets.isEmpty {
+            text += "🌐 <b>Глобальные</b> — <i>нет</i>\n"
+        } else {
+            text += "🌐 <b>Глобальные</b> (только администратор)\n"
+            for (i, preset) in globalPresets.enumerated() {
+                if category == .role {
+                    text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
+                } else {
+                    text += "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>\n"
+                }
+            }
+        }
+
+        text += "\n"
+
+        if chatPresets.isEmpty {
+            text += "💬 <b>Пресеты чата</b> — <i>нет</i>"
+        } else {
+            text += "💬 <b>Пресеты чата</b>\n"
+            for (i, preset) in chatPresets.enumerated() {
+                if category == .role {
+                    text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
+                } else {
+                    text += "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>\n"
+                }
+            }
+        }
+
+        var rows: [[InlineKeyboardButton]] = []
+
+        if isAdmin {
+            rows.append([menuButton("🌐 ➕ Добавить глобальный", action: "pm:\(category.rawValue):gadd")])
+            for (i, preset) in globalPresets.enumerated() {
+                rows.append([
+                    menuButton("🌐 ✏️ \(preset.display)", action: "pm:\(category.rawValue):gedit:\(i)"),
+                    menuButton("❌", action: "pm:\(category.rawValue):gdel:\(i)"),
+                ])
+            }
+        }
+
+        rows.append([menuButton("💬 ➕ Добавить в чат", action: "pm:\(category.rawValue):add")])
+        for (i, preset) in chatPresets.enumerated() {
+            rows.append([
+                menuButton("💬 ✏️ \(preset.display)", action: "pm:\(category.rawValue):edit:\(i)"),
+                menuButton("❌", action: "pm:\(category.rawValue):del:\(i)"),
+            ])
+        }
+
+        rows.append([
+            menuButton("← К выбору", action: "nav:\(category.rawValue)"),
+            menuButton("✕ Закрыть", action: "close"),
+        ])
+
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderAwaitingInput(category: PresetCategory, scope: PendingInput.Scope, kind: PendingInput.Kind, preset: Preset?) -> (String, InlineKeyboardMarkup) {
+        let scopeLabel = scope == .global ? "🌐 Глобальный" : "💬 Пресет чата"
+        let text: String
+        switch kind {
+        case .add:
+            text = """
+            <b>➕ Новый пресет · \(scopeLabel) · \(category.displayName)</b>
+
+            Отправьте сообщение в формате:
+            <code>Название | Значение</code>
+
+            Пример: <code>\(category.addExample)</code>
+            """
+        case .edit:
+            text = """
+            <b>✏️ Редактирование · \(scopeLabel) · \(preset?.display ?? "")</b>
+
+            Текущее значение:
+            <code>\(preset?.value ?? "")</code>
+
+            Отправьте новое в формате:
+            <code>Название | Значение</code>
+            """
+        }
+
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton("❌ Отмена", action: "pm:\(category.rawValue)")],
+        ]
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
     // MARK: - Helpers
