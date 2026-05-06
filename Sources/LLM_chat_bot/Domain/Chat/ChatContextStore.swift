@@ -26,6 +26,7 @@ struct ChatContext: Sendable {
     var suffix: Int?
     var reasoningEffort: ReasoningEffort?
     var backupNotify: Bool
+    var cumulativeUsage: CumulativeUsage
 }
 
 struct GenerationSnapshot: Sendable {
@@ -49,6 +50,7 @@ struct HelpData: Sendable {
     let reasoningEffort: ReasoningEffort?
     let testModeSuffix: Int?
     let backupNotify: Bool
+    let cumulativeUsage: CumulativeUsage
 }
 
 actor ChatContextStore {
@@ -117,7 +119,8 @@ actor ChatContextStore {
             provider: .openrouter,
             suffix: defaultSuffix,
             reasoningEffort: nil,
-            backupNotify: false
+            backupNotify: false,
+            cumulativeUsage: .zero
         )
         contexts[chatKey] = context
         return context
@@ -174,7 +177,8 @@ actor ChatContextStore {
             provider: context.provider,
             reasoningEffort: context.reasoningEffort,
             testModeSuffix: context.suffix,
-            backupNotify: context.backupNotify
+            backupNotify: context.backupNotify,
+            cumulativeUsage: context.cumulativeUsage
         )
     }
 
@@ -329,14 +333,16 @@ actor ChatContextStore {
         )
     }
     
-    func appendAssistant(chatKey: ChatKey, generationID: GenerationID, content: String) {
+    func appendAssistant(chatKey: ChatKey, generationID: GenerationID, content: String, usage: StreamUsageSummary? = nil) {
         mutate(chatKey: chatKey) { context in
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
                 return
             }
-            
             context.pendingTurns[index].state = .completed(content)
             flushResolvedTurns(&context)
+            context.cumulativeUsage.totalTokens += usage?.totalTokens ?? 0
+            context.cumulativeUsage.totalCost += usage?.cost ?? 0
+            context.cumulativeUsage.generationCount += 1
         }
     }
     
@@ -345,12 +351,24 @@ actor ChatContextStore {
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
                 return
             }
-            
+
             context.pendingTurns[index].state = .cancelled
             flushResolvedTurns(&context)
         }
     }
-    
+
+    func accumulateUsage(chatKey: ChatKey, usage: StreamUsageSummary?) {
+        mutate(chatKey: chatKey) { context in
+            context.cumulativeUsage.totalTokens += usage?.totalTokens ?? 0
+            context.cumulativeUsage.totalCost += usage?.cost ?? 0
+            context.cumulativeUsage.generationCount += 1
+        }
+    }
+
+    func resetUsage(chatKey: ChatKey) {
+        mutate(chatKey: chatKey) { $0.cumulativeUsage = .zero }
+    }
+
     func isAdmin(username: String?) -> Bool {
         guard let username else { return false }
         return adminUsernames.contains(username.lowercased())
@@ -498,7 +516,8 @@ actor ChatContextStore {
             provider: .openrouter,
             suffix: defaultSuffix,
             reasoningEffort: nil,
-            backupNotify: false
+            backupNotify: false,
+            cumulativeUsage: .zero
         )
     }
 
@@ -517,7 +536,8 @@ actor ChatContextStore {
                 provider: context.provider,
                 suffix: context.suffix,
                 reasoningEffort: context.reasoningEffort,
-                backupNotify: context.backupNotify
+                backupNotify: context.backupNotify,
+                cumulativeUsage: context.cumulativeUsage
             )
         }
         return BotStateSnapshot(
@@ -562,7 +582,8 @@ actor ChatContextStore {
                 provider: ctxSnapshot.provider,
                 suffix: ctxSnapshot.suffix,
                 reasoningEffort: ctxSnapshot.reasoningEffort,
-                backupNotify: ctxSnapshot.backupNotify
+                backupNotify: ctxSnapshot.backupNotify,
+                cumulativeUsage: ctxSnapshot.cumulativeUsage ?? .zero
             )
         }
     }

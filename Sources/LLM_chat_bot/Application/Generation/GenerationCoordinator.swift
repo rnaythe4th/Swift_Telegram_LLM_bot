@@ -77,6 +77,18 @@ final class GenerationCoordinator: @unchecked Sendable {
     private func processContent(message: TelegramMessage, content: UserInputContent, chatKey: ChatKey) async throws {
         let username = message.from?.username
         let generationID = await sessionRegistry.register(chatKey: chatKey)
+
+        let typingTask = Task {
+            while !Task.isCancelled {
+                try? await self.telegram.sendChatAction(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    action: "typing"
+                )
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+            }
+        }
+        defer { typingTask.cancel() }
         
         var processedContent = content
         if let username, let text = processedContent.text, !text.isEmpty {
@@ -196,7 +208,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                         chatID: chatKey.chatID,
                         messageID: currentPlaceholder.message_id,
                         text: done + "\n\n<i>↓ продолжение ниже</i>",
-                        replyMarkup: emptyMarkup
+                        replyMarkup: stopMarkup
                     )
                 )
                 guard let next = await sendContinuationPlaceholder() else {
@@ -310,7 +322,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             if isCancelled {
                 await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             } else if !fullAccumulator.isEmpty {
-                await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator)
+                await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage)
             } else {
                 await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             }

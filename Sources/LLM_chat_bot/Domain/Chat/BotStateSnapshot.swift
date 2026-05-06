@@ -1,5 +1,19 @@
 import Foundation
 
+struct CumulativeUsage: Codable, Sendable {
+    var totalTokens: Double
+    var totalCost: Double
+    var generationCount: Int
+
+    static let zero = CumulativeUsage(totalTokens: 0, totalCost: 0, generationCount: 0)
+
+    mutating func add(_ usage: StreamUsageSummary?) {
+        totalTokens += usage?.totalTokens ?? 0
+        totalCost += usage?.cost ?? 0
+        generationCount += 1
+    }
+}
+
 struct ChatContextSnapshot: Codable, Sendable {
     var role: String
     var history: [ChatMessage]
@@ -13,6 +27,7 @@ struct ChatContextSnapshot: Codable, Sendable {
     var suffix: Int?
     var reasoningEffort: ReasoningEffort?
     var backupNotify: Bool
+    var cumulativeUsage: CumulativeUsage?
 }
 
 struct BotStateSnapshot: Codable, Sendable {

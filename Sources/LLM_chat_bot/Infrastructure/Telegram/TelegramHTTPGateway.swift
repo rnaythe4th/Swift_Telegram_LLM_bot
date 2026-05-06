@@ -161,6 +161,26 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
     }
     
+    func sendChatAction(chatID: Int, threadID: Int64?, action: String) async throws {
+        struct Body: Codable {
+            let chat_id: Int
+            let action: String
+            let message_thread_id: Int64?
+        }
+        let body = Body(chat_id: chatID, action: action, message_thread_id: threadID)
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/sendChatAction",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 10,
+            maxBodyBytes: 1 << 18,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "sendChatAction", statusCode: raw.statusCode, data: raw.data)
+    }
+
     func answerCallback(callbackQueryID: String, text: String?) async throws {
         let body = AnswerCallbackQueryBody(
             callback_query_id: callbackQueryID,

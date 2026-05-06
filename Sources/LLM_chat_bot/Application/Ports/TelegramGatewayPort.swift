@@ -21,6 +21,7 @@ protocol TelegramGatewayPort: Sendable {
     func getUpdates(offset: Int?) async throws -> [TelegramUpdate]
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage
     func editMessage(_ request: EditMessageRequest) async throws
+    func sendChatAction(chatID: Int, threadID: Int64?, action: String) async throws
     func answerCallback(callbackQueryID: String, text: String?) async throws
     func getFile(fileID: String) async throws -> TelegramFile
     func downloadFile(filePath: String) async throws -> Data

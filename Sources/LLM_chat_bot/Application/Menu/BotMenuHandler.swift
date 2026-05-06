@@ -138,19 +138,32 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "stats":
+            guard parts.count >= 2 else { return }
+            if parts[1] == "usage-reset" {
+                await state.resetUsage(chatKey: chatKey)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Статистика сброшена")
+                try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+                return
+            }
             guard parts.count >= 3, parts[1] == "toggle" else { return }
+            let toastText: String
             switch parts[2] {
             case "tokens":
-                _ = await state.toggleShowStats(chatKey: chatKey)
+                let on = await state.toggleShowStats(chatKey: chatKey)
+                toastText = on ? "🟢 Токены включены" : "⚪️ Токены выключены"
             case "cost":
-                _ = await state.toggleShowCost(chatKey: chatKey)
+                let on = await state.toggleShowCost(chatKey: chatKey)
+                toastText = on ? "🟢 Стоимость включена" : "⚪️ Стоимость выключена"
             case "model":
-                _ = await state.toggleShowModel(chatKey: chatKey)
+                let on = await state.toggleShowModel(chatKey: chatKey)
+                toastText = on ? "🟢 Модель включена" : "⚪️ Модель выключена"
             case "backup":
-                _ = await state.toggleBackupNotify(chatKey: chatKey)
+                let on = await state.toggleBackupNotify(chatKey: chatKey)
+                toastText = on ? "🟢 Уведомления включены" : "⚪️ Уведомления выключены"
             default:
-                break
+                toastText = ""
             }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: toastText.isEmpty ? nil : toastText)
             try await showPage(.stats, chatKey: chatKey, callback: callback, message: message)
             return
 
@@ -304,6 +317,20 @@ final class BotMenuHandler: @unchecked Sendable {
         let gateway = try? gateways.gateway(for: provider)
         let reasoningSupported = gateway?.capabilities.supportsReasoning ?? false
         let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
+        let usage = help.cumulativeUsage
+        let usageLine: String
+        if usage.generationCount == 0 {
+            usageLine = "📈 Запросов пока нет"
+        } else {
+            var parts: [String] = ["запросов <b>\(usage.generationCount)</b>"]
+            if usage.totalTokens > 0 {
+                parts.append("токенов <b>\(ResponseFooterFormatter.formatTokenValue(usage.totalTokens))</b>")
+            }
+            if usage.totalCost > 0 {
+                parts.append("итого <b>$\(Self.formatCost(usage.totalCost))</b>")
+            }
+            usageLine = "📈 " + parts.joined(separator: " · ")
+        }
 
         let text = """
         <b>⚙️ Настройки чата</b>
@@ -313,6 +340,8 @@ final class BotMenuHandler: @unchecked Sendable {
         🌡 Темп · <b>\(Self.formatTemp(help.temp))</b>
         📝 История · <b>\(help.maxHistory) сообщ.</b>\
         \(reasoningSupported ? "\n🧠 Reasoning · <b>\(reasoningLabel)</b>" : "")
+
+        \(usageLine)
         """
 
         var rows: [[InlineKeyboardButton]] = [
@@ -324,10 +353,20 @@ final class BotMenuHandler: @unchecked Sendable {
             rows[2].append(menuButton("🧠 Reasoning", action: "nav:reasoning"))
         }
         rows.append([menuButton("📊 Что показывать", action: "nav:stats")])
+        if usage.generationCount > 0 {
+            rows.append([menuButton("🗑 Сбросить статистику", action: "stats:usage-reset")])
+        }
         rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сброс", action: "reset")])
         rows.append([menuButton("✕ Закрыть", action: "close")])
 
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private static func formatCost(_ cost: Double) -> String {
+        if cost == 0 { return "0" }
+        if cost < 0.0001 { return String(format: "%.6f", cost) }
+        if cost < 0.01 { return String(format: "%.5f", cost) }
+        return String(format: "%.4f", cost)
     }
 
     private func renderRole(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
