@@ -8,6 +8,10 @@ enum EnvironmentKey: String {
     case supabaseURL = "SUPABASE_URL"
     case supabaseAnonKey = "SUPABASE_ANON_KEY"
     case healthPort = "PORT"
+    case bscscanApiKey = "BSCSCAN_API_KEY"
+    case etherscanApiKey = "ETHERSCAN_API_KEY"
+    case trongridApiKey = "TRONGRID_API_KEY"
+    case tonapiKey = "TONAPI_KEY"
 }
 
 enum AppConfigError: LocalizedError {
@@ -33,21 +37,25 @@ struct AppConfig: Sendable {
     let supabaseURL: String?
     let supabaseAnonKey: String?
     let healthPort: Int
-    
+    let bscscanApiKey: String?
+    let etherscanApiKey: String?
+    let trongridApiKey: String?
+    let tonapiKey: String?
+
     static func load() throws -> AppConfig {
         let telegramToken = try env(.telegramToken)
         let deepseekKey = try env(.deepseekKey)
         let routerApiKey = try env(.routerApiKey)
         let companyChatIdRaw = try env(.companyChatId)
-        
+
         guard let companyChatId = Int(companyChatIdRaw) else {
             throw AppConfigError.invalidCompanyChatId(companyChatIdRaw)
         }
-        
+
         let supabaseURL = optionalEnv(.supabaseURL)
         let supabaseAnonKey = optionalEnv(.supabaseAnonKey)
         let healthPort = Int(optionalEnv(.healthPort) ?? "") ?? 8000
-        
+
         return .init(
             telegramToken: telegramToken,
             deepseekKey: deepseekKey,
@@ -55,7 +63,11 @@ struct AppConfig: Sendable {
             companyChatId: companyChatId,
             supabaseURL: supabaseURL,
             supabaseAnonKey: supabaseAnonKey,
-            healthPort: healthPort
+            healthPort: healthPort,
+            bscscanApiKey: optionalEnv(.bscscanApiKey),
+            etherscanApiKey: optionalEnv(.etherscanApiKey),
+            trongridApiKey: optionalEnv(.trongridApiKey),
+            tonapiKey: optionalEnv(.tonapiKey)
         )
     }
     

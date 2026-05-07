@@ -12,6 +12,7 @@ final class BotOrchestrator: @unchecked Sendable {
     private let updateDispatcher = ChatUpdateDispatcher()
     private var photoAlbumBuffer = TelegramPhotoAlbumBuffer()
     private let modelPriceMonitor: ModelPriceMonitor?
+    private let cryptoMonitor: CryptoPaymentMonitor?
 
     private static let backupIntervalSeconds: Int64 = 60
 
@@ -25,13 +26,16 @@ final class BotOrchestrator: @unchecked Sendable {
         logger: LoggerPort,
         botUsername: String,
         formatOptions: String,
-        modelPriceMonitor: ModelPriceMonitor? = nil
+        modelPriceMonitor: ModelPriceMonitor? = nil,
+        cryptoService: CryptoPaymentService? = nil,
+        cryptoMonitor: CryptoPaymentMonitor? = nil
     ) {
         self.telegram = telegram
         self.state = state
         self.persistence = persistence
         self.logger = logger
         self.modelPriceMonitor = modelPriceMonitor
+        self.cryptoMonitor = cryptoMonitor
 
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
         let menuHandler = BotMenuHandler(
@@ -40,7 +44,8 @@ final class BotOrchestrator: @unchecked Sendable {
             gateways: gatewayRegistry,
             logger: logger,
             formatOptions: formatOptions,
-            modelPriceMonitor: modelPriceMonitor
+            modelPriceMonitor: modelPriceMonitor,
+            cryptoService: cryptoService
         )
 
         self.menuHandler = menuHandler
@@ -60,7 +65,8 @@ final class BotOrchestrator: @unchecked Sendable {
             botUsername: botUsername,
             formatOptions: formatOptions,
             menuHandler: menuHandler,
-            modelPriceMonitor: modelPriceMonitor
+            modelPriceMonitor: modelPriceMonitor,
+            cryptoService: cryptoService
         )
         self.generationCoordinator = GenerationCoordinator(
             telegram: telegram,
@@ -83,6 +89,10 @@ final class BotOrchestrator: @unchecked Sendable {
 
         let priceMonitorTask = Task { [weak self] in
             await self?.modelPriceMonitor?.run()
+        }
+
+        let cryptoMonitorTask = Task { [weak self] in
+            await self?.cryptoMonitor?.run()
         }
 
         let backupTask = Task { [weak self] in
@@ -135,6 +145,7 @@ final class BotOrchestrator: @unchecked Sendable {
         }
 
         priceMonitorTask.cancel()
+        cryptoMonitorTask.cancel()
         backupTask.cancel()
     }
 

@@ -54,6 +54,7 @@ struct BotStateSnapshot: Codable, Sendable {
     var telegramUpdateOffset: Int
     var starsPrice: Int?
     var freeModelIDs: [String]?
+    var crypto: CryptoConfigSnapshot?
 
     // Legacy fields — present in pre-tenant snapshots, absent in new ones
     var whitelistedUserIDs: [Int]?

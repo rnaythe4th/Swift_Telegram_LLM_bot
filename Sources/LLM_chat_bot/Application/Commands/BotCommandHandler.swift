@@ -8,6 +8,7 @@ final class BotCommandHandler: @unchecked Sendable {
     private let formatOptions: String
     private let menuHandler: BotMenuHandler
     private let modelPriceMonitor: ModelPriceMonitor?
+    private let cryptoService: CryptoPaymentService?
 
     init(
         telegram: TelegramGatewayPort,
@@ -16,7 +17,8 @@ final class BotCommandHandler: @unchecked Sendable {
         botUsername: String,
         formatOptions: String,
         menuHandler: BotMenuHandler,
-        modelPriceMonitor: ModelPriceMonitor? = nil
+        modelPriceMonitor: ModelPriceMonitor? = nil,
+        cryptoService: CryptoPaymentService? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -25,6 +27,7 @@ final class BotCommandHandler: @unchecked Sendable {
         self.formatOptions = formatOptions
         self.menuHandler = menuHandler
         self.modelPriceMonitor = modelPriceMonitor
+        self.cryptoService = cryptoService
     }
 
     func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?) async throws -> Bool {
@@ -689,6 +692,35 @@ final class BotCommandHandler: @unchecked Sendable {
         case "freemodels":
             try await handleFreeModels(chatKey: chatKey, subcommand: arg1, value: arg2)
 
+        case "cryptoprice":
+            if arg1.isEmpty {
+                let cents = await state.cryptoPriceUsdCents()
+                if let cents {
+                    let usd = Double(cents) / 100.0
+                    try await sendUserFeedback(chatKey: chatKey, text: String(format: "🪙 Цена в крипто: <b>$%.2f</b>", usd))
+                } else {
+                    try await sendUserFeedback(chatKey: chatKey, text: "🪙 Крипто-оплата отключена.")
+                }
+            } else if arg1 == "0" || arg1.lowercased() == "off" {
+                await state.setCryptoPriceUsdCents(nil)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Крипто-оплата отключена.")
+            } else if let usd = Double(arg1.replacingOccurrences(of: ",", with: ".")), usd > 0 {
+                let cents = Int((usd * 100.0).rounded())
+                await state.setCryptoPriceUsdCents(cents)
+                try await sendUserFeedback(chatKey: chatKey, text: String(format: "✓ Цена в крипто: <b>$%.2f</b>", Double(cents) / 100.0))
+            } else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant cryptoprice 9.99</code> или <code>/tenant cryptoprice 0</code>")
+            }
+
+        case "cryptoaddr":
+            try await handleCryptoAddr(chatKey: chatKey, subArg: arg1, value: arg2)
+
+        case "cryptomode":
+            try await handleCryptoMode(chatKey: chatKey, value: arg1)
+
+        case "cryptopool":
+            try await handleCryptoPool(chatKey: chatKey, subArg: arg1, value: arg2)
+
         case "price":
             if arg1.isEmpty {
                 let price = await state.starsPrice()
@@ -720,7 +752,120 @@ final class BotCommandHandler: @unchecked Sendable {
                 <code>/tenant freemodels remove &lt;id&gt;</code> — удалить
                 <code>/tenant freemodels list</code> — список (пусто = все бесплатны)
                 <code>/tenant freemodels available</code> — бесплатные модели OpenRouter сейчас
+                <code>/tenant cryptoprice &lt;USD&gt;</code> — цена крипто-доступа (0 = отключить)
+                <code>/tenant cryptoaddr &lt;chain&gt; &lt;addr&gt;</code> — адрес для приёма (chain: ton|bsc|eth|tron)
+                <code>/tenant cryptoaddr list</code> — текущие адреса
+                <code>/tenant cryptomode delta|unique</code> — режим идентификации
+                <code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code> — добавить адрес в пул
+                <code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code> — удалить из пула
+                <code>/tenant cryptopool list</code> — пул адресов
                 """)
+        }
+    }
+
+    private func handleCryptoMode(chatKey: ChatKey, value: String) async throws {
+        let v = value.trimmingCharacters(in: .whitespaces).lowercased()
+        if v.isEmpty {
+            let mode = await state.cryptoMatchMode()
+            try await sendUserFeedback(chatKey: chatKey, text: "🪙 Режим: <b>\(mode.displayName)</b>\n<i>Использование:</i> <code>/tenant cryptomode delta|unique</code>")
+            return
+        }
+        let target: CryptoMatchMode?
+        switch v {
+        case "delta", "amount", "amount_delta": target = .amountDelta
+        case "unique", "address", "unique_address": target = .uniqueAddress
+        default: target = nil
+        }
+        guard let mode = target else {
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant cryptomode delta|unique</code>")
+            return
+        }
+        await state.setCryptoMatchMode(mode)
+        try await sendUserFeedback(chatKey: chatKey, text: "✓ Режим: <b>\(mode.displayName)</b>")
+    }
+
+    private func handleCryptoPool(chatKey: ChatKey, subArg: String, value: String) async throws {
+        let sub = subArg.trimmingCharacters(in: .whitespaces).lowercased()
+        let parts = value.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
+        let chainStr = parts.first ?? ""
+        let arg2 = parts.count > 1 ? parts[1] : ""
+
+        if sub.isEmpty || sub == "list" {
+            let pools = await state.cryptoAddressPools()
+            var lines: [String] = ["<b>🪙 Пулы адресов</b>"]
+            for chain in CryptoChain.allCases {
+                let pool = pools[chain] ?? []
+                if pool.isEmpty {
+                    lines.append("• \(chain.displayName) · <i>пусто</i>")
+                } else {
+                    lines.append("• \(chain.displayName) (\(pool.count))")
+                    for (i, addr) in pool.enumerated() {
+                        lines.append("  \(i). <code>\(addr)</code>")
+                    }
+                }
+            }
+            try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+            return
+        }
+
+        guard let chain = CryptoChain(rawValue: chainStr.lowercased()) else {
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Неизвестная сеть.</i> Используйте: <code>ton|bsc|eth|tron</code>")
+            return
+        }
+
+        switch sub {
+        case "add":
+            let addr = arg2.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !addr.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code>")
+                return
+            }
+            let added = await state.addCryptoPoolAddress(chain, address: addr)
+            try await sendUserFeedback(chatKey: chatKey, text: added
+                ? "✓ В пул \(chain.displayName) добавлен: <code>\(addr)</code>"
+                : "Адрес уже в пуле.")
+        case "remove":
+            guard let index = Int(arg2) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code>")
+                return
+            }
+            let removed = await state.removeCryptoPoolAddress(chain, at: index)
+            try await sendUserFeedback(chatKey: chatKey, text: removed
+                ? "✓ Удалён из пула \(chain.displayName), индекс \(index)."
+                : "Адрес с таким индексом не найден.")
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant cryptopool add|remove|list</code>")
+        }
+    }
+
+    private func handleCryptoAddr(chatKey: ChatKey, subArg: String, value: String) async throws {
+        let lower = subArg.lowercased()
+        if lower.isEmpty || lower == "list" {
+            let addrs = await state.cryptoAddresses()
+            if addrs.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "🪙 Адреса не настроены.\n<i>Использование:</i> <code>/tenant cryptoaddr ton EQ...</code>")
+                return
+            }
+            var lines = ["<b>🪙 Адреса для приёма</b>"]
+            for chain in CryptoChain.allCases {
+                if let addr = addrs[chain] {
+                    lines.append("• \(chain.displayName) · <code>\(addr)</code>")
+                }
+            }
+            try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+            return
+        }
+        guard let chain = CryptoChain(rawValue: lower) else {
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Неизвестная сеть.</i> Используйте: <code>ton</code>, <code>bsc</code>, <code>eth</code>, <code>tron</code>")
+            return
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            await state.setCryptoAddress(chain, address: nil)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Адрес для \(chain.displayName) удалён.")
+        } else {
+            await state.setCryptoAddress(chain, address: trimmed)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Адрес для \(chain.displayName): <code>\(trimmed)</code>")
         }
     }
 
@@ -790,7 +935,15 @@ final class BotCommandHandler: @unchecked Sendable {
     }
 
     private func handleBuy(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
-        guard let price = await state.starsPrice(), price > 0 else {
+        let starsPrice = await state.starsPrice()
+        let cryptoPriceCents = await state.cryptoPriceUsdCents()
+        let cryptoAssets: [CryptoAsset] = await {
+            guard let service = cryptoService else { return [] }
+            return await service.availableAssets()
+        }()
+        let cryptoAvailable = cryptoPriceCents != nil && !cryptoAssets.isEmpty
+
+        guard (starsPrice ?? 0) > 0 || cryptoAvailable else {
             try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Продажа доступа сейчас недоступна.")
             return
         }
@@ -806,12 +959,50 @@ final class BotCommandHandler: @unchecked Sendable {
             try await sendUserFeedback(chatKey: chatKey, text: "✅ У вас уже есть доступ к боту.")
             return
         }
-        try await telegram.sendInvoice(.init(
+
+        // Both methods available → show choice; only Stars or only Crypto → go straight.
+        if let starsPrice, starsPrice > 0, !cryptoAvailable {
+            try await telegram.sendInvoice(.init(
+                chatID: chatKey.chatID,
+                title: "Доступ к боту",
+                description: "Персональная копия ИИ-бота — единоразовая покупка",
+                payload: "buy_access",
+                starsAmount: starsPrice
+            ))
+            return
+        }
+
+        if cryptoAvailable, (starsPrice ?? 0) == 0 {
+            await menuHandler.sendCryptoAssetChoice(chatKey: chatKey)
+            return
+        }
+
+        // Both available → choice menu
+        var rows: [[InlineKeyboardButton]] = []
+        if let starsPrice, starsPrice > 0 {
+            rows.append([InlineKeyboardButton(
+                text: "💫 Stars · \(starsPrice) ⭐",
+                callback_data: BotCallbackAction.menu(action: "buy:stars").rawData
+            )])
+        }
+        if cryptoAvailable, let cents = cryptoPriceCents {
+            let label = String(format: "🪙 Криптовалюта · $%.2f", Double(cents) / 100.0)
+            rows.append([InlineKeyboardButton(
+                text: label,
+                callback_data: BotCallbackAction.menu(action: "buy:crypto").rawData
+            )])
+        }
+        let markup = InlineKeyboardMarkup(inline_keyboard: rows)
+        _ = try await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
-            title: "Доступ к боту",
-            description: "Персональная копия ИИ-бота — единоразовая покупка",
-            payload: "buy_access",
-            starsAmount: price
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: """
+            <b>💳 Выберите способ оплаты</b>
+
+            После оплаты бот активирует персональную копию автоматически.
+            """,
+            replyMarkup: markup
         ))
     }
 

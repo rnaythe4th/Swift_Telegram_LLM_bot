@@ -92,6 +92,32 @@ struct BlueprintBotApp {
             logger: logger
         )
 
+        let cryptoService = CryptoPaymentService(
+            state: state,
+            network: network,
+            telegram: telegram,
+            logger: logger
+        )
+
+        let tonExplorer = TonExplorer(network: network, apiKey: config.tonapiKey)
+        let bscExplorer = config.bscscanApiKey.map {
+            EvmExplorer(network: network, baseURL: "https://api.bscscan.com/api", apiKey: $0)
+        }
+        let ethExplorer = config.etherscanApiKey.map {
+            EvmExplorer(network: network, baseURL: "https://api.etherscan.io/api", apiKey: $0)
+        }
+        let tronExplorer = TronExplorer(network: network, apiKey: config.trongridApiKey)
+
+        let cryptoMonitor = CryptoPaymentMonitor(
+            state: state,
+            service: cryptoService,
+            logger: logger,
+            tonExplorer: tonExplorer,
+            bscExplorer: bscExplorer,
+            ethExplorer: ethExplorer,
+            tronExplorer: tronExplorer
+        )
+
         let orchestrator = BotOrchestrator(
             telegram: telegram,
             state: state,
@@ -106,7 +132,9 @@ struct BlueprintBotApp {
             logger: logger,
             botUsername: botUsername,
             formatOptions: formatOptions,
-            modelPriceMonitor: modelPriceMonitor
+            modelPriceMonitor: modelPriceMonitor,
+            cryptoService: cryptoService,
+            cryptoMonitor: cryptoMonitor
         )
         
         logger.info("Bot started as @\(botUsername)")

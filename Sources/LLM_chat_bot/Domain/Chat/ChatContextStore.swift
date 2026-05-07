@@ -95,6 +95,16 @@ actor ChatContextStore {
     private var _openRouterFreeModelIDs: Set<String>? = nil
     private var _openRouterModelPrices: [String: ModelPriceInfo] = [:]
 
+    private var _cryptoPriceUsdCents: Int? = nil
+    private var _cryptoAddresses: [CryptoChain: String] = [:]
+    private var _cryptoInvoices: [String: CryptoInvoice] = [:]
+    private var _cryptoSlotCounters: [CryptoAsset: Int] = [:]
+    private var _cryptoMatchMode: CryptoMatchMode = .amountDelta
+    private var _cryptoAddressPools: [CryptoChain: [String]] = [:]
+    private var _pendingCryptoPriceInputs: [ChatKey: Int] = [:]
+    private var _pendingCryptoAddressInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
+    private var _pendingCryptoPoolAddInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
+
     init(
         ownerUsername: String,
         model: String,
@@ -923,6 +933,265 @@ actor ChatContextStore {
         for (k, v) in prices { _openRouterModelPrices[k] = v }
     }
 
+    // MARK: - Crypto config
+
+    func cryptoPriceUsdCents() -> Int? { _cryptoPriceUsdCents }
+
+    func setCryptoPriceUsdCents(_ value: Int?) {
+        _cryptoPriceUsdCents = value.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    func cryptoAddress(_ chain: CryptoChain) -> String? {
+        _cryptoAddresses[chain]
+    }
+
+    func cryptoAddresses() -> [CryptoChain: String] { _cryptoAddresses }
+
+    func setCryptoAddress(_ chain: CryptoChain, address: String?) {
+        let trimmed = address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            _cryptoAddresses.removeValue(forKey: chain)
+        } else {
+            _cryptoAddresses[chain] = trimmed
+        }
+    }
+
+    func nextCryptoSlot(asset: CryptoAsset) -> Int {
+        let max = asset.maxConcurrentSlots
+        let current = (_cryptoSlotCounters[asset] ?? Int.random(in: 0..<max))
+        let next = (current + 1) % max
+        _cryptoSlotCounters[asset] = next
+        return next
+    }
+
+    func upsertCryptoInvoice(_ invoice: CryptoInvoice) {
+        _cryptoInvoices[invoice.id] = invoice
+    }
+
+    func cryptoInvoice(id: String) -> CryptoInvoice? {
+        _cryptoInvoices[id]
+    }
+
+    func openCryptoInvoices() -> [CryptoInvoice] {
+        _cryptoInvoices.values.filter { $0.status == .open || $0.status == .partial }
+    }
+
+    func openCryptoInvoices(asset: CryptoAsset) -> [CryptoInvoice] {
+        _cryptoInvoices.values.filter {
+            ($0.status == .open || $0.status == .partial) && $0.asset == asset
+        }
+    }
+
+    func openCryptoInvoiceForUser(username: String, asset: CryptoAsset) -> CryptoInvoice? {
+        let u = username.lowercased()
+        return _cryptoInvoices.values.first {
+            $0.username == u && $0.asset == asset && ($0.status == .open || $0.status == .partial)
+        }
+    }
+
+    func cancelCryptoInvoice(id: String) {
+        guard var inv = _cryptoInvoices[id] else { return }
+        if inv.status == .open || inv.status == .partial {
+            inv.status = .cancelled
+            _cryptoInvoices[id] = inv
+        }
+    }
+
+    func expireDueCryptoInvoices(now: Date = Date()) -> [CryptoInvoice] {
+        var expired: [CryptoInvoice] = []
+        for (id, inv) in _cryptoInvoices {
+            guard inv.status == .open || inv.status == .partial else { continue }
+            if now >= inv.expiresAt {
+                var copy = inv
+                copy.status = .expired
+                _cryptoInvoices[id] = copy
+                expired.append(copy)
+            }
+        }
+        return expired
+    }
+
+    func usedSlots(asset: CryptoAsset) -> Set<Int> {
+        Set(
+            _cryptoInvoices.values
+                .filter { ($0.status == .open || $0.status == .partial) && $0.asset == asset }
+                .map { $0.slotOffset }
+        )
+    }
+
+    func setPendingCryptoPriceInput(menuMessageID: Int, chatKey: ChatKey) {
+        _pendingCryptoPriceInputs[chatKey] = menuMessageID
+    }
+
+    func consumePendingCryptoPriceInput(chatKey: ChatKey) -> Int? {
+        _pendingCryptoPriceInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasPendingCryptoPriceInput(chatKey: ChatKey) -> Bool {
+        _pendingCryptoPriceInputs[chatKey] != nil
+    }
+
+    func clearPendingCryptoPriceInput(chatKey: ChatKey) {
+        _pendingCryptoPriceInputs.removeValue(forKey: chatKey)
+    }
+
+    func setPendingCryptoAddressInput(menuMessageID: Int, chain: CryptoChain, chatKey: ChatKey) {
+        _pendingCryptoAddressInputs[chatKey] = (menuMessageID, chain)
+    }
+
+    func consumePendingCryptoAddressInput(chatKey: ChatKey) -> (menuMessageID: Int, chain: CryptoChain)? {
+        _pendingCryptoAddressInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasPendingCryptoAddressInput(chatKey: ChatKey) -> Bool {
+        _pendingCryptoAddressInputs[chatKey] != nil
+    }
+
+    func clearPendingCryptoAddressInput(chatKey: ChatKey) {
+        _pendingCryptoAddressInputs.removeValue(forKey: chatKey)
+    }
+
+    func cryptoMatchMode() -> CryptoMatchMode { _cryptoMatchMode }
+
+    func setCryptoMatchMode(_ mode: CryptoMatchMode) {
+        _cryptoMatchMode = mode
+    }
+
+    func cryptoAddressPool(_ chain: CryptoChain) -> [String] {
+        _cryptoAddressPools[chain] ?? []
+    }
+
+    func cryptoAddressPools() -> [CryptoChain: [String]] { _cryptoAddressPools }
+
+    @discardableResult
+    func addCryptoPoolAddress(_ chain: CryptoChain, address: String) -> Bool {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        var pool = _cryptoAddressPools[chain] ?? []
+        guard !pool.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) else { return false }
+        pool.append(trimmed)
+        _cryptoAddressPools[chain] = pool
+        return true
+    }
+
+    @discardableResult
+    func removeCryptoPoolAddress(_ chain: CryptoChain, at index: Int) -> Bool {
+        guard var pool = _cryptoAddressPools[chain], index >= 0, index < pool.count else { return false }
+        pool.remove(at: index)
+        if pool.isEmpty {
+            _cryptoAddressPools.removeValue(forKey: chain)
+        } else {
+            _cryptoAddressPools[chain] = pool
+        }
+        return true
+    }
+
+    /// All addresses worth polling for a chain — primary delta address plus pool.
+    func pollableCryptoAddresses(_ chain: CryptoChain) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        if let primary = _cryptoAddresses[chain] {
+            let key = primary.lowercased()
+            if !seen.contains(key) { seen.insert(key); result.append(primary) }
+        }
+        for addr in _cryptoAddressPools[chain] ?? [] {
+            let key = addr.lowercased()
+            if !seen.contains(key) { seen.insert(key); result.append(addr) }
+        }
+        return result
+    }
+
+    /// Addresses already allocated to open/partial invoices for given asset.
+    func allocatedPoolAddresses(asset: CryptoAsset) -> Set<String> {
+        Set(
+            _cryptoInvoices.values
+                .filter { ($0.status == .open || $0.status == .partial) && $0.asset == asset }
+                .map { $0.receivingAddress.lowercased() }
+        )
+    }
+
+    /// Find first pool address for the chain that's not currently held by an open invoice
+    /// of any asset on that chain.
+    func nextFreePoolAddress(chain: CryptoChain) -> String? {
+        let pool = _cryptoAddressPools[chain] ?? []
+        guard !pool.isEmpty else { return nil }
+        let allocated = Set(
+            _cryptoInvoices.values
+                .filter { ($0.status == .open || $0.status == .partial) && $0.asset.chain == chain }
+                .map { $0.receivingAddress.lowercased() }
+        )
+        return pool.first { !allocated.contains($0.lowercased()) }
+    }
+
+    func openInvoiceMatching(asset: CryptoAsset, address: String) -> CryptoInvoice? {
+        let target = address.lowercased()
+        return _cryptoInvoices.values.first {
+            ($0.status == .open || $0.status == .partial)
+                && $0.asset == asset
+                && $0.receivingAddress.lowercased() == target
+        }
+    }
+
+    func setPendingCryptoPoolAddInput(menuMessageID: Int, chain: CryptoChain, chatKey: ChatKey) {
+        _pendingCryptoPoolAddInputs[chatKey] = (menuMessageID, chain)
+    }
+
+    func consumePendingCryptoPoolAddInput(chatKey: ChatKey) -> (menuMessageID: Int, chain: CryptoChain)? {
+        _pendingCryptoPoolAddInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasPendingCryptoPoolAddInput(chatKey: ChatKey) -> Bool {
+        _pendingCryptoPoolAddInputs[chatKey] != nil
+    }
+
+    func clearPendingCryptoPoolAddInput(chatKey: ChatKey) {
+        _pendingCryptoPoolAddInputs.removeValue(forKey: chatKey)
+    }
+
+    func cryptoConfigSnapshot() -> CryptoConfigSnapshot {
+        var addrs: [String: String] = [:]
+        for (chain, value) in _cryptoAddresses { addrs[chain.rawValue] = value }
+        var counters: [String: Int] = [:]
+        for (asset, value) in _cryptoSlotCounters { counters[asset.rawValue] = value }
+        var pools: [String: [String]] = [:]
+        for (chain, list) in _cryptoAddressPools { pools[chain.rawValue] = list }
+        return CryptoConfigSnapshot(
+            priceUsdCents: _cryptoPriceUsdCents,
+            addresses: addrs,
+            slotCounters: counters,
+            invoices: Array(_cryptoInvoices.values),
+            matchMode: _cryptoMatchMode.rawValue,
+            addressPools: pools.isEmpty ? nil : pools
+        )
+    }
+
+    func restoreCryptoConfig(_ snapshot: CryptoConfigSnapshot?) {
+        _cryptoPriceUsdCents = snapshot?.priceUsdCents
+        _cryptoAddresses = [:]
+        for (key, value) in snapshot?.addresses ?? [:] {
+            if let chain = CryptoChain(rawValue: key) {
+                _cryptoAddresses[chain] = value
+            }
+        }
+        _cryptoSlotCounters = [:]
+        for (key, value) in snapshot?.slotCounters ?? [:] {
+            if let asset = CryptoAsset(rawValue: key) {
+                _cryptoSlotCounters[asset] = value
+            }
+        }
+        _cryptoInvoices = [:]
+        for invoice in snapshot?.invoices ?? [] {
+            _cryptoInvoices[invoice.id] = invoice
+        }
+        _cryptoMatchMode = (snapshot?.matchMode).flatMap { CryptoMatchMode(rawValue: $0) } ?? .amountDelta
+        _cryptoAddressPools = [:]
+        for (key, list) in snapshot?.addressPools ?? [:] {
+            if let chain = CryptoChain(rawValue: key) {
+                _cryptoAddressPools[chain] = list
+            }
+        }
+    }
+
     func superAdminPrivateChats() -> [ChatKey] {
         contexts.keys.filter { $0.chatID > 0 && chatOwnership[$0.chatID] == defaultOwnerUsername }.map { $0 }
     }
@@ -1059,7 +1328,8 @@ actor ChatContextStore {
             chatOwnership: ownershipStrings,
             telegramUpdateOffset: telegramUpdateOffset,
             starsPrice: _starsPrice,
-            freeModelIDs: _freeModelIDs.isEmpty ? nil : _freeModelIDs
+            freeModelIDs: _freeModelIDs.isEmpty ? nil : _freeModelIDs,
+            crypto: cryptoConfigSnapshot()
         )
     }
 
@@ -1158,5 +1428,6 @@ actor ChatContextStore {
 
         _starsPrice = snapshot.starsPrice
         _freeModelIDs = snapshot.freeModelIDs ?? []
+        restoreCryptoConfig(snapshot.crypto)
     }
 }

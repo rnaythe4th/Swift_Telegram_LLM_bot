@@ -21,6 +21,7 @@ final class BotMenuHandler: @unchecked Sendable {
     private let logger: LoggerPort
     private let formatOptions: String
     private let modelPriceMonitor: ModelPriceMonitor?
+    private let cryptoService: CryptoPaymentService?
 
     init(
         telegram: TelegramGatewayPort,
@@ -28,7 +29,8 @@ final class BotMenuHandler: @unchecked Sendable {
         gateways: ProviderGatewayRegistry,
         logger: LoggerPort,
         formatOptions: String,
-        modelPriceMonitor: ModelPriceMonitor? = nil
+        modelPriceMonitor: ModelPriceMonitor? = nil,
+        cryptoService: CryptoPaymentService? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -36,6 +38,7 @@ final class BotMenuHandler: @unchecked Sendable {
         self.logger = logger
         self.formatOptions = formatOptions
         self.modelPriceMonitor = modelPriceMonitor
+        self.cryptoService = cryptoService
     }
 
     func handle(action rawAction: String, callback: CallbackQuery) async {
@@ -100,6 +103,105 @@ final class BotMenuHandler: @unchecked Sendable {
                     replyMarkup: nil
                 ))
             }
+            return true
+        }
+
+        if await state.hasPendingCryptoPriceInput(chatKey: chatKey) {
+            guard let menuMessageID = await state.consumePendingCryptoPriceInput(chatKey: chatKey) else { return true }
+            guard await state.isSuperAdmin(username: username) else {
+                _ = try? await telegram.sendMessage(.init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: "🔒 Только суперадмин может изменить цену.",
+                    replyMarkup: nil
+                ))
+                return true
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: ".")
+            if trimmed == "0" || trimmed.lowercased() == "off" {
+                await state.setCryptoPriceUsdCents(nil)
+                let confirm = "✓ Крипто-оплата отключена."
+                let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+                try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
+                _ = try? await telegram.sendMessage(.init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: confirm,
+                    replyMarkup: nil
+                ))
+            } else if let usd = Double(trimmed), usd > 0 {
+                let cents = Int((usd * 100.0).rounded())
+                await state.setCryptoPriceUsdCents(cents)
+                let confirm = String(format: "✓ Цена в крипто: <b>$%.2f</b>", Double(cents) / 100.0)
+                let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+                try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
+                _ = try? await telegram.sendMessage(.init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: confirm,
+                    replyMarkup: nil
+                ))
+            } else {
+                await state.setPendingCryptoPriceInput(menuMessageID: menuMessageID, chatKey: chatKey)
+                _ = try? await telegram.sendMessage(.init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: "⚠️ Введите сумму в долларах (например <code>9.99</code>) или <code>0</code>.",
+                    replyMarkup: nil
+                ))
+            }
+            return true
+        }
+
+        if await state.hasPendingCryptoPoolAddInput(chatKey: chatKey) {
+            guard let pending = await state.consumePendingCryptoPoolAddInput(chatKey: chatKey) else { return true }
+            guard await state.isSuperAdmin(username: username) else { return true }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let toast: String
+            if trimmed.isEmpty {
+                toast = "⚠️ Адрес пустой."
+            } else {
+                let added = await state.addCryptoPoolAddress(pending.chain, address: trimmed)
+                toast = added
+                    ? "✓ В пул \(pending.chain.displayName) добавлен: \(trimmed)"
+                    : "Адрес уже в пуле: \(trimmed)"
+            }
+            let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+            try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: toast,
+                replyMarkup: nil
+            ))
+            return true
+        }
+
+        if await state.hasPendingCryptoAddressInput(chatKey: chatKey) {
+            guard let pending = await state.consumePendingCryptoAddressInput(chatKey: chatKey) else { return true }
+            guard await state.isSuperAdmin(username: username) else { return true }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed == "-" || trimmed.isEmpty {
+                await state.setCryptoAddress(pending.chain, address: nil)
+            } else {
+                await state.setCryptoAddress(pending.chain, address: trimmed)
+            }
+            let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+            try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: trimmed == "-" || trimmed.isEmpty
+                    ? "✓ Адрес для \(pending.chain.displayName) удалён."
+                    : "✓ Адрес для \(pending.chain.displayName): <code>\(trimmed)</code>",
+                replyMarkup: nil
+            ))
             return true
         }
 
@@ -204,10 +306,59 @@ final class BotMenuHandler: @unchecked Sendable {
         return true
     }
 
+    func sendCryptoAssetChoice(chatKey: ChatKey) async {
+        guard let service = cryptoService else {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "ℹ️ Крипто-оплата не настроена.",
+                replyMarkup: nil
+            ))
+            return
+        }
+        let assets = await service.availableAssets()
+        guard !assets.isEmpty else {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "ℹ️ Адреса для приёма крипто-оплаты не настроены.",
+                replyMarkup: nil
+            ))
+            return
+        }
+        var rows: [[InlineKeyboardButton]] = []
+        for asset in assets {
+            rows.append([menuButton(asset.displayLabel, action: "buy:asset:\(asset.rawValue)")])
+        }
+        rows.append([menuButton("✕ Отмена", action: "close")])
+
+        let cents = await state.cryptoPriceUsdCents() ?? 0
+        let usd = String(format: "%.2f", Double(cents) / 100.0)
+        let text = """
+        <b>🪙 Оплата криптой</b>
+
+        Сумма к оплате: <b>$\(usd)</b>
+
+        Выберите валюту/сеть:
+        """
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: text,
+            replyMarkup: InlineKeyboardMarkup(inline_keyboard: rows)
+        ))
+    }
+
     func sendMenu(chatKey: ChatKey, username: String? = nil) async {
         await state.clearPendingInput(chatKey: chatKey)
         await state.clearPendingStarsPriceInput(chatKey: chatKey)
         await state.clearPendingFreeModelInput(chatKey: chatKey)
+        await state.clearPendingCryptoPriceInput(chatKey: chatKey)
+        await state.clearPendingCryptoAddressInput(chatKey: chatKey)
+        await state.clearPendingCryptoPoolAddInput(chatKey: chatKey)
         let (text, markup) = await renderPage(.main, chatKey: chatKey, username: username)
         _ = try? await telegram.sendMessage(
             .init(
@@ -573,6 +724,18 @@ final class BotMenuHandler: @unchecked Sendable {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             return
 
+        case "buy":
+            try await handleBuyAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            return
+
+        case "crypto":
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            try await handleCryptoAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            return
+
         case "pm":
             guard parts.count >= 2, let category = PresetCategory(rawValue: parts[1]) else { return }
             await state.clearPendingInput(chatKey: chatKey)
@@ -683,6 +846,9 @@ final class BotMenuHandler: @unchecked Sendable {
         await state.clearPendingInput(chatKey: chatKey)
         await state.clearPendingStarsPriceInput(chatKey: chatKey)
         await state.clearPendingFreeModelInput(chatKey: chatKey)
+        await state.clearPendingCryptoPriceInput(chatKey: chatKey)
+        await state.clearPendingCryptoAddressInput(chatKey: chatKey)
+        await state.clearPendingCryptoPoolAddInput(chatKey: chatKey)
         try await telegram.editMessage(
             .init(
                 chatID: message.chat.id,
@@ -1157,6 +1323,269 @@ final class BotMenuHandler: @unchecked Sendable {
         return (formatHelpText(help), InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
+    // MARK: - Buy flow (user-facing)
+
+    private func handleBuyAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard parts.count >= 2 else { return }
+        switch parts[1] {
+        case "stars":
+            guard let price = await state.starsPrice(), price > 0 else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Stars-оплата отключена")
+                return
+            }
+            guard let username = callback.from.username else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Требуется @username")
+                return
+            }
+            if await state.isTenant(username: username) {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас уже есть доступ")
+                return
+            }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            try await telegram.sendInvoice(.init(
+                chatID: chatKey.chatID,
+                title: "Доступ к боту",
+                description: "Персональная копия ИИ-бота — единоразовая покупка",
+                payload: "buy_access",
+                starsAmount: price
+            ))
+
+        case "crypto":
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            await sendCryptoAssetChoice(chatKey: chatKey)
+
+        case "asset":
+            guard parts.count >= 3, let asset = CryptoAsset(rawValue: parts[2]) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный актив")
+                return
+            }
+            guard let service = cryptoService else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Крипто-оплата недоступна")
+                return
+            }
+            guard let username = callback.from.username else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Требуется @username")
+                return
+            }
+            if await state.isTenant(username: username) {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас уже есть доступ")
+                return
+            }
+            do {
+                let invoice = try await service.createOrRefreshInvoice(
+                    username: username,
+                    userChatID: chatKey.chatID,
+                    asset: asset
+                )
+                let (text, markup) = renderInvoice(invoice)
+                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            } catch {
+                logger.error("crypto invoice creation failed: \(error)")
+                try? await telegram.answerCallback(
+                    callbackQueryID: callback.id,
+                    text: UserFacingError.shortMessage(error, context: "Не удалось создать счёт")
+                )
+            }
+
+        case "refresh":
+            guard parts.count >= 3 else { return }
+            let invoiceID = parts[2]
+            guard let invoice = await state.cryptoInvoice(id: invoiceID) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Счёт не найден")
+                return
+            }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            let (text, markup) = renderInvoice(invoice)
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+        case "cancel":
+            guard parts.count >= 3 else { return }
+            let invoiceID = parts[2]
+            guard let invoice = await state.cryptoInvoice(id: invoiceID) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Счёт не найден")
+                return
+            }
+            if invoice.username != (callback.from.username?.lowercased() ?? "") {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш счёт")
+                return
+            }
+            await cryptoService?.cancelInvoice(id: invoiceID)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Счёт отменён")
+            try await telegram.editMessage(.init(
+                chatID: message.chat.id,
+                messageID: message.message_id,
+                text: "❌ Счёт отменён.",
+                replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
+            ))
+
+        default:
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+        }
+    }
+
+    private func renderInvoice(_ invoice: CryptoInvoice) -> (String, InlineKeyboardMarkup) {
+        let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
+        let received = CryptoAmountFormatter.format(atomic: invoice.accumulatedAtomic, decimals: invoice.asset.decimals)
+        let remaining = CryptoAmountFormatter.format(atomic: invoice.remainingAtomic, decimals: invoice.asset.decimals)
+        let expiresMin = max(0, Int(invoice.expiresAt.timeIntervalSinceNow / 60))
+
+        var statusLine = ""
+        switch invoice.status {
+        case .open:
+            statusLine = "⏳ Ожидаю оплату"
+        case .partial:
+            statusLine = "⚠️ Частично оплачено"
+        case .paid:
+            statusLine = "✅ Оплачено"
+        case .expired:
+            statusLine = "⌛ Истёк"
+        case .cancelled:
+            statusLine = "❌ Отменён"
+        }
+
+        var lines: [String] = [
+            "<b>🪙 Счёт на оплату</b>",
+            "",
+            "Сеть: <b>\(invoice.asset.displayLabel)</b>",
+            "К оплате: <b>\(amount) \(invoice.asset.symbol)</b>",
+        ]
+        if invoice.accumulatedAtomic > 0 {
+            lines.append("Получено: <b>\(received) \(invoice.asset.symbol)</b>")
+            lines.append("Осталось: <b>\(remaining) \(invoice.asset.symbol)</b>")
+        }
+        lines.append("")
+        lines.append("Адрес:")
+        lines.append("<code>\(invoice.receivingAddress)</code>")
+        lines.append("")
+        lines.append("⚠️ <b>Отправьте РОВНО эту сумму</b> — иначе зачисление потребует ручного разбора.")
+        lines.append("")
+        lines.append("Срок: <b>\(expiresMin) мин</b>")
+        lines.append(statusLine)
+
+        var rows: [[InlineKeyboardButton]] = []
+        if invoice.status == .open || invoice.status == .partial {
+            rows.append([menuButton("🔄 Обновить статус", action: "buy:refresh:\(invoice.id)")])
+            rows.append([menuButton("❌ Отменить счёт", action: "buy:cancel:\(invoice.id)")])
+        }
+        rows.append([menuButton("✕ Закрыть", action: "close")])
+
+        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    // MARK: - Crypto admin actions
+
+    private func handleCryptoAdminAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard parts.count >= 2 else { return }
+        switch parts[1] {
+        case "setprice":
+            await state.setPendingCryptoPriceInput(menuMessageID: message.message_id, chatKey: chatKey)
+            let cents = await state.cryptoPriceUsdCents()
+            let label = cents.map { String(format: "$%.2f", Double($0) / 100.0) } ?? "отключена"
+            let text = """
+            <b>🪙 Цена в USDT</b>
+
+            Текущая: <b>\(label)</b>
+
+            Введите сумму в долларах (например <code>9.99</code>) или <b>0</b> для отключения.
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("❌ Отмена", action: "nav:superadmin")]
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+        case "disableprice":
+            await state.setCryptoPriceUsdCents(nil)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Отключено")
+            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+
+        case "setaddr":
+            guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
+            await state.setPendingCryptoAddressInput(menuMessageID: message.message_id, chain: chain, chatKey: chatKey)
+            let current = await state.cryptoAddress(chain) ?? "<i>не задан</i>"
+            let text = """
+            <b>🪙 Адрес для приёма · \(chain.displayName)</b>
+
+            Текущий: <code>\(current)</code>
+
+            Отправьте новый адрес одним сообщением. Отправьте <code>-</code> чтобы удалить.
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("❌ Отмена", action: "nav:superadmin")]
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+        case "deladdr":
+            guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
+            await state.setCryptoAddress(chain, address: nil)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Адрес удалён")
+            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+
+        case "togglemode":
+            let current = await state.cryptoMatchMode()
+            let next: CryptoMatchMode = current == .amountDelta ? .uniqueAddress : .amountDelta
+            await state.setCryptoMatchMode(next)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Режим: \(next.displayName)")
+            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+
+        case "pooladd":
+            guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
+            await state.setPendingCryptoPoolAddInput(menuMessageID: message.message_id, chain: chain, chatKey: chatKey)
+            let pool = await state.cryptoAddressPool(chain)
+            let listing = pool.isEmpty ? "<i>пусто</i>" : pool.enumerated().map { "\($0.offset + 1). <code>\($0.element)</code>" }.joined(separator: "\n")
+            let text = """
+            <b>🪙 Пул · \(chain.displayName)</b>
+
+            Текущие адреса:
+            \(listing)
+
+            Отправьте новый адрес одним сообщением.
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("❌ Отмена", action: "nav:superadmin")]
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+        case "poolrm":
+            guard parts.count >= 4, let chain = CryptoChain(rawValue: parts[2]), let index = Int(parts[3]) else { return }
+            let removed = await state.removeCryptoPoolAddress(chain, at: index)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалено" : "Не найдено")
+            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+
+        case "invoices":
+            let invoices = await state.openCryptoInvoices()
+            var text = "<b>🪙 Открытые счета</b> (\(invoices.count))\n"
+            if invoices.isEmpty {
+                text += "<i>нет</i>"
+            } else {
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime]
+                let sorted = invoices.sorted { $0.createdAt < $1.createdAt }
+                for inv in sorted.prefix(20) {
+                    let amount = CryptoAmountFormatter.format(atomic: inv.exactAmountAtomic, decimals: inv.asset.decimals)
+                    let received = CryptoAmountFormatter.format(atomic: inv.accumulatedAtomic, decimals: inv.asset.decimals)
+                    text += "\n• @\(inv.username) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)"
+                }
+            }
+            let markup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("← Назад", action: "nav:superadmin")]
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+        default:
+            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
+
     private func renderSuperAdmin(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let price = await state.starsPrice()
         let priceLabel = price.map { "<b>\($0) ⭐</b>" } ?? "<b>отключена</b>"
@@ -1165,11 +1594,18 @@ final class BotMenuHandler: @unchecked Sendable {
             ? "<i>не ограничены (все бесплатны)</i>"
             : freeModels.map { "• <code>\($0)</code>" }.joined(separator: "\n")
 
+        let cryptoCents = await state.cryptoPriceUsdCents()
+        let cryptoLabel = cryptoCents.map { String(format: "<b>$%.2f</b>", Double($0) / 100.0) } ?? "<b>отключена</b>"
+        let cryptoAddrs = await state.cryptoAddresses()
+        let cryptoMode = await state.cryptoMatchMode()
+        let cryptoPools = await state.cryptoAddressPools()
+        let openInvoices = await state.openCryptoInvoices()
+
         var rows: [[InlineKeyboardButton]] = [
             [menuButton("✏️ Изменить цену Stars", action: "stars:setprice")],
         ]
         if price != nil {
-            rows.append([menuButton("⛔ Отключить продажи", action: "stars:disable")])
+            rows.append([menuButton("⛔ Отключить Stars", action: "stars:disable")])
         }
         rows.append([menuButton("🆓 Добавить бесплатную модель", action: "freemodels:add")])
         for (i, modelID) in freeModels.enumerated() {
@@ -1178,14 +1614,80 @@ final class BotMenuHandler: @unchecked Sendable {
                 menuButton("🗑 \(shortID)", action: "freemodels:remove:\(i)")
             ])
         }
+
+        rows.append([menuButton("✏️ Цена в USDT", action: "crypto:setprice")])
+        if cryptoCents != nil {
+            rows.append([menuButton("⛔ Отключить крипто-оплату", action: "crypto:disableprice")])
+        }
+        rows.append([menuButton("🔀 Режим: \(cryptoMode.displayName)", action: "crypto:togglemode")])
+
+        switch cryptoMode {
+        case .amountDelta:
+            for chain in CryptoChain.allCases {
+                let addr = cryptoAddrs[chain]
+                let label = addr.map { _ in "✏️ \(chain.displayName) ✓" } ?? "✏️ \(chain.displayName)"
+                var row: [InlineKeyboardButton] = [menuButton(label, action: "crypto:setaddr:\(chain.rawValue)")]
+                if addr != nil {
+                    row.append(menuButton("🗑", action: "crypto:deladdr:\(chain.rawValue)"))
+                }
+                rows.append(row)
+            }
+        case .uniqueAddress:
+            for chain in CryptoChain.allCases {
+                let pool = cryptoPools[chain] ?? []
+                rows.append([menuButton("➕ \(chain.displayName) (\(pool.count))", action: "crypto:pooladd:\(chain.rawValue)")])
+                for (i, addr) in pool.enumerated() {
+                    let short = addr.count > 22 ? String(addr.prefix(10)) + "…" + String(addr.suffix(8)) : addr
+                    rows.append([menuButton("🗑 \(short)", action: "crypto:poolrm:\(chain.rawValue):\(i)")])
+                }
+            }
+        }
+        rows.append([menuButton("🪙 Открытые счета (\(openInvoices.count))", action: "crypto:invoices")])
         rows.append(navButtons())
 
+        var addrLines: [String] = []
+        switch cryptoMode {
+        case .amountDelta:
+            for chain in CryptoChain.allCases {
+                if let addr = cryptoAddrs[chain] {
+                    addrLines.append("• \(chain.displayName) · <code>\(addr)</code>")
+                }
+            }
+        case .uniqueAddress:
+            for chain in CryptoChain.allCases {
+                let pool = cryptoPools[chain] ?? []
+                if !pool.isEmpty {
+                    addrLines.append("• \(chain.displayName) — пул из \(pool.count) адр.")
+                }
+            }
+        }
+        let addrSection = addrLines.isEmpty ? "<i>не настроены</i>" : addrLines.joined(separator: "\n")
+
+        let modeHelp: String
+        switch cryptoMode {
+        case .amountDelta:
+            modeHelp = "<i>Дельта суммы: один адрес на сеть, идентификация по уникальной сумме.</i>"
+        case .uniqueAddress:
+            modeHelp = "<i>Уникальный адрес: каждому счёту выдаётся свой адрес из пула. Сумма одинаковая.</i>"
+        }
+
         let text = """
-        <b>💫 Продажа доступа (Telegram Stars)</b>
+        <b>💫 Stars</b>
 
         Цена: \(priceLabel)
 
-        <b>🆓 Бесплатные модели:</b>
+        <b>🪙 Крипто-оплата</b>
+
+        Цена: \(cryptoLabel)
+        Режим: <b>\(cryptoMode.displayName)</b>
+        \(modeHelp)
+
+        Адреса:
+        \(addrSection)
+
+        Открытых счетов: <b>\(openInvoices.count)</b>
+
+        <b>🆓 Бесплатные модели</b>
         \(freeModelsText)
 
         Пользователи без доступа видят только бесплатные модели.
