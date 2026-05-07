@@ -106,29 +106,10 @@ final class BotCallbackHandler: @unchecked Sendable {
 
 <b>━━━ 🛠 Прочее ━━━</b>
 
-<code>/menu</code> — интерактивные настройки
-<code>/help</code> — текущие настройки чата
+<code>/menu</code> — интерактивные настройки (там же текущие параметры чата)
+<code>/help</code> — эта справка
 <code>/reset</code> — сбросить чат к стандарту
 <code>/testmode</code> — добавить суффикс к командам для тестов
-<code>/faq</code> — эта справка
-
-<b>━━━ 🔒 Только администратор ━━━</b>
-
-<b>Whitelist:</b>
-<code>/whitelist add|remove &lt;ID&gt;</code> · <code>/whitelist list</code>
-
-<b>Дефолты для новых чатов:</b>
-<code>/defaults</code> — показать
-<code>/defaults model|role|historylength &lt;значение&gt;</code>
-
-<b>Пресеты меню</b> (типы: <code>model</code>, <code>temp</code>, <code>history</code>, <code>role</code>):
-<code>/presets &lt;тип&gt; add &lt;label&gt; | &lt;value&gt;</code>
-<code>/presets &lt;тип&gt; remove &lt;value&gt;</code>
-<code>/presets &lt;тип&gt; list</code>
-<blockquote>/presets model add GPT-4o | openai/gpt-4o</blockquote>
-
-<b>Просмотр чатов и пользователей:</b>
-<code>/chats</code> — все чаты · <code>/users</code> — пользователи в личке
 
 <b>━━━ 💳 Покупка доступа ━━━</b>
 
@@ -159,28 +140,5 @@ final class BotCallbackHandler: @unchecked Sendable {
 • <b>❌ Отменить</b> — закрыть счёт (только свой)
 
 Если не хватает <code>@username</code> в Telegram — установите его в настройках, иначе покупка невозможна.
-
-<b>━━━ 💼 Только суперадмин · оплата ━━━</b>
-
-<b>Stars:</b>
-<code>/tenant price &lt;Stars&gt;</code> — цена в Stars (0 = отключить)
-
-<b>Крипто:</b>
-<code>/tenant cryptoprice &lt;USD&gt;</code> — цена в долларах (0 = отключить)
-<code>/tenant cryptomode delta|unique</code> — режим идентификации платежей
-
-<i>delta</i> — один адрес на сеть, плательщики различаются по уникальной сумме.
-<i>unique</i> — каждому счёту выдаётся свой адрес из пула (сумма у всех одинаковая).
-
-<b>Адреса (режим delta):</b>
-<code>/tenant cryptoaddr &lt;ton|bsc|eth|tron&gt; &lt;addr&gt;</code> — установить
-<code>/tenant cryptoaddr list</code> — показать
-
-<b>Пул адресов (режим unique):</b>
-<code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code>
-<code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code>
-<code>/tenant cryptopool list</code>
-
-Все настройки оплаты доступны кнопками в <b>/menu → 💫</b>.
 """
 }

@@ -1,5 +1,10 @@
 import Foundation
 
+enum SimulatedRole: String, Sendable, CaseIterable {
+    case admin
+    case regularUser = "user"
+}
+
 struct TenantState: Sendable {
     var ownerUsername: String
     var defaultModel: String
@@ -104,6 +109,8 @@ actor ChatContextStore {
     private var _pendingCryptoPriceInputs: [ChatKey: Int] = [:]
     private var _pendingCryptoAddressInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
     private var _pendingCryptoPoolAddInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
+
+    private var _simulatedRoles: [String: SimulatedRole] = [:]
 
     init(
         ownerUsername: String,
@@ -229,17 +236,50 @@ actor ChatContextStore {
 
     func isSuperAdmin(username: String?) -> Bool {
         guard let u = username?.lowercased() else { return false }
+        guard superAdminUsernames.contains(u) else { return false }
+        return _simulatedRoles[u] == nil
+    }
+
+    /// Raw super-admin check that ignores any active simulation. Use only for
+    /// gating commands that must remain reachable while a simulation is active
+    /// (e.g. `/simulate` itself).
+    func isActuallySuperAdmin(username: String?) -> Bool {
+        guard let u = username?.lowercased() else { return false }
         return superAdminUsernames.contains(u)
+    }
+
+    func simulatedRole(username: String?) -> SimulatedRole? {
+        guard let u = username?.lowercased() else { return nil }
+        guard superAdminUsernames.contains(u) else { return nil }
+        return _simulatedRoles[u]
+    }
+
+    @discardableResult
+    func setSimulatedRole(username: String, role: SimulatedRole?) -> Bool {
+        let u = username.lowercased()
+        guard superAdminUsernames.contains(u) else { return false }
+        if let role {
+            _simulatedRoles[u] = role
+        } else {
+            _simulatedRoles.removeValue(forKey: u)
+        }
+        return true
     }
 
     func isTenantOwner(username: String?, chatID: Int) -> Bool {
         guard let u = username?.lowercased() else { return false }
-        if superAdminUsernames.contains(u) { return true }
+        if superAdminUsernames.contains(u) {
+            if _simulatedRoles[u] != nil { return false }
+            return true
+        }
         return effectiveOwnerUsername(chatID: chatID) == u
     }
 
     func isAdmin(username: String?, chatID: Int) -> Bool {
         guard let u = username?.lowercased() else { return false }
+        if let sim = _simulatedRoles[u], superAdminUsernames.contains(u) {
+            return sim == .admin
+        }
         if superAdminUsernames.contains(u) { return true }
         let owner = effectiveOwnerUsername(chatID: chatID)
         if u == owner { return true }
@@ -1198,6 +1238,7 @@ actor ChatContextStore {
 
     func hasFullModelAccess(username: String?) -> Bool {
         guard let u = username?.lowercased() else { return false }
+        if superAdminUsernames.contains(u), _simulatedRoles[u] != nil { return false }
         return tenants[u] != nil
     }
 

@@ -10,7 +10,13 @@ private enum MenuPage: String {
     case provider
     case reasoning
     case helpPage = "help"
+    case adminPanel = "admin"
+    case adminHelp = "adminhelp"
     case superAdmin = "superadmin"
+    case superAdminHelp = "superadminhelp"
+    case superStars = "superstars"
+    case superCrypto = "supercrypto"
+    case superFreeModels = "superfreemodels"
     case close
 }
 
@@ -79,7 +85,7 @@ final class BotMenuHandler: @unchecked Sendable {
             if let value = Int(trimmed), value >= 0 {
                 await state.setStarsPrice(value > 0 ? value : nil)
                 let confirmText = value > 0 ? "✓ Цена доступа: <b>\(value) ⭐</b>" : "✓ Продажи отключены."
-                let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+                let (menuText, markup) = await renderSuperStars(chatKey: chatKey)
                 try? await telegram.editMessage(.init(
                     chatID: chatKey.chatID,
                     messageID: menuMessageID,
@@ -122,7 +128,7 @@ final class BotMenuHandler: @unchecked Sendable {
             if trimmed == "0" || trimmed.lowercased() == "off" {
                 await state.setCryptoPriceUsdCents(nil)
                 let confirm = "✓ Крипто-оплата отключена."
-                let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+                let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
                 try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
@@ -135,7 +141,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 let cents = Int((usd * 100.0).rounded())
                 await state.setCryptoPriceUsdCents(cents)
                 let confirm = String(format: "✓ Цена в крипто: <b>$%.2f</b>", Double(cents) / 100.0)
-                let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+                let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
                 try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
@@ -170,7 +176,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     ? "✓ В пул \(pending.chain.displayName) добавлен: \(trimmed)"
                     : "Адрес уже в пуле: \(trimmed)"
             }
-            let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+            let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
             try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
@@ -191,7 +197,7 @@ final class BotMenuHandler: @unchecked Sendable {
             } else {
                 await state.setCryptoAddress(pending.chain, address: trimmed)
             }
-            let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+            let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
             try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
@@ -212,7 +218,7 @@ final class BotMenuHandler: @unchecked Sendable {
             if !modelID.isEmpty {
                 let added = await state.addFreeModel(modelID)
                 let toast = added ? "✓ Добавлено: \(modelID)" : "Уже в списке: \(modelID)"
-                let (menuText, markup) = await renderSuperAdmin(chatKey: chatKey)
+                let (menuText, markup) = await renderSuperFreeModels(chatKey: chatKey)
                 try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
@@ -402,6 +408,20 @@ final class BotMenuHandler: @unchecked Sendable {
                 try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
                 return
             }
+            switch menuPage {
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superFreeModels:
+                guard await state.isSuperAdmin(username: callback.from.username) else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                    return
+                }
+            case .adminPanel, .adminHelp:
+                guard await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID) else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                    return
+                }
+            default:
+                break
+            }
             try await showPage(menuPage, chatKey: chatKey, callback: callback, message: message)
 
         case "role":
@@ -499,7 +519,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 }
                 await state.addFreeModel(modelValue)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🆓 Добавлено в бесплатные")
-                try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
+                try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
                 return
             } else if parts[1] == "unmarkfree" {
                 guard await state.isSuperAdmin(username: callback.from.username) else {
@@ -508,7 +528,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 }
                 await state.removeFreeModel(modelValue)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Убрано из бесплатных")
-                try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
+                try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
                 return
             } else if parts[1] == "select" || parts[1] == "gsel" {
                 let presets = await state.modelPresets(chatID: chatKey.chatID)
@@ -665,7 +685,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     Введите ID модели (например: <code>openai/gpt-4o-mini</code>)
                     """
                     let markup = InlineKeyboardMarkup(inline_keyboard: [
-                        [menuButton("❌ Отмена", action: "nav:superadmin")]
+                        [menuButton("❌ Отмена", action: "nav:superfreemodels")]
                     ])
                     try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
                 case "remove":
@@ -677,12 +697,12 @@ final class BotMenuHandler: @unchecked Sendable {
                     }
                     await state.removeFreeModel(ids[index])
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Удалено")
-                    try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+                    try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
                 default:
-                    try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+                    try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
                 }
             } else {
-                try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+                try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
             }
             return
 
@@ -705,18 +725,18 @@ final class BotMenuHandler: @unchecked Sendable {
                     Введите количество Stars (целое число ≥ 1) или <b>0</b> для отключения продаж.
                     """
                     let markup = InlineKeyboardMarkup(inline_keyboard: [
-                        [menuButton("❌ Отмена", action: "nav:superadmin")]
+                        [menuButton("❌ Отмена", action: "nav:superstars")]
                     ])
                     try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
                 case "disable":
                     await state.setStarsPrice(nil)
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продажи отключены")
-                    try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+                    try await showPage(.superStars, chatKey: chatKey, callback: callback, message: message)
                 default:
-                    try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+                    try await showPage(.superStars, chatKey: chatKey, callback: callback, message: message)
                 }
             } else {
-                try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+                try await showPage(.superStars, chatKey: chatKey, callback: callback, message: message)
             }
             return
 
@@ -909,8 +929,20 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderReasoning(chatKey: chatKey)
         case .helpPage:
             return await renderHelp(chatKey: chatKey)
+        case .adminPanel:
+            return await renderAdminPanel(chatKey: chatKey)
+        case .adminHelp:
+            return renderAdminHelp()
         case .superAdmin:
             return await renderSuperAdmin(chatKey: chatKey)
+        case .superAdminHelp:
+            return renderSuperAdminHelp()
+        case .superStars:
+            return await renderSuperStars(chatKey: chatKey)
+        case .superCrypto:
+            return await renderSuperCrypto(chatKey: chatKey)
+        case .superFreeModels:
+            return await renderSuperFreeModels(chatKey: chatKey)
         case .close:
             return ("Меню закрыто. Откройте снова — /menu", InlineKeyboardMarkup(inline_keyboard: []))
         }
@@ -965,9 +997,9 @@ final class BotMenuHandler: @unchecked Sendable {
         }
         rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сбросить", action: "reset")])
         if await state.isSuperAdmin(username: username) {
-            let price = await state.starsPrice()
-            let starsLabel = price.map { "💫 Stars · \($0) ⭐" } ?? "💫 Продажа (выкл)"
-            rows.append([menuButton(starsLabel, action: "nav:superadmin")])
+            rows.append([menuButton("🛡 Супер-админ", action: "nav:superadmin")])
+        } else if await state.isAdmin(username: username, chatID: chatKey.chatID) {
+            rows.append([menuButton("🛠 Админ-панель", action: "nav:admin")])
         }
         rows.append([menuButton("✕ Закрыть", action: "close")])
 
@@ -1040,9 +1072,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let globalPresets = await state.modelPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
         let effectiveFreeModels = await state.effectiveFreeModelIDs()
-        let pinnedModels = Set(await state.freeModelIDs())
         let hasFullAccess = await state.hasFullModelAccess(username: username)
-        let isSuperAdmin = await state.isSuperAdmin(username: username)
         let restrictionsActive = effectiveFreeModels != nil
         let modelPrices = await state.openRouterModelPrices()
         var rows: [[InlineKeyboardButton]] = []
@@ -1063,26 +1093,13 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         func appendPresets(_ presets: [Preset], action: String) {
-            if isSuperAdmin {
-                for preset in presets {
-                    let isPinned = pinnedModels.contains(preset.value)
-                    let selectLabel = presetLabel(preset: preset, scope: action == "gsel" ? "🌐" : "💬")
-                    let toggleLabel = isPinned ? "－🆓" : "＋🆓"
-                    let toggleAction = isPinned ? "model:unmarkfree:\(preset.value)" : "model:markfree:\(preset.value)"
-                    rows.append([
-                        menuButton(selectLabel, action: "model:\(action):\(preset.value)"),
-                        menuButton(toggleLabel, action: toggleAction),
-                    ])
-                }
-            } else {
-                var currentRow: [InlineKeyboardButton] = []
-                for preset in presets {
-                    let label = presetLabel(preset: preset, scope: action == "gsel" ? "🌐" : "💬")
-                    currentRow.append(menuButton(label, action: "model:\(action):\(preset.value)"))
-                    if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
-                }
-                if !currentRow.isEmpty { rows.append(currentRow) }
+            var currentRow: [InlineKeyboardButton] = []
+            for preset in presets {
+                let label = presetLabel(preset: preset, scope: action == "gsel" ? "🌐" : "💬")
+                currentRow.append(menuButton(label, action: "model:\(action):\(preset.value)"))
+                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
             }
+            if !currentRow.isEmpty { rows.append(currentRow) }
         }
 
         if !globalPresets.isEmpty { appendPresets(globalPresets, action: "gsel") }
@@ -1101,12 +1118,6 @@ final class BotMenuHandler: @unchecked Sendable {
             if !hasFullAccess {
                 accessLine = "\n\n<i>Модели с ⭐ доступны после покупки — /buy</i>"
             }
-        }
-        if isSuperAdmin {
-            let pinnedHint = pinnedModels.isEmpty
-                ? "<i>Нет закреплённых бесплатных моделей. Нажмите ＋🆓 чтобы закрепить.</i>"
-                : "<i>＋🆓 — закрепить бесплатной · －🆓 — открепить</i>"
-            accessLine = "\n\n\(pinnedHint)"
         }
 
         let allPresets = globalPresets + chatPresets
@@ -1315,12 +1326,8 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func renderHelp(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
-        let help = await state.fetchHelp(chatKey: chatKey)
-        let rows: [[InlineKeyboardButton]] = [
-            [InlineKeyboardButton(text: "📘 Полная инструкция", callback_data: BotCallbackAction.faq.rawData)],
-            navButtons(),
-        ]
-        return (formatHelpText(help), InlineKeyboardMarkup(inline_keyboard: rows))
+        let rows: [[InlineKeyboardButton]] = [navButtons()]
+        return (BotCallbackHandler.faqText, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
     // MARK: - Buy flow (user-facing)
@@ -1499,14 +1506,14 @@ final class BotMenuHandler: @unchecked Sendable {
             Введите сумму в долларах (например <code>9.99</code>) или <b>0</b> для отключения.
             """
             let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:superadmin")]
+                [menuButton("❌ Отмена", action: "nav:supercrypto")]
             ])
             try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
         case "disableprice":
             await state.setCryptoPriceUsdCents(nil)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Отключено")
-            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+            try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "setaddr":
             guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
@@ -1520,7 +1527,7 @@ final class BotMenuHandler: @unchecked Sendable {
             Отправьте новый адрес одним сообщением. Отправьте <code>-</code> чтобы удалить.
             """
             let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:superadmin")]
+                [menuButton("❌ Отмена", action: "nav:supercrypto")]
             ])
             try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
@@ -1528,14 +1535,14 @@ final class BotMenuHandler: @unchecked Sendable {
             guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
             await state.setCryptoAddress(chain, address: nil)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Адрес удалён")
-            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+            try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "togglemode":
             let current = await state.cryptoMatchMode()
             let next: CryptoMatchMode = current == .amountDelta ? .uniqueAddress : .amountDelta
             await state.setCryptoMatchMode(next)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Режим: \(next.displayName)")
-            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+            try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "pooladd":
             guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
@@ -1551,7 +1558,7 @@ final class BotMenuHandler: @unchecked Sendable {
             Отправьте новый адрес одним сообщением.
             """
             let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:superadmin")]
+                [menuButton("❌ Отмена", action: "nav:supercrypto")]
             ])
             try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
@@ -1559,7 +1566,7 @@ final class BotMenuHandler: @unchecked Sendable {
             guard parts.count >= 4, let chain = CryptoChain(rawValue: parts[2]), let index = Int(parts[3]) else { return }
             let removed = await state.removeCryptoPoolAddress(chain, at: index)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалено" : "Не найдено")
-            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+            try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "invoices":
             let invoices = await state.openCryptoInvoices()
@@ -1582,18 +1589,82 @@ final class BotMenuHandler: @unchecked Sendable {
             try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
         default:
-            try await showPage(.superAdmin, chatKey: chatKey, callback: callback, message: message)
+            try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
         }
     }
 
     private func renderSuperAdmin(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let starsPrice = await state.starsPrice()
+        let starsLabel = starsPrice.map { "<b>\($0) ⭐</b>" } ?? "<b>отключена</b>"
+
+        let cryptoCents = await state.cryptoPriceUsdCents()
+        let cryptoLabel = cryptoCents.map { String(format: "<b>$%.2f</b>", Double($0) / 100.0) } ?? "<b>отключена</b>"
+        let cryptoMode = await state.cryptoMatchMode()
+        let openInvoices = await state.openCryptoInvoices()
+
+        let freeModels = await state.freeModelIDs()
+        let freeCount = freeModels.count
+
+        let globalRoles = await state.rolePresets(chatID: chatKey.chatID).count
+        let globalModels = await state.modelPresets(chatID: chatKey.chatID).count
+        let globalTemps = await state.tempPresets(chatID: chatKey.chatID).count
+        let globalHist = await state.historyLengthPresets(chatID: chatKey.chatID).count
+
+        let starsButtonLabel = starsPrice.map { "💫 Stars · \($0) ⭐" } ?? "💫 Stars · откл"
+        let cryptoButtonLabel = cryptoCents.map { String(format: "🪙 Крипто · $%.2f", Double($0) / 100.0) } ?? "🪙 Крипто · откл"
+
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton(starsButtonLabel, action: "nav:superstars")],
+            [menuButton(cryptoButtonLabel, action: "nav:supercrypto")],
+            [menuButton("🆓 Бесплатные модели · \(freeCount)", action: "nav:superfreemodels")],
+            [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
+            [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
+             menuButton("🎭 Роль", action: "pm:role")],
+            [menuButton("🌡 Темп.", action: "pm:temp"),
+             menuButton("📝 История", action: "pm:history")],
+            [menuButton("ℹ️ Справка по командам", action: "nav:superadminhelp")],
+            navButtons(),
+        ]
+
+        let text = """
+        <b>🛡 Супер-админ</b>
+
+        💫 Stars · \(starsLabel)
+        🪙 Крипто · \(cryptoLabel) · режим <b>\(cryptoMode.displayName)</b>
+        🆓 Бесплатных моделей · <b>\(freeCount)</b>
+        🪙 Открытых счетов · <b>\(openInvoices.count)</b>
+
+        <b>Глобальные пресеты</b>
+        🤖 Моделей · <b>\(globalModels)</b> · 🎭 Ролей · <b>\(globalRoles)</b>
+        🌡 Темп · <b>\(globalTemps)</b> · 📝 Истории · <b>\(globalHist)</b>
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderSuperStars(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let price = await state.starsPrice()
         let priceLabel = price.map { "<b>\($0) ⭐</b>" } ?? "<b>отключена</b>"
-        let freeModels = await state.freeModelIDs()
-        let freeModelsText = freeModels.isEmpty
-            ? "<i>не ограничены (все бесплатны)</i>"
-            : freeModels.map { "• <code>\($0)</code>" }.joined(separator: "\n")
 
+        var rows: [[InlineKeyboardButton]] = [
+            [menuButton("✏️ Изменить цену", action: "stars:setprice")],
+        ]
+        if price != nil {
+            rows.append([menuButton("⛔ Отключить продажи", action: "stars:disable")])
+        }
+        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+
+        let text = """
+        <b>💫 Stars — продажа доступа</b>
+
+        Цена: \(priceLabel)
+
+        <i>Цена в Telegram Stars за единоразовую покупку доступа к боту. \
+        Установите 0 для отключения продаж.</i>
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderSuperCrypto(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let cryptoCents = await state.cryptoPriceUsdCents()
         let cryptoLabel = cryptoCents.map { String(format: "<b>$%.2f</b>", Double($0) / 100.0) } ?? "<b>отключена</b>"
         let cryptoAddrs = await state.cryptoAddresses()
@@ -1602,20 +1673,8 @@ final class BotMenuHandler: @unchecked Sendable {
         let openInvoices = await state.openCryptoInvoices()
 
         var rows: [[InlineKeyboardButton]] = [
-            [menuButton("✏️ Изменить цену Stars", action: "stars:setprice")],
+            [menuButton("✏️ Изменить цену в USDT", action: "crypto:setprice")],
         ]
-        if price != nil {
-            rows.append([menuButton("⛔ Отключить Stars", action: "stars:disable")])
-        }
-        rows.append([menuButton("🆓 Добавить бесплатную модель", action: "freemodels:add")])
-        for (i, modelID) in freeModels.enumerated() {
-            let shortID = modelID.count > 28 ? "…" + modelID.suffix(25) : modelID
-            rows.append([
-                menuButton("🗑 \(shortID)", action: "freemodels:remove:\(i)")
-            ])
-        }
-
-        rows.append([menuButton("✏️ Цена в USDT", action: "crypto:setprice")])
         if cryptoCents != nil {
             rows.append([menuButton("⛔ Отключить крипто-оплату", action: "crypto:disableprice")])
         }
@@ -1643,7 +1702,7 @@ final class BotMenuHandler: @unchecked Sendable {
             }
         }
         rows.append([menuButton("🪙 Открытые счета (\(openInvoices.count))", action: "crypto:invoices")])
-        rows.append(navButtons())
+        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
 
         var addrLines: [String] = []
         switch cryptoMode {
@@ -1672,10 +1731,6 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         let text = """
-        <b>💫 Stars</b>
-
-        Цена: \(priceLabel)
-
         <b>🪙 Крипто-оплата</b>
 
         Цена: \(cryptoLabel)
@@ -1686,15 +1741,181 @@ final class BotMenuHandler: @unchecked Sendable {
         \(addrSection)
 
         Открытых счетов: <b>\(openInvoices.count)</b>
-
-        <b>🆓 Бесплатные модели</b>
-        \(freeModelsText)
-
-        Пользователи без доступа видят только бесплатные модели.
-        Покупка даёт полный доступ — /buy
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
+
+    private func renderSuperFreeModels(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let pinned = Set(await state.freeModelIDs())
+        let pinnedList = await state.freeModelIDs()
+        let modelPresets = await state.modelPresets(chatID: chatKey.chatID)
+        let chatModelPresets = await state.chatPresets(category: .model, chatKey: chatKey)
+        let allPresets = modelPresets + chatModelPresets
+
+        var rows: [[InlineKeyboardButton]] = [
+            [menuButton("➕ Добавить по ID", action: "freemodels:add")],
+        ]
+        if modelPriceMonitor != nil {
+            rows.append([menuButton("🌐 Список бесплатных OpenRouter", action: "model:freemodels")])
+        }
+
+        if !allPresets.isEmpty {
+            for preset in allPresets {
+                let isPinned = pinned.contains(preset.value)
+                let mark = isPinned ? "🆓" : "☐"
+                let action = isPinned ? "model:unmarkfree:\(preset.value)" : "model:markfree:\(preset.value)"
+                rows.append([menuButton("\(mark) \(preset.display)", action: action)])
+            }
+        }
+
+        for (i, modelID) in pinnedList.enumerated() where !allPresets.contains(where: { $0.value == modelID }) {
+            let shortID = modelID.count > 28 ? "…" + modelID.suffix(25) : modelID
+            rows.append([menuButton("🗑 \(shortID)", action: "freemodels:remove:\(i)")])
+        }
+
+        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+
+        let pinnedText = pinnedList.isEmpty
+            ? "<i>не закреплены — пользователи без доступа видят все модели как бесплатные</i>"
+            : pinnedList.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+
+        let text = """
+        <b>🆓 Бесплатные модели</b>
+
+        Закреплено: <b>\(pinnedList.count)</b>
+        \(pinnedText)
+
+        <i>Пользователи без полного доступа видят только закреплённые модели. \
+        Нажмите ☐ напротив пресета чтобы закрепить, 🆓 — открепить. \
+        Модели не из пресетов добавляйте по ID.</i>
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderAdminPanel(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let defaults = await state.getDefaults(chatID: chatKey.chatID)
+        let whitelist = await state.listWhitelisted(chatID: chatKey.chatID)
+        let admins = await state.listAdmins(chatID: chatKey.chatID)
+
+        let globalRoles = await state.rolePresets(chatID: chatKey.chatID).count
+        let globalModels = await state.modelPresets(chatID: chatKey.chatID).count
+        let globalTemps = await state.tempPresets(chatID: chatKey.chatID).count
+        let globalHist = await state.historyLengthPresets(chatID: chatKey.chatID).count
+
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton("🤖 Пресеты моделей · \(globalModels)", action: "pm:model"),
+             menuButton("🎭 Ролей · \(globalRoles)", action: "pm:role")],
+            [menuButton("🌡 Темп. · \(globalTemps)", action: "pm:temp"),
+             menuButton("📝 Истории · \(globalHist)", action: "pm:history")],
+            [menuButton("ℹ️ Справка по командам", action: "nav:adminhelp")],
+            navButtons(),
+        ]
+
+        let adminsLine = admins.isEmpty
+            ? "<i>только владелец</i>"
+            : admins.sorted().map { "@\($0)" }.joined(separator: ", ")
+
+        let text = """
+        <b>🛠 Админ-панель</b>
+
+        <b>По умолчанию для новых чатов</b>
+        🤖 Модель · <code>\(defaults.model)</code>
+        📝 История · <b>\(defaults.historyLength) сообщ.</b>
+        🎭 Роль:
+        <blockquote expandable>\(defaults.role)</blockquote>
+
+        <b>👥 Доступ</b>
+        Whitelist · <b>\(whitelist.count) ID</b>
+        Админы · \(adminsLine)
+
+        <b>📋 Глобальные пресеты</b>
+        Кнопки ниже — управление пресетами для всех чатов.
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderAdminHelp() -> (String, InlineKeyboardMarkup) {
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton("← К админ-панели", action: "nav:admin")],
+        ]
+        return (Self.adminHelpText, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderSuperAdminHelp() -> (String, InlineKeyboardMarkup) {
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton("← К супер-админу", action: "nav:superadmin")],
+        ]
+        return (Self.superAdminHelpText, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    static let adminHelpText: String = """
+<b>🛠 Справка администратора</b>
+
+Большинство админ-задач делается кнопками в этой панели. Команды ниже — на случай, если хочется быстро.
+
+<b>━━━ 👥 Whitelist ━━━</b>
+
+ID чатов с разрешённым доступом без оплаты.
+<code>/whitelist add &lt;ID&gt;</code> — добавить
+<code>/whitelist remove &lt;ID&gt;</code> — убрать
+<code>/whitelist list</code> — показать
+
+<b>━━━ ⚙️ Дефолты для новых чатов ━━━</b>
+
+<code>/defaults</code> — показать текущие
+<code>/defaults model &lt;id&gt;</code>
+<code>/defaults role &lt;текст&gt;</code>
+<code>/defaults historylength &lt;1–50&gt;</code>
+
+<b>━━━ 📋 Пресеты меню ━━━</b>
+
+Типы: <code>model</code>, <code>temp</code>, <code>history</code>, <code>role</code>.
+<code>/presets &lt;тип&gt; add &lt;label&gt; | &lt;value&gt;</code>
+<code>/presets &lt;тип&gt; remove &lt;value&gt;</code>
+<code>/presets &lt;тип&gt; list</code>
+<blockquote>/presets model add GPT-4o | openai/gpt-4o</blockquote>
+
+<b>━━━ 📋 Просмотр ━━━</b>
+
+<code>/chats</code> — все чаты бота
+<code>/users</code> — пользователи в личке
+"""
+
+    static let superAdminHelpText: String = """
+<b>🛡 Справка супер-админа</b>
+
+Все настройки оплаты доступны кнопками выше. Команды — для быстрых правок.
+
+<b>━━━ 💫 Stars ━━━</b>
+
+<code>/tenant price &lt;Stars&gt;</code> — цена в Stars (0 = отключить)
+
+<b>━━━ 🪙 Крипто ━━━</b>
+
+<code>/tenant cryptoprice &lt;USD&gt;</code> — цена в долларах (0 = отключить)
+<code>/tenant cryptomode delta|unique</code> — режим идентификации платежей
+
+<i>delta</i> — один адрес на сеть, плательщики различаются по уникальной сумме.
+<i>unique</i> — каждому счёту выдаётся свой адрес из пула (сумма у всех одинаковая).
+
+<b>Адреса (режим delta):</b>
+<code>/tenant cryptoaddr &lt;ton|bsc|eth|tron&gt; &lt;addr&gt;</code> — установить
+<code>/tenant cryptoaddr list</code> — показать
+
+<b>Пул адресов (режим unique):</b>
+<code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code>
+<code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code>
+<code>/tenant cryptopool list</code>
+
+<b>━━━ 🆓 Бесплатные модели ━━━</b>
+
+Закреплённые модели видны пользователям без полного доступа. Управление — кнопками в «🆓 Бесплатные модели».
+
+<b>━━━ 🧪 Прочее ━━━</b>
+
+<code>/simulate</code> — внутренняя отладка платежей.
+Команды админа также доступны: /defaults, /presets, /whitelist, /chats, /users.
+"""
 
     // MARK: - Preset management renderers
 
@@ -1835,37 +2056,6 @@ final class BotMenuHandler: @unchecked Sendable {
         }
     }
 
-    private func formatHelpText(_ help: HelpData) -> String {
-        let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
-        let suffix = help.testModeSuffix.map(String.init) ?? "выкл"
-        return """
-        <b>⚙️ Настройки чата</b>
-
-        🔌 Провайдер · <b>\(help.provider.commandValue)</b>
-        🤖 Модель · <b>\(help.model)</b>
-        🌡 Темп · <b>\(Self.formatTemp(help.temp))</b> — \(Self.tempBucket(help.temp))
-        📝 История · <b>\(help.maxHistory) сообщ.</b>
-        🧠 Reasoning · <b>\(reasoningLabel)</b>
-
-        <b>Показ в ответе:</b>
-        \(yesNo(help.showTokens)) Токены
-        \(yesNo(help.showCost)) Стоимость
-        \(yesNo(help.showModel)) Модель
-        \(yesNo(help.backupNotify)) Уведомления о бэкапе
-
-        <b>🎭 Роль:</b>
-        <blockquote expandable>\(help.role)</blockquote>
-
-        <b>Роль по умолчанию:</b>
-        <blockquote expandable>\(help.defaultRole)</blockquote>
-
-        <i>Тест-режим · \(suffix)</i>
-        """
-    }
-
-    private func yesNo(_ value: Bool) -> String {
-        value ? "✓" : "·"
-    }
 }
 
 extension ServiceProvider: CaseIterable {

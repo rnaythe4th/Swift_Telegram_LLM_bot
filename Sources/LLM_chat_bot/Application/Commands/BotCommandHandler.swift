@@ -97,6 +97,13 @@ final class BotCommandHandler: @unchecked Sendable {
         case .buy:
             try await handleBuy(chatKey: chatKey, fromUser: fromUser)
 
+        case .simulate:
+            guard await state.isActuallySuperAdmin(username: fromUser?.username) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                return
+            }
+            try await handleSimulate(chatKey: chatKey, fromUser: fromUser, argument: parsed.argument)
+
         case .start:
             try await handleStart(chatKey: chatKey)
 
@@ -177,22 +184,16 @@ final class BotCommandHandler: @unchecked Sendable {
             try await sendUserFeedback(chatKey: chatKey, text: "💾 Уведомления о бэкапе · <b>\(onOff(new))</b>")
 
         case .help:
-            let help = await state.fetchHelp(chatKey: chatKey)
-            let isAdminUser = await isAdmin(fromUser, chatID: chatKey.chatID)
             let markup = InlineKeyboardMarkup(inline_keyboard: [
                 [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
-                [InlineKeyboardButton(text: "📘 Полная инструкция", callback_data: BotCallbackAction.faq.rawData)],
             ])
             _ = try await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
-                text: formatHelp(help, isAdmin: isAdminUser),
+                text: BotCallbackHandler.faqText,
                 replyMarkup: markup
             ))
-
-        case .faq:
-            try await sendUserFeedback(chatKey: chatKey, text: BotCallbackHandler.faqText)
 
         case .defaultRole:
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
@@ -296,7 +297,7 @@ final class BotCommandHandler: @unchecked Sendable {
 
         <b>Быстрый старт:</b>
         ⚙️ /menu — все настройки
-        📘 /faq — полная инструкция
+        📘 /help — полная инструкция
         🎭 /setrole — задать характер бота
         ↺ /reset — сбросить к стандарту
         """
@@ -313,35 +314,7 @@ final class BotCommandHandler: @unchecked Sendable {
         ))
     }
 
-    private func formatHelp(_ help: HelpData, isAdmin: Bool) -> String {
-        let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
-        let suffix = help.testModeSuffix.map(String.init) ?? "выкл"
-        let adminLine = isAdmin
-            ? "\n<i>Вы администратор · /whitelist /defaults /presets /chats /users</i>"
-            : ""
-        return """
-        <b>⚙️ Настройки чата</b>
 
-        🔌 Провайдер · <b>\(help.provider.commandValue)</b>
-        🤖 Модель · <code>\(help.model)</code>
-        🌡 Темп · <b>\(BotMenuHandler.formatTemp(help.temp))</b> — \(BotMenuHandler.tempBucket(help.temp))
-        📝 История · <b>\(help.maxHistory) сообщ.</b>
-        🧠 Reasoning · <b>\(reasoningLabel)</b>
-
-        <b>Показ в ответе:</b>
-        \(yesNo(help.showTokens)) Токены
-        \(yesNo(help.showCost)) Стоимость
-        \(yesNo(help.showModel)) Модель
-        \(yesNo(help.backupNotify)) Уведомления о бэкапе
-
-        <b>🎭 Роль:</b>
-        <blockquote expandable>\(help.role)</blockquote>
-
-        <i>Тест-режим · \(suffix)</i>\(adminLine)
-        """
-    }
-
-    private func yesNo(_ v: Bool) -> String { v ? "✓" : "·" }
     private func onOff(_ v: Bool) -> String { v ? "вкл" : "выкл" }
 
     private func handleWhitelist(chatKey: ChatKey, argument: String) async throws {
@@ -760,6 +733,59 @@ final class BotCommandHandler: @unchecked Sendable {
                 <code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code> — удалить из пула
                 <code>/tenant cryptopool list</code> — пул адресов
                 """)
+        }
+    }
+
+    private func handleSimulate(chatKey: ChatKey, fromUser: TelegramUser?, argument: String) async throws {
+        guard let username = fromUser?.username else {
+            try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан username в Telegram.")
+            return
+        }
+
+        let arg = argument.trimmingCharacters(in: .whitespaces).lowercased()
+
+        func currentLabel() async -> String {
+            switch await state.simulatedRole(username: username) {
+            case .admin: return "админ"
+            case .regularUser: return "обычный пользователь"
+            case nil: return "выкл (суперадмин)"
+            }
+        }
+
+        switch arg {
+        case "":
+            let label = await currentLabel()
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                <b>🎭 Симуляция роли</b>
+
+                Текущий режим · <b>\(label)</b>
+
+                <code>/simulate admin</code> — тест от админа
+                <code>/simulate user</code> — тест от обычного пользователя
+                <code>/simulate off</code> — выключить
+                <code>/simulate status</code> — статус
+
+                <i>Действует только в текущем процессе бота, не сохраняется при рестарте.</i>
+                """)
+
+        case "status":
+            let label = await currentLabel()
+            try await sendUserFeedback(chatKey: chatKey, text: "🎭 Симуляция · <b>\(label)</b>")
+
+        case "admin":
+            await state.setSimulatedRole(username: username, role: .admin)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Симуляция включена · <b>админ</b>.\nЧтобы выключить — <code>/simulate off</code>.")
+
+        case "user", "regular":
+            await state.setSimulatedRole(username: username, role: .regularUser)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Симуляция включена · <b>обычный пользователь</b>.\nЧтобы выключить — <code>/simulate off</code>.")
+
+        case "off", "выкл", "none":
+            await state.setSimulatedRole(username: username, role: nil)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Симуляция выключена. Вы снова суперадмин.")
+
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/simulate admin|user|off|status</code>")
         }
     }
 
