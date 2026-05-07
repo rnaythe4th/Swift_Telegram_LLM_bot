@@ -16,6 +16,16 @@ struct TenantState: Sendable {
     var rolePresets: [Preset]
     var whitelistedUserIDs: Set<Int>
     var adminUsernames: Set<String>
+    var licensedUsernames: Set<String>
+    var cumulativeUsage: CumulativeUsage
+}
+
+struct TenantStatsRow: Sendable {
+    let username: String
+    let usage: CumulativeUsage
+    let chatCount: Int
+    let licensedUserCount: Int
+    let isSuperAdmin: Bool
 }
 
 struct ChatContext: Sendable {
@@ -81,7 +91,8 @@ actor ChatContextStore {
     private var chatOwnership: [Int: String] = [:]
     private var userTenantMap: [Int: String] = [:]
 
-    private let superAdminUsernames: Set<String>
+    private var superAdminUsernames: Set<String>
+    private let rootSuperAdminUsername: String
     let defaultOwnerUsername: String
     var formatOptions: String
     let companyChatId: Int
@@ -112,6 +123,8 @@ actor ChatContextStore {
 
     private var _simulatedRoles: [String: SimulatedRole] = [:]
 
+    private var _pendingAdminInputs: [ChatKey: AdminPendingInput] = [:]
+
     init(
         ownerUsername: String,
         model: String,
@@ -124,6 +137,7 @@ actor ChatContextStore {
     ) {
         let owner = ownerUsername.lowercased()
         self.superAdminUsernames = [owner]
+        self.rootSuperAdminUsername = owner
         self.defaultOwnerUsername = owner
         self.formatOptions = formatOptions
         self.companyChatId = companyChatId
@@ -143,7 +157,9 @@ actor ChatContextStore {
                 historyLengthPresets: [],
                 rolePresets: [],
                 whitelistedUserIDs: [],
-                adminUsernames: []
+                adminUsernames: [],
+                licensedUsernames: [],
+                cumulativeUsage: .zero
             )
         ]
     }
@@ -185,7 +201,9 @@ actor ChatContextStore {
             historyLengthPresets: [],
             rolePresets: [],
             whitelistedUserIDs: [],
-            adminUsernames: []
+            adminUsernames: [],
+            licensedUsernames: [],
+            cumulativeUsage: .zero
         )
     }
 
@@ -223,6 +241,16 @@ actor ChatContextStore {
         return true
     }
 
+    @discardableResult
+    func unassignChat(chatID: Int) -> String? {
+        chatOwnership.removeValue(forKey: chatID)
+    }
+
+    func chatsOwnedBy(_ ownerUsername: String) -> [Int] {
+        let u = ownerUsername.lowercased()
+        return chatOwnership.compactMap { $0.value == u ? $0.key : nil }
+    }
+
     func autoAssignIfNeeded(chatID: Int, senderUsername: String?, senderUserID: Int?) {
         guard chatOwnership[chatID] == nil else { return }
         if let username = senderUsername?.lowercased(), tenants[username] != nil {
@@ -246,6 +274,31 @@ actor ChatContextStore {
     func isActuallySuperAdmin(username: String?) -> Bool {
         guard let u = username?.lowercased() else { return false }
         return superAdminUsernames.contains(u)
+    }
+
+    /// True only for the immutable bootstrap super-admin (default @maythe4th).
+    /// Only this user may add or remove other super-admins.
+    func isRootSuperAdmin(username: String?) -> Bool {
+        guard let u = username?.lowercased() else { return false }
+        return u == rootSuperAdminUsername
+    }
+
+    func listSuperAdmins() -> [String] {
+        superAdminUsernames.sorted()
+    }
+
+    @discardableResult
+    func addSuperAdmin(target: String) -> Bool {
+        let u = target.lowercased()
+        guard !u.isEmpty else { return false }
+        return superAdminUsernames.insert(u).inserted
+    }
+
+    @discardableResult
+    func removeSuperAdmin(target: String) -> Bool {
+        let u = target.lowercased()
+        guard u != rootSuperAdminUsername else { return false }
+        return superAdminUsernames.remove(u) != nil
     }
 
     func simulatedRole(username: String?) -> SimulatedRole? {
@@ -758,6 +811,7 @@ actor ChatContextStore {
             context.cumulativeUsage.totalCost += usage?.cost ?? 0
             context.cumulativeUsage.generationCount += 1
         }
+        accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
     }
 
     func cancelPendingTurn(chatKey: ChatKey, generationID: GenerationID) {
@@ -776,6 +830,7 @@ actor ChatContextStore {
             context.cumulativeUsage.totalCost += usage?.cost ?? 0
             context.cumulativeUsage.generationCount += 1
         }
+        accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
     }
 
     func resetUsage(chatKey: ChatKey) {
@@ -1172,6 +1227,22 @@ actor ChatContextStore {
         }
     }
 
+    func setAdminPendingInput(_ input: AdminPendingInput, chatKey: ChatKey) {
+        _pendingAdminInputs[chatKey] = input
+    }
+
+    func consumeAdminPendingInput(chatKey: ChatKey) -> AdminPendingInput? {
+        _pendingAdminInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasAdminPendingInput(chatKey: ChatKey) -> Bool {
+        _pendingAdminInputs[chatKey] != nil
+    }
+
+    func clearAdminPendingInput(chatKey: ChatKey) {
+        _pendingAdminInputs.removeValue(forKey: chatKey)
+    }
+
     func setPendingCryptoPoolAddInput(menuMessageID: Int, chain: CryptoChain, chatKey: ChatKey) {
         _pendingCryptoPoolAddInputs[chatKey] = (menuMessageID, chain)
     }
@@ -1239,7 +1310,67 @@ actor ChatContextStore {
     func hasFullModelAccess(username: String?) -> Bool {
         guard let u = username?.lowercased() else { return false }
         if superAdminUsernames.contains(u), _simulatedRoles[u] != nil { return false }
-        return tenants[u] != nil
+        if tenants[u] != nil { return true }
+        for tenant in tenants.values where tenant.licensedUsernames.contains(u) {
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Per-tenant licensed users (paid access for individuals)
+
+    @discardableResult
+    func addLicensedUser(ownerUsername: String, target: String) -> Bool {
+        let owner = ownerUsername.lowercased()
+        let user = target.lowercased()
+        guard !user.isEmpty, tenants[owner] != nil else { return false }
+        var inserted = false
+        mutateTenantByOwner(owner) { inserted = $0.licensedUsernames.insert(user).inserted }
+        return inserted
+    }
+
+    @discardableResult
+    func removeLicensedUser(ownerUsername: String, target: String) -> Bool {
+        let owner = ownerUsername.lowercased()
+        let user = target.lowercased()
+        guard tenants[owner] != nil else { return false }
+        var removed = false
+        mutateTenantByOwner(owner) { removed = $0.licensedUsernames.remove(user) != nil }
+        return removed
+    }
+
+    func licensedUsers(ownerUsername: String) -> [String] {
+        Array(tenants[ownerUsername.lowercased()]?.licensedUsernames ?? []).sorted()
+    }
+
+    // MARK: - Tenant usage / stats
+
+    func tenantUsage(ownerUsername: String) -> CumulativeUsage {
+        tenants[ownerUsername.lowercased()]?.cumulativeUsage ?? .zero
+    }
+
+    func tenantStats() -> [TenantStatsRow] {
+        tenants.values.map { tenant in
+            let owner = tenant.ownerUsername
+            let chats = chatOwnership.values.filter { $0 == owner }.count
+            return TenantStatsRow(
+                username: owner,
+                usage: tenant.cumulativeUsage,
+                chatCount: chats,
+                licensedUserCount: tenant.licensedUsernames.count,
+                isSuperAdmin: superAdminUsernames.contains(owner)
+            )
+        }
+        .sorted { $0.username < $1.username }
+    }
+
+    private func accumulateTenantUsage(chatID: Int, usage: StreamUsageSummary?) {
+        let owner = chatOwnership[chatID] ?? defaultOwnerUsername
+        mutateTenantByOwner(owner) {
+            $0.cumulativeUsage.totalTokens += usage?.totalTokens ?? 0
+            $0.cumulativeUsage.totalCost += usage?.cost ?? 0
+            $0.cumulativeUsage.generationCount += 1
+        }
     }
 
     func model(chatKey: ChatKey) -> String {
@@ -1354,7 +1485,9 @@ actor ChatContextStore {
                 historyLengthPresets: tenant.historyLengthPresets,
                 rolePresets: tenant.rolePresets,
                 whitelistedUserIDs: Array(tenant.whitelistedUserIDs),
-                adminUsernames: Array(tenant.adminUsernames)
+                adminUsernames: Array(tenant.adminUsernames),
+                licensedUsernames: Array(tenant.licensedUsernames),
+                cumulativeUsage: tenant.cumulativeUsage
             )
         }
 
@@ -1363,6 +1496,8 @@ actor ChatContextStore {
             ownershipStrings[String(chatID)] = owner
         }
 
+        let extraSupers = superAdminUsernames.subtracting([rootSuperAdminUsername])
+
         return BotStateSnapshot(
             contexts: ctxSnapshots,
             tenants: tenantSnapshots,
@@ -1370,7 +1505,8 @@ actor ChatContextStore {
             telegramUpdateOffset: telegramUpdateOffset,
             starsPrice: _starsPrice,
             freeModelIDs: _freeModelIDs.isEmpty ? nil : _freeModelIDs,
-            crypto: cryptoConfigSnapshot()
+            crypto: cryptoConfigSnapshot(),
+            superAdminUsernames: extraSupers.isEmpty ? nil : Array(extraSupers).sorted()
         )
     }
 
@@ -1420,7 +1556,9 @@ actor ChatContextStore {
                     historyLengthPresets: ts.historyLengthPresets,
                     rolePresets: ts.rolePresets,
                     whitelistedUserIDs: Set(ts.whitelistedUserIDs),
-                    adminUsernames: Set(ts.adminUsernames)
+                    adminUsernames: Set(ts.adminUsernames),
+                    licensedUsernames: Set((ts.licensedUsernames ?? []).map { $0.lowercased() }),
+                    cumulativeUsage: ts.cumulativeUsage ?? .zero
                 )
             }
         } else {
@@ -1439,7 +1577,9 @@ actor ChatContextStore {
                     (snapshot.adminUsernames ?? [])
                         .map { $0.lowercased() }
                         .filter { $0 != defaultOwnerUsername }
-                )
+                ),
+                licensedUsernames: [],
+                cumulativeUsage: .zero
             )
         }
 
@@ -1455,8 +1595,16 @@ actor ChatContextStore {
                 historyLengthPresets: [],
                 rolePresets: [],
                 whitelistedUserIDs: [],
-                adminUsernames: []
+                adminUsernames: [],
+                licensedUsernames: [],
+                cumulativeUsage: .zero
             )
+        }
+
+        superAdminUsernames = [rootSuperAdminUsername]
+        for u in snapshot.superAdminUsernames ?? [] {
+            let lc = u.lowercased()
+            if !lc.isEmpty { superAdminUsernames.insert(lc) }
         }
 
         // Rebuild reverse userID → tenant mapping from whitelist data

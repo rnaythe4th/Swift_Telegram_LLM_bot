@@ -12,11 +12,18 @@ private enum MenuPage: String {
     case helpPage = "help"
     case adminPanel = "admin"
     case adminHelp = "adminhelp"
+    case adminChats = "adminchats"
+    case adminUsers = "adminusers"
+    case adminWhitelist = "adminwl"
+    case adminDefaults = "admindef"
     case superAdmin = "superadmin"
     case superAdminHelp = "superadminhelp"
     case superStars = "superstars"
     case superCrypto = "supercrypto"
     case superFreeModels = "superfreemodels"
+    case superTenants = "supertenants"
+    case superAdmins = "superadmins"
+    case superSimulate = "supersim"
     case close
 }
 
@@ -233,6 +240,10 @@ final class BotMenuHandler: @unchecked Sendable {
             return true
         }
 
+        if await state.hasAdminPendingInput(chatKey: chatKey) {
+            return await processAdminPendingInput(text: text, chatKey: chatKey, username: username)
+        }
+
         guard await state.hasPendingInput(chatKey: chatKey) else { return false }
         guard let pending = await state.consumePendingInput(chatKey: chatKey) else { return false }
 
@@ -365,6 +376,7 @@ final class BotMenuHandler: @unchecked Sendable {
         await state.clearPendingCryptoPriceInput(chatKey: chatKey)
         await state.clearPendingCryptoAddressInput(chatKey: chatKey)
         await state.clearPendingCryptoPoolAddInput(chatKey: chatKey)
+        await state.clearAdminPendingInput(chatKey: chatKey)
         let (text, markup) = await renderPage(.main, chatKey: chatKey, username: username)
         _ = try? await telegram.sendMessage(
             .init(
@@ -409,12 +421,12 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             }
             switch menuPage {
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superFreeModels:
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superFreeModels, .superTenants, .superAdmins, .superSimulate:
                 guard await state.isSuperAdmin(username: callback.from.username) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                     return
                 }
-            case .adminPanel, .adminHelp:
+            case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults:
                 guard await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
                     return
@@ -598,6 +610,13 @@ final class BotMenuHandler: @unchecked Sendable {
             case "backup":
                 let on = await state.toggleBackupNotify(chatKey: chatKey)
                 toastText = on ? "🟢 Уведомления включены" : "⚪️ Уведомления выключены"
+            case "testmode":
+                let suffix = await state.toggleTestMode(chatKey: chatKey)
+                if let suffix {
+                    toastText = "🧪 Тест-режим: суффикс \(suffix)"
+                } else {
+                    toastText = "🧪 Тест-режим выключен"
+                }
             default:
                 toastText = ""
             }
@@ -611,6 +630,10 @@ final class BotMenuHandler: @unchecked Sendable {
                 await state.clearHistory(chatKey: chatKey)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "История очищена")
                 try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
+                return
+            } else if parts[1] == "dump" {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+                await sendHistoryDump(chatKey: chatKey)
                 return
             } else if parts.count >= 3, parts[1] == "length", let length = Int(parts[2]), (1...50).contains(length) {
                 await state.setMaxHistory(chatKey: chatKey, newMax: length)
@@ -744,6 +767,142 @@ final class BotMenuHandler: @unchecked Sendable {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             return
 
+        case "tenant":
+            try await handleTenantAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            return
+
+        case "wl":
+            guard await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                return
+            }
+            guard parts.count >= 2 else { return }
+            switch parts[1] {
+            case "add":
+                await state.setAdminPendingInput(.init(kind: .whitelistAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                let promptText = """
+                <b>👤 Добавить в whitelist</b>
+
+                Отправьте Telegram user ID одним сообщением (целое число).
+                """
+                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminwl")]])
+                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+            case "remove":
+                guard parts.count >= 3, let id = Int(parts[2]) else { return }
+                await state.removeFromWhitelist(userID: id, chatID: chatKey.chatID)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Убрано")
+                try await showPage(.adminWhitelist, chatKey: chatKey, callback: callback, message: message)
+            default:
+                try await showPage(.adminWhitelist, chatKey: chatKey, callback: callback, message: message)
+            }
+            return
+
+        case "def":
+            guard await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
+                return
+            }
+            guard parts.count >= 2 else { return }
+            let defs = await state.getDefaults(chatID: chatKey.chatID)
+            let kind: AdminPendingInputKind
+            let prompt: String
+            switch parts[1] {
+            case "model":
+                kind = .defaultsModel
+                prompt = "<b>⚙️ Модель по умолчанию</b>\n\nТекущая: <code>\(defs.model)</code>\n\nОтправьте ID модели одним сообщением."
+            case "hist":
+                kind = .defaultsHistory
+                prompt = "<b>⚙️ Длина истории по умолчанию</b>\n\nТекущая: <b>\(defs.historyLength)</b>\n\nОтправьте число от 1 до 50."
+            case "role":
+                kind = .defaultsRole
+                prompt = "<b>⚙️ Роль по умолчанию</b>\n\nТекущая:\n<blockquote expandable>\(defs.role)</blockquote>\n\nОтправьте новый текст роли одним сообщением."
+            default:
+                return
+            }
+            await state.setAdminPendingInput(.init(kind: kind, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:admindef")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            return
+
+        case "sa":
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            guard parts.count >= 2 else { return }
+            switch parts[1] {
+            case "add":
+                guard await state.isRootSuperAdmin(username: callback.from.username) else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
+                    return
+                }
+                await state.setAdminPendingInput(.init(kind: .superAdminAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                let prompt = "<b>🛡 Добавить суперадмина</b>\n\nОтправьте @username одним сообщением."
+                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superadmins")]])
+                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            case "rm":
+                guard await state.isRootSuperAdmin(username: callback.from.username) else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
+                    return
+                }
+                guard parts.count >= 3 else { return }
+                let target = parts[2]
+                let ok = await state.removeSuperAdmin(target: target)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Удалён" : "Не удалось")
+                try await showPage(.superAdmins, chatKey: chatKey, callback: callback, message: message)
+            default:
+                try await showPage(.superAdmins, chatKey: chatKey, callback: callback, message: message)
+            }
+            return
+
+        case "stenant":
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            guard parts.count >= 2 else { return }
+            switch parts[1] {
+            case "add":
+                await state.setAdminPendingInput(.init(kind: .tenantRegister, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                let prompt = "<b>🏢 Зарегистрировать tenant</b>\n\nОтправьте @username одним сообщением."
+                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:supertenants")]])
+                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            case "rm":
+                guard parts.count >= 3 else { return }
+                let target = parts[2]
+                let removed = await state.removeTenant(username: target)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалён" : "Нельзя")
+                try await showPage(.superTenants, chatKey: chatKey, callback: callback, message: message)
+            default:
+                try await showPage(.superTenants, chatKey: chatKey, callback: callback, message: message)
+            }
+            return
+
+        case "sim":
+            guard await state.isActuallySuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            guard parts.count >= 2, let username = callback.from.username else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
+                return
+            }
+            switch parts[1] {
+            case "admin":
+                _ = await state.setSimulatedRole(username: username, role: .admin)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Симуляция: админ")
+            case "user":
+                _ = await state.setSimulatedRole(username: username, role: .regularUser)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Симуляция: юзер")
+            case "off":
+                _ = await state.setSimulatedRole(username: username, role: nil)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Симуляция выкл")
+            default:
+                break
+            }
+            try await showPage(.superSimulate, chatKey: chatKey, callback: callback, message: message)
+            return
+
         case "buy":
             try await handleBuyAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
             return
@@ -869,6 +1028,7 @@ final class BotMenuHandler: @unchecked Sendable {
         await state.clearPendingCryptoPriceInput(chatKey: chatKey)
         await state.clearPendingCryptoAddressInput(chatKey: chatKey)
         await state.clearPendingCryptoPoolAddInput(chatKey: chatKey)
+        await state.clearAdminPendingInput(chatKey: chatKey)
         try await telegram.editMessage(
             .init(
                 chatID: message.chat.id,
@@ -930,9 +1090,17 @@ final class BotMenuHandler: @unchecked Sendable {
         case .helpPage:
             return await renderHelp(chatKey: chatKey)
         case .adminPanel:
-            return await renderAdminPanel(chatKey: chatKey)
+            return await renderAdminPanel(chatKey: chatKey, username: username)
         case .adminHelp:
             return renderAdminHelp()
+        case .adminChats:
+            return await renderAdminChats(chatKey: chatKey, username: username)
+        case .adminUsers:
+            return await renderAdminUsers(chatKey: chatKey, username: username)
+        case .adminWhitelist:
+            return await renderAdminWhitelist(chatKey: chatKey)
+        case .adminDefaults:
+            return await renderAdminDefaults(chatKey: chatKey)
         case .superAdmin:
             return await renderSuperAdmin(chatKey: chatKey)
         case .superAdminHelp:
@@ -943,6 +1111,12 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderSuperCrypto(chatKey: chatKey)
         case .superFreeModels:
             return await renderSuperFreeModels(chatKey: chatKey)
+        case .superTenants:
+            return await renderSuperTenants(chatKey: chatKey)
+        case .superAdmins:
+            return await renderSuperAdmins(chatKey: chatKey, username: username)
+        case .superSimulate:
+            return await renderSuperSimulate(chatKey: chatKey, username: username)
         case .close:
             return ("Меню закрыто. Откройте снова — /menu", InlineKeyboardMarkup(inline_keyboard: []))
         }
@@ -1191,13 +1365,24 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderStats(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
+        let testModeOn = help.testModeSuffix != nil
+        let testLabel: String = {
+            if let s = help.testModeSuffix {
+                return "🟢 Тест-режим (суффикс \(s))"
+            }
+            return "⚪️ Тест-режим"
+        }()
         let rows: [[InlineKeyboardButton]] = [
             [menuButton("\(toggleMark(help.showTokens)) Токены", action: "stats:toggle:tokens"),
              menuButton("\(toggleMark(help.showCost)) Стоимость", action: "stats:toggle:cost")],
             [menuButton("\(toggleMark(help.showModel)) Модель", action: "stats:toggle:model")],
             [menuButton("\(toggleMark(help.backupNotify)) Уведомления о бэкапе", action: "stats:toggle:backup")],
+            [menuButton(testLabel, action: "stats:toggle:testmode")],
             navButtons(),
         ]
+        let testHint = testModeOn
+            ? "\n\n<i>🧪 Тест-режим включён — добавляйте суффикс <code>\(help.testModeSuffix!)</code> к командам, чтобы их выполнял именно этот экземпляр бота.</i>"
+            : ""
         let text = """
         <b>📊 Что показывать в ответе</b>
 
@@ -1207,7 +1392,7 @@ final class BotMenuHandler: @unchecked Sendable {
         Стоимость — цена одного запроса в $
         Модель — какая модель ответила</i>
 
-        Нажмите, чтобы переключить.
+        Нажмите, чтобы переключить.\(testHint)
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -1240,7 +1425,10 @@ final class BotMenuHandler: @unchecked Sendable {
             if !currentRow.isEmpty { rows.append(currentRow) }
         }
 
-        rows.append([menuButton("🧹 Очистить историю", action: "history:clear")])
+        rows.append([
+            menuButton("📜 Показать историю", action: "history:dump"),
+            menuButton("🧹 Очистить", action: "history:clear"),
+        ])
         rows.append([menuButton("⚙️ Управление пресетами", action: "pm:history")])
         rows.append(navButtons())
 
@@ -1593,6 +1781,95 @@ final class BotMenuHandler: @unchecked Sendable {
         }
     }
 
+    private func handleTenantAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard parts.count >= 2 else { return }
+        let invokerUsername = callback.from.username
+        let invoker = invokerUsername?.lowercased()
+        let isSuper = await state.isSuperAdmin(username: invokerUsername)
+        let isAdmin = await state.isAdmin(username: invokerUsername, chatID: chatKey.chatID)
+        guard isAdmin || isSuper else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только админ")
+            return
+        }
+
+        switch parts[1] {
+        case "claim":
+            guard let username = invoker else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
+                return
+            }
+            let ok = await state.assignChat(chatID: chatKey.chatID, to: username)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Чат привязан" : "Лицензия не активна")
+            try await showPage(.adminPanel, chatKey: chatKey, callback: callback, message: message)
+
+        case "release":
+            let owner = await state.chatOwner(chatID: chatKey.chatID)
+            if !isSuper, owner?.lowercased() != invoker {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш чат")
+                return
+            }
+            _ = await state.unassignChat(chatID: chatKey.chatID)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Чат отвязан")
+            try await showPage(.adminPanel, chatKey: chatKey, callback: callback, message: message)
+
+        case "rmchat":
+            guard parts.count >= 3, let chatID = Int(parts[2]) else { return }
+            let owner = await state.chatOwner(chatID: chatID)
+            if !isSuper, owner?.lowercased() != invoker {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш чат")
+                return
+            }
+            _ = await state.unassignChat(chatID: chatID)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Отвязан")
+            try await showPage(.adminChats, chatKey: chatKey, callback: callback, message: message)
+
+        case "assignprompt":
+            guard let invoker else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
+                return
+            }
+            await state.setAdminPendingInput(.init(kind: .tenantAssignChat, menuMessageID: message.message_id, payload: invoker), chatKey: chatKey)
+            let prompt = """
+            <b>📥 Привязать чат по ID</b>
+
+            Отправьте chatID одним сообщением (целое число; для групп — отрицательное).
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminchats")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            return
+
+        case "adduserprompt":
+            guard let invoker else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
+                return
+            }
+            await state.setAdminPendingInput(.init(kind: .tenantAddUser, menuMessageID: message.message_id, payload: invoker), chatKey: chatKey)
+            let prompt = "<b>➕ Добавить пользователя в лицензию</b>\n\nОтправьте @username одним сообщением."
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminusers")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            return
+
+        case "rmuser":
+            guard parts.count >= 3, let index = Int(parts[2]), let invoker else { return }
+            let users = await state.licensedUsers(ownerUsername: invoker)
+            guard index >= 0, index < users.count else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Не найдено")
+                return
+            }
+            _ = await state.removeLicensedUser(ownerUsername: invoker, target: users[index])
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Удалён")
+            try await showPage(.adminUsers, chatKey: chatKey, callback: callback, message: message)
+
+        default:
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+        }
+    }
+
     private func renderSuperAdmin(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let starsPrice = await state.starsPrice()
         let starsLabel = starsPrice.map { "<b>\($0) ⭐</b>" } ?? "<b>отключена</b>"
@@ -1613,10 +1890,16 @@ final class BotMenuHandler: @unchecked Sendable {
         let starsButtonLabel = starsPrice.map { "💫 Stars · \($0) ⭐" } ?? "💫 Stars · откл"
         let cryptoButtonLabel = cryptoCents.map { String(format: "🪙 Крипто · $%.2f", Double($0) / 100.0) } ?? "🪙 Крипто · откл"
 
+        let tenantStats = await state.tenantStats()
+        let totalTenants = tenantStats.count
+
         let rows: [[InlineKeyboardButton]] = [
             [menuButton(starsButtonLabel, action: "nav:superstars")],
             [menuButton(cryptoButtonLabel, action: "nav:supercrypto")],
             [menuButton("🆓 Бесплатные модели · \(freeCount)", action: "nav:superfreemodels")],
+            [menuButton("🏢 Tenants и статистика · \(totalTenants)", action: "nav:supertenants")],
+            [menuButton("🛡 Суперадмины", action: "nav:superadmins"),
+             menuButton("🎭 Симуляция", action: "nav:supersim")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
             [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
              menuButton("🎭 Роль", action: "pm:role")],
@@ -1792,7 +2075,7 @@ final class BotMenuHandler: @unchecked Sendable {
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
-    private func renderAdminPanel(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    private func renderAdminPanel(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
         let defaults = await state.getDefaults(chatID: chatKey.chatID)
         let whitelist = await state.listWhitelisted(chatID: chatKey.chatID)
         let admins = await state.listAdmins(chatID: chatKey.chatID)
@@ -1802,21 +2085,66 @@ final class BotMenuHandler: @unchecked Sendable {
         let globalTemps = await state.tempPresets(chatID: chatKey.chatID).count
         let globalHist = await state.historyLengthPresets(chatID: chatKey.chatID).count
 
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton("🤖 Пресеты моделей · \(globalModels)", action: "pm:model"),
-             menuButton("🎭 Ролей · \(globalRoles)", action: "pm:role")],
-            [menuButton("🌡 Темп. · \(globalTemps)", action: "pm:temp"),
-             menuButton("📝 Истории · \(globalHist)", action: "pm:history")],
-            [menuButton("ℹ️ Справка по командам", action: "nav:adminhelp")],
-            navButtons(),
-        ]
+        let invoker = username?.lowercased()
+        let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
+        let isOwnChat = invoker != nil && chatOwner?.lowercased() == invoker
+        let chatStatusLine: String
+        if let chatOwner {
+            chatStatusLine = isOwnChat ? "🟢 этот чат привязан к вам" : "🔒 чат принадлежит @\(chatOwner)"
+        } else {
+            chatStatusLine = "⚪ чат свободен"
+        }
+
+        let licensedChats: [Int]
+        let licensedUsers: [String]
+        let usage: CumulativeUsage
+        if let invoker {
+            licensedChats = await state.chatsOwnedBy(invoker)
+            licensedUsers = await state.licensedUsers(ownerUsername: invoker)
+            usage = await state.tenantUsage(ownerUsername: invoker)
+        } else {
+            licensedChats = []
+            licensedUsers = []
+            usage = .zero
+        }
+
+        var rows: [[InlineKeyboardButton]] = []
+        if isOwnChat {
+            rows.append([menuButton("📌 Отвязать этот чат", action: "tenant:release")])
+        } else if chatOwner == nil {
+            rows.append([menuButton("📌 Привязать этот чат к моей лицензии", action: "tenant:claim")])
+        }
+        rows.append([
+            menuButton("📋 Чаты лицензии · \(licensedChats.count)", action: "nav:adminchats"),
+            menuButton("👥 Пользователи · \(licensedUsers.count)", action: "nav:adminusers"),
+        ])
+        rows.append([
+            menuButton("⚙️ Дефолты", action: "nav:admindef"),
+            menuButton("👤 Whitelist · \(whitelist.count)", action: "nav:adminwl"),
+        ])
+        rows.append([menuButton("🤖 Пресеты моделей · \(globalModels)", action: "pm:model"),
+                     menuButton("🎭 Ролей · \(globalRoles)", action: "pm:role")])
+        rows.append([menuButton("🌡 Темп. · \(globalTemps)", action: "pm:temp"),
+                     menuButton("📝 Истории · \(globalHist)", action: "pm:history")])
+        rows.append([menuButton("ℹ️ Справка по командам", action: "nav:adminhelp")])
+        rows.append(navButtons())
 
         let adminsLine = admins.isEmpty
             ? "<i>только владелец</i>"
             : admins.sorted().map { "@\($0)" }.joined(separator: ", ")
 
+        let costStr = String(format: "$%.4f", usage.totalCost)
+        let usageLine = usage.generationCount == 0
+            ? "📈 Запросов пока нет"
+            : "📈 запросов <b>\(usage.generationCount)</b> · токенов <b>\(Int(usage.totalTokens))</b> · итого <b>\(costStr)</b>"
+
         let text = """
         <b>🛠 Админ-панель</b>
+
+        <b>📌 Лицензия</b>
+        \(chatStatusLine)
+        Чатов · <b>\(licensedChats.count)</b> · юзеров · <b>\(licensedUsers.count)</b>
+        \(usageLine)
 
         <b>По умолчанию для новых чатов</b>
         🤖 Модель · <code>\(defaults.model)</code>
@@ -1830,6 +2158,208 @@ final class BotMenuHandler: @unchecked Sendable {
 
         <b>📋 Глобальные пресеты</b>
         Кнопки ниже — управление пресетами для всех чатов.
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderAdminChats(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+        guard let invoker = username?.lowercased() else {
+            return ("У вас не задан @username.", InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+        }
+        let chats = await state.chatsOwnedBy(invoker).sorted()
+
+        var rows: [[InlineKeyboardButton]] = []
+        for chatID in chats.prefix(40) {
+            let kind = chatID < 0 ? "👥" : "👤"
+            rows.append([
+                menuButton("\(kind) \(chatID)", action: "noop"),
+                menuButton("🗑 Отвязать", action: "tenant:rmchat:\(chatID)"),
+            ])
+        }
+        let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
+        if chatOwner?.lowercased() != invoker {
+            rows.append([menuButton("📌 Привязать этот чат", action: "tenant:claim")])
+        }
+        rows.append([menuButton("📥 Привязать чат по ID", action: "tenant:assignprompt")])
+        rows.append([menuButton("← К админ-панели", action: "nav:admin")])
+
+        let listText: String
+        if chats.isEmpty {
+            listText = "<i>нет привязанных чатов</i>"
+        } else {
+            listText = chats.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+        }
+        let text = """
+        <b>📋 Чаты лицензии @\(invoker)</b> (\(chats.count))
+
+        \(listText)
+
+        <i>Чтобы привязать ещё один чат — добавьте бота туда (он привяжется автоматически), \
+        либо откройте этот чат и нажмите «Привязать этот чат». Также можно ввести chatID кнопкой ниже.</i>
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderAdminWhitelist(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let ids = await state.listWhitelisted(chatID: chatKey.chatID).sorted()
+        var rows: [[InlineKeyboardButton]] = [
+            [menuButton("➕ Добавить ID", action: "wl:add")],
+        ]
+        for id in ids.prefix(40) {
+            rows.append([
+                menuButton("\(id)", action: "noop"),
+                menuButton("🗑 Убрать", action: "wl:remove:\(id)"),
+            ])
+        }
+        rows.append([menuButton("← К админ-панели", action: "nav:admin")])
+
+        let listText = ids.isEmpty
+            ? "<i>пусто</i>"
+            : ids.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+        let text = """
+        <b>👤 Whitelist</b> (\(ids.count))
+
+        \(listText)
+
+        <i>ID пользователей с разрешённым доступом без оплаты в этом чате.</i>
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderAdminDefaults(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let defs = await state.getDefaults(chatID: chatKey.chatID)
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton("✏️ Модель", action: "def:model")],
+            [menuButton("✏️ Длина истории", action: "def:hist")],
+            [menuButton("✏️ Роль", action: "def:role")],
+            [menuButton("← К админ-панели", action: "nav:admin")],
+        ]
+        let text = """
+        <b>⚙️ Значения по умолчанию для новых чатов</b>
+
+        🤖 Модель · <code>\(defs.model)</code>
+        📝 История · <b>\(defs.historyLength) сообщ.</b>
+        🎭 Роль:
+        <blockquote expandable>\(defs.role)</blockquote>
+
+        <i>Применяются к новым чатам и при /reset.</i>
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderAdminUsers(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+        guard let invoker = username?.lowercased() else {
+            return ("У вас не задан @username.", InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+        }
+        let users = await state.licensedUsers(ownerUsername: invoker)
+
+        var rows: [[InlineKeyboardButton]] = [
+            [menuButton("➕ Добавить @username", action: "tenant:adduserprompt")],
+        ]
+        for (i, user) in users.prefix(40).enumerated() {
+            rows.append([
+                menuButton("@\(user)", action: "noop"),
+                menuButton("🗑 Удалить", action: "tenant:rmuser:\(i)"),
+            ])
+        }
+        rows.append([menuButton("← К админ-панели", action: "nav:admin")])
+
+        let listText: String
+        if users.isEmpty {
+            listText = "<i>нет добавленных пользователей</i>"
+        } else {
+            listText = users.map { "• @\($0)" }.joined(separator: "\n")
+        }
+        let text = """
+        <b>👥 Лицензированные пользователи @\(invoker)</b> (\(users.count))
+
+        \(listText)
+
+        <i>Кнопка выше — добавить @username. Команда — <code>/tenant adduser @username</code>.</i>
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderSuperTenants(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let rows = await state.tenantStats()
+
+        var lines: [String] = ["<b>🏢 Tenants</b> (\(rows.count))"]
+        if rows.isEmpty {
+            lines.append("<i>нет</i>")
+        } else {
+            for row in rows {
+                let mark = row.isSuperAdmin ? "🛡" : "🛠"
+                let costStr = String(format: "$%.4f", row.usage.totalCost)
+                let tokens = Int(row.usage.totalTokens)
+                lines.append("\n\(mark) <b>@\(row.username)</b>")
+                lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b>")
+                lines.append("  запросов <b>\(row.usage.generationCount)</b> · ток. <b>\(tokens)</b> · итого <b>\(costStr)</b>")
+            }
+        }
+
+        var buttons: [[InlineKeyboardButton]] = [[menuButton("➕ Зарегистрировать tenant", action: "stenant:add")]]
+        for row in rows where !row.isSuperAdmin {
+            buttons.append([
+                menuButton("@\(row.username)", action: "noop"),
+                menuButton("🗑 Удалить", action: "stenant:rm:\(row.username)"),
+            ])
+        }
+        buttons.append([menuButton("🛡 Суперадмины", action: "nav:superadmins")])
+        buttons.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+
+        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: buttons))
+    }
+
+    private func renderSuperAdmins(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+        let supers = await state.listSuperAdmins()
+        let isRoot = await state.isRootSuperAdmin(username: username)
+
+        var rows: [[InlineKeyboardButton]] = []
+        if isRoot {
+            rows.append([menuButton("➕ Добавить @username", action: "sa:add")])
+            for s in supers {
+                rows.append([
+                    menuButton("@\(s)", action: "noop"),
+                    menuButton("🗑 Удалить", action: "sa:rm:\(s)"),
+                ])
+            }
+        }
+        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+
+        let listText = supers.isEmpty ? "<i>нет</i>" : supers.map { "• @\($0)" }.joined(separator: "\n")
+        let footer = isRoot
+            ? ""
+            : "\n\n<i>Только главный суперадмин может изменять список.</i>"
+        let text = """
+        <b>🛡 Суперадмины</b> (\(supers.count))
+
+        \(listText)\(footer)
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderSuperSimulate(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+        let role = await state.simulatedRole(username: username)
+        let label: String
+        switch role {
+        case .admin: label = "админ"
+        case .regularUser: label = "обычный пользователь"
+        case nil: label = "выкл (суперадмин)"
+        }
+
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton((role == .admin ? "✓ " : "") + "🛠 Админ", action: "sim:admin")],
+            [menuButton((role == .regularUser ? "✓ " : "") + "👤 Обычный пользователь", action: "sim:user")],
+            [menuButton((role == nil ? "✓ " : "") + "⛔ Выключить", action: "sim:off")],
+            [menuButton("← К супер-админу", action: "nav:superadmin")],
+        ]
+
+        let text = """
+        <b>🎭 Симуляция роли</b>
+
+        Текущий режим · <b>\(label)</b>
+
+        <i>Только в текущем процессе бота, не сохраняется при рестарте.</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -1851,16 +2381,32 @@ final class BotMenuHandler: @unchecked Sendable {
     static let adminHelpText: String = """
 <b>🛠 Справка администратора</b>
 
-Большинство админ-задач делается кнопками в этой панели. Команды ниже — на случай, если хочется быстро.
+Все админ-задачи доступны кнопками в этой панели <b>и</b> командами. Кнопки — для удобства, команды — для скорости.
+
+<b>━━━ 📌 Лицензия ━━━</b>
+
+UI: «📌 Привязать/Отвязать», «📋 Чаты лицензии» → «📥 Привязать чат по ID», «👥 Пользователи» → «➕ Добавить @username».
+
+<code>/tenant claim</code> — привязать этот чат к вашей лицензии
+<code>/tenant release</code> — отвязать этот чат
+<code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат вручную
+<code>/tenant unassign &lt;chatID&gt;</code> — отвязать чат
+<code>/tenant chats</code> — чаты лицензии
+<code>/tenant adduser @username</code> — дать @пользователю доступ
+<code>/tenant removeuser @username</code> — отозвать доступ
+<code>/tenant users</code> — лицензированные пользователи
 
 <b>━━━ 👥 Whitelist ━━━</b>
 
-ID чатов с разрешённым доступом без оплаты.
-<code>/whitelist add &lt;ID&gt;</code> — добавить
-<code>/whitelist remove &lt;ID&gt;</code> — убрать
-<code>/whitelist list</code> — показать
+UI: «👤 Whitelist» в админ-панели — ➕ добавить ID / 🗑 убрать.
+
+<code>/whitelist add &lt;ID&gt;</code>
+<code>/whitelist remove &lt;ID&gt;</code>
+<code>/whitelist list</code>
 
 <b>━━━ ⚙️ Дефолты для новых чатов ━━━</b>
+
+UI: «⚙️ Дефолты» в админ-панели — кнопки правят модель, длину истории и роль.
 
 <code>/defaults</code> — показать текущие
 <code>/defaults model &lt;id&gt;</code>
@@ -1868,6 +2414,8 @@ ID чатов с разрешённым доступом без оплаты.
 <code>/defaults historylength &lt;1–50&gt;</code>
 
 <b>━━━ 📋 Пресеты меню ━━━</b>
+
+UI: «🤖 Пресеты моделей», «🎭 Ролей», «🌡 Темп.», «📝 Истории» — кнопки в админ-панели или в самих разделах меню.
 
 Типы: <code>model</code>, <code>temp</code>, <code>history</code>, <code>role</code>.
 <code>/presets &lt;тип&gt; add &lt;label&gt; | &lt;value&gt;</code>
@@ -1884,23 +2432,46 @@ ID чатов с разрешённым доступом без оплаты.
     static let superAdminHelpText: String = """
 <b>🛡 Справка супер-админа</b>
 
-Все настройки оплаты доступны кнопками выше. Команды — для быстрых правок.
+Любая настройка имеет и кнопку, и команду. Списки кнопок — в соответствующих разделах меню.
+
+<b>━━━ 🛡 Суперадмины ━━━</b>
+
+UI: «🛡 Суперадмины» в супер-меню — ➕ добавить / 🗑 убрать (только главный суперадмин).
+
+<code>/superadmin add @username</code>
+<code>/superadmin remove @username</code>
+<code>/superadmin list</code>
+
+<b>━━━ 🏢 Tenants и лицензии ━━━</b>
+
+UI: «🏢 Tenants и статистика» — ➕ зарегистрировать / 🗑 удалить.
+
+<code>/tenant list</code> — все tenants
+<code>/tenant stats</code> — статистика по tenants (токены, $)
+<code>/tenant add @username</code> — зарегистрировать вручную
+<code>/tenant remove @username</code> — удалить tenant
+<code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат
+<code>/tenant unassign &lt;chatID&gt;</code> — отвязать чат
 
 <b>━━━ 💫 Stars ━━━</b>
 
+UI: «💫 Stars» в супер-меню.
 <code>/tenant price &lt;Stars&gt;</code> — цена в Stars (0 = отключить)
 
 <b>━━━ 🪙 Крипто ━━━</b>
 
+UI: «🪙 Крипто» в супер-меню — все настройки кнопками. «🪙 Открытые счета» — список счетов.
+
 <code>/tenant cryptoprice &lt;USD&gt;</code> — цена в долларах (0 = отключить)
 <code>/tenant cryptomode delta|unique</code> — режим идентификации платежей
+<code>/tenant cryptoinvoices</code> — открытые счета
 
 <i>delta</i> — один адрес на сеть, плательщики различаются по уникальной сумме.
 <i>unique</i> — каждому счёту выдаётся свой адрес из пула (сумма у всех одинаковая).
 
 <b>Адреса (режим delta):</b>
-<code>/tenant cryptoaddr &lt;ton|bsc|eth|tron&gt; &lt;addr&gt;</code> — установить
-<code>/tenant cryptoaddr list</code> — показать
+<code>/tenant cryptoaddr &lt;ton|bsc|eth|tron&gt; &lt;addr&gt;</code>
+<code>/tenant cryptoaddr list</code>
 
 <b>Пул адресов (режим unique):</b>
 <code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code>
@@ -1909,12 +2480,19 @@ ID чатов с разрешённым доступом без оплаты.
 
 <b>━━━ 🆓 Бесплатные модели ━━━</b>
 
-Закреплённые модели видны пользователям без полного доступа. Управление — кнопками в «🆓 Бесплатные модели».
+UI: «🆓 Бесплатные модели» в супер-меню — ➕ по ID, ☐/🆓 у пресетов.
 
-<b>━━━ 🧪 Прочее ━━━</b>
+<code>/tenant freemodels add|remove|list|available &lt;id&gt;</code>
 
-<code>/simulate</code> — внутренняя отладка платежей.
-Команды админа также доступны: /defaults, /presets, /whitelist, /chats, /users.
+<b>━━━ 🎭 Симуляция роли ━━━</b>
+
+UI: «🎭 Симуляция» в супер-меню — кнопки админ/обычный/выкл.
+
+<code>/simulate admin|user|off|status</code>
+
+<b>━━━ 🧪 Команды админа ━━━</b>
+
+Также доступны: /defaults, /presets, /whitelist, /chats, /users, /reset_stats.
 """
 
     // MARK: - Preset management renderers
@@ -2023,6 +2601,185 @@ ID чатов с разрешённым доступом без оплаты.
     }
 
     // MARK: - Helpers
+
+    private func processAdminPendingInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard let pending = await state.consumeAdminPendingInput(chatKey: chatKey) else { return true }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isAdmin = await state.isAdmin(username: username, chatID: chatKey.chatID)
+        let isSuper = await state.isSuperAdmin(username: username)
+        let isRoot = await state.isRootSuperAdmin(username: username)
+
+        func normalizeUsername(_ raw: String) -> String {
+            raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        }
+
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
+        case .whitelistAdd:
+            guard isAdmin else { toast = "🔒 Только администратор"; resumePage = .adminPanel; break }
+            if let id = Int(trimmed) {
+                await state.addToWhitelist(userID: id, chatID: chatKey.chatID)
+                toast = "✓ \(id) в whitelist"
+            } else {
+                toast = "⚠️ Нужен целочисленный ID"
+            }
+            resumePage = .adminWhitelist
+
+        case .defaultsModel:
+            guard isAdmin, !trimmed.isEmpty else { toast = "⚠️ ID модели пуст"; resumePage = .adminDefaults; break }
+            let new = await state.setDefaultModel(trimmed, chatID: chatKey.chatID)
+            toast = "✓ Модель по умолчанию: \(new)"
+            resumePage = .adminDefaults
+
+        case .defaultsRole:
+            guard isAdmin, !trimmed.isEmpty else { toast = "⚠️ Текст пуст"; resumePage = .adminDefaults; break }
+            _ = await state.setDefaultRole(trimmed, chatID: chatKey.chatID)
+            toast = "✓ Роль по умолчанию обновлена"
+            resumePage = .adminDefaults
+
+        case .defaultsHistory:
+            if let n = Int(trimmed), (1...50).contains(n) {
+                _ = await state.setDefaultHistoryLength(n, chatID: chatKey.chatID)
+                toast = "✓ Длина истории по умолчанию: \(n)"
+            } else {
+                toast = "⚠️ Нужно число 1–50"
+            }
+            resumePage = .adminDefaults
+
+        case .tenantAssignChat:
+            guard let owner = pending.payload else { toast = "Нет владельца"; resumePage = .adminChats; break }
+            if !isSuper, owner.lowercased() != username?.lowercased() {
+                toast = "🔒 Можно привязать только к своей лицензии"
+            } else if let chatID = Int(trimmed) {
+                let ok = await state.assignChat(chatID: chatID, to: owner)
+                toast = ok ? "✓ Чат \(chatID) привязан" : "Tenant не найден"
+            } else {
+                toast = "⚠️ Нужен целочисленный chatID"
+            }
+            resumePage = .adminChats
+
+        case .tenantAddUser:
+            guard let owner = pending.payload else { toast = "Нет владельца"; resumePage = .adminUsers; break }
+            if !isSuper, owner.lowercased() != username?.lowercased() {
+                toast = "🔒 Можно добавлять только в свою лицензию"
+            } else {
+                let target = normalizeUsername(trimmed)
+                if target.isEmpty {
+                    toast = "⚠️ Нужен @username"
+                } else {
+                    let ok = await state.addLicensedUser(ownerUsername: owner, target: target)
+                    toast = ok ? "✓ @\(target) лицензирован" : "Уже в списке или нет лицензии"
+                }
+            }
+            resumePage = .adminUsers
+
+        case .tenantRegister:
+            guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superTenants; break }
+            let target = normalizeUsername(trimmed)
+            if target.isEmpty {
+                toast = "⚠️ Нужен @username"
+            } else {
+                await state.registerTenant(username: target)
+                toast = "✓ Tenant @\(target) создан"
+            }
+            resumePage = .superTenants
+
+        case .tenantRemove:
+            guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superTenants; break }
+            let target = normalizeUsername(trimmed)
+            let removed = await state.removeTenant(username: target)
+            toast = removed ? "✓ Tenant @\(target) удалён" : "Нельзя удалить"
+            resumePage = .superTenants
+
+        case .superAdminAdd:
+            guard isRoot else { toast = "🔒 Только главный суперадмин"; resumePage = .superAdmins; break }
+            let target = normalizeUsername(trimmed)
+            if target.isEmpty {
+                toast = "⚠️ Нужен @username"
+            } else {
+                let ok = await state.addSuperAdmin(target: target)
+                toast = ok ? "✓ @\(target) — суперадмин" : "Уже суперадмин"
+            }
+            resumePage = .superAdmins
+
+        case .superAdminRemove:
+            guard isRoot else { toast = "🔒 Только главный суперадмин"; resumePage = .superAdmins; break }
+            let target = normalizeUsername(trimmed)
+            let ok = await state.removeSuperAdmin(target: target)
+            toast = ok ? "✓ @\(target) больше не суперадмин" : "Нельзя удалить"
+            resumePage = .superAdmins
+
+        case .simulateAs:
+            break
+        }
+
+        let (menuText, markup) = await renderPage(resumePage, chatKey: chatKey, username: username)
+        try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
+        if !toast.isEmpty {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: toast,
+                replyMarkup: nil
+            ))
+        }
+        return true
+    }
+
+    private func sendHistoryDump(chatKey: ChatKey) async {
+        let messages = await state.history(chatKey: chatKey)
+        let text: String
+        if messages.isEmpty {
+            text = "📝 История пуста."
+        } else {
+            var lines: [String] = ["<b>📝 История</b> (\(messages.count))"]
+            for msg in messages {
+                let roleLabel: String
+                switch msg.role {
+                case "system": roleLabel = "⚙️"
+                case "user": roleLabel = "👤"
+                case "assistant": roleLabel = "🤖"
+                default: roleLabel = msg.role
+                }
+                let content: String
+                switch msg.content {
+                case .text(let t):
+                    content = t
+                case .parts(let parts):
+                    let textParts = parts.compactMap { $0.text }
+                    let mediaTags = parts.compactMap { part -> String? in
+                        if part.inputImage != nil { return "[изображение]" }
+                        if part.inputAudio != nil { return "[аудио]" }
+                        if part.inputVideo != nil { return "[видео]" }
+                        return nil
+                    }
+                    content = (textParts.joined(separator: " ") + " " + mediaTags.joined(separator: " ")).trimmingCharacters(in: .whitespaces)
+                }
+                let limit = 280
+                let displayContent: String
+                if content.isEmpty {
+                    displayContent = "<i>(пусто)</i>"
+                } else if content.count > limit {
+                    let endIndex = content.index(content.startIndex, offsetBy: limit)
+                    displayContent = String(content[..<endIndex]) + "…"
+                } else {
+                    displayContent = content
+                }
+                lines.append("\n\(roleLabel) \(displayContent)")
+            }
+            text = lines.joined(separator: "\n")
+        }
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: text,
+            replyMarkup: nil
+        ))
+    }
 
     private func menuButton(_ text: String, action: String) -> InlineKeyboardButton {
         .init(text: text, callback_data: BotCallbackAction.menu(action: action).rawData)

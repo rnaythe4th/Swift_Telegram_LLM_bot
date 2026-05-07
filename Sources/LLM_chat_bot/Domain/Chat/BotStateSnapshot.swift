@@ -25,6 +25,8 @@ struct TenantStateSnapshot: Codable, Sendable {
     var rolePresets: [Preset]
     var whitelistedUserIDs: [Int]
     var adminUsernames: [String]
+    var licensedUsernames: [String]?
+    var cumulativeUsage: CumulativeUsage?
 }
 
 struct ChatContextSnapshot: Codable, Sendable {
@@ -55,6 +57,7 @@ struct BotStateSnapshot: Codable, Sendable {
     var starsPrice: Int?
     var freeModelIDs: [String]?
     var crypto: CryptoConfigSnapshot?
+    var superAdminUsernames: [String]?
 
     // Legacy fields — present in pre-tenant snapshots, absent in new ones
     var whitelistedUserIDs: [Int]?

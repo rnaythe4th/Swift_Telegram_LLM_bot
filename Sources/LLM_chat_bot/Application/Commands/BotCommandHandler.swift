@@ -88,11 +88,18 @@ final class BotCommandHandler: @unchecked Sendable {
             try await handlePresets(chatKey: chatKey, argument: parsed.argument)
 
         case .tenant:
-            guard await isSuperAdmin(fromUser) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+            guard await isAdmin(fromUser, chatID: chatKey.chatID) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для администратора.")
                 return
             }
-            try await handleTenant(chatKey: chatKey, argument: parsed.argument)
+            try await handleTenant(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
+
+        case .superadmin:
+            guard await state.isRootSuperAdmin(username: fromUser?.username) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для главного суперадмина.")
+                return
+            }
+            try await handleSuperAdminCmd(chatKey: chatKey, argument: parsed.argument)
 
         case .buy:
             try await handleBuy(chatKey: chatKey, fromUser: fromUser)
@@ -274,6 +281,10 @@ final class BotCommandHandler: @unchecked Sendable {
         case .reset:
             await state.resetChat(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "↺ Настройки сброшены к стандартным.")
+
+        case .resetStats:
+            await state.resetUsage(chatKey: chatKey)
+            try await sendUserFeedback(chatKey: chatKey, text: "🗑 Статистика этого чата сброшена.")
 
         case .history:
             try await handleHistory(chatKey: chatKey)
@@ -611,7 +622,7 @@ final class BotCommandHandler: @unchecked Sendable {
         }
     }
 
-    private func handleTenant(chatKey: ChatKey, argument: String) async throws {
+    private func handleTenant(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
         let parts = argument.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true).map(String.init)
         let subcommand = parts.first ?? ""
         let arg1 = parts.count > 1 ? parts[1] : ""
@@ -621,8 +632,23 @@ final class BotCommandHandler: @unchecked Sendable {
             raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
         }
 
+        let invokerUsername = fromUser?.username?.lowercased()
+        let invokerIsSuper = await state.isSuperAdmin(username: fromUser?.username)
+        let superOnlySubs: Set<String> = [
+            "remove", "price", "freemodels", "cryptoprice", "cryptoaddr",
+            "cryptomode", "cryptopool", "stats", "cryptoinvoices"
+        ]
+        if superOnlySubs.contains(subcommand.lowercased()), !invokerIsSuper {
+            try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+            return
+        }
+
         switch subcommand.lowercased() {
         case "add":
+            guard invokerIsSuper else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                return
+            }
             let username = normalizeUsername(arg1)
             guard !username.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant add @username</code>")
@@ -653,6 +679,11 @@ final class BotCommandHandler: @unchecked Sendable {
 
         case "assign":
             let username = normalizeUsername(arg1)
+            // Admins may only assign chats to themselves; super may assign to anyone.
+            if !invokerIsSuper, username.lowercased() != invokerUsername {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Можно привязать чат только к своей лицензии.")
+                return
+            }
             guard !username.isEmpty, let chatID = Int(arg2) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant assign @username &lt;chatID&gt;</code>")
                 return
@@ -661,6 +692,118 @@ final class BotCommandHandler: @unchecked Sendable {
             try await sendUserFeedback(chatKey: chatKey, text: ok
                 ? "✓ Chat <code>\(chatID)</code> назначен @\(username)."
                 : "Tenant @\(username) не найден.")
+
+        case "unassign":
+            guard let chatID = Int(arg1) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant unassign &lt;chatID&gt;</code>")
+                return
+            }
+            let owner = await state.chatOwner(chatID: chatID)
+            if !invokerIsSuper, owner?.lowercased() != invokerUsername {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Этот чат не привязан к вашей лицензии.")
+                return
+            }
+            let removed = await state.unassignChat(chatID: chatID)
+            try await sendUserFeedback(chatKey: chatKey, text: removed != nil
+                ? "✓ Chat <code>\(chatID)</code> отвязан от @\(removed!)."
+                : "Чат <code>\(chatID)</code> не был привязан.")
+
+        case "claim":
+            // Admin attaches the current chat to their licence.
+            guard let username = invokerUsername else {
+                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                return
+            }
+            let ok = await state.assignChat(chatID: chatKey.chatID, to: username)
+            try await sendUserFeedback(chatKey: chatKey, text: ok
+                ? "✓ Этот чат привязан к @\(username)."
+                : "Tenant @\(username) не найден — оплатите доступ через /buy.")
+
+        case "release":
+            // Admin detaches the current chat from their licence.
+            let owner = await state.chatOwner(chatID: chatKey.chatID)
+            if !invokerIsSuper, owner?.lowercased() != invokerUsername {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Этот чат не привязан к вашей лицензии.")
+                return
+            }
+            let removed = await state.unassignChat(chatID: chatKey.chatID)
+            try await sendUserFeedback(chatKey: chatKey, text: removed != nil
+                ? "✓ Этот чат отвязан от @\(removed!)."
+                : "Этот чат не был привязан.")
+
+        case "chats":
+            // Admin → own chats; super → all (already covered by /chats).
+            guard let username = invokerUsername else {
+                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                return
+            }
+            let chats = await state.chatsOwnedBy(username)
+            if chats.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "У вашей лицензии нет привязанных чатов.")
+            } else {
+                let list = chats.sorted().map { "• <code>\($0)</code>" }.joined(separator: "\n")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты лицензии @\(username)</b> (\(chats.count))\n\(list)")
+            }
+
+        case "adduser":
+            guard let username = invokerUsername else {
+                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                return
+            }
+            let target = normalizeUsername(arg1)
+            guard !target.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant adduser @username</code>")
+                return
+            }
+            let added = await state.addLicensedUser(ownerUsername: username, target: target)
+            try await sendUserFeedback(chatKey: chatKey, text: added
+                ? "✓ @\(target) получил доступ к платным моделям по вашей лицензии."
+                : "@\(target) уже в списке или ваша лицензия не активна.")
+
+        case "removeuser":
+            guard let username = invokerUsername else {
+                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                return
+            }
+            let target = normalizeUsername(arg1)
+            guard !target.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant removeuser @username</code>")
+                return
+            }
+            let removed = await state.removeLicensedUser(ownerUsername: username, target: target)
+            try await sendUserFeedback(chatKey: chatKey, text: removed
+                ? "✓ @\(target) удалён из списка лицензированных."
+                : "@\(target) не найден в списке лицензированных.")
+
+        case "users":
+            guard let username = invokerUsername else {
+                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                return
+            }
+            let users = await state.licensedUsers(ownerUsername: username)
+            if users.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "В вашей лицензии нет добавленных пользователей.")
+            } else {
+                let list = users.map { "• @\($0)" }.joined(separator: "\n")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Лицензированные пользователи @\(username)</b> (\(users.count))\n\(list)")
+            }
+
+        case "stats":
+            let rows = await state.tenantStats()
+            if rows.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "Tenants: пусто.")
+            } else {
+                var lines = ["<b>📊 Статистика tenants</b>"]
+                for row in rows {
+                    let mark = row.isSuperAdmin ? "🛡" : "🛠"
+                    let costStr = String(format: "$%.4f", row.usage.totalCost)
+                    let tokens = Int(row.usage.totalTokens)
+                    lines.append("\n\(mark) <b>@\(row.username)</b>")
+                    lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b>")
+                    lines.append("  запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(tokens)</b> · итого <b>\(costStr)</b>")
+                }
+                try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+            }
 
         case "freemodels":
             try await handleFreeModels(chatKey: chatKey, subcommand: arg1, value: arg2)
@@ -694,6 +837,9 @@ final class BotCommandHandler: @unchecked Sendable {
         case "cryptopool":
             try await handleCryptoPool(chatKey: chatKey, subArg: arg1, value: arg2)
 
+        case "cryptoinvoices":
+            try await handleCryptoInvoices(chatKey: chatKey)
+
         case "price":
             if arg1.isEmpty {
                 let price = await state.starsPrice()
@@ -713,25 +859,84 @@ final class BotCommandHandler: @unchecked Sendable {
             }
 
         default:
-            try await sendUserFeedback(chatKey: chatKey, text: """
-                <b>🏢 Управление tenants</b>
+            let adminHelp = """
+                <b>🏢 Управление лицензией</b>
 
+                <code>/tenant claim</code> — привязать этот чат к вашей лицензии
+                <code>/tenant release</code> — отвязать этот чат
+                <code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат вручную
+                <code>/tenant unassign &lt;chatID&gt;</code> — отвязать чат
+                <code>/tenant chats</code> — чаты вашей лицензии
+                <code>/tenant adduser @username</code> — дать пользователю доступ
+                <code>/tenant removeuser @username</code> — отозвать доступ
+                <code>/tenant users</code> — лицензированные пользователи
+                """
+            let superHelp = """
+
+                <b>🛡 Только суперадмин</b>
                 <code>/tenant add @username</code> — зарегистрировать
                 <code>/tenant remove @username</code> — удалить
-                <code>/tenant list</code> — список
-                <code>/tenant assign @username &lt;chatID&gt;</code> — назначить чат
-                <code>/tenant price &lt;число&gt;</code> — цена доступа в Stars (0 = отключить)
-                <code>/tenant freemodels add &lt;id&gt;</code> — добавить бесплатную модель
-                <code>/tenant freemodels remove &lt;id&gt;</code> — удалить
-                <code>/tenant freemodels list</code> — список (пусто = все бесплатны)
-                <code>/tenant freemodels available</code> — бесплатные модели OpenRouter сейчас
-                <code>/tenant cryptoprice &lt;USD&gt;</code> — цена крипто-доступа (0 = отключить)
-                <code>/tenant cryptoaddr &lt;chain&gt; &lt;addr&gt;</code> — адрес для приёма (chain: ton|bsc|eth|tron)
-                <code>/tenant cryptoaddr list</code> — текущие адреса
-                <code>/tenant cryptomode delta|unique</code> — режим идентификации
-                <code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code> — добавить адрес в пул
-                <code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code> — удалить из пула
-                <code>/tenant cryptopool list</code> — пул адресов
+                <code>/tenant list</code> — все tenants
+                <code>/tenant stats</code> — статистика по tenants
+                <code>/tenant price &lt;число&gt;</code> — цена в Stars (0 = отключить)
+                <code>/tenant freemodels add|remove|list|available &lt;id&gt;</code>
+                <code>/tenant cryptoprice &lt;USD&gt;</code> — цена крипто-доступа
+                <code>/tenant cryptoaddr &lt;chain&gt; &lt;addr&gt;|list</code>
+                <code>/tenant cryptomode delta|unique</code>
+                <code>/tenant cryptopool add|remove|list &lt;chain&gt; …</code>
+                <code>/tenant cryptoinvoices</code> — открытые счета
+                """
+            let text = invokerIsSuper ? adminHelp + superHelp : adminHelp
+            try await sendUserFeedback(chatKey: chatKey, text: text)
+        }
+    }
+
+    private func handleSuperAdminCmd(chatKey: ChatKey, argument: String) async throws {
+        let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
+        let subcommand = (parts.first ?? "").lowercased()
+        let arg = parts.count > 1 ? parts[1] : ""
+
+        func normalizeUsername(_ raw: String) -> String {
+            raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        }
+
+        switch subcommand {
+        case "add":
+            let username = normalizeUsername(arg.trimmingCharacters(in: .whitespaces))
+            guard !username.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/superadmin add @username</code>")
+                return
+            }
+            let ok = await state.addSuperAdmin(target: username)
+            try await sendUserFeedback(chatKey: chatKey, text: ok
+                ? "✓ @\(username) теперь суперадмин."
+                : "@\(username) уже является суперадмином.")
+
+        case "remove":
+            let username = normalizeUsername(arg.trimmingCharacters(in: .whitespaces))
+            guard !username.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/superadmin remove @username</code>")
+                return
+            }
+            let ok = await state.removeSuperAdmin(target: username)
+            try await sendUserFeedback(chatKey: chatKey, text: ok
+                ? "✓ @\(username) больше не суперадмин."
+                : "Нельзя удалить главного суперадмина или такого пользователя нет.")
+
+        case "list":
+            let supers = await state.listSuperAdmins()
+            let list = supers.map { "• @\($0)" }.joined(separator: "\n")
+            try await sendUserFeedback(chatKey: chatKey, text: "<b>🛡 Суперадмины</b> (\(supers.count))\n\(list)")
+
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                <b>🛡 Суперадмины</b>
+
+                <code>/superadmin add @username</code>
+                <code>/superadmin remove @username</code>
+                <code>/superadmin list</code>
+
+                <i>Только главный суперадмин может управлять списком.</i>
                 """)
         }
     }
@@ -787,6 +992,22 @@ final class BotCommandHandler: @unchecked Sendable {
         default:
             try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/simulate admin|user|off|status</code>")
         }
+    }
+
+    private func handleCryptoInvoices(chatKey: ChatKey) async throws {
+        let invoices = await state.openCryptoInvoices()
+        var lines: [String] = ["<b>🪙 Открытые счета</b> (\(invoices.count))"]
+        if invoices.isEmpty {
+            lines.append("<i>нет</i>")
+        } else {
+            let sorted = invoices.sorted { $0.createdAt < $1.createdAt }
+            for inv in sorted.prefix(50) {
+                let amount = CryptoAmountFormatter.format(atomic: inv.exactAmountAtomic, decimals: inv.asset.decimals)
+                let received = CryptoAmountFormatter.format(atomic: inv.accumulatedAtomic, decimals: inv.asset.decimals)
+                lines.append("• @\(inv.username) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)")
+            }
+        }
+        try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
     }
 
     private func handleCryptoMode(chatKey: ChatKey, value: String) async throws {

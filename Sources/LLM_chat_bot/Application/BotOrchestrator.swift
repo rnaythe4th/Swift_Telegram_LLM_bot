@@ -268,6 +268,7 @@ final class BotOrchestrator: @unchecked Sendable {
             return
         }
         await state.registerTenant(username: username)
+        await state.assignChat(chatID: message.chat.id, to: username)
         _ = try? await telegram.sendMessage(.init(
             chatID: message.chat.id,
             threadID: message.message_thread_id,

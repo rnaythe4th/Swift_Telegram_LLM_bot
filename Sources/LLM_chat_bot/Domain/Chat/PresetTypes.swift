@@ -46,3 +46,23 @@ struct PendingInput: Sendable {
     let kind: Kind
     let menuMessageID: Int
 }
+
+enum AdminPendingInputKind: Sendable {
+    case whitelistAdd
+    case defaultsModel
+    case defaultsRole
+    case defaultsHistory
+    case tenantAssignChat
+    case tenantAddUser
+    case tenantRegister
+    case tenantRemove
+    case superAdminAdd
+    case superAdminRemove
+    case simulateAs
+}
+
+struct AdminPendingInput: Sendable {
+    let kind: AdminPendingInputKind
+    let menuMessageID: Int
+    let payload: String?
+}
