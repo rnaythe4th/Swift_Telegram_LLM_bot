@@ -79,7 +79,7 @@ final class GenerationCoordinator: @unchecked Sendable {
 
         // Enforce free model restriction for non-tenants
         if let effectiveFree = await state.effectiveFreeModelIDs(),
-           !(await state.hasFullModelAccess(username: username)) {
+           !(await state.hasFullModelAccess(username: username, userID: message.from?.id, chatID: chatKey.chatID)) {
             let currentModel = await state.model(chatKey: chatKey)
             if !effectiveFree.contains(currentModel) {
                 guard let firstFree = effectiveFree.first else {

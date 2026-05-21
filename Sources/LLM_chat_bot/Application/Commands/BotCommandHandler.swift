@@ -150,7 +150,7 @@ final class BotCommandHandler: @unchecked Sendable {
                     """)
                 return
             }
-            let hasAccess = await state.hasFullModelAccess(username: fromUser?.username)
+            let hasAccess = await state.hasFullModelAccess(username: fromUser?.username, userID: fromUser?.id, chatID: chatKey.chatID)
             let effectiveFree = await state.effectiveFreeModelIDs()
             if !hasAccess, let eff = effectiveFree, !eff.contains(trimmed) {
                 let price = await state.starsPrice()

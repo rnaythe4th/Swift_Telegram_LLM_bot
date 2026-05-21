@@ -1307,11 +1307,27 @@ actor ChatContextStore {
         contexts.keys.filter { $0.chatID > 0 && chatOwnership[$0.chatID] == defaultOwnerUsername }.map { $0 }
     }
 
-    func hasFullModelAccess(username: String?) -> Bool {
-        guard let u = username?.lowercased() else { return false }
-        if superAdminUsernames.contains(u), _simulatedRoles[u] != nil { return false }
-        if tenants[u] != nil { return true }
-        for tenant in tenants.values where tenant.licensedUsernames.contains(u) {
+    func hasFullModelAccess(username: String?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
+        let lowered = username?.lowercased()
+        let simulated: Bool = {
+            guard let u = lowered else { return false }
+            return superAdminUsernames.contains(u) && _simulatedRoles[u] != nil
+        }()
+
+        if !simulated, let u = lowered {
+            if tenants[u] != nil { return true }
+            for tenant in tenants.values where tenant.licensedUsernames.contains(u) {
+                return true
+            }
+        }
+
+        // Chat-level licensing: chat assigned to a tenant grants access to all members.
+        if let chatID, chatOwnership[chatID] != nil {
+            return true
+        }
+        // Per-chat whitelisted user IDs (set by tenant owner for this chat).
+        if let chatID, let userID,
+           tenantState(for: chatID).whitelistedUserIDs.contains(userID) {
             return true
         }
         return false

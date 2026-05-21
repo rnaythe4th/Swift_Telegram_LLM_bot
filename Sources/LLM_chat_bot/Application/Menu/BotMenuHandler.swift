@@ -549,7 +549,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     return
                 }
                 let effectiveFree = await state.effectiveFreeModelIDs()
-                let hasAccess = await state.hasFullModelAccess(username: callback.from.username)
+                let hasAccess = await state.hasFullModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
                 if !hasAccess, let eff = effectiveFree, !eff.contains(modelValue) {
                     let price = await state.starsPrice()
                     let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
@@ -567,7 +567,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     return
                 }
                 let effectiveFree = await state.effectiveFreeModelIDs()
-                let hasAccess = await state.hasFullModelAccess(username: callback.from.username)
+                let hasAccess = await state.hasFullModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
                 if !hasAccess, let eff = effectiveFree, !eff.contains(modelValue) {
                     let price = await state.starsPrice()
                     let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
@@ -1171,7 +1171,10 @@ final class BotMenuHandler: @unchecked Sendable {
         }
         rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сбросить", action: "reset")])
         if await state.isSuperAdmin(username: username) {
-            rows.append([menuButton("🛡 Супер-админ", action: "nav:superadmin")])
+            rows.append([
+                menuButton("🛠 Админ-панель", action: "nav:admin"),
+                menuButton("🛡 Супер-админ", action: "nav:superadmin"),
+            ])
         } else if await state.isAdmin(username: username, chatID: chatKey.chatID) {
             rows.append([menuButton("🛠 Админ-панель", action: "nav:admin")])
         }
@@ -1246,7 +1249,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let globalPresets = await state.modelPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
         let effectiveFreeModels = await state.effectiveFreeModelIDs()
-        let hasFullAccess = await state.hasFullModelAccess(username: username)
+        let hasFullAccess = await state.hasFullModelAccess(username: username, chatID: chatKey.chatID)
         let restrictionsActive = effectiveFreeModels != nil
         let modelPrices = await state.openRouterModelPrices()
         var rows: [[InlineKeyboardButton]] = []
