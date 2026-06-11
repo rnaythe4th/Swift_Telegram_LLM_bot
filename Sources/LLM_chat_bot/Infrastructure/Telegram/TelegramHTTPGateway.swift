@@ -161,6 +161,44 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
     }
     
+    func sendMessageDraft(_ request: SendMessageDraftRequest) async throws {
+        let body = TelegramSendMessageDraftBody(
+            chat_id: request.chatID,
+            message_thread_id: request.threadID,
+            draft_id: request.draftID,
+            text: request.text.isEmpty ? "" : TelegramHTMLFormatter.helper(text: request.text),
+            parse_mode: request.text.isEmpty ? nil : "HTML"
+        )
+
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/sendMessageDraft",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 30,
+            maxBodyBytes: 1 << 20,
+            validStatusCodes: 100..<600
+        )
+
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "sendMessageDraft", statusCode: raw.statusCode, data: raw.data)
+    }
+
+    func deleteMessage(chatID: Int, messageID: Int) async throws {
+        let body = TelegramDeleteMessageBody(chat_id: chatID, message_id: messageID)
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/deleteMessage",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 10,
+            maxBodyBytes: 1 << 18,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "deleteMessage", statusCode: raw.statusCode, data: raw.data)
+    }
+
     func sendChatAction(chatID: Int, threadID: Int64?, action: String) async throws {
         struct Body: Codable {
             let chat_id: Int

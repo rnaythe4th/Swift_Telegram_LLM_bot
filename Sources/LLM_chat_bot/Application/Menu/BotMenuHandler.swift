@@ -262,15 +262,20 @@ final class BotMenuHandler: @unchecked Sendable {
             return true
         }
 
-        let components = text.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-        guard components.count == 2, !components[0].isEmpty, !components[1].isEmpty else {
+        // Model presets accept a third part: OpenRouter upstream provider pin.
+        let maxParts = pending.category == .model ? 2 : 1
+        let components = text.split(separator: "|", maxSplits: maxParts).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard (2...(maxParts + 1)).contains(components.count), components.allSatisfy({ !$0.isEmpty }) else {
             await state.setPendingInput(pending, chatKey: chatKey)
+            let format = pending.category == .model
+                ? "<code>Название | Значение | Провайдер</code> (провайдер опционален)"
+                : "<code>Название | Значение</code>"
             _ = try? await telegram.sendMessage(
                 .init(
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                     replyTo: nil,
-                    text: "⚠️ Неверный формат. Используйте: <code>Название | Значение</code>",
+                    text: "⚠️ Неверный формат. Используйте: \(format)",
                     replyMarkup: nil
                 )
             )
@@ -279,7 +284,9 @@ final class BotMenuHandler: @unchecked Sendable {
 
         let display = components[0]
         let value = components[1]
+        let provider = components.count > 2 ? components[2] : nil
         let toastText: String
+        let providerSuffix = provider.map { " · \($0)" } ?? ""
 
         if pending.category == .model {
             await modelPriceMonitor?.refreshPricesIfNeeded(for: value)
@@ -287,17 +294,17 @@ final class BotMenuHandler: @unchecked Sendable {
 
         switch (pending.scope, pending.kind) {
         case (.global, .add):
-            _ = await state.addPreset(category: pending.category, display: display, value: value, chatID: chatKey.chatID)
-            toastText = "✓ Глобальный пресет добавлен: \(display)"
+            _ = await state.addPreset(category: pending.category, display: display, value: value, provider: provider, chatID: chatKey.chatID)
+            toastText = "✓ Глобальный пресет добавлен: \(display)\(providerSuffix)"
         case (.global, .edit(let index)):
-            let ok = await state.editPreset(category: pending.category, index: index, display: display, value: value, chatID: chatKey.chatID)
-            toastText = ok ? "✓ Обновлён: \(display)" : "⚠️ Пресет не найден"
+            let ok = await state.editPreset(category: pending.category, index: index, display: display, value: value, provider: provider, chatID: chatKey.chatID)
+            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Пресет не найден"
         case (.chat, .add):
-            _ = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value)
-            toastText = "✓ Пресет чата добавлен: \(display)"
+            _ = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value, provider: provider)
+            toastText = "✓ Пресет чата добавлен: \(display)\(providerSuffix)"
         case (.chat, .edit(let index)):
-            let ok = await state.editChatPreset(category: pending.category, chatKey: chatKey, index: index, display: display, value: value)
-            toastText = ok ? "✓ Обновлён: \(display)" : "⚠️ Пресет не найден"
+            let ok = await state.editChatPreset(category: pending.category, chatKey: chatKey, index: index, display: display, value: value, provider: provider)
+            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Пресет не найден"
         }
 
         let (menuText, markup) = await renderPresetManagement(category: pending.category, chatKey: chatKey, canManageGlobal: canManageGlobal)
@@ -556,8 +563,9 @@ final class BotMenuHandler: @unchecked Sendable {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Эта модель требует полного доступа\(hint)")
                     return
                 }
-                _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель: \(preset.display)")
+                _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
+                let toast = "Модель: \(preset.display)" + (preset.provider.map { " · \($0)" } ?? "")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: toast)
                 try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
                 return
             } else if parts[1] == "csel" {
@@ -574,8 +582,9 @@ final class BotMenuHandler: @unchecked Sendable {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Эта модель требует полного доступа\(hint)")
                     return
                 }
-                _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель: \(preset.display)")
+                _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
+                let toast = "Модель: \(preset.display)" + (preset.provider.map { " · \($0)" } ?? "")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: toast)
                 try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
                 return
             }
@@ -1260,7 +1269,7 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         func presetLabel(preset: Preset, scope: String) -> String {
-            let isActive = preset.value == help.model
+            let isActive = preset.value == help.model && preset.provider == help.modelProviderRouting
             var parts: [String] = []
             if isActive { parts.append("✓") }
             if restrictionsActive { parts.append(isEffectivelyFree(preset.value) ? "🆓" : "⭐") }
@@ -1311,13 +1320,15 @@ final class BotMenuHandler: @unchecked Sendable {
             }
         }
 
+        let routingLine = help.modelProviderRouting.map { "\nПровайдер · 📡 <code>\($0)</code>" } ?? ""
         let text = """
         <b>🤖 Модель</b>
 
-        Текущая · <code>\(help.model)</code>\(legendLine)\(priceSection)
+        Текущая · <code>\(help.model)</code>\(routingLine)\(legendLine)\(priceSection)
 
         <i>Смена модели очистит историю.</i>
         Своя модель — /model &lt;id&gt;
+        <i>С провайдером — /model &lt;id&gt; | &lt;провайдер&gt;</i>
         <i>ID моделей можно найти на openrouter.ai</i>\(accessLine)
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
@@ -2516,6 +2527,9 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                     text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
                 } else {
                     var line = "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>"
+                    if let provider = preset.provider {
+                        line += " · 📡 <code>\(provider)</code>"
+                    }
                     if let price = modelPrices[preset.value] {
                         line += " — ⬇️$\(Self.formatPriceM(price.inputPerToken))/M | ⬆️$\(Self.formatPriceM(price.outputPerToken))/M"
                     }
@@ -2535,6 +2549,9 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                     text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
                 } else {
                     var line = "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>"
+                    if let provider = preset.provider {
+                        line += " · 📡 <code>\(provider)</code>"
+                    }
                     if let price = modelPrices[preset.value] {
                         line += " — ⬇️$\(Self.formatPriceM(price.inputPerToken))/M | ⬆️$\(Self.formatPriceM(price.outputPerToken))/M"
                     }
@@ -2575,25 +2592,29 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
     private func renderAwaitingInput(category: PresetCategory, scope: PendingInput.Scope, kind: PendingInput.Kind, preset: Preset?) -> (String, InlineKeyboardMarkup) {
         let scopeLabel = scope == .global ? "🌐 Глобальный" : "💬 Пресет чата"
         let text: String
+        let formatLine = category == .model
+            ? "<code>Название | Значение | Провайдер</code>\n<i>Провайдер (роутинг OpenRouter) — опционален.</i>"
+            : "<code>Название | Значение</code>"
         switch kind {
         case .add:
             text = """
             <b>➕ Новый пресет · \(scopeLabel) · \(category.displayName)</b>
 
             Отправьте сообщение в формате:
-            <code>Название | Значение</code>
+            \(formatLine)
 
             Пример: <code>\(category.addExample)</code>
             """
         case .edit:
+            let currentValue = (preset?.value ?? "") + (preset?.provider.map { " | \($0)" } ?? "")
             text = """
             <b>✏️ Редактирование · \(scopeLabel) · \(preset?.display ?? "")</b>
 
             Текущее значение:
-            <code>\(preset?.value ?? "")</code>
+            <code>\(currentValue)</code>
 
             Отправьте новое в формате:
-            <code>Название | Значение</code>
+            \(formatLine)
             """
         }
 

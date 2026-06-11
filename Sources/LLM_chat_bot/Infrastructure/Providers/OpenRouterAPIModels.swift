@@ -24,6 +24,13 @@ struct OpenRouterRequestBody: Codable {
     var top_logprobs: Int? = nil
     var min_p: Float? = nil
     var top_a: Float? = nil
+    var provider: OpenRouterProviderRouting? = nil
+}
+
+struct OpenRouterProviderRouting: Codable {
+    var order: [String]? = nil
+    var only: [String]? = nil
+    var allow_fallbacks: Bool? = nil
 }
 
 struct OpenRouterReasoning: Codable {

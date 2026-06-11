@@ -109,6 +109,19 @@ struct TelegramEditMessageTextBody: Codable {
     let reply_markup: InlineKeyboardMarkup?
 }
 
+struct TelegramSendMessageDraftBody: Codable {
+    let chat_id: Int
+    let message_thread_id: Int64?
+    let draft_id: Int
+    let text: String
+    let parse_mode: String?
+}
+
+struct TelegramDeleteMessageBody: Codable {
+    let chat_id: Int
+    let message_id: Int
+}
+
 struct TelegramAPICallbackQuery: Decodable, Sendable {
     let id: String
     let from: TelegramAPIUser

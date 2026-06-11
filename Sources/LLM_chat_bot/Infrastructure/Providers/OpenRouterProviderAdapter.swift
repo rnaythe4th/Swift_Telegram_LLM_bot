@@ -31,7 +31,10 @@ final class OpenRouterProviderAdapter: ProviderGatewayPort, @unchecked Sendable 
                     effort: plan.reasoningEffort?.rawValue ?? "high",
                     summary: "concise",
                     enabled: plan.reasoningEffort != nil
-                )
+                ),
+                provider: plan.providerRouting.map {
+                    OpenRouterProviderRouting(order: [$0], only: [$0], allow_fallbacks: false)
+                }
             )
         )
     }

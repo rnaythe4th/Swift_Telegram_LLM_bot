@@ -3,6 +3,14 @@ import Foundation
 struct Preset: Codable, Sendable, Equatable {
     let display: String
     let value: String
+    // OpenRouter upstream provider pin (provider routing), model presets only.
+    let provider: String?
+
+    init(display: String, value: String, provider: String? = nil) {
+        self.display = display
+        self.value = value
+        self.provider = provider
+    }
 }
 
 enum PresetCategory: String, Sendable {
@@ -19,7 +27,7 @@ enum PresetCategory: String, Sendable {
 
     var addExample: String {
         switch self {
-        case .model: return "GPT-4o | openai/gpt-4o"
+        case .model: return "DeepSeek V4 | deepseek/deepseek-v4-pro | deepseek"
         case .temp: return "Низкая | 0.3"
         case .history: return "Короткая | 5"
         case .role: return "Физик | Ты физик, отвечай кратко."

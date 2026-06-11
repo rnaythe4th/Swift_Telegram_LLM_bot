@@ -146,30 +146,40 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(chatKey: chatKey, text: """
                     🤖 Укажите модель.
                     <i>Пример:</i> <code>/model openai/gpt-4o</code>
+                    <i>С провайдером (роутинг OpenRouter):</i> <code>/model deepseek/deepseek-v4-pro | deepseek</code>
                     Готовые варианты — /menu → Модель
                     """)
                 return
             }
-            let hasAccess = await state.hasFullModelAccess(username: fromUser?.username, userID: fromUser?.id, chatID: chatKey.chatID)
-            let effectiveFree = await state.effectiveFreeModelIDs()
-            if !hasAccess, let eff = effectiveFree, !eff.contains(trimmed) {
-                let price = await state.starsPrice()
-                let buyHint = price.map { "\n\nКупить полный доступ (\($0) ⭐): /buy" } ?? "\n\nОформите полный доступ: /buy"
-                try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(trimmed)</b> — модель с полным доступом.\(buyHint)")
+            // Optional second part after "|": OpenRouter upstream provider pin.
+            let modelParts = trimmed.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            let modelID = modelParts[0]
+            let providerRouting = modelParts.count > 1 && !modelParts[1].isEmpty ? modelParts[1] : nil
+            guard !modelID.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Укажите модель перед <code>|</code>.")
                 return
             }
-            let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: trimmed)
+            let hasAccess = await state.hasFullModelAccess(username: fromUser?.username, userID: fromUser?.id, chatID: chatKey.chatID)
+            let effectiveFree = await state.effectiveFreeModelIDs()
+            if !hasAccess, let eff = effectiveFree, !eff.contains(modelID) {
+                let price = await state.starsPrice()
+                let buyHint = price.map { "\n\nКупить полный доступ (\($0) ⭐): /buy" } ?? "\n\nОформите полный доступ: /buy"
+                try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(modelID)</b> — модель с полным доступом.\(buyHint)")
+                return
+            }
+            let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelID, providerRouting: providerRouting)
             if modelPriceMonitor != nil {
-                await modelPriceMonitor?.refreshPricesIfNeeded(for: trimmed)
+                await modelPriceMonitor?.refreshPricesIfNeeded(for: modelID)
             }
             var priceNote = ""
-            if let price = await state.openRouterModelPrice(for: trimmed) {
+            if let price = await state.openRouterModelPrice(for: modelID) {
                 let inP = BotMenuHandler.formatPriceM(price.inputPerToken)
                 let outP = BotMenuHandler.formatPriceM(price.outputPerToken)
                 priceNote = "\n⬇️$\(inP)/M · ⬆️$\(outP)/M"
             }
+            let providerNote = providerRouting.map { "\nПровайдер: <code>\($0)</code>" } ?? ""
             try await sendUserFeedback(chatKey: chatKey, text: """
-                ✓ Модель: <code>\(changed.new)</code>
+                ✓ Модель: <code>\(changed.new)</code>\(providerNote)
                 <i>Была:</i> <code>\(changed.old)</code>
                 История очищена.\(priceNote)
                 """)
@@ -494,7 +504,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 typeKey: "model",
                 typeName: "моделей",
                 list: { [self] in await state.modelPresets(chatID: chatKey.chatID) },
-                add: { [self] display, val in await state.addModelPreset(display: display, value: val, chatID: chatKey.chatID) },
+                add: { [self] display, val, provider in await state.addModelPreset(display: display, value: val, provider: provider, chatID: chatKey.chatID) },
                 remove: { [self] val in await state.removeModelPreset(value: val, chatID: chatKey.chatID) }
             )
 
@@ -506,7 +516,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 typeKey: "temp",
                 typeName: "температуры",
                 list: { [self] in await state.tempPresets(chatID: chatKey.chatID) },
-                add: { [self] display, val in await state.addTempPreset(display: display, value: val, chatID: chatKey.chatID) },
+                add: { [self] display, val, _ in await state.addTempPreset(display: display, value: val, chatID: chatKey.chatID) },
                 remove: { [self] val in await state.removeTempPreset(value: val, chatID: chatKey.chatID) }
             )
 
@@ -518,7 +528,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 typeKey: "history",
                 typeName: "длины истории",
                 list: { [self] in await state.historyLengthPresets(chatID: chatKey.chatID) },
-                add: { [self] display, val in await state.addHistoryLengthPreset(display: display, value: val, chatID: chatKey.chatID) },
+                add: { [self] display, val, _ in await state.addHistoryLengthPreset(display: display, value: val, chatID: chatKey.chatID) },
                 remove: { [self] val in await state.removeHistoryLengthPreset(value: val, chatID: chatKey.chatID) }
             )
 
@@ -530,7 +540,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 typeKey: "role",
                 typeName: "ролей",
                 list: { [self] in await state.rolePresets(chatID: chatKey.chatID) },
-                add: { [self] display, val in await state.addRolePreset(display: display, value: val, chatID: chatKey.chatID) },
+                add: { [self] display, val, _ in await state.addRolePreset(display: display, value: val, chatID: chatKey.chatID) },
                 remove: { [self] val in await state.removeRolePreset(value: val, chatID: chatKey.chatID) }
             )
 
@@ -557,7 +567,7 @@ final class BotCommandHandler: @unchecked Sendable {
         typeKey: String,
         typeName: String,
         list: @Sendable () async -> [Preset],
-        add: @Sendable (String, String) async -> Preset,
+        add: @Sendable (String, String, String?) async -> Preset,
         remove: @Sendable (String) async -> Bool
     ) async throws {
         switch subcommand.lowercased() {
@@ -574,17 +584,28 @@ final class BotCommandHandler: @unchecked Sendable {
                     text: """
                     <i>Использование:</i> <code>/presets \(typeKey) add &lt;label&gt; | &lt;value&gt;</code>
                     <i>Пример:</i> <code>/presets model add Gemini 3 Flash | google/gemini-3-flash-preview</code>
+                    <i>Модель с провайдером:</i> <code>/presets model add DeepSeek V4 | deepseek/deepseek-v4-pro | deepseek</code>
                     """
                 )
                 return
             }
 
             let display = addParts[0]
-            let presetValue = addParts.dropFirst().joined(separator: " ")
-            let preset = await add(display, presetValue)
+            let presetValue: String
+            let presetProvider: String?
+            if typeKey == "model", addParts.count >= 3 {
+                // Third part pins the OpenRouter upstream provider.
+                presetValue = addParts[1]
+                presetProvider = addParts[2]
+            } else {
+                presetValue = addParts.dropFirst().joined(separator: " ")
+                presetProvider = nil
+            }
+            let preset = await add(display, presetValue, presetProvider)
+            let providerNote = preset.provider.map { " · <code>\($0)</code>" } ?? ""
             try await sendUserFeedback(
                 chatKey: chatKey,
-                text: "✓ Пресет \(typeName): <b>\(preset.display)</b> → <code>\(preset.value)</code>"
+                text: "✓ Пресет \(typeName): <b>\(preset.display)</b> → <code>\(preset.value)</code>\(providerNote)"
             )
 
         case "remove":
@@ -607,7 +628,8 @@ final class BotCommandHandler: @unchecked Sendable {
             } else {
                 var lines = ["<b>Пресеты \(typeName)</b> (\(presets.count))"]
                 for (i, p) in presets.enumerated() {
-                    lines.append("\(i). <b>\(p.display)</b> → <code>\(p.value)</code>")
+                    let providerNote = p.provider.map { " · <code>\($0)</code>" } ?? ""
+                    lines.append("\(i). <b>\(p.display)</b> → <code>\(p.value)</code>\(providerNote)")
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             }

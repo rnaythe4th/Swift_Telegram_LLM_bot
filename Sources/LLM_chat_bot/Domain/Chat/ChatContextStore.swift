@@ -45,6 +45,8 @@ struct ChatContext: Sendable {
     var history: [ChatMessage]
     var pendingTurns: [PendingTurn]
     var model: String
+    // OpenRouter upstream provider pin for the current model (provider routing).
+    var modelProviderRouting: String?
     var temp: Float
     var showStats: Bool
     var maxHistory: Int
@@ -64,6 +66,7 @@ struct ChatContext: Sendable {
 struct GenerationSnapshot: Sendable {
     let provider: ServiceProvider
     let model: String
+    let providerRouting: String?
     let temperature: Float
     let options: GenerationOptions
     let messages: [ChatMessage]
@@ -71,6 +74,7 @@ struct GenerationSnapshot: Sendable {
 
 struct HelpData: Sendable {
     let model: String
+    let modelProviderRouting: String?
     let role: String
     let temp: Float
     let maxHistory: Int
@@ -419,8 +423,8 @@ actor ChatContextStore {
         }
     }
 
-    func addPreset(category: PresetCategory, display: String, value: String, chatID: Int) -> Preset {
-        let preset = Preset(display: display, value: value)
+    func addPreset(category: PresetCategory, display: String, value: String, provider: String? = nil, chatID: Int) -> Preset {
+        let preset = Preset(display: display, value: value, provider: provider)
         mutateTenant(for: chatID) { tenant in
             switch category {
             case .model: tenant.modelPresets.append(preset)
@@ -457,8 +461,8 @@ actor ChatContextStore {
         return success
     }
 
-    func editPreset(category: PresetCategory, index: Int, display: String, value: String, chatID: Int) -> Bool {
-        let preset = Preset(display: display, value: value)
+    func editPreset(category: PresetCategory, index: Int, display: String, value: String, provider: String? = nil, chatID: Int) -> Bool {
+        let preset = Preset(display: display, value: value, provider: provider)
         var success = false
         mutateTenant(for: chatID) { tenant in
             switch category {
@@ -483,8 +487,8 @@ actor ChatContextStore {
         return success
     }
 
-    func addModelPreset(display: String, value: String, chatID: Int) -> Preset {
-        addPreset(category: .model, display: display, value: value, chatID: chatID)
+    func addModelPreset(display: String, value: String, provider: String? = nil, chatID: Int) -> Preset {
+        addPreset(category: .model, display: display, value: value, provider: provider, chatID: chatID)
     }
 
     func removeModelPreset(value: String, chatID: Int) -> Bool {
@@ -574,6 +578,7 @@ actor ChatContextStore {
             history: [.init(role: "system", content: role)],
             pendingTurns: [],
             model: tenant.defaultModel,
+            modelProviderRouting: nil,
             temp: 1.5,
             showStats: false,
             maxHistory: tenant.defaultHistoryLength,
@@ -635,6 +640,7 @@ actor ChatContextStore {
         let context = ensure(chatKey: chatKey)
         return .init(
             model: context.model,
+            modelProviderRouting: context.modelProviderRouting,
             role: displayRole(context.role, chatID: chatKey.chatID),
             temp: context.temp,
             maxHistory: context.maxHistory,
@@ -735,10 +741,11 @@ actor ChatContextStore {
         ensure(chatKey: chatKey).temp
     }
 
-    func setModelAndResetHistory(chatKey: ChatKey, newModel: String) -> (old: String, new: String) {
+    func setModelAndResetHistory(chatKey: ChatKey, newModel: String, providerRouting: String? = nil) -> (old: String, new: String) {
         let old = ensure(chatKey: chatKey).model
         mutate(chatKey: chatKey) { context in
             context.model = newModel
+            context.modelProviderRouting = providerRouting
             context.history = [.init(role: "system", content: context.role)]
             context.pendingTurns = []
         }
@@ -789,6 +796,7 @@ actor ChatContextStore {
         return .init(
             provider: context.provider,
             model: context.model,
+            providerRouting: context.modelProviderRouting,
             temperature: context.temp,
             options: .init(
                 showStats: context.showStats,
@@ -849,8 +857,8 @@ actor ChatContextStore {
         }
     }
 
-    func addChatPreset(category: PresetCategory, chatKey: ChatKey, display: String, value: String) -> Preset {
-        let preset = Preset(display: display, value: value)
+    func addChatPreset(category: PresetCategory, chatKey: ChatKey, display: String, value: String, provider: String? = nil) -> Preset {
+        let preset = Preset(display: display, value: value, provider: provider)
         mutate(chatKey: chatKey) { ctx in
             switch category {
             case .model: ctx.chatModelPresets.append(preset)
@@ -887,8 +895,8 @@ actor ChatContextStore {
         return success
     }
 
-    func editChatPreset(category: PresetCategory, chatKey: ChatKey, index: Int, display: String, value: String) -> Bool {
-        let preset = Preset(display: display, value: value)
+    func editChatPreset(category: PresetCategory, chatKey: ChatKey, index: Int, display: String, value: String, provider: String? = nil) -> Bool {
+        let preset = Preset(display: display, value: value, provider: provider)
         var success = false
         mutate(chatKey: chatKey) { ctx in
             switch category {
@@ -1394,7 +1402,11 @@ actor ChatContextStore {
     }
 
     func setModelOnly(chatKey: ChatKey, model: String) {
-        mutate(chatKey: chatKey) { $0.model = model }
+        mutate(chatKey: chatKey) {
+            $0.model = model
+            // Provider pin belongs to the previously chosen model.
+            $0.modelProviderRouting = nil
+        }
     }
 
     // MARK: - Chat listings
@@ -1446,6 +1458,7 @@ actor ChatContextStore {
             history: [.init(role: "system", content: role)],
             pendingTurns: [],
             model: tenant.defaultModel,
+            modelProviderRouting: nil,
             temp: 1.5,
             showStats: false,
             maxHistory: tenant.defaultHistoryLength,
@@ -1472,6 +1485,7 @@ actor ChatContextStore {
                 role: context.role,
                 history: context.history,
                 model: context.model,
+                modelProvider: context.modelProviderRouting,
                 temp: context.temp,
                 showStats: context.showStats,
                 maxHistory: context.maxHistory,
@@ -1535,6 +1549,7 @@ actor ChatContextStore {
                 history: ctxSnapshot.history,
                 pendingTurns: [],
                 model: ctxSnapshot.model,
+                modelProviderRouting: ctxSnapshot.modelProvider,
                 temp: ctxSnapshot.temp,
                 showStats: ctxSnapshot.showStats,
                 maxHistory: ctxSnapshot.maxHistory,

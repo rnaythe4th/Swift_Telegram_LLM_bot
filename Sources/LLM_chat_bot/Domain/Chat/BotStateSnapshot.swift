@@ -33,6 +33,8 @@ struct ChatContextSnapshot: Codable, Sendable {
     var role: String
     var history: [ChatMessage]
     var model: String
+    // OpenRouter provider routing pin; absent in pre-routing snapshots
+    var modelProvider: String?
     var temp: Float
     var showStats: Bool
     var maxHistory: Int

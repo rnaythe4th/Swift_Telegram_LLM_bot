@@ -15,12 +15,21 @@ struct EditMessageRequest: Sendable {
     let replyMarkup: InlineKeyboardMarkup?
 }
 
+struct SendMessageDraftRequest: Sendable {
+    let chatID: Int
+    let threadID: Int64?
+    let draftID: Int
+    let text: String
+}
+
 protocol TelegramGatewayPort: Sendable {
     func deleteWebhook() async throws
     func getMe() async throws -> TelegramUser
     func getUpdates(offset: Int?) async throws -> [TelegramUpdate]
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage
     func editMessage(_ request: EditMessageRequest) async throws
+    func sendMessageDraft(_ request: SendMessageDraftRequest) async throws
+    func deleteMessage(chatID: Int, messageID: Int) async throws
     func sendChatAction(chatID: Int, threadID: Int64?, action: String) async throws
     func answerCallback(callbackQueryID: String, text: String?) async throws
     func getFile(fileID: String) async throws -> TelegramFile
