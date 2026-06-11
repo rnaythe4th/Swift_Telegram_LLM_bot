@@ -30,15 +30,20 @@ final class BotCommandHandler: @unchecked Sendable {
         self.cryptoService = cryptoService
     }
 
-    func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?) async throws -> Bool {
+    func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?, isPrivate: Bool) async throws -> Bool {
         guard let text else {
             return false
         }
 
+        // The test-mode suffix disambiguates multiple bot copies inside one group.
+        // Private chats only ever talk to a single copy, so commands must work
+        // bare (`/menu`) regardless of any inherited default suffix.
+        let suffix = isPrivate ? nil : await state.suffix(chatKey: chatKey)
+
         let parsed = ParsedBotCommand.parse(
             from: text,
             botUsername: botUsername,
-            suffix: await state.suffix(chatKey: chatKey)
+            suffix: suffix
         )
 
         guard parsed.name != .unknown, parsed.name != .mention else {

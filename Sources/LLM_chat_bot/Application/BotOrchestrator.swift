@@ -226,6 +226,7 @@ final class BotOrchestrator: @unchecked Sendable {
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
         let senderUsername = message.from?.username
         let senderUserID = message.from?.id
+        let isPrivate = message.chat.type == "private"
 
         // Successful payment — handle before access gate since payer isn't a tenant yet
         if let payment = message.successful_payment {
@@ -237,7 +238,7 @@ final class BotOrchestrator: @unchecked Sendable {
         if let text = message.text {
             let isBuyOrStart = text.hasPrefix("/buy") || text.hasPrefix("/start")
             if isBuyOrStart {
-                _ = try? await commandHandler.handleIfCommand(text: text, chatKey: chatKey, fromUser: message.from)
+                _ = try? await commandHandler.handleIfCommand(text: text, chatKey: chatKey, fromUser: message.from, isPrivate: isPrivate)
                 return
             }
         }
@@ -245,7 +246,7 @@ final class BotOrchestrator: @unchecked Sendable {
         // Auto-assign unowned private chat to sender's tenant if they own one
         await state.autoAssignIfNeeded(chatID: chatKey.chatID, senderUsername: senderUsername, senderUserID: senderUserID)
 
-        if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey, fromUser: message.from) {
+        if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey, fromUser: message.from, isPrivate: isPrivate) {
             return
         }
 
