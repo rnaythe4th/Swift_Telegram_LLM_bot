@@ -170,6 +170,14 @@ actor ChatContextStore {
     /// Greeting example prompts + their tap counters (roadmap step 9).
     /// Super-admin knob, persisted via GlobalConfigKey.onboarding.
     var onboardingConfigValue: OnboardingConfig = .default
+    /// Two-sided referral economics (roadmap step 10). Super-admin knob,
+    /// persisted via GlobalConfigKey.referrals.
+    var referralConfigValue: ReferralConfig = .default
+    /// Referral attributions + per-inviter aggregates (roadmap step 10).
+    /// Persisted via GlobalConfigKey.referralLedger — the anti-fraud rules
+    /// ("one attribution per person, once per pair") depend on it surviving
+    /// restarts, so unlike the daily premium counter it is not in-memory.
+    var referralLedgerValue: ReferralLedger = .empty
     /// Pay-as-you-go wallets, keyed by lowercased username.
     var userBalances: [String: UserBalance] = [:]
 
@@ -2005,6 +2013,198 @@ actor ChatContextStore {
         setOnboardingConfig(config)
     }
 
+    // MARK: - Two-sided referral (roadmap step 10)
+
+    func referralConfig() -> ReferralConfig { referralConfigValue }
+
+    func setReferralConfig(_ config: ReferralConfig) {
+        referralConfigValue = config.normalized
+        dirtyConfigs.insert(.referrals)
+    }
+
+    private func markReferralLedgerDirty() {
+        referralLedgerValue.prune()
+        dirtyConfigs.insert(.referralLedger)
+    }
+
+    /// @username of a user we have met in a private chat. Telegram private
+    /// chatIDs equal the userID, so the chat-meta table doubles as the
+    /// userID → @username directory needed to credit a wallet.
+    func usernameForUserID(_ userID: Int) -> String? {
+        guard let meta = chatMetaByID[userID], meta.type == "private",
+              let username = meta.username, !username.isEmpty else { return nil }
+        return username.lowercased()
+    }
+
+    /// True when this person has used the bot before — the "new user only"
+    /// anti-fraud rule. Signals: a private chat that already produced turns, an
+    /// owned licence, or a wallet.
+    private func hasPriorBotActivity(userID: Int, username: String?) -> Bool {
+        if let context = contexts[ChatKey(chatID: userID, threadID: 0)] {
+            // `ensure` seeds history with the system message, so "used before"
+            // means more than that one entry.
+            if context.funnelFirstMessageCounted
+                || context.cumulativeUsage.generationCount > 0
+                || context.history.count > 1 { return true }
+        }
+        if userTenantMap[userID] != nil { return true }
+        if let user = username?.lowercased(), !user.isEmpty {
+            if tenants[user] != nil { return true }
+            if userBalances[user] != nil { return true }
+        }
+        return false
+    }
+
+    /// Attributes a new user to the inviter behind a `ref_` deep link. Pays
+    /// nothing yet: the reward lands after the friend's first real answer
+    /// (`redeemReferralIfDue`), which is what makes farming expensive.
+    func bindReferral(invitedUserID: Int, invitedUsername: String?, inviterUserID: Int) -> ReferralBindOutcome {
+        let config = referralConfigValue
+        guard config.enabled else { return .disabled }
+        guard invitedUserID != inviterUserID else { return .selfInvite }
+
+        let invitedKey = String(invitedUserID)
+        if let existing = referralLedgerValue.records[invitedKey] {
+            return .alreadyBound(inviter: existing.inviterUsername)
+        }
+
+        // The inviter must be known to us by @username — that is the wallet key.
+        guard let inviterUsername = usernameForUserID(inviterUserID) else { return .unknownInviter }
+        let invited = invitedUsername?.lowercased()
+        if let invited, invited == inviterUsername { return .selfInvite }
+
+        guard !hasPriorBotActivity(userID: invitedUserID, username: invited) else { return .notNewUser }
+
+        referralLedgerValue.records[invitedKey] = ReferralRecord(
+            inviterUserID: inviterUserID,
+            inviterUsername: inviterUsername,
+            invitedUsername: invited
+        )
+        var tally = referralLedgerValue.tallies[String(inviterUserID)] ?? ReferralTally(username: inviterUsername)
+        tally.username = inviterUsername
+        tally.invited += 1
+        referralLedgerValue.tallies[String(inviterUserID)] = tally
+        markReferralLedgerDirty()
+        bumpFunnel(.referralJoined)
+
+        return .bound(
+            inviter: inviterUsername,
+            inviteeRewardUsd: config.inviteeRewardUsd,
+            needsUsername: invited == nil && config.inviteeRewardCents > 0
+        )
+    }
+
+    /// Pays a pending referral pair once the invited user has produced their
+    /// first real answer. Credits both wallets and resolves the record in one
+    /// actor step, so a crash can never leave money credited twice or a pair
+    /// half-paid. Returns nil when there is nothing to pay.
+    func redeemReferralIfDue(userID: Int, username: String?) -> ReferralPayout? {
+        let config = referralConfigValue
+        guard config.enabled else { return nil }
+        let key = String(userID)
+        guard var record = referralLedgerValue.records[key], record.isPending else { return nil }
+
+        // The invited side needs a @username to receive their share; until they
+        // set one the pair stays pending (nobody loses their reward).
+        let invited = (username?.lowercased()).flatMap { $0.isEmpty ? nil : $0 } ?? record.invitedUsername
+        if config.inviteeRewardCents > 0, invited == nil { return nil }
+        if let invited { record.invitedUsername = invited }
+
+        // Usernames change: pay the inviter's *current* handle when we know it,
+        // so the credit never lands on an abandoned wallet key.
+        if let current = usernameForUserID(record.inviterUserID) {
+            record.inviterUsername = current
+        }
+
+        var tally = referralLedgerValue.tallies[String(record.inviterUserID)]
+            ?? ReferralTally(username: record.inviterUsername)
+        tally.username = record.inviterUsername
+
+        // Anti-farming cap: beyond it the pair resolves without a payout, so it
+        // is never retried, and the refusal stays visible to the super-admin.
+        let cap = config.maxRewardsPerInviter
+        if cap > 0, tally.rewarded >= cap {
+            record.rewardedAt = Date()
+            record.blocked = true
+            tally.blocked += 1
+            referralLedgerValue.records[key] = record
+            referralLedgerValue.tallies[String(record.inviterUserID)] = tally
+            markReferralLedgerDirty()
+            return nil
+        }
+
+        let inviterReward = config.inviterRewardUsd
+        let inviteeReward = config.inviteeRewardUsd
+        if inviterReward > 0 {
+            creditBalance(username: record.inviterUsername, amountUsd: inviterReward)
+        }
+        if inviteeReward > 0, let invited {
+            creditBalance(username: invited, amountUsd: inviteeReward)
+        }
+
+        record.rewardedAt = Date()
+        record.inviterRewardUsd = inviterReward
+        record.inviteeRewardUsd = inviteeReward
+        tally.rewarded += 1
+        tally.earnedUsd += inviterReward
+        referralLedgerValue.paidOutUsd += inviterReward + inviteeReward
+        referralLedgerValue.records[key] = record
+        referralLedgerValue.tallies[String(record.inviterUserID)] = tally
+        markReferralLedgerDirty()
+        bumpFunnel(.referralRewarded)
+
+        return ReferralPayout(
+            inviterUserID: record.inviterUserID,
+            inviterUsername: record.inviterUsername,
+            inviterRewardUsd: inviterReward,
+            invitedUsername: invited,
+            inviteeRewardUsd: inviteeReward,
+            inviterRewardedTotal: tally.rewarded
+        )
+    }
+
+    /// Personal referral state for the `/ref` page.
+    func referralUserStats(userID: Int) -> ReferralUserStats {
+        let tally = referralLedgerValue.tallies[String(userID)]
+        let pending = referralLedgerValue.records.values
+            .filter { $0.inviterUserID == userID && $0.isPending }
+            .count
+        let cap = referralConfigValue.maxRewardsPerInviter
+        return ReferralUserStats(
+            invited: tally?.invited ?? 0,
+            rewarded: tally?.rewarded ?? 0,
+            pending: pending,
+            earnedUsd: tally?.earnedUsd ?? 0,
+            capRemaining: cap > 0 ? max(0, cap - (tally?.rewarded ?? 0)) : nil,
+            incoming: referralLedgerValue.records[String(userID)]
+        )
+    }
+
+    /// Program-wide numbers for the super-admin page and `/metrics`.
+    func referralOverview(topLimit: Int = 5) -> ReferralOverview {
+        let ledger = referralLedgerValue
+        return ReferralOverview(
+            bound: ledger.records.count,
+            pending: ledger.pendingCount,
+            rewarded: ledger.rewardedCount,
+            blocked: ledger.blockedCount,
+            paidOutUsd: ledger.paidOutUsd,
+            inviters: ledger.tallies.count,
+            top: ledger.topInviters(limit: topLimit)
+        )
+    }
+
+    /// Wipes attributions and aggregates (super-admin reset). Destructive: the
+    /// "one attribution per person" guard forgets everyone, so previously
+    /// invited users could be attributed again if they are still "new".
+    @discardableResult
+    func clearReferralLedger() -> Int {
+        let count = referralLedgerValue.records.count
+        referralLedgerValue = .empty
+        dirtyConfigs.insert(.referralLedger)
+        return count
+    }
+
     /// Funnel event counts plus sponsor tallies derived live from tenant state:
     /// active = paying now, expired = churned, unlimited = comped. Super-admins
     /// are excluded — they are not paying sponsors.
@@ -2031,7 +2231,10 @@ actor ChatContextStore {
             sponsorsExpired: expired,
             sponsorsUnlimited: unlimited,
             sponsorsExpiringSoon: expiringSoon,
-            winbackOffersActive: offers
+            winbackOffersActive: offers,
+            referralPending: referralLedgerValue.pendingCount,
+            referralRewarded: referralLedgerValue.rewardedCount,
+            referralPaidCents: Int((referralLedgerValue.paidOutUsd * 100).rounded())
         )
     }
 

@@ -20,12 +20,15 @@ enum FunnelEvent: String, CaseIterable, Sendable {
     case expiryReminder // renewal reminder delivered before expiry (step 8)
     case winbackSent    // winback offer delivered after expiry (step 8)
     case winbackRedeemed // a purchase used a live winback discount (step 8)
+    case referralJoined   // someone opened a referral link and was attributed (step 10)
+    case referralRewarded // a referral pair was paid after the friend's first answer (step 10)
 
     /// Ordered as the funnel flows, for rendering the super-menu page.
     static let funnelOrder: [FunnelEvent] = [
         .start, .addedToGroup, .onboardingShown, .exampleTapped, .firstMessage, .capHit,
         .openPurchase, .invoiceSent, .paid, .renewed, .creditTopup,
         .expiryReminder, .winbackSent, .winbackRedeemed,
+        .referralJoined, .referralRewarded,
     ]
 
     /// Human-readable label for the super-menu funnel page.
@@ -45,6 +48,8 @@ enum FunnelEvent: String, CaseIterable, Sendable {
         case .expiryReminder: return "Напоминание о продлении"
         case .winbackSent: return "Winback-оффер отправлен"
         case .winbackRedeemed: return "Winback → оплата"
+        case .referralJoined: return "Пришли по реф-ссылке"
+        case .referralRewarded: return "Реферал → награда"
         }
     }
 }
@@ -61,6 +66,12 @@ struct FunnelReport: Sendable {
     var sponsorsExpiringSoon: Int
     /// Winback offers currently valid.
     var winbackOffersActive: Int
+    /// Referral attributions waiting for the friend's first answer (step 10).
+    var referralPending: Int
+    /// Referral pairs already paid.
+    var referralRewarded: Int
+    /// What the referral program has paid out so far, in USD cents.
+    var referralPaidCents: Int
 
     func count(_ event: FunnelEvent) -> Int { counters[event.rawValue] ?? 0 }
 
@@ -72,6 +83,9 @@ struct FunnelReport: Sendable {
         out["sponsors_unlimited"] = sponsorsUnlimited
         out["sponsors_expiring_soon"] = sponsorsExpiringSoon
         out["winback_offers_active"] = winbackOffersActive
+        out["referral_pending"] = referralPending
+        out["referral_rewarded"] = referralRewarded
+        out["referral_paid_cents"] = referralPaidCents
         return out
     }
 }

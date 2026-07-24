@@ -181,6 +181,10 @@ extension ChatContextStore {
             return .reminders(reminderConfigValue)
         case .onboarding:
             return .onboarding(onboardingConfigValue)
+        case .referrals:
+            return .referrals(referralConfigValue)
+        case .referralLedger:
+            return .referralLedger(referralLedgerValue)
         }
     }
 
@@ -267,6 +271,8 @@ extension ChatContextStore {
         dailyPremiumLimitValue = state.configs.dailyPremiumLimit ?? 5
         reminderConfigValue = (state.configs.reminders ?? .default).normalized
         onboardingConfigValue = (state.configs.onboarding ?? .default).normalized
+        referralConfigValue = (state.configs.referrals ?? .default).normalized
+        referralLedgerValue = state.configs.referralLedger ?? .empty
     }
 
     // MARK: - Legacy snapshot restore (one-time migration path)

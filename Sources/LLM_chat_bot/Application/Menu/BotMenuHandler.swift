@@ -32,6 +32,8 @@ private enum MenuPage: String {
     case superFunnel = "superfunnel"
     case superReminders = "superreminders"
     case superOnboarding = "superonboarding"
+    case superReferrals = "superref"
+    case referral = "ref"
     case adminInvite = "admininvite"
     case close
 }
@@ -468,6 +470,22 @@ final class BotMenuHandler: @unchecked Sendable {
         )
     }
 
+    /// Posts the personal referral page as a fresh message (`/ref`). The userID
+    /// comes from the sender, not from the chat, so it is correct even when the
+    /// command is used somewhere unexpected.
+    func sendReferral(chatKey: ChatKey, userID: Int, username: String?) async {
+        let (text, markup) = await renderReferral(chatKey: chatKey, userID: userID, username: username)
+        _ = try? await telegram.sendMessage(
+            .init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: text,
+                replyMarkup: markup
+            )
+        )
+    }
+
     private func processAction(
         parts: [String],
         chatKey: ChatKey,
@@ -502,9 +520,19 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             }
             switch menuPage {
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders:
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superReferrals:
                 guard await state.isSuperAdmin(username: callback.from.username) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                    return
+                }
+            case .referral:
+                // The link belongs to a person, not to a group: in a group the
+                // menu is shared, so there is no single owner to render it for.
+                guard chatKey.chatID > 0 else {
+                    try? await telegram.answerCallback(
+                        callbackQueryID: callback.id,
+                        text: "🎁 Реферальная ссылка личная — откройте её в личке с ботом: /ref"
+                    )
                     return
                 }
             case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults, .adminInvite:
@@ -1209,6 +1237,14 @@ final class BotMenuHandler: @unchecked Sendable {
             try await handleOnboardingAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
             return
 
+        case "sref":
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            try await handleReferralAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            return
+
         case "sbal":
             guard await state.isSuperAdmin(username: callback.from.username) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
@@ -1479,6 +1515,12 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderSuperReminders(chatKey: chatKey)
         case .superOnboarding:
             return await renderSuperOnboarding(chatKey: chatKey)
+        case .superReferrals:
+            return await renderSuperReferrals(chatKey: chatKey)
+        case .referral:
+            // Private chats only (guarded at the nav gate), where chatID == the
+            // user's ID — that is whose link and wallet the page is about.
+            return await renderReferral(chatKey: chatKey, userID: chatKey.chatID, username: username)
         case .adminInvite:
             return await renderAdminInvite(chatKey: chatKey, username: username)
         case .close:
@@ -1563,6 +1605,14 @@ final class BotMenuHandler: @unchecked Sendable {
         // Viral loop: one tap opens Telegram's group picker and adds the bot.
         if !botUsername.isEmpty {
             rows.append([InlineKeyboardButton(text: "➕ Добавить в свой чат", url: "https://t.me/\(botUsername)?startgroup=add")])
+        }
+        // Referral (roadmap step 10): personal link, so private chats only.
+        let referral = await state.referralConfig()
+        if referral.enabled, !botUsername.isEmpty, chatKey.chatID > 0 {
+            let label = referral.inviterRewardCents > 0
+                ? "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))"
+                : "🎁 Пригласить друга"
+            rows.append([menuButton(label, action: "nav:ref")])
         }
         rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сбросить", action: "reset")])
         if await state.isSuperAdmin(username: username) {
@@ -2017,6 +2067,14 @@ final class BotMenuHandler: @unchecked Sendable {
                     menuButton(CreditPack.label(cents: $0), action: "buy:credits:\($0)")
                 }
                 rows.append(packRow)
+            }
+
+            // Free way to get a balance: bring a friend (roadmap step 10).
+            let referral = await state.referralConfig()
+            if referral.enabled, referral.inviterRewardCents > 0, !botUsername.isEmpty, chatKey.chatID > 0 {
+                lines.append("")
+                lines.append("🎁 <b>Не хотите платить?</b> Пригласите друга — вам обоим упадёт на баланс (\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents)) вам, \(ReferralConfig.formatUsd(cents: referral.inviteeRewardCents)) ему).")
+                rows.append([menuButton("🎁 Пригласить друга", action: "nav:ref")])
             }
         }
         rows.append(navButtons())
@@ -2917,6 +2975,8 @@ final class BotMenuHandler: @unchecked Sendable {
         let dailyLimit = await state.dailyPremiumLimit()
         let reminders = await state.reminderConfig()
         let onboarding = await state.onboardingConfig()
+        let referral = await state.referralConfig()
+        let referralOverview = await state.referralOverview(topLimit: 1)
         let lifecycle = await state.subscriptionLifecycleStats()
         let balances = await state.allBalances()
         let balancesTotal = balances.reduce(0.0) { $0 + $1.wallet.balanceUsd }
@@ -2937,6 +2997,7 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton("🎁 Премиум-лимит/день · \(dailyLimit)", action: "dailylimit:set")],
             [menuButton("⏳ Напоминания и winback · \(reminders.enabled ? "вкл" : "выкл")", action: "nav:superreminders")],
             [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.activeExamples.count)" : "выкл")", action: "nav:superonboarding")],
+            [menuButton("🎁 Приглашения · \(referral.enabled ? ReferralConfig.formatUsd(cents: referral.inviterRewardCents) : "выкл")", action: "nav:superref")],
             [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
             [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
@@ -2957,6 +3018,7 @@ final class BotMenuHandler: @unchecked Sendable {
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
         💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · активных <b>\(onboarding.activeExamples.count)</b>\(onboarding.showInGroups ? " · и в группах" : "")
         ⏳ Напоминания · <b>\(reminders.enabled ? "вкл" : "выкл")</b> · скоро истекут <b>\(lifecycle.expiringSoon.count)</b> · winback-офферов <b>\(lifecycle.activeDiscounts.count)</b>
+        🎁 Приглашения · <b>\(referral.enabled ? "вкл" : "выкл")</b> · выплачено пар <b>\(referralOverview.rewarded)</b> · \(String(format: "$%.2f", referralOverview.paidOutUsd)) · ждут <b>\(referralOverview.pending)</b>
         💰 Балансов · <b>\(balances.count)</b> · остатки \(String(format: "$%.2f", balancesTotal)) · маржа <b>\(String(format: "$%.4f", marginTotal))</b> · /balance list
         🆓 Бесплатных моделей · <b>\(freeCount)</b>
         🪙 Открытых счетов · <b>\(openInvoices.count)</b>
@@ -3171,6 +3233,209 @@ final class BotMenuHandler: @unchecked Sendable {
         lines.append("<i>Тап по примеру = обычный запрос: работают лимиты, биллинг и история чата. Тексты и порядок кнопок правятся здесь, без передеплоя. Команда — /examples.</i>")
 
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    /// Personal referral page (roadmap step 10). Private chats only — the link
+    /// identifies its owner by userID and the rewards land on their wallet.
+    private func renderReferral(chatKey: ChatKey, userID: Int, username: String?) async -> (String, InlineKeyboardMarkup) {
+        let config = await state.referralConfig()
+        let stats = await state.referralUserStats(userID: userID)
+        let link = ReferralLink.url(botUsername: botUsername, userID: userID)
+
+        var lines: [String] = ["<b>🎁 Приведи друга</b>", ""]
+        var rows: [[InlineKeyboardButton]] = []
+
+        guard config.enabled, !botUsername.isEmpty else {
+            lines.append("Программа приглашений сейчас <b>выключена</b>.")
+            rows.append(navButtons())
+            return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        }
+
+        if config.paysAnything {
+            lines.append(String(
+                format: "Друг переходит по вашей ссылке и пишет боту первый вопрос — вам <b>$%.2f</b>, ему <b>$%.2f</b> на баланс.",
+                config.inviterRewardUsd, config.inviteeRewardUsd
+            ))
+            lines.append("<i>Баланс — оплата по факту: пока он есть, отвечают любые модели, без подписки.</i>")
+        } else {
+            lines.append("Отправьте ссылку друзьям — бот сразу заработает у них в личке.")
+        }
+        lines.append("")
+        lines.append("Ваша ссылка:")
+        lines.append("<code>\(link)</code>")
+        lines.append("")
+        lines.append("Приглашено · <b>\(stats.invited)</b> · с наградой · <b>\(stats.rewarded)</b> · ждут первого сообщения · <b>\(stats.pending)</b>")
+        if stats.earnedUsd > 0 {
+            lines.append(String(format: "Заработано · <b>$%.2f</b>", stats.earnedUsd))
+        }
+        if let remaining = stats.capRemaining {
+            lines.append("Осталось награждаемых приглашений · <b>\(remaining)</b>")
+        }
+        if username == nil, config.inviterRewardCents > 0 {
+            lines.append("")
+            lines.append("⚠️ Награда приходит на кошелёк, привязанный к <b>@username</b> — задайте его в настройках Telegram.")
+        }
+        if let incoming = stats.incoming, incoming.isPending {
+            lines.append("")
+            lines.append("ℹ️ Вас пригласил <b>@\(incoming.inviterUsername)</b> — награда придёт после вашего первого вопроса боту.")
+        }
+        lines.append("")
+        lines.append("<i>Награда — один раз за друга, и только за тех, кто ещё не писал боту в личке.</i>")
+
+        let shareText = "Умный ИИ прямо в Telegram — отвечает на текст, фото и голос. Заходи по моей ссылке:"
+        rows.append([InlineKeyboardButton(
+            text: "📤 Поделиться ссылкой",
+            url: ReferralLink.shareURL(link: link, text: shareText)
+        )])
+        if await state.balance(username: username) != nil {
+            rows.append([menuButton("💰 Мой баланс", action: "nav:pay")])
+        }
+        rows.append(navButtons())
+        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    /// Referral control + monitoring for the super-admin (roadmap step 10):
+    /// rewards, the anti-farming cap, live program numbers and the top inviters.
+    private func renderSuperReferrals(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let config = await state.referralConfig()
+        let overview = await state.referralOverview()
+        let report = await state.funnelReport()
+        let joined = report.count(.referralJoined)
+        let rewarded = report.count(.referralRewarded)
+
+        func pct(_ num: Int, _ den: Int) -> String {
+            guard den > 0 else { return "—" }
+            return String(format: "%.0f%%", Double(num) / Double(den) * 100)
+        }
+
+        var rows: [[InlineKeyboardButton]] = [
+            [menuButton(config.enabled ? "🟢 Программа включена" : "⚪️ Программа выключена", action: "sref:toggle")],
+            [menuButton("👤 Пригласившему · \(ReferralConfig.formatUsd(cents: config.inviterRewardCents))", action: "sref:inviter"),
+             menuButton("🎁 Другу · \(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))", action: "sref:invitee")],
+            [menuButton(config.maxRewardsPerInviter > 0
+                ? "🛡 Лимит наград · \(config.maxRewardsPerInviter)"
+                : "🛡 Лимит наград · без лимита", action: "sref:cap")],
+        ]
+        if overview.bound > 0 {
+            rows.append([menuButton("🗑 Очистить журнал приглашений", action: "sref:clear")])
+        }
+        rows.append([menuButton("📊 Воронка", action: "nav:superfunnel"),
+                     menuButton("← К супер-админу", action: "nav:superadmin")])
+
+        var lines: [String] = [
+            "<b>🎁 Приглашения (реферальная программа)</b>",
+            "",
+            "Статус · <b>\(config.enabled ? "включена" : "выключена")</b>",
+            "Награда · пригласившему <b>\(ReferralConfig.formatUsd(cents: config.inviterRewardCents))</b> · другу <b>\(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))</b>",
+            "Лимит на человека · <b>\(config.maxRewardsPerInviter > 0 ? "\(config.maxRewardsPerInviter) наград" : "без лимита")</b>",
+            "",
+            "Привязок · <b>\(overview.bound)</b> · выплачено пар · <b>\(overview.rewarded)</b> · ждут первого сообщения · <b>\(overview.pending)</b>",
+            "Отклонено лимитом · <b>\(overview.blocked)</b> · пригласивших · <b>\(overview.inviters)</b>",
+            String(format: "Выплачено всего · <b>$%.2f</b>", overview.paidOutUsd),
+            "Переходов по ссылке · <b>\(joined)</b> → наград · <b>\(rewarded)</b> · конверсия <b>\(pct(rewarded, joined))</b>",
+        ]
+
+        if !overview.top.isEmpty {
+            lines.append("")
+            lines.append("<b>Топ пригласивших</b>")
+            for (index, entry) in overview.top.enumerated() {
+                lines.append(String(
+                    format: "%d. @%@ · наград <b>%d</b> · $%.2f · привязок %d",
+                    index + 1, entry.tally.username, entry.tally.rewarded, entry.tally.earnedUsd, entry.tally.invited
+                ))
+            }
+        }
+
+        lines.append("")
+        lines.append("""
+            <i>Антифрод: награда только за нового пользователя (кто ещё не писал боту в личке, не имеет кошелька и лицензии), одна привязка на человека навсегда, деньги — лишь после его первого реального ответа в личке, самоприглашение отклоняется, плюс лимит наград на пригласившего. Пригласившему нужен @username — на него зачисляется баланс.</i>
+            """)
+        lines.append("<i>Команда — /ref (юзерам — своя ссылка, суперадмину — управление).</i>")
+
+        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    // MARK: - Referral admin actions (roadmap step 10)
+
+    private func handleReferralAdminAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard parts.count >= 2 else {
+            try await showPage(.superReferrals, chatKey: chatKey, callback: callback, message: message)
+            return
+        }
+        var config = await state.referralConfig()
+
+        /// Asks for a value; the answer is applied in `processTextInput`.
+        func ask(kind: AdminPendingInputKind, text: String) async throws {
+            await state.setAdminPendingInput(.init(kind: kind, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superref")]])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        }
+
+        switch parts[1] {
+        case "toggle":
+            config.enabled.toggle()
+            await state.setReferralConfig(config)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: config.enabled ? "🟢 Включена" : "⚪️ Выключена")
+            try await showPage(.superReferrals, chatKey: chatKey, callback: callback, message: message)
+
+        case "inviter":
+            try await ask(kind: .referralInviterReward, text: """
+                <b>👤 Награда пригласившему</b>
+
+                Сейчас · <b>\(ReferralConfig.formatUsd(cents: config.inviterRewardCents))</b>
+
+                Отправьте сумму в долларах, например <code>1</code> или <code>0.50</code>. <code>0</code> — не платить пригласившему.
+                Максимум — \(ReferralConfig.formatUsd(cents: ReferralConfig.rewardRange.upperBound)) за приглашение.
+                """)
+
+        case "invitee":
+            try await ask(kind: .referralInviteeReward, text: """
+                <b>🎁 Награда другу</b>
+
+                Сейчас · <b>\(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))</b>
+
+                Отправьте сумму в долларах, например <code>1</code>. <code>0</code> — приглашённый ничего не получает (тогда ему не нужен @username).
+                """)
+
+        case "cap":
+            try await ask(kind: .referralCap, text: """
+                <b>🛡 Лимит наград на человека</b>
+
+                Сейчас · <b>\(config.maxRewardsPerInviter > 0 ? "\(config.maxRewardsPerInviter)" : "без лимита")</b>
+
+                Отправьте число от <code>\(ReferralConfig.capRange.lowerBound)</code> до <code>\(ReferralConfig.capRange.upperBound)</code> — сколько приглашений одного человека может быть оплачено за всё время. <code>0</code> — без лимита.
+                Сверх лимита приглашения продолжают привязываться, но выплат не будет (видно в счётчике «отклонено лимитом»).
+                """)
+
+        case "clear":
+            // Destructive: confirm before forgetting who invited whom.
+            let overview = await state.referralOverview()
+            let text = """
+                <b>🗑 Очистить журнал приглашений?</b>
+
+                Будет удалено привязок · <b>\(overview.bound)</b> (в т.ч. ждущих награды · \(overview.pending)) и статистика пригласивших.
+
+                ⚠️ Уже начисленные балансы останутся, но защита «одна привязка на человека» обнулится: ранее приглашённые смогут быть привязаны заново, если ещё не писали боту. Счётчики воронки не меняются.
+                """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("🗑 Да, очистить", action: "sref:clearyes")],
+                [menuButton("❌ Отмена", action: "nav:superref")],
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+        case "clearyes":
+            let removed = await state.clearReferralLedger()
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Удалено привязок: \(removed)")
+            try await showPage(.superReferrals, chatKey: chatKey, callback: callback, message: message)
+
+        default:
+            try await showPage(.superReferrals, chatKey: chatKey, callback: callback, message: message)
+        }
     }
 
     private func renderSuperStars(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
@@ -4096,6 +4361,17 @@ UI: «💡 Примеры-запросы» в супер-меню — текст
 <code>/examples reset</code> — вернуть стандартный набор
 <code>/examples clearstats</code> — обнулить счётчики
 
+<b>━━━ 🎁 Приглашения (рефералы) ━━━</b>
+
+UI: «🎁 Приглашения» в супер-меню — награды обеим сторонам, лимит наград на человека, счётчики выплат, топ пригласивших, очистка журнала.
+
+Пользователь берёт свою ссылку в /ref или в меню. Награда начисляется на балансы <b>после первого реального ответа</b> приглашённому, один раз на пару, только если он раньше не пользовался ботом.
+
+<code>/ref</code> — своя ссылка (у всех) · <code>/ref stats</code> — цифры программы
+<code>/ref on|off</code> — включить/выключить
+<code>/ref reward 1</code> · <code>/ref friend 1</code> — награды, $
+<code>/ref cap 20</code> — лимит оплаченных приглашений на человека (0 — без лимита)
+
 <b>━━━ 💫 Stars ━━━</b>
 
 UI: «💫 Stars» в супер-меню.
@@ -4543,6 +4819,45 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 toast = "✓ Пример обновлён · <b>\(OnboardingPresenter.escape(label))</b>"
             } else {
                 toast = "⚠️ Пример не найден — возможно, он был удалён"
+            }
+
+        case .referralInviterReward, .referralInviteeReward:
+            resumePage = .superReferrals
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
+            if let usd = Double(normalized), usd >= 0 {
+                let cents = Int((usd * 100).rounded())
+                guard ReferralConfig.rewardRange.contains(cents) else {
+                    toast = "⚠️ Максимум \(ReferralConfig.formatUsd(cents: ReferralConfig.rewardRange.upperBound)) за приглашение"
+                    break
+                }
+                var config = await state.referralConfig()
+                if pending.kind == .referralInviterReward {
+                    config.inviterRewardCents = cents
+                } else {
+                    config.inviteeRewardCents = cents
+                }
+                await state.setReferralConfig(config)
+                let side = pending.kind == .referralInviterReward ? "пригласившему" : "другу"
+                toast = cents == 0
+                    ? "✓ Награда \(side) отключена"
+                    : "✓ Награда \(side) · <b>\(ReferralConfig.formatUsd(cents: cents))</b>"
+            } else {
+                toast = "⚠️ Введите сумму в долларах, например <code>1</code> или <code>0.50</code>"
+            }
+
+        case .referralCap:
+            resumePage = .superReferrals
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            if let n = Int(trimmed), ReferralConfig.capRange.contains(n) {
+                var config = await state.referralConfig()
+                config.maxRewardsPerInviter = n
+                await state.setReferralConfig(config)
+                toast = n == 0
+                    ? "✓ Лимит наград снят (без лимита) — следите за счётчиком выплат"
+                    : "✓ Лимит · <b>\(n)</b> оплаченных приглашений на человека"
+            } else {
+                toast = "⚠️ Нужно число \(ReferralConfig.capRange.lowerBound)–\(ReferralConfig.capRange.upperBound)"
             }
 
         case .balanceTopUp:

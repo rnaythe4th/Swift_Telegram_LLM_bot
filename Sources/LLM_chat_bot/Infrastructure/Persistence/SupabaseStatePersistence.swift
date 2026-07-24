@@ -83,6 +83,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         configs.dailyPremiumLimit = try await fetchConfig(.dailyPremiumLimit, as: Int.self)
         configs.reminders = try await fetchConfig(.reminders, as: SubscriptionReminderConfig.self)
         configs.onboarding = try await fetchConfig(.onboarding, as: OnboardingConfig.self)
+        configs.referrals = try await fetchConfig(.referrals, as: ReferralConfig.self)
+        configs.referralLedger = try await fetchConfig(.referralLedger, as: ReferralLedger.self)
 
         return PersistedBotState(
             contexts: contextRows.map {
@@ -227,6 +229,10 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         case .reminders(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .onboarding(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .referrals(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .referralLedger(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         }
         try await upsert(table: "bot_config", body: body)

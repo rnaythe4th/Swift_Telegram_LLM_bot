@@ -19,6 +19,8 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case dailyPremiumLimit = "daily_premium_limit"
     case reminders = "reminders"
     case onboarding = "onboarding"
+    case referrals = "referrals"
+    case referralLedger = "referral_ledger"
 }
 
 struct ChatContextRow: Sendable {
@@ -63,6 +65,10 @@ enum GlobalConfigValue: Sendable {
     case reminders(SubscriptionReminderConfig)
     /// Greeting example prompts + their tap counters (roadmap step 9).
     case onboarding(OnboardingConfig)
+    /// Two-sided referral economics (roadmap step 10).
+    case referrals(ReferralConfig)
+    /// Referral attributions + per-inviter aggregates (roadmap step 10).
+    case referralLedger(ReferralLedger)
 
     var key: GlobalConfigKey {
         switch self {
@@ -83,6 +89,8 @@ enum GlobalConfigValue: Sendable {
         case .dailyPremiumLimit: return .dailyPremiumLimit
         case .reminders: return .reminders
         case .onboarding: return .onboarding
+        case .referrals: return .referrals
+        case .referralLedger: return .referralLedger
         }
     }
 }
@@ -172,13 +180,15 @@ struct PersistedGlobalConfigs: Sendable {
     var dailyPremiumLimit: Int?
     var reminders: SubscriptionReminderConfig?
     var onboarding: OnboardingConfig?
+    var referrals: ReferralConfig?
+    var referralLedger: ReferralLedger?
 
     var hasAnyValue: Bool {
         starsPrice != nil || starsPerUsd != nil || freeModelIDs != nil || crypto != nil || card != nil
             || superAdmins != nil || processedPayments != nil || pollingOffset != nil
             || chatMeta != nil || invites != nil || ads != nil
             || markup != nil || balances != nil || funnel != nil || dailyPremiumLimit != nil
-            || reminders != nil || onboarding != nil
+            || reminders != nil || onboarding != nil || referrals != nil || referralLedger != nil
     }
 }
 

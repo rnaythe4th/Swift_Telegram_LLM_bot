@@ -109,10 +109,20 @@ final class GenerationCoordinator: @unchecked Sendable {
             ]])
         } else {
             text = "🚦 Премиум на сегодня закончился (\(limit)/\(limit)). Продолжаю бесплатно — <code>\(freeModel)</code>. Или сними лимит навсегда:"
-            markup = InlineKeyboardMarkup(inline_keyboard: [[
+            var rows: [[InlineKeyboardButton]] = [[
                 InlineKeyboardButton(text: "⚡ Открыть безлимит", callback_data: payAction),
                 InlineKeyboardButton(text: "💰 Баланс", callback_data: payAction)
-            ]])
+            ]]
+            // Free way out of the cap right at the pain point: bring a friend
+            // and both wallets grow (roadmap step 10).
+            let referral = await state.referralConfig()
+            if referral.enabled, referral.inviterRewardCents > 0 {
+                rows.append([InlineKeyboardButton(
+                    text: "🎁 Позвать друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))",
+                    callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
+                )])
+            }
+            markup = InlineKeyboardMarkup(inline_keyboard: rows)
         }
         _ = try await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
@@ -121,6 +131,47 @@ final class GenerationCoordinator: @unchecked Sendable {
             text: text,
             replyMarkup: markup
         ))
+    }
+
+    /// Credits a resolved referral pair and tells both sides (roadmap step 10).
+    /// The store resolves the record and both wallets in one actor step, so a
+    /// redelivered update or a retried turn can never pay twice; failing to
+    /// deliver a notification is non-fatal — the money is already there.
+    private func payReferralIfDue(userID: Int, username: String?, chatKey: ChatKey) async {
+        guard let payout = await state.redeemReferralIfDue(userID: userID, username: username) else { return }
+        let refButton = InlineKeyboardButton(
+            text: "🎁 Пригласить друга",
+            callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
+        )
+
+        if payout.inviteeRewardUsd > 0 {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: String(
+                    format: "🎁 <b>Бонус за приглашение: $%.2f на баланс</b> — спасибо @%@!\n\nБаланс тратится по факту: пока он есть, доступны любые модели (остаток видно в футере, включите /show_cost). Своя ссылка для друзей — /ref.",
+                    payout.inviteeRewardUsd, payout.inviterUsername
+                ),
+                replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
+            ))
+        }
+
+        if payout.inviterRewardUsd > 0 {
+            let friend = payout.invitedUsername.map { "@\($0)" } ?? "Ваш друг"
+            _ = try? await telegram.sendMessage(.init(
+                chatID: payout.inviterUserID,
+                threadID: nil,
+                replyTo: nil,
+                text: String(
+                    format: "🎉 <b>%@ пришёл по вашей ссылке и уже пишет боту.</b>\n\nВам начислено <b>$%.2f</b> на баланс · приглашений с наградой: <b>%d</b>.",
+                    friend, payout.inviterRewardUsd, payout.inviterRewardedTotal
+                ),
+                replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
+            ))
+        }
+
+        logger.info("referral payout: @\(payout.inviterUsername) +$\(payout.inviterRewardUsd), \(payout.invitedUsername.map { "@\($0)" } ?? "friend") +$\(payout.inviteeRewardUsd)")
     }
 
     /// Customer-facing footer: costs go through the markup multiplier; for
@@ -221,6 +272,13 @@ final class GenerationCoordinator: @unchecked Sendable {
 
         // Funnel: count this chat's first real message (activation, once per chat).
         await state.markFirstMessageIfNeeded(chatKey: chatKey)
+
+        // Referral (roadmap step 10): the invited friend's first real turn in
+        // their own DM is what releases the two-sided reward. Attribution alone
+        // pays nothing, so a farm of idle accounts earns nothing.
+        if origin.isPrivate, let userID = origin.user?.id {
+            await payReferralIfDue(userID: userID, username: username, chatKey: chatKey)
+        }
 
         // Free-tier gate with a daily premium "taste": a sender without full
         // access who selected a paid model gets N smart-model answers per day

@@ -88,6 +88,10 @@ enum AdminPendingInputKind: Sendable {
     // Greeting example prompts (roadmap step 9); edit carries the example id.
     case onboardingAdd
     case onboardingEdit
+    // Two-sided referral economics (roadmap step 10).
+    case referralInviterReward
+    case referralInviteeReward
+    case referralCap
 }
 
 struct AdminPendingInput: Sendable {

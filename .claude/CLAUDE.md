@@ -28,6 +28,9 @@ Telegram-бот на Swift (server-side, без Vapor), отвечающий п�
   со срочной скидкой после истечения (расписание настраивается суперадмином).
 - **Онбординг**: кнопки-примеры в приветствии — тап запускает готовый запрос и
   бот сразу отвечает (набор примеров правится суперадмином из меню).
+- **Рост**: двусторонний реферал в личке — по ссылке `?start=ref_<userID>` друг
+  и пригласивший получают бонус на баланс после первого реального ответа
+  (награды и антифрод-лимит настраиваются суперадмином).
 - **Управление**: слэш-команды + богатое inline-меню (`/menu`).
 - **Надёжность**: webhook с очередью Telegram, дедупликация updates,
   идемпотентность платежей, graceful shutdown, rate limiting, health-эндпоинты.
@@ -135,6 +138,11 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
 - `Chat/Onboarding.swift` — `OnboardingExample` (id, подпись кнопки, готовый
   запрос, вкл/выкл, счётчик тапов) и `OnboardingConfig` (вкл/выкл, показывать ли
   в группах, список примеров + границы и нормализация). См. §7 «Онбординг».
+- `Chat/Referral.swift` — двусторонний реферал (§7 «Реферал»): `ReferralLink`
+  (диплинк `ref_<userID>`, share-URL), `ReferralConfig` (вкл/выкл, награды обеим
+  сторонам, лимит наград на человека), `ReferralRecord`/`ReferralTally`/
+  `ReferralLedger` (журнал привязок + агрегаты + прунинг), `ReferralBindOutcome`,
+  `ReferralPayout`, `ReferralUserStats`, `ReferralOverview`.
 - `Chat/MediaTypes.swift`, `UserInputContent.swift` — медиа-рефы и вход юзера.
 - `Providers/ProviderTypes.swift` — `ServiceProvider`, `ProviderCapabilities`,
   `StreamUsageSummary`/`StreamMeta`, `ProviderStreamEvent`, `GenerationOptions`,
@@ -194,6 +202,7 @@ BotOrchestrator.dispatch(update:)
                             1. recordChatMeta (title/@username для админ-тулинга)
                             2. successful_payment? → handleSuccessfulPayment (идемпотентно)
                             3. /buy или /start? → пропустить до access-gate
+                               (`/start ref_<userID>` → привязка реферала, §7)
                             4. autoAssignIfNeeded (привязать чат к тенанту отправителя)
                             5. BotCommandHandler.handleIfCommand → true? стоп
                             6. BotMenuHandler.processTextInput → true? стоп (ждали ввод)
@@ -222,7 +231,8 @@ BotOrchestrator.dispatch(update:)
   балансы пользователей, счётчики воронки (`funnelCounters`), дневной премиум-лимит
   (`dailyPremiumLimitValue`, §7/§9), расписание напоминаний/winback
   (`reminderConfigValue`, §7/§14), примеры онбординга + их тапы
-  (`onboardingConfigValue`, §7 «Онбординг»).
+  (`onboardingConfigValue`, §7 «Онбординг»), настройки реферала
+  (`referralConfigValue`) и журнал привязок (`referralLedgerValue`, §7 «Реферал»).
 - **In-memory без персиста** (сброс при рестарте некритичен): `_premiumDailyUsage`
   — дневной счётчик «премиум-вкуса» free-tier (см. §9).
 - **Dirty-tracking**: `dirtyContexts`, `dirtyTenants`, `deletedTenants`,
@@ -405,6 +415,49 @@ charge_id, как у подписок.
 - Изменение текста примера сохраняет его `id` и счётчик тапов — уже отправленные
   приветствия продолжают работать, статистика не обнуляется.
 
+**Двусторонний реферал** (`Domain/Chat/Referral.swift`, роадмап шаг 10): у каждого
+пользователя есть личная ссылка `t.me/<bot>?start=ref_<userID>` (userID, а не
+@username — не ломается при смене ника). Друг переходит, пишет первый вопрос — и
+**обе стороны** получают бонус на pay-as-you-go баланс (дефолт $1 + $1).
+
+- **Две фазы**: `/start ref_<id>` → `bindReferral` (только привязка, деньги не
+  платятся) → первый реальный ответ в личке → `redeemReferralIfDue` в
+  `GenerationCoordinator.processContent` (кредит обоим кошелькам + уведомления
+  обеим сторонам). Награда сразу даёт «премиум по факту»: положительный баланс =
+  `hasFullModelAccess`, поэтому тот же первый ответ уже идёт на платной модели.
+- **Антифрод** (всё в сторе, одна актор-транзакция): самоприглашение отклоняется
+  (по userID и по username); одна привязка на человека **навсегда**
+  (`records[invitedUserID]`); награда только «новому» — у кого нет личного чата с
+  оборотом, кошелька, лицензии (`hasPriorBotActivity`); деньги — только после
+  первого реального ответа (пустая ферма аккаунтов не окупается); лимит
+  оплаченных приглашений на одного пригласившего (`maxRewardsPerInviter`, дефолт
+  20; сверх — привязка есть, выплаты нет, счётчик «отклонено лимитом» растёт).
+- **Кошельки по username**: пригласившему нужен @username (иначе `.unknownInviter`);
+  приглашённому — тоже, иначе пара честно висит в pending до тех пор, пока он его
+  не поставит. При выплате username пригласившего перечитывается из `chatMeta`
+  (ник мог смениться).
+- **Идемпотентность/durability**: `rewardedAt` ставится в том же шаге актора, что
+  и кредит балансов, поэтому повторные сообщения/рестарт не платят дважды; при
+  потере флаша теряются обе записи разом (баланс и отметка) — пара просто снова
+  становится pending и оплатится на следующем сообщении. Отдельный `flushNow()`
+  не нужен (в отличие от платежей).
+- **Хранение**: `ReferralLedger` = привязки + агрегаты по пригласившим +
+  накопленный расход, одна строка `bot_config` (`GlobalConfigKey.referralLedger`);
+  прунятся только **разрешённые** записи (pending не трогаются), агрегаты живут
+  дольше записей, поэтому лимит наград нельзя обнулить переполнением журнала.
+- **Где показывается**: кнопка «🎁 Пригласить друга» в главном меню (только личка),
+  блок на странице покупки, третья кнопка в оффере при исчерпании дневного лимита
+  (бесплатный способ снять лимит), команда `/ref`, страница меню `ref` (ссылка,
+  «📤 Поделиться», личная статистика: приглашено / с наградой / ждут / заработано /
+  остаток лимита).
+- **Контроль и мониторинг у суперадмина**: страница «🎁 Приглашения»
+  (`superref`) — вкл/выкл, награды каждой стороне, лимит, счётчики
+  (привязки / выплачено пар / ждут / отклонено лимитом / выплачено $ / пригласивших),
+  топ пригласивших, очистка журнала (с подтверждением); те же ручки командой
+  `/ref on|off|reward|friend|cap|stats`. Воронка: `referralJoined → referralRewarded`
+  в «📊 Воронка» и `/metrics` (+ `referral_pending`, `referral_rewarded`,
+  `referral_paid_cents`).
+
 ---
 
 ## 8. LLM-провайдеры
@@ -508,7 +561,8 @@ super_admins, processed_payments, polling_offset, chat_meta, invites, ads,
 markup, balances, **funnel** (счётчики воронки, §7/§11), **daily_premium_limit**
 (суперадмин-настройка дневного премиум-вкуса, §9), **reminders**
 (расписание напоминаний/winback, §7/§14), **onboarding** (примеры-запросы и
-счётчики их тапов, §7 «Онбординг»).
+счётчики их тапов, §7 «Онбординг»), **referrals** (награды/лимит реферала) и
+**referral_ledger** (журнал привязок + агрегаты, §7 «Реферал»).
 Значения конфигов оборачиваются в `{"value": …}`.
 
 **Boot** (`BotOrchestrator.bootstrapState`): `loadEverything()`; если строковые
@@ -555,9 +609,11 @@ memory-only режим, запись отключена**, чтобы не за�
   события start → addedToGroup (вирусный рост, §шаг4) → onboardingShown →
   exampleTapped (онбординг, §шаг9) → firstMessage → capHit →
   openPurchase → invoiceSent → paid/renewed + creditTopup, плюс удержание:
-  expiryReminder → winbackSent → winbackRedeemed (§7). Отдаётся в `/metrics`
+  expiryReminder → winbackSent → winbackRedeemed и рост: referralJoined →
+  referralRewarded (§7). Отдаётся в `/metrics`
   (`funnel`: счётчики + живой подсчёт спонсоров
-  active/expired/unlimited/expiring_soon и активных winback-скидок) и на странице
+  active/expired/unlimited/expiring_soon, активных winback-скидок и реферала
+  `referral_pending`/`referral_rewarded`/`referral_paid_cents`) и на странице
   супер-меню «📊 Воронка» (`renderSuperFunnel`)
   с пошаговой конверсией. Счётчики — событийные (не уникальные юзеры), переживают
   рестарт. Ретеншн D1/D7 требует когортных таймстемпов — отложен.
@@ -575,7 +631,7 @@ memory-only режим, запись отключена**, чтобы не за�
 `/model`, `/historylength`, `/show_model`, `/show_cost`, `/show_tokens`,
 `/provider`, `/testmode`, `/reasoning`, `/help`, `/menu`, `/reset`, `/history`,
 `/reset_stats`, `/backup_notify`, `/chatid`, `/start`, `/buy`, `/balance`,
-`/examples` (кнопки-примеры онбординга).
+`/examples` (кнопки-примеры онбординга), `/ref` (личная реферальная ссылка).
 
 **Админские / тенант**: `/default_role`, `/defaults`, `/whitelist`, `/chats`,
 `/users`, `/presets`, `/tenant` (assign/release/adduser/register/remove/freemodels/
@@ -584,6 +640,8 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 **Суперадминские**: `/superadmin` (add/remove), `/simulate`, `/reminders`
 (on/off/days/winback/discount/hours/interval/chats/run/test/clear — §7/§14),
 `/examples` (stats/on/off/groups/reset/clearstats — §7 «Онбординг»),
+`/ref` (on/off/reward/friend/cap/stats — §7 «Реферал»; очистка журнала — только
+кнопкой в меню),
 глобальные free-модели, цены, наценка, балансы (в основном через супер-меню).
 
 Неизвестная команда/упоминание → `.mention`/`.unknown` (игнор или обычная генерация).
@@ -593,14 +651,16 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 ## 13. Inline-меню (`BotMenuHandler`)
 
 Страницы (`MenuPage`, callback_data `menu:<action>`): главная (`help`), страница
-покупки (`pay` — подписка + пакеты кредитов), admin-панель (`admin`, `adminhelp`,
+покупки (`pay` — подписка + пакеты кредитов), реферальная страница (`ref` — личная
+ссылка, «Поделиться», личная статистика; только в личке), admin-панель (`admin`, `adminhelp`,
 `adminchats`, `adminusers`, `adminwl`, `admindef`, `admininvite`), супер-панель
 (`superadmin`, `superadminhelp`, `superstars`, `supercrypto`, `supercard`,
 `superfreemodels`, `supertenants`, `superadmins`, `supersim`, `superchats`,
 `superads`, `superbal`, `superfunnel` — воронка-аналитика, `superreminders` —
 напоминания/winback: расписание, ручная проверка, предпросмотр, список подписок
 под наблюдением, `superonboarding` — примеры-запросы: тексты, порядок, вкл/выкл,
-предпросмотр, тапы по каждому примеру).
+предпросмотр, тапы по каждому примеру, `superref` — приглашения: награды обеим
+сторонам, антифрод-лимит, счётчики выплат, топ пригласивших, очистка журнала).
 
 - `sendMenu` / `showPage` / `renderPage` — рендер клавиатур под роль/контекст.
 - **Pending-input flow**: кнопка вроде «✏️ Изменить цену» кладёт «ожидание ввода»
@@ -679,7 +739,11 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
   крипто-инвойс, `pre_checkout_query`). Прямое чтение `starsPrice()`/`cardConfig()`
   для выставления счёта разъедет показанную и списанную цену, когда у юзера есть
   winback-скидка.
-- **Платежи — `flushNow()`**, не полагайся на 2-секундный debounce.
+- **Платежи — `flushNow()`**, не полагайся на 2-секундный debounce. Исключение —
+  реферальные выплаты (§7): кредит балансов и отметка `rewardedAt` меняются в
+  одном шаге актора, поэтому потеря флаша откатывает их **вместе** и пара просто
+  оплатится позже. Любая новая начисляющая механика обязана держать это свойство
+  (деньги и отметка «выплачено» — в одной мутации).
 - **Идемпотентность**: любой платёжный путь дедуплицируется (charge_id / tx-хеш) —
   Telegram и блокчейн-поллинг доставляют события повторно.
 - **Роли**: `isSuperAdmin` учитывает симуляцию, `isActuallySuperAdmin` — нет.

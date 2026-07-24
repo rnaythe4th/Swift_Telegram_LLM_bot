@@ -36,6 +36,7 @@ enum BotCommandName: CaseIterable, Equatable {
     case balance
     case reminders
     case examples
+    case referral
     case unknown
     
     private var baseCommand: String {
@@ -108,6 +109,8 @@ enum BotCommandName: CaseIterable, Equatable {
             return "reminders"
         case .examples:
             return "examples"
+        case .referral:
+            return "ref"
         case .mention, .unknown:
             return ""
         }
