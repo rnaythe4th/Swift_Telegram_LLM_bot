@@ -480,6 +480,7 @@ final class BotOrchestrator: @unchecked Sendable {
            CreditPack.isValid(cents: cents) {
             let wallet = await state.creditBalance(username: username, amountUsd: Double(cents) / 100.0)
             await state.markPaymentProcessed(chargeID: chargeID)
+            await state.bumpFunnel(.creditTopup)
             await metrics.increment(MetricName.paymentsProcessed)
             await persistence?.flushNow()
             _ = try? await telegram.sendMessage(.init(
@@ -499,6 +500,13 @@ final class BotOrchestrator: @unchecked Sendable {
         let activation = await state.activatePaidSubscription(username: username)
         await state.assignChat(chatID: message.chat.id, to: username)
         await state.markPaymentProcessed(chargeID: chargeID)
+        // Funnel: count the conversion before the flush so it persists with the
+        // payment (not on the next debounce).
+        switch activation {
+        case .started: await state.bumpFunnel(.paid)
+        case .extended: await state.bumpFunnel(.renewed)
+        case .alreadyUnlimited: break
+        }
         await metrics.increment(MetricName.paymentsProcessed)
         // Payments are the one thing that must never wait out the debounce.
         await persistence?.flushNow()
@@ -556,6 +564,8 @@ final class BotOrchestrator: @unchecked Sendable {
         let dirtyEntities: Int
         let persistence: String
         let counters: [String: Int]
+        /// Conversion-funnel event counts + live sponsor tallies (roadmap step 7).
+        let funnel: [String: Int]
     }
 
     func metricsReport() async -> MetricsReport {
@@ -577,7 +587,8 @@ final class BotOrchestrator: @unchecked Sendable {
             queuedChatOperations: await updateDispatcher.totalQueuedOperations,
             dirtyEntities: await state.dirtyEntityCount,
             persistence: persistenceLine,
-            counters: snapshot.counters
+            counters: snapshot.counters,
+            funnel: await state.funnelReport().flat
         )
     }
 }

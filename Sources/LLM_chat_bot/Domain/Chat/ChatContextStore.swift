@@ -81,6 +81,9 @@ struct ChatContext: Sendable {
     /// Bot replies in this chat since the last ad impression.
     var adReplyCounter: Int = 0
     var adLastShownAt: Date? = nil
+    /// Funnel analytics: set once this chat produces its first LLM turn, so the
+    /// `firstMessage` (activation) event is counted at most once per chat.
+    var funnelFirstMessageCounted: Bool = false
 }
 
 struct GenerationSnapshot: Sendable {
@@ -149,6 +152,11 @@ actor ChatContextStore {
     var markupPercentValue: Int = 30
     /// Pay-as-you-go wallets, keyed by lowercased username.
     var userBalances: [String: UserBalance] = [:]
+
+    /// Conversion-funnel event counters (roadmap step 7), keyed by
+    /// FunnelEvent.rawValue. Persisted via GlobalConfigKey.funnel so the numbers
+    /// survive restarts/redeploys.
+    var funnelCounters: [String: Int] = [:]
 
     /// Daily free "taste" of premium for free-tier chats/users. In-memory only:
     /// per §17 CLAUDE.md this is the sanctioned simplification — resetting the
@@ -1675,6 +1683,47 @@ actor ChatContextStore {
         entry.used += 1
         _premiumDailyUsage[key] = entry
         return .allowed
+    }
+
+    // MARK: - Funnel analytics (roadmap step 7)
+
+    /// Records one funnel event. Persisted (dirties GlobalConfigKey.funnel).
+    func bumpFunnel(_ event: FunnelEvent, by amount: Int = 1) {
+        funnelCounters[event.rawValue, default: 0] += amount
+        dirtyConfigs.insert(.funnel)
+    }
+
+    /// Counts the `firstMessage` activation the first time a chat produces an LLM
+    /// turn. Idempotent per chat via a persisted flag on the context, so a
+    /// restart never re-counts it.
+    func markFirstMessageIfNeeded(chatKey: ChatKey) {
+        var context = ensure(chatKey: chatKey)
+        guard !context.funnelFirstMessageCounted else { return }
+        context.funnelFirstMessageCounted = true
+        contexts[chatKey] = context
+        dirtyContexts.insert(chatKey)
+        bumpFunnel(.firstMessage)
+    }
+
+    /// Funnel event counts plus sponsor tallies derived live from tenant state:
+    /// active = paying now, expired = churned, unlimited = comped. Super-admins
+    /// are excluded — they are not paying sponsors.
+    func funnelReport() -> FunnelReport {
+        let now = Date()
+        var active = 0, expired = 0, unlimited = 0
+        for (owner, tenant) in tenants where !superAdminUsernames.contains(owner) {
+            if let until = tenant.paidUntil {
+                if until > now { active += 1 } else { expired += 1 }
+            } else {
+                unlimited += 1
+            }
+        }
+        return FunnelReport(
+            counters: funnelCounters,
+            sponsorsActive: active,
+            sponsorsExpired: expired,
+            sponsorsUnlimited: unlimited
+        )
     }
 
     // MARK: - Per-tenant licensed users (paid access for individuals)

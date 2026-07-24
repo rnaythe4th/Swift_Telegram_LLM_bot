@@ -28,7 +28,8 @@ extension ChatContextStore {
             chatHistoryLengthPresets: context.chatHistoryLengthPresets.isEmpty ? nil : context.chatHistoryLengthPresets,
             chatRolePresets: context.chatRolePresets.isEmpty ? nil : context.chatRolePresets,
             adReplyCounter: context.adReplyCounter == 0 ? nil : context.adReplyCounter,
-            adLastShownAt: context.adLastShownAt
+            adLastShownAt: context.adLastShownAt,
+            funnelCounted: context.funnelFirstMessageCounted ? true : nil
         )
     }
 
@@ -73,7 +74,8 @@ extension ChatContextStore {
             chatHistoryLengthPresets: snapshot.chatHistoryLengthPresets ?? [],
             chatRolePresets: snapshot.chatRolePresets ?? [],
             adReplyCounter: snapshot.adReplyCounter ?? 0,
-            adLastShownAt: snapshot.adLastShownAt
+            adLastShownAt: snapshot.adLastShownAt,
+            funnelFirstMessageCounted: snapshot.funnelCounted ?? false
         )
     }
 
@@ -163,6 +165,8 @@ extension ChatContextStore {
             return .markup(markupPercentValue)
         case .balances:
             return .balances(userBalances)
+        case .funnel:
+            return .funnel(funnelCounters)
         }
     }
 
@@ -245,6 +249,7 @@ extension ChatContextStore {
         adCampaignList = state.configs.ads ?? []
         markupPercentValue = state.configs.markup ?? 30
         userBalances = state.configs.balances ?? [:]
+        funnelCounters = state.configs.funnel ?? [:]
     }
 
     // MARK: - Legacy snapshot restore (one-time migration path)

@@ -183,6 +183,9 @@ final class GenerationCoordinator: @unchecked Sendable {
     private func processContent(message: TelegramMessage, content: UserInputContent, chatKey: ChatKey) async throws {
         let username = message.from?.username
 
+        // Funnel: count this chat's first real message (activation, once per chat).
+        await state.markFirstMessageIfNeeded(chatKey: chatKey)
+
         // Free-tier gate with a daily premium "taste": a sender without full
         // access who selected a paid model gets N smart-model answers per day
         // (group = shared per chat, private = per user). Once the daily
@@ -208,6 +211,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                     // Daily premium taste: let the paid model answer this turn.
                     break
                 case .exhausted(let limit):
+                    await state.bumpFunnel(.capHit)
                     await state.setModelOnly(chatKey: chatKey, model: firstFree)
                     try? await sendDailyLimitOffer(chatKey: chatKey, isGroup: isGroup, limit: limit, freeModel: firstFree)
                 }

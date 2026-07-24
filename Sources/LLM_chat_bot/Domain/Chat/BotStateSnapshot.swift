@@ -80,6 +80,9 @@ struct ChatContextSnapshot: Codable, Sendable {
     // Ad delivery counters; absent in pre-ads rows
     var adReplyCounter: Int?
     var adLastShownAt: Date?
+    // Funnel: whether this chat's first-message activation was already counted;
+    // absent in pre-funnel rows (treated as false → re-counted once).
+    var funnelCounted: Bool?
 }
 
 struct BotStateSnapshot: Codable, Sendable {

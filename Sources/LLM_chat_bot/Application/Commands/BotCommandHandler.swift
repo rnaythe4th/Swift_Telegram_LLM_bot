@@ -331,6 +331,7 @@ final class BotCommandHandler: @unchecked Sendable {
     }
 
     private func handleStart(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
+        await state.bumpFunnel(.start)
         // Deep-link invite: t.me/<bot>?start=inv_<token> — grants paid-model
         // access under the issuing admin's licence.
         let payload = argument.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1791,6 +1792,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 """)
             return
         }
+        await state.bumpFunnel(.openPurchase)
         // Existing tenant: unlimited → nothing to buy; with an expiry →
         // the same purchase flow extends the subscription.
         if await state.isTenant(username: username) {
@@ -1817,6 +1819,7 @@ final class BotCommandHandler: @unchecked Sendable {
                     payload: "buy_access",
                     starsAmount: starsPrice
                 ))
+                await state.bumpFunnel(.invoiceSent)
                 return
             }
             if cryptoAvailable {
@@ -1831,6 +1834,7 @@ final class BotCommandHandler: @unchecked Sendable {
                     payload: "buy_access_card",
                     kind: .fiat(currency: card.currency.rawValue, amountMinorUnits: minorUnits, providerToken: token)
                 ))
+                await state.bumpFunnel(.invoiceSent)
                 return
             }
         }

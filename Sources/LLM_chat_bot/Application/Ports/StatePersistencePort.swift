@@ -15,6 +15,7 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case ads = "ads"
     case markup = "markup"
     case balances = "balances"
+    case funnel = "funnel"
 }
 
 struct ChatContextRow: Sendable {
@@ -51,6 +52,8 @@ enum GlobalConfigValue: Sendable {
     case markup(Int)
     /// Keyed by lowercased username.
     case balances([String: UserBalance])
+    /// Conversion-funnel event counters, keyed by FunnelEvent.rawValue.
+    case funnel([String: Int])
 
     var key: GlobalConfigKey {
         switch self {
@@ -67,6 +70,7 @@ enum GlobalConfigValue: Sendable {
         case .ads: return .ads
         case .markup: return .markup
         case .balances: return .balances
+        case .funnel: return .funnel
         }
     }
 }
@@ -152,12 +156,13 @@ struct PersistedGlobalConfigs: Sendable {
     var ads: [AdCampaign]?
     var markup: Int?
     var balances: [String: UserBalance]?
+    var funnel: [String: Int]?
 
     var hasAnyValue: Bool {
         starsPrice != nil || starsPerUsd != nil || freeModelIDs != nil || crypto != nil || card != nil
             || superAdmins != nil || processedPayments != nil || pollingOffset != nil
             || chatMeta != nil || invites != nil || ads != nil
-            || markup != nil || balances != nil
+            || markup != nil || balances != nil || funnel != nil
     }
 }
 

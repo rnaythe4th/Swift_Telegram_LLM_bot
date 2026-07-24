@@ -29,6 +29,7 @@ private enum MenuPage: String {
     case superChats = "superchats"
     case superAds = "superads"
     case superBalances = "superbal"
+    case superFunnel = "superfunnel"
     case adminInvite = "admininvite"
     case close
 }
@@ -486,7 +487,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             }
             switch menuPage {
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances:
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel:
                 guard await state.isSuperAdmin(username: callback.from.username) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                     return
@@ -1288,6 +1289,8 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func showPage(_ page: MenuPage, chatKey: ChatKey, callback: CallbackQuery, message: MaybeInaccessibleMessage) async throws {
+        // Funnel: reaching the purchase page counts as "opened purchase".
+        if page == .pay { await state.bumpFunnel(.openPurchase) }
         let (text, markup) = await renderPage(page, chatKey: chatKey, username: callback.from.username)
         try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
     }
@@ -1400,6 +1403,8 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderSuperAds(chatKey: chatKey)
         case .superBalances:
             return await renderSuperBalances(chatKey: chatKey)
+        case .superFunnel:
+            return await renderSuperFunnel(chatKey: chatKey)
         case .adminInvite:
             return await renderAdminInvite(chatKey: chatKey, username: username)
         case .close:
@@ -1978,6 +1983,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 payload: "credits_\(cents)",
                 starsAmount: stars
             ))
+            await state.bumpFunnel(.invoiceSent)
 
         case "stars":
             guard let price = await state.starsPrice(), price > 0 else {
@@ -2002,6 +2008,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 payload: "buy_access",
                 starsAmount: price
             ))
+            await state.bumpFunnel(.invoiceSent)
 
         case "card":
             let card = await state.cardConfig()
@@ -2026,6 +2033,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 payload: "buy_access_card",
                 kind: .fiat(currency: card.currency.rawValue, amountMinorUnits: minorUnits, providerToken: token)
             ))
+            await state.bumpFunnel(.invoiceSent)
 
         case "crypto":
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
@@ -2536,6 +2544,7 @@ final class BotMenuHandler: @unchecked Sendable {
              menuButton("🎭 Симуляция", action: "nav:supersim")],
             [menuButton("💰 Балансы · \(balances.count)", action: "nav:superbal"),
              menuButton("💹 Наценка · \(markupPct)%", action: "markup:set")],
+            [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
             [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
              menuButton("🎭 Роль", action: "pm:role")],
@@ -2561,6 +2570,55 @@ final class BotMenuHandler: @unchecked Sendable {
         🌡 Темп · <b>\(globalTemps)</b> · 📝 Истории · <b>\(globalHist)</b>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    /// Conversion-funnel analytics page (roadmap step 7): each funnel stage with
+    /// step-to-step conversion, plus sponsor tallies (retained vs. churned).
+    private func renderSuperFunnel(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let report = await state.funnelReport()
+        func n(_ e: FunnelEvent) -> Int { report.count(e) }
+        func pct(_ num: Int, _ den: Int) -> String {
+            guard den > 0 else { return "—" }
+            return String(format: "%.0f%%", Double(num) / Double(den) * 100)
+        }
+
+        let start = n(.start)
+        let firstMsg = n(.firstMessage)
+        let capHit = n(.capHit)
+        let openPurchase = n(.openPurchase)
+        let invoiceSent = n(.invoiceSent)
+        let paid = n(.paid)
+        let renewed = n(.renewed)
+        let creditTopup = n(.creditTopup)
+        let converted = paid + creditTopup
+
+        let lines: [String] = [
+            "<b>📊 Воронка конверсии</b>",
+            "",
+            "1️⃣ Старт (/start) · <b>\(start)</b>",
+            "2️⃣ Первое сообщение · <b>\(firstMsg)</b> · активация \(pct(firstMsg, start))",
+            "3️⃣ Упёрлись в лимит · <b>\(capHit)</b>",
+            "4️⃣ Открыли покупку · <b>\(openPurchase)</b>",
+            "5️⃣ Счёт выставлен · <b>\(invoiceSent)</b> · из открывших \(pct(invoiceSent, openPurchase))",
+            "6️⃣ Оплатили · <b>\(paid)</b> · из счетов \(pct(paid, invoiceSent))",
+            "",
+            "🔄 Продлений · <b>\(renewed)</b> · renewal \(pct(renewed, paid))",
+            "💰 Пополнений баланса · <b>\(creditTopup)</b>",
+            "",
+            "🎯 Конверсия в оплату (от активации) · <b>\(pct(converted, firstMsg))</b>",
+            "",
+            "<b>Спонсоры (по подпискам)</b>",
+            "✅ Активных · <b>\(report.sponsorsActive)</b> · ⛔ истёкших (отток) · <b>\(report.sponsorsExpired)</b>"
+                + (report.sponsorsUnlimited > 0 ? " · ♾ <b>\(report.sponsorsUnlimited)</b>" : ""),
+            "",
+            "<i>Счётчики событий (не уникальные юзеры), переживают рестарт. Те же числа — в /metrics. Ретеншн D1/D7 — в разработке.</i>",
+        ]
+
+        let rows: [[InlineKeyboardButton]] = [
+            [menuButton("🔄 Обновить", action: "nav:superfunnel")],
+            navButtons(),
+        ]
+        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
     private func renderSuperStars(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
