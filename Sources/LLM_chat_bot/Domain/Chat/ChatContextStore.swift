@@ -150,6 +150,11 @@ actor ChatContextStore {
     /// Markup percent on provider prices for customer-facing costs and
     /// balance charging.
     var markupPercentValue: Int = 30
+    /// Free-premium "taste" answers granted per day to a free-tier chat (group,
+    /// shared) or user (private) before a paid model falls back to free (roadmap
+    /// step 6). Super-admin-configurable; persisted via
+    /// GlobalConfigKey.dailyPremiumLimit. 0 = no free premium taste at all.
+    var dailyPremiumLimitValue: Int = 5
     /// Pay-as-you-go wallets, keyed by lowercased username.
     var userBalances: [String: UserBalance] = [:]
 
@@ -291,11 +296,6 @@ actor ChatContextStore {
     // MARK: - Subscription
 
     static let subscriptionDays = 30
-
-    /// Free premium answers granted per day to a free-tier chat (group, shared)
-    /// or user (private) before the paid model falls back to free. Hardcoded for
-    /// now; a super-menu setting can replace this later (roadmap step 6).
-    static let dailyPremiumLimit = 5
 
     /// Payment path: creates the tenant if needed and extends the subscription
     /// by `days` from max(now, current end). An unlimited tenant stays
@@ -1673,7 +1673,7 @@ actor ChatContextStore {
     /// user (userID). Counter resets at the UTC day boundary. In-memory only
     /// (see `_premiumDailyUsage`). `.exhausted` does not consume a unit.
     func consumeDailyPremium(chatID: Int, userID: Int?, isGroup: Bool) -> DailyPremiumDecision {
-        let limit = Self.dailyPremiumLimit
+        let limit = dailyPremiumLimitValue
         guard limit > 0 else { return .exhausted(limit: limit) }
         let key = isGroup ? "c\(chatID)" : "u\(userID ?? chatID)"
         let today = Int(Date().timeIntervalSince1970 / 86_400)
@@ -1930,6 +1930,14 @@ actor ChatContextStore {
     func setMarkupPercent(_ percent: Int) {
         markupPercentValue = max(0, min(500, percent))
         dirtyConfigs.insert(.markup)
+    }
+
+    /// Daily free-premium "taste" allowance (roadmap step 6). Super-admin knob.
+    func dailyPremiumLimit() -> Int { dailyPremiumLimitValue }
+
+    func setDailyPremiumLimit(_ value: Int) {
+        dailyPremiumLimitValue = max(0, min(100, value))
+        dirtyConfigs.insert(.dailyPremiumLimit)
     }
 
     /// Multiplier applied to real provider cost for everything customers see

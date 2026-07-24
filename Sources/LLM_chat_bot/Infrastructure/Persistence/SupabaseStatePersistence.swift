@@ -80,6 +80,7 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         configs.markup = try await fetchConfig(.markup, as: Int.self)
         configs.balances = try await fetchConfig(.balances, as: [String: UserBalance].self)
         configs.funnel = try await fetchConfig(.funnel, as: [String: Int].self)
+        configs.dailyPremiumLimit = try await fetchConfig(.dailyPremiumLimit, as: Int.self)
 
         return PersistedBotState(
             contexts: contextRows.map {
@@ -218,6 +219,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         case .balances(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .funnel(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .dailyPremiumLimit(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         }
         try await upsert(table: "bot_config", body: body)

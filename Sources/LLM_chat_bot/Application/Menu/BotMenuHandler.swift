@@ -1139,6 +1139,25 @@ final class BotMenuHandler: @unchecked Sendable {
             try await editOrAnswer(callback: callback, message: message, text: markupPrompt, markup: markupMarkup)
             return
 
+        case "dailylimit":
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            guard parts.count >= 2, parts[1] == "set" else { return }
+            await state.setAdminPendingInput(.init(kind: .dailyPremiumLimit, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let currentLimit = await state.dailyPremiumLimit()
+            let limitPrompt = """
+            <b>🎁 Дневной премиум-вкус (free-tier)</b>
+
+            Текущий лимит: <b>\(currentLimit)</b> умных ответов в день.
+
+            Отправьте число от <code>0</code> до <code>100</code> — сколько ответов платной модели в день получает бесплатный чат (в группе — общий на чат, в личке — на пользователя), прежде чем бот переключится на бесплатную модель и предложит премиум. <code>0</code> — совсем без премиум-вкуса. Бесплатные модели всегда без лимита.
+            """
+            let limitMarkup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superadmin")]])
+            try await editOrAnswer(callback: callback, message: message, text: limitPrompt, markup: limitMarkup)
+            return
+
         case "sbal":
             guard await state.isSuperAdmin(username: callback.from.username) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
@@ -2528,6 +2547,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let totalTenants = tenantStats.count
 
         let markupPct = await state.markupPercent()
+        let dailyLimit = await state.dailyPremiumLimit()
         let balances = await state.allBalances()
         let balancesTotal = balances.reduce(0.0) { $0 + $1.wallet.balanceUsd }
         let marginTotal = balances.reduce(0.0) { $0 + ($1.wallet.spentBilledUsd - $1.wallet.spentRealUsd) }
@@ -2544,6 +2564,7 @@ final class BotMenuHandler: @unchecked Sendable {
              menuButton("🎭 Симуляция", action: "nav:supersim")],
             [menuButton("💰 Балансы · \(balances.count)", action: "nav:superbal"),
              menuButton("💹 Наценка · \(markupPct)%", action: "markup:set")],
+            [menuButton("🎁 Премиум-лимит/день · \(dailyLimit)", action: "dailylimit:set")],
             [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
             [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
@@ -2561,6 +2582,7 @@ final class BotMenuHandler: @unchecked Sendable {
         🪙 Крипто · \(cryptoLabel) · режим <b>\(cryptoMode.displayName)</b>
         💳 Карта · \(cardLabel)
         💹 Наценка · <b>\(markupPct)%</b> · /tenant markup
+        🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
         💰 Балансов · <b>\(balances.count)</b> · остатки \(String(format: "$%.2f", balancesTotal)) · маржа <b>\(String(format: "$%.4f", marginTotal))</b> · /balance list
         🆓 Бесплатных моделей · <b>\(freeCount)</b>
         🪙 Открытых счетов · <b>\(openInvoices.count)</b>
@@ -2583,6 +2605,7 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         let start = n(.start)
+        let addedToGroup = n(.addedToGroup)
         let firstMsg = n(.firstMessage)
         let capHit = n(.capHit)
         let openPurchase = n(.openPurchase)
@@ -2596,6 +2619,7 @@ final class BotMenuHandler: @unchecked Sendable {
             "<b>📊 Воронка конверсии</b>",
             "",
             "1️⃣ Старт (/start) · <b>\(start)</b>",
+            "➕ Добавлен в группы · <b>\(addedToGroup)</b> · вирусный рост",
             "2️⃣ Первое сообщение · <b>\(firstMsg)</b> · активация \(pct(firstMsg, start))",
             "3️⃣ Упёрлись в лимит · <b>\(capHit)</b>",
             "4️⃣ Открыли покупку · <b>\(openPurchase)</b>",
@@ -3343,6 +3367,11 @@ final class BotMenuHandler: @unchecked Sendable {
             }
         }
         lines.append("")
+        let anyRunning = campaigns.contains { $0.isRunning() }
+        lines.append(anyRunning
+            ? "<i>💡 Когда ни одна кампания не активна, слот занимает встроенная само-реклама премиума (роадмап 5).</i>"
+            : "<i>💡 Сейчас активных кампаний нет — слот занимает встроенная само-реклама премиума: «📣 Надоела реклама и лимиты? Премиум для чата откроет любой участник → /buy» (роадмап 5).</i>")
+        lines.append("")
         lines.append("<i>Тонкая настройка — команда /ads (частота, лимиты с пейсингом, кнопка-ссылка). Проверить показ: /simulate user и написать боту.</i>")
 
         var rows: [[InlineKeyboardButton]] = [[menuButton("➕ Новое объявление", action: "ads:add")]]
@@ -3824,6 +3853,18 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 toast = "✓ Наценка: <b>\(pct)%</b> (множитель ×\(String(format: "%.2f", 1.0 + Double(pct) / 100.0)))"
             } else {
                 toast = "⚠️ Нужно число 0–500"
+            }
+
+        case .dailyPremiumLimit:
+            resumePage = .superAdmin
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            if let n = Int(trimmed), (0...100).contains(n) {
+                await state.setDailyPremiumLimit(n)
+                toast = n == 0
+                    ? "✓ Премиум-вкус выключен (0 — бесплатным сразу free-модель)"
+                    : "✓ Премиум-вкус: <b>\(n)</b> умных ответов/день бесплатным"
+            } else {
+                toast = "⚠️ Нужно число 0–100"
             }
 
         case .balanceTopUp:

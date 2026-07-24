@@ -383,6 +383,9 @@ final class BotOrchestrator: @unchecked Sendable {
             info: ChatMetaInfo(type: type, title: update.chat.title, username: nil, firstName: nil)
         )
 
+        // Funnel: a real group entry is the viral-growth event (roadmap step 4).
+        await state.bumpFunnel(.addedToGroup)
+
         let text = """
         <b>👋 Всем привет!</b> Я умный ИИ-ассистент. Отвечаю на @упоминание или реплай на моё сообщение.
 

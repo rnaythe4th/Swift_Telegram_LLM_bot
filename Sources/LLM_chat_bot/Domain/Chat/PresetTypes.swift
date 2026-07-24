@@ -75,6 +75,7 @@ enum AdminPendingInputKind: Sendable {
     case chatCustomHistory
     // Super-admin monetization inputs.
     case markupPercent
+    case dailyPremiumLimit
     case balanceTopUp
     case cardProviderToken
     case cardPrice

@@ -167,6 +167,8 @@ extension ChatContextStore {
             return .balances(userBalances)
         case .funnel:
             return .funnel(funnelCounters)
+        case .dailyPremiumLimit:
+            return .dailyPremiumLimit(dailyPremiumLimitValue)
         }
     }
 
@@ -250,6 +252,7 @@ extension ChatContextStore {
         markupPercentValue = state.configs.markup ?? 30
         userBalances = state.configs.balances ?? [:]
         funnelCounters = state.configs.funnel ?? [:]
+        dailyPremiumLimitValue = state.configs.dailyPremiumLimit ?? 5
     }
 
     // MARK: - Legacy snapshot restore (one-time migration path)

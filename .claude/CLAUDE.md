@@ -195,7 +195,8 @@ BotOrchestrator.dispatch(update:)
 - `userTenantMap: [Int: String]` — userID → тенант (для автопривязки).
 - Глобальные конфиги: суперадмины, цена Stars, крипто-конфиг, карта, free-модели,
   processed payments, polling offset, метаданные чатов, инвайты, реклама, markup%,
-  балансы пользователей, счётчики воронки (`funnelCounters`).
+  балансы пользователей, счётчики воронки (`funnelCounters`), дневной премиум-лимит
+  (`dailyPremiumLimitValue`, §7/§9).
 - **In-memory без персиста** (сброс при рестарте некритичен): `_premiumDailyUsage`
   — дневной счётчик «премиум-вкуса» free-tier (см. §9).
 - **Dirty-tracking**: `dirtyContexts`, `dirtyTenants`, `deletedTenants`,
@@ -314,6 +315,8 @@ charge_id, как у подписок.
 поздравление. Снимает проблему «безбилетника».
 
 **Дневной премиум-вкус** free-tier: см. §9 (гейт генерации) — `consumeDailyPremium`.
+Дневной лимит настраивается суперадмином (`setDailyPremiumLimit`, кнопка
+«🎁 Премиум-лимит/день» в супер-меню; 0 = премиум-вкус выключен).
 
 **Реклама** (`AdCampaign`): показывается только во free-tier чатах (нет подписки
 и нет баланса). Два дросселя: частота (раз в N ответов + мин. интервал) и пейсинг
@@ -321,6 +324,8 @@ charge_id, как у подписок.
 решает, считает показ и ротирует кампании (least-shown first). Когда нет активной
 кампании суперадмина, слот заполняет встроенный **само-оффер** (`AdCampaign.selfPromo`,
 синтетический, не персистится, тот же дроссель) — реклама продаёт сам премиум.
+Страница «📣 Реклама» в супер-меню явно показывает, что при отсутствии кампаний слот
+занимает само-оффер (прозрачность, §шаг5).
 
 ---
 
@@ -362,8 +367,10 @@ Gemini 3.1 Flash Lite, DeepSeek V4 Pro/Flash, Grok 4.3. Дефолтная мо�
 1. **Воронка + free-model gate с дневным премиум-вкусом**: сначала
    `markFirstMessageIfNeeded` (первое сообщение чата → аналитика, §7). Затем: если у
    отправителя нет полного доступа и текущая модель платная — `consumeDailyPremium`
-   (группа: общий счётчик на чат; личка: на `userID`; сброс по UTC-суткам, лимит
-   `dailyPremiumLimit`=5, **in-memory**). Остаток есть → платная модель отвечает
+   (группа: общий счётчик на чат; личка: на `userID`; сброс по UTC-суткам; лимит
+   `dailyPremiumLimitValue`, дефолт 5, настраивается суперадмином в супер-меню
+   «🎁 Премиум-лимит/день», персист в `bot_config`; сам счётчик расхода —
+   **in-memory**). Остаток есть → платная модель отвечает
    (бесплатный «вкус премиума»); исчерпан → переключение на первую бесплатную +
    оффер с кнопками покупки/баланса (`sendDailyLimitOffer`) + `funnel(.capHit)`.
    Free-модели безлимитны; спонсируемые чаты сюда не доходят (`hasFullModelAccess`).
@@ -420,7 +427,8 @@ bot_state(id PK, data jsonb)                         -- legacy-блоб, read-on
 ```
 `GlobalConfigKey`: stars_price, stars_per_usd, free_models, crypto, card,
 super_admins, processed_payments, polling_offset, chat_meta, invites, ads,
-markup, balances, **funnel** (счётчики воронки, §7/§11).
+markup, balances, **funnel** (счётчики воронки, §7/§11), **daily_premium_limit**
+(суперадмин-настройка дневного премиум-вкуса, §9).
 Значения конфигов оборачиваются в `{"value": …}`.
 
 **Boot** (`BotOrchestrator.bootstrapState`): `loadEverything()`; если строковые
@@ -463,8 +471,9 @@ memory-only режим, запись отключена**, чтобы не за�
   generations, telegram_429, send errors, persistence flushes/errors, payments
   processed/deduplicated. Легко мапится на Prometheus.
 - **Воронка-аналитика** (`FunnelEvent`/`funnelCounters`, персистится в `bot_config`):
-  события start → firstMessage → capHit → openPurchase → invoiceSent → paid/renewed
-  + creditTopup. Отдаётся в `/metrics` (`funnel`: счётчики + живой подсчёт спонсоров
+  события start → addedToGroup (вирусный рост, §шаг4) → firstMessage → capHit →
+  openPurchase → invoiceSent → paid/renewed + creditTopup. Отдаётся в `/metrics`
+  (`funnel`: счётчики + живой подсчёт спонсоров
   active/expired/unlimited) и на странице супер-меню «📊 Воронка» (`renderSuperFunnel`)
   с пошаговой конверсией. Счётчики — событийные (не уникальные юзеры), переживают
   рестарт. Ретеншн D1/D7 требует когортных таймстемпов — отложен.

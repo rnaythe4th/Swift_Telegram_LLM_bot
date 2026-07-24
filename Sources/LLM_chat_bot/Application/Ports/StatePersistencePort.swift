@@ -16,6 +16,7 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case markup = "markup"
     case balances = "balances"
     case funnel = "funnel"
+    case dailyPremiumLimit = "daily_premium_limit"
 }
 
 struct ChatContextRow: Sendable {
@@ -54,6 +55,8 @@ enum GlobalConfigValue: Sendable {
     case balances([String: UserBalance])
     /// Conversion-funnel event counters, keyed by FunnelEvent.rawValue.
     case funnel([String: Int])
+    /// Daily free-premium "taste" allowance per free-tier chat/user (roadmap step 6).
+    case dailyPremiumLimit(Int)
 
     var key: GlobalConfigKey {
         switch self {
@@ -71,6 +74,7 @@ enum GlobalConfigValue: Sendable {
         case .markup: return .markup
         case .balances: return .balances
         case .funnel: return .funnel
+        case .dailyPremiumLimit: return .dailyPremiumLimit
         }
     }
 }
@@ -157,12 +161,13 @@ struct PersistedGlobalConfigs: Sendable {
     var markup: Int?
     var balances: [String: UserBalance]?
     var funnel: [String: Int]?
+    var dailyPremiumLimit: Int?
 
     var hasAnyValue: Bool {
         starsPrice != nil || starsPerUsd != nil || freeModelIDs != nil || crypto != nil || card != nil
             || superAdmins != nil || processedPayments != nil || pollingOffset != nil
             || chatMeta != nil || invites != nil || ads != nil
-            || markup != nil || balances != nil || funnel != nil
+            || markup != nil || balances != nil || funnel != nil || dailyPremiumLimit != nil
     }
 }
 

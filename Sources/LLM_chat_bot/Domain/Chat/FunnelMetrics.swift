@@ -7,6 +7,7 @@ import Foundation
 /// (D1/D7) needs per-user timestamps and is left for a later step.
 enum FunnelEvent: String, CaseIterable, Sendable {
     case start          // /start received
+    case addedToGroup   // bot added to a new group (viral growth, roadmap step 4)
     case firstMessage   // first LLM turn in a chat (activation)
     case capHit         // daily premium allowance exhausted (hit the wall)
     case openPurchase   // purchase page / flow opened
@@ -17,13 +18,14 @@ enum FunnelEvent: String, CaseIterable, Sendable {
 
     /// Ordered as the funnel flows, for rendering the super-menu page.
     static let funnelOrder: [FunnelEvent] = [
-        .start, .firstMessage, .capHit, .openPurchase, .invoiceSent, .paid, .renewed, .creditTopup,
+        .start, .addedToGroup, .firstMessage, .capHit, .openPurchase, .invoiceSent, .paid, .renewed, .creditTopup,
     ]
 
     /// Human-readable label for the super-menu funnel page.
     var label: String {
         switch self {
         case .start: return "Старт (/start)"
+        case .addedToGroup: return "Добавлен в группу"
         case .firstMessage: return "Первое сообщение"
         case .capHit: return "Упёрлись в лимит"
         case .openPurchase: return "Открыли покупку"
