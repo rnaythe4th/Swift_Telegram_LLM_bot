@@ -48,7 +48,11 @@ extension ChatContextStore {
             licensedUsernames: Array(tenant.licensedUsernames),
             cumulativeUsage: tenant.cumulativeUsage,
             createdAt: tenant.createdAt,
-            paidUntil: tenant.paidUntil
+            paidUntil: tenant.paidUntil,
+            noticeCycleUntil: tenant.noticeCycleUntil,
+            sentNotices: tenant.sentNotices.isEmpty ? nil : Array(tenant.sentNotices),
+            winbackDiscount: tenant.winbackDiscount,
+            remindersOptOut: tenant.remindersOptOut ? true : nil
         )
     }
 
@@ -94,7 +98,11 @@ extension ChatContextStore {
             licensedUsernames: Set((snapshot.licensedUsernames ?? []).map { $0.lowercased() }),
             cumulativeUsage: snapshot.cumulativeUsage ?? .zero,
             createdAt: snapshot.createdAt,
-            paidUntil: snapshot.paidUntil
+            paidUntil: snapshot.paidUntil,
+            noticeCycleUntil: snapshot.noticeCycleUntil,
+            sentNotices: Set(snapshot.sentNotices ?? []),
+            winbackDiscount: snapshot.winbackDiscount,
+            remindersOptOut: snapshot.remindersOptOut ?? false
         )
     }
 
@@ -169,6 +177,8 @@ extension ChatContextStore {
             return .funnel(funnelCounters)
         case .dailyPremiumLimit:
             return .dailyPremiumLimit(dailyPremiumLimitValue)
+        case .reminders:
+            return .reminders(reminderConfigValue)
         }
     }
 
@@ -253,6 +263,7 @@ extension ChatContextStore {
         userBalances = state.configs.balances ?? [:]
         funnelCounters = state.configs.funnel ?? [:]
         dailyPremiumLimitValue = state.configs.dailyPremiumLimit ?? 5
+        reminderConfigValue = (state.configs.reminders ?? .default).normalized
     }
 
     // MARK: - Legacy snapshot restore (one-time migration path)

@@ -9,6 +9,7 @@ final class BotCommandHandler: @unchecked Sendable {
     private let menuHandler: BotMenuHandler
     private let modelPriceMonitor: ModelPriceMonitor?
     private let cryptoService: CryptoPaymentService?
+    private let reminderService: SubscriptionReminderService?
 
     init(
         telegram: TelegramGatewayPort,
@@ -18,7 +19,8 @@ final class BotCommandHandler: @unchecked Sendable {
         formatOptions: String,
         menuHandler: BotMenuHandler,
         modelPriceMonitor: ModelPriceMonitor? = nil,
-        cryptoService: CryptoPaymentService? = nil
+        cryptoService: CryptoPaymentService? = nil,
+        reminderService: SubscriptionReminderService? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -28,6 +30,7 @@ final class BotCommandHandler: @unchecked Sendable {
         self.menuHandler = menuHandler
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoService = cryptoService
+        self.reminderService = reminderService
     }
 
     func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?, isPrivate: Bool) async throws -> Bool {
@@ -138,6 +141,13 @@ final class BotCommandHandler: @unchecked Sendable {
 
         case .balance:
             try await handleBalance(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
+
+        case .reminders:
+            guard await isSuperAdmin(fromUser) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                return
+            }
+            try await handleReminders(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
         case .setRole:
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -592,6 +602,192 @@ final class BotCommandHandler: @unchecked Sendable {
             lines.append("<i>Реально потрачено (суперадмин): \(formatUsd(wallet.spentRealUsd)) · маржа \(formatUsd(wallet.spentBilledUsd - wallet.spentRealUsd))</i>")
         }
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+    }
+
+    // MARK: - Renewal reminders & winback (superadmin, roadmap step 8)
+
+    private func handleReminders(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
+        let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
+        let subcommand = (parts.first ?? "").lowercased()
+        let rest = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+        var config = await state.reminderConfig()
+
+        switch subcommand {
+        case "":
+            try await sendUserFeedback(chatKey: chatKey, text: await remindersStatusText(config: config))
+
+        case "on", "off":
+            config.enabled = subcommand == "on"
+            await state.setReminderConfig(config)
+            try await sendUserFeedback(chatKey: chatKey, text: config.enabled
+                ? "✓ Напоминания и winback включены."
+                : "✓ Напоминания и winback выключены.")
+
+        case "chats":
+            let value = rest.lowercased()
+            guard value == "on" || value == "off" else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reminders chats on|off</code>")
+                return
+            }
+            config.notifyChats = value == "on"
+            await state.setReminderConfig(config)
+            try await sendUserFeedback(chatKey: chatKey, text: config.notifyChats
+                ? "✓ Уведомления пойдут и в чаты спонсора (продлить сможет любой участник)."
+                : "✓ Уведомления только в личку спонсора.")
+
+        case "days":
+            guard let n = Int(rest), SubscriptionReminderConfig.daysBeforeRange.contains(n) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reminders days \(SubscriptionReminderConfig.daysBeforeRange.lowerBound)-\(SubscriptionReminderConfig.daysBeforeRange.upperBound)</code> (0 — не напоминать до истечения)")
+                return
+            }
+            config.daysBeforeExpiry = n
+            await state.setReminderConfig(config)
+            try await sendUserFeedback(chatKey: chatKey, text: n == 0
+                ? "✓ Напоминание до истечения выключено."
+                : "✓ Напоминание за <b>\(n)</b> дн. до конца подписки.")
+
+        case "winback":
+            if rest == "-" || rest == "0" || rest.lowercased() == "off" {
+                config.winbackDays = []
+                await state.setReminderConfig(config)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Winback выключен.")
+                return
+            }
+            let parsed = rest
+                .split(whereSeparator: { ",; ".contains($0) })
+                .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                .filter { SubscriptionReminderConfig.winbackDayRange.contains($0) }
+            guard !parsed.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reminders winback 1,7</code> · <code>/reminders winback off</code>")
+                return
+            }
+            config.winbackDays = parsed
+            await state.setReminderConfig(config)
+            let applied = await state.reminderConfig().winbackDays
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Winback: " + applied.map { "+\($0)д" }.joined(separator: ", "))
+
+        case "discount":
+            guard let n = Int(rest), SubscriptionReminderConfig.discountRange.contains(n) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reminders discount \(SubscriptionReminderConfig.discountRange.lowerBound)-\(SubscriptionReminderConfig.discountRange.upperBound)</code>")
+                return
+            }
+            config.winbackDiscountPercent = n
+            await state.setReminderConfig(config)
+            try await sendUserFeedback(chatKey: chatKey, text: n == 0
+                ? "✓ Winback без скидки — только напоминание."
+                : "✓ Скидка winback: <b>\(n)%</b> на подписку (Stars, крипта, карта).")
+
+        case "hours":
+            guard let n = Int(rest), SubscriptionReminderConfig.offerHoursRange.contains(n) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reminders hours \(SubscriptionReminderConfig.offerHoursRange.lowerBound)-\(SubscriptionReminderConfig.offerHoursRange.upperBound)</code>")
+                return
+            }
+            config.winbackOfferHours = n
+            await state.setReminderConfig(config)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Скидка действует <b>\(n) ч</b> после выдачи.")
+
+        case "interval":
+            guard let n = Int(rest), SubscriptionReminderConfig.sweepIntervalRange.contains(n) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reminders interval \(SubscriptionReminderConfig.sweepIntervalRange.lowerBound)-\(SubscriptionReminderConfig.sweepIntervalRange.upperBound)</code> (минуты)")
+                return
+            }
+            config.sweepIntervalMinutes = n
+            await state.setReminderConfig(config)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Проверка каждые <b>\(n) мин</b> (применится к следующему циклу).")
+
+        case "run":
+            guard let reminderService else {
+                try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Сервис напоминаний недоступен.")
+                return
+            }
+            let result = await reminderService.sweep()
+            try await sendUserFeedback(chatKey: chatKey, text: "🔄 Проверка выполнена · \(result.summaryLine)")
+
+        case "test", "preview":
+            guard let reminderService else {
+                try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Сервис напоминаний недоступен.")
+                return
+            }
+            // Renders the real texts with real prices; nothing goes to sponsors.
+            for preview in await reminderService.previewTexts(username: fromUser?.username) {
+                _ = try? await telegram.sendMessage(.init(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    replyTo: nil,
+                    text: "👁 <i>Предпросмотр (никому не отправлено)</i>\n\n" + preview.text,
+                    replyMarkup: preview.markup
+                ))
+            }
+
+        case "clear":
+            let cleared = await state.clearAllWinbackDiscounts()
+            try await sendUserFeedback(chatKey: chatKey, text: "🗑 Снято активных скидок: <b>\(cleared)</b>.")
+
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                <b>⏳ Напоминания и winback</b>
+
+                <code>/reminders</code> — статус и список подписок под наблюдением
+                <code>/reminders on|off</code> — включить/выключить
+                <code>/reminders days 3</code> — за сколько дней напомнить (0 — не напоминать)
+                <code>/reminders winback 1,7</code> — дни winback после истечения (<code>off</code> — выключить)
+                <code>/reminders discount 30</code> — скидка winback, %
+                <code>/reminders hours 48</code> — сколько действует скидка
+                <code>/reminders interval 60</code> — как часто проверять, мин
+                <code>/reminders chats on|off</code> — уведомлять ли чаты спонсора
+                <code>/reminders run</code> — проверить прямо сейчас
+                <code>/reminders test</code> — предпросмотр текстов
+                <code>/reminders clear</code> — снять все активные скидки
+
+                Всё то же — в /menu → 🛡 Супер-админ → ⏳ Напоминания и winback.
+                """)
+        }
+    }
+
+    private func remindersStatusText(config: SubscriptionReminderConfig) async -> String {
+        let stats = await state.subscriptionLifecycleStats()
+        let sweep = await reminderService?.status()
+        let dateFormatter = DateFormatter(); dateFormatter.dateFormat = "dd.MM.yyyy"
+        let timeFormatter = DateFormatter(); timeFormatter.dateFormat = "dd.MM HH:mm"
+
+        var lines = [
+            "<b>⏳ Напоминания и winback</b>",
+            "",
+            "Статус · <b>\(config.enabled ? "включены" : "выключены")</b>",
+            "До истечения · за <b>\(config.daysBeforeExpiry)</b> дн." + (config.daysBeforeExpiry == 0 ? " <i>(выкл)</i>" : ""),
+            "Winback · <b>\(config.winbackDays.isEmpty ? "выкл" : config.winbackDays.map { "+\($0)д" }.joined(separator: ", "))</b> · скидка <b>\(config.winbackDiscountPercent)%</b> на <b>\(config.winbackOfferHours) ч</b>",
+            "Чаты спонсора · <b>\(config.notifyChats ? "уведомляем" : "нет")</b> · проверка каждые <b>\(config.sweepIntervalMinutes)</b> мин",
+        ]
+        if let sweep, let last = sweep.last, let runAt = sweep.lastRunAt {
+            lines.append("Последняя проверка · \(timeFormatter.string(from: runAt)) · \(last.summaryLine)")
+        } else {
+            lines.append("Последняя проверка · <i>ещё не было</i>")
+        }
+        lines.append("")
+        lines.append("Спонсоров с подпиской · <b>\(stats.sponsors)</b> · без канала связи · <b>\(stats.unreachable)</b> · отписались · <b>\(stats.optedOut)</b>")
+        if stats.expiringSoon.isEmpty {
+            lines.append("⏳ Скоро истекают · <i>нет</i>")
+        } else {
+            lines.append("⏳ Скоро истекают:")
+            for row in stats.expiringSoon.prefix(15) {
+                lines.append("• @\(row.username) — \(dateFormatter.string(from: row.paidUntil))" + (row.reachable ? "" : " · 🚫 нет канала") + (row.optedOut ? " · 🔕" : ""))
+            }
+        }
+        if !stats.recentlyExpired.isEmpty {
+            lines.append("⛔ Недавно истекли:")
+            for row in stats.recentlyExpired.prefix(15) {
+                lines.append("• @\(row.username) — \(dateFormatter.string(from: row.paidUntil))" + (row.reachable ? "" : " · 🚫 нет канала") + (row.optedOut ? " · 🔕" : ""))
+            }
+        }
+        if !stats.activeDiscounts.isEmpty {
+            lines.append("🎁 Живые скидки:")
+            for entry in stats.activeDiscounts.prefix(15) {
+                lines.append("• @\(entry.username) — −\(entry.discount.percent)% до \(timeFormatter.string(from: entry.discount.expiresAt))")
+            }
+        }
+        lines.append("")
+        lines.append("<i>Подсказка по подкомандам — /reminders help</i>")
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Ads (superadmin)
@@ -1793,6 +1989,9 @@ final class BotCommandHandler: @unchecked Sendable {
             return
         }
         await state.bumpFunnel(.openPurchase)
+        // Prices for this user: a live winback discount (roadmap step 8) is
+        // already applied, so quotes here match what checkout will charge.
+        let pricing = await state.subscriptionPricing(username: username)
         // Existing tenant: unlimited → nothing to buy; with an expiry →
         // the same purchase flow extends the subscription.
         if await state.isTenant(username: username) {
@@ -1805,31 +2004,37 @@ final class BotCommandHandler: @unchecked Sendable {
             let statusLine = sub.isActive
                 ? "Ваша подписка активна до <b>\(f.string(from: sub.paidUntil!))</b>."
                 : "⛔ Ваша подписка истекла <b>\(f.string(from: sub.paidUntil!))</b>."
-            try await sendUserFeedback(chatKey: chatKey, text: statusLine + "\nОплата ниже продлит её на \(ChatContextStore.subscriptionDays) дней.")
+            var text = statusLine + "\nОплата ниже продлит её на \(ChatContextStore.subscriptionDays) дней."
+            if let discount = pricing.discount, pricing.hasDiscount {
+                let df = DateFormatter(); df.dateFormat = "dd.MM HH:mm"
+                text += "\n🎁 Ваша скидка <b>−\(discount.percent)%</b> действует до <b>\(df.string(from: discount.expiresAt))</b>."
+            }
+            try await sendUserFeedback(chatKey: chatKey, text: text)
         }
 
         // Single method available → go straight; several → show choice menu.
         let methodCount = ((starsPrice ?? 0) > 0 ? 1 : 0) + (cryptoAvailable ? 1 : 0) + (cardAvailable ? 1 : 0)
+        let discountNote = pricing.hasDiscount ? " · скидка −\(pricing.discount?.percent ?? 0)%" : ""
         if methodCount == 1 {
-            if let starsPrice, starsPrice > 0 {
+            if let starsAmount = pricing.stars, starsAmount > 0 {
                 try await telegram.sendInvoice(.init(
                     chatID: chatKey.chatID,
-                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней",
+                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней\(discountNote)",
                     description: "Персональная копия ИИ-бота: платные модели, свои чаты и пользователи",
                     payload: "buy_access",
-                    starsAmount: starsPrice
+                    starsAmount: starsAmount
                 ))
                 await state.bumpFunnel(.invoiceSent)
                 return
             }
             if cryptoAvailable {
-                await menuHandler.sendCryptoAssetChoice(chatKey: chatKey)
+                await menuHandler.sendCryptoAssetChoice(chatKey: chatKey, username: username)
                 return
             }
-            if cardAvailable, let token = card.providerToken, let minorUnits = card.priceMinorUnits {
+            if cardAvailable, let token = card.providerToken, let minorUnits = pricing.cardMinorUnits {
                 try await telegram.sendInvoice(.init(
                     chatID: chatKey.chatID,
-                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней",
+                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней\(discountNote)",
                     description: "Персональная копия ИИ-бота: платные модели, свои чаты и пользователи",
                     payload: "buy_access_card",
                     kind: .fiat(currency: card.currency.rawValue, amountMinorUnits: minorUnits, providerToken: token)
@@ -1841,22 +2046,22 @@ final class BotCommandHandler: @unchecked Sendable {
 
         // Several methods available → choice menu
         var rows: [[InlineKeyboardButton]] = []
-        if let starsPrice, starsPrice > 0 {
+        if let starsAmount = pricing.stars, starsAmount > 0 {
             rows.append([InlineKeyboardButton(
-                text: "💫 Stars · \(starsPrice) ⭐",
+                text: "💫 Stars · \(starsAmount) ⭐\(discountNote)",
                 callback_data: BotCallbackAction.menu(action: "buy:stars").rawData
             )])
         }
-        if cryptoAvailable, let cents = cryptoPriceCents {
+        if cryptoAvailable, let cents = pricing.cryptoCents {
             let label = String(format: "🪙 Криптовалюта · $%.2f", Double(cents) / 100.0)
             rows.append([InlineKeyboardButton(
                 text: label,
                 callback_data: BotCallbackAction.menu(action: "buy:crypto").rawData
             )])
         }
-        if cardAvailable, let priceLabel = card.priceLabel {
+        if cardAvailable, let minorUnits = pricing.cardMinorUnits {
             rows.append([InlineKeyboardButton(
-                text: "💳 Картой · \(priceLabel)",
+                text: "💳 Картой · \(card.currency.format(minorUnits: minorUnits))",
                 callback_data: BotCallbackAction.menu(action: "buy:card").rawData
             )])
         }

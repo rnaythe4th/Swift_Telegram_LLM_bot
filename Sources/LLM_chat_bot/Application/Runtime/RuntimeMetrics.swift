@@ -42,6 +42,10 @@ enum MetricName {
     static let persistenceErrors = "persistence_errors"
     static let paymentsProcessed = "payments_processed"
     static let paymentsDeduplicated = "payments_deduplicated"
+    static let reminderSweeps = "reminder_sweeps"
+    static let remindersSent = "reminders_sent"
+    static let winbacksSent = "winbacks_sent"
+    static let reminderSendErrors = "reminder_send_errors"
 
     static let activeGenerations = "active_generations"
     static let dirtyEntities = "dirty_entities"

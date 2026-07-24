@@ -21,6 +21,15 @@ struct TenantState: Sendable {
     var createdAt: Date?
     /// Subscription end. nil = unlimited (root owner, manually added tenants).
     var paidUntil: Date?
+    /// Lifecycle notices already delivered for the cycle ending at this date
+    /// (roadmap step 8). A renewal moves `paidUntil`, which drops the set — so
+    /// every subscription cycle gets its own reminder exactly once.
+    var noticeCycleUntil: Date?
+    var sentNotices: Set<String> = []
+    /// Winback discount granted after expiry; consumed by the next purchase.
+    var winbackDiscount: SubscriptionDiscount?
+    /// Sponsor asked not to be reminded (toggle in their admin panel).
+    var remindersOptOut: Bool = false
 
     var isActive: Bool {
         guard let paidUntil else { return true }
@@ -155,6 +164,9 @@ actor ChatContextStore {
     /// step 6). Super-admin-configurable; persisted via
     /// GlobalConfigKey.dailyPremiumLimit. 0 = no free premium taste at all.
     var dailyPremiumLimitValue: Int = 5
+    /// Renewal-reminder / winback schedule (roadmap step 8). Super-admin knob,
+    /// persisted via GlobalConfigKey.reminders.
+    var reminderConfigValue: SubscriptionReminderConfig = .default
     /// Pay-as-you-go wallets, keyed by lowercased username.
     var userBalances: [String: UserBalance] = [:]
 
@@ -366,6 +378,197 @@ actor ChatContextStore {
         tenants[u] = tenant
         dirtyTenants.insert(u)
         return true
+    }
+
+    // MARK: - Subscription lifecycle: reminders & winback (roadmap step 8)
+
+    /// An invoice opened just before a winback offer ran out is still honored
+    /// at checkout — the user must never be charged more than they were shown.
+    static let checkoutDiscountGrace: TimeInterval = 3600
+
+    func reminderConfig() -> SubscriptionReminderConfig { reminderConfigValue }
+
+    func setReminderConfig(_ config: SubscriptionReminderConfig) {
+        reminderConfigValue = config.normalized
+        dirtyConfigs.insert(.reminders)
+    }
+
+    func remindersOptOut(username: String?) -> Bool {
+        guard let u = username?.lowercased() else { return false }
+        return tenants[u]?.remindersOptOut ?? false
+    }
+
+    /// Per-sponsor opt-out (toggle in their own admin panel).
+    @discardableResult
+    func setRemindersOptOut(username: String, optOut: Bool) -> Bool {
+        let u = username.lowercased()
+        guard tenants[u] != nil else { return false }
+        mutateTenantByOwner(u) { $0.remindersOptOut = optOut }
+        return true
+    }
+
+    /// Notices due right now. Pure decision: the caller sends them and reports
+    /// back through `markNoticeSent`, so a failed send is retried next sweep
+    /// (bounded by each notice's own window) instead of being lost.
+    func dueSubscriptionNotices(now: Date = Date()) -> [SubscriptionNoticeTarget] {
+        let config = reminderConfigValue
+        guard config.enabled else { return [] }
+        var targets: [SubscriptionNoticeTarget] = []
+        for (owner, tenant) in tenants {
+            guard let paidUntil = tenant.paidUntil, !tenant.remindersOptOut else { continue }
+            // Flags belong to one cycle; a renewal invalidates them.
+            let sent = tenant.noticeCycleUntil == paidUntil ? tenant.sentNotices : []
+            guard let notice = config.dueNotice(paidUntil: paidUntil, alreadySent: sent, now: now) else {
+                continue
+            }
+            targets.append(SubscriptionNoticeTarget(
+                username: owner,
+                notice: notice,
+                paidUntil: paidUntil,
+                privateChatID: privateChatID(forUsername: owner),
+                groupChatIDs: ownedGroupChatIDs(owner: owner)
+            ))
+        }
+        return targets.sorted { $0.username < $1.username }
+    }
+
+    /// Records a delivered notice against the cycle it was computed for. A
+    /// renewal in between changes `paidUntil` → the mark is dropped, so the new
+    /// cycle keeps its own reminder.
+    @discardableResult
+    func markNoticeSent(username: String, notice: SubscriptionNotice, paidUntil: Date) -> Bool {
+        let u = username.lowercased()
+        guard let tenant = tenants[u], tenant.paidUntil == paidUntil else { return false }
+        mutateTenantByOwner(u) { state in
+            if state.noticeCycleUntil != paidUntil {
+                state.noticeCycleUntil = paidUntil
+                state.sentNotices = []
+            }
+            state.sentNotices.insert(notice.key)
+        }
+        return true
+    }
+
+    /// Attaches a winback discount; the next subscription purchase by this user
+    /// is priced with it on every payment method.
+    @discardableResult
+    func grantWinbackDiscount(username: String, percent: Int, hours: Int, now: Date = Date()) -> SubscriptionDiscount? {
+        let u = username.lowercased()
+        guard tenants[u] != nil, percent > 0, hours > 0 else { return nil }
+        let discount = SubscriptionDiscount(
+            percent: percent,
+            expiresAt: now.addingTimeInterval(Double(hours) * 3600)
+        )
+        mutateTenantByOwner(u) { $0.winbackDiscount = discount }
+        return discount
+    }
+
+    /// The discount honored right now, if any.
+    func subscriptionDiscount(username: String?, grace: TimeInterval = 0, now: Date = Date()) -> SubscriptionDiscount? {
+        guard let u = username?.lowercased(), let discount = tenants[u]?.winbackDiscount else { return nil }
+        return discount.isActive(now: now, grace: grace) ? discount : nil
+    }
+
+    /// Clears the offer after a purchase (one-shot). Returns it when it was
+    /// still valid, so the caller can count the winback conversion.
+    @discardableResult
+    func consumeWinbackDiscount(username: String) -> SubscriptionDiscount? {
+        let u = username.lowercased()
+        guard let discount = tenants[u]?.winbackDiscount else { return nil }
+        mutateTenantByOwner(u) { $0.winbackDiscount = nil }
+        return discount.isActive(grace: Self.checkoutDiscountGrace) ? discount : nil
+    }
+
+    /// Super-admin escape hatch: drops every live offer at once (e.g. after a
+    /// misconfigured discount went out).
+    @discardableResult
+    func clearAllWinbackDiscounts() -> Int {
+        var cleared = 0
+        for (owner, tenant) in tenants where tenant.winbackDiscount != nil {
+            mutateTenantByOwner(owner) { $0.winbackDiscount = nil }
+            cleared += 1
+        }
+        return cleared
+    }
+
+    /// Subscription prices for this user with any active winback discount
+    /// applied. Single source of truth for menus, `/buy`, crypto invoices and
+    /// pre-checkout validation.
+    func subscriptionPricing(username: String?, grace: TimeInterval = 0, now: Date = Date()) -> SubscriptionPricing {
+        let cardPrice = _cardConfig.isEnabled ? _cardConfig.priceMinorUnits : nil
+        var pricing = SubscriptionPricing(
+            discount: nil,
+            starsFull: _starsPrice,
+            stars: _starsPrice,
+            cryptoCentsFull: _cryptoPriceUsdCents,
+            cryptoCents: _cryptoPriceUsdCents,
+            cardMinorUnitsFull: cardPrice,
+            cardMinorUnits: cardPrice,
+            cardLabelFull: cardPrice.map { _cardConfig.currency.format(minorUnits: $0) },
+            cardLabel: cardPrice.map { _cardConfig.currency.format(minorUnits: $0) }
+        )
+        guard let discount = subscriptionDiscount(username: username, grace: grace, now: now) else {
+            return pricing
+        }
+        pricing.discount = discount
+        pricing.stars = _starsPrice.map { discount.apply(to: $0) }
+        pricing.cryptoCents = _cryptoPriceUsdCents.map { discount.apply(to: $0) }
+        // Card: never dip below the provider minimum — Telegram rejects it.
+        pricing.cardMinorUnits = cardPrice.map { max(_cardConfig.currency.minMinorUnits, discount.apply(to: $0)) }
+        pricing.cardLabel = pricing.cardMinorUnits.map { _cardConfig.currency.format(minorUnits: $0) }
+        return pricing
+    }
+
+    /// The sponsor's DM with the bot, if they ever wrote to it (Telegram
+    /// forbids bot-initiated conversations, so this is the only way to reach
+    /// them personally).
+    func privateChatID(forUsername username: String) -> Int? {
+        let u = username.lowercased()
+        for (chatID, meta) in chatMetaByID
+        where chatID > 0 && meta.type == "private" && meta.username?.lowercased() == u {
+            return chatID
+        }
+        return nil
+    }
+
+    /// Group chats currently covered by this sponsor's licence.
+    func ownedGroupChatIDs(owner: String) -> [Int] {
+        let u = owner.lowercased()
+        return chatOwnership.filter { $0.key < 0 && $0.value == u }.map(\.key).sorted()
+    }
+
+    /// Monitoring snapshot for the super-admin reminders page: who is about to
+    /// lapse, who just did, who carries a live offer, who can't be reached.
+    func subscriptionLifecycleStats(now: Date = Date()) -> SubscriptionLifecycleStats {
+        let config = reminderConfigValue
+        let lead = Double(max(config.daysBeforeExpiry, 1)) * 86_400
+        let winbackHorizon = Double((config.winbackDays.max() ?? 7)) * 86_400 + config.winbackCatchUpWindow
+        var stats = SubscriptionLifecycleStats()
+        for (owner, tenant) in tenants {
+            guard let paidUntil = tenant.paidUntil else { continue }
+            stats.sponsors += 1
+            let reachable = privateChatID(forUsername: owner) != nil || !ownedGroupChatIDs(owner: owner).isEmpty
+            if !reachable { stats.unreachable += 1 }
+            if tenant.remindersOptOut { stats.optedOut += 1 }
+            let row = SubscriptionLifecycleStats.Row(
+                username: owner,
+                paidUntil: paidUntil,
+                reachable: reachable,
+                optedOut: tenant.remindersOptOut
+            )
+            if paidUntil > now {
+                if paidUntil.timeIntervalSince(now) <= lead { stats.expiringSoon.append(row) }
+            } else if now.timeIntervalSince(paidUntil) <= winbackHorizon {
+                stats.recentlyExpired.append(row)
+            }
+            if let discount = tenant.winbackDiscount, discount.isActive(now: now) {
+                stats.activeDiscounts.append((username: owner, discount: discount))
+            }
+        }
+        stats.expiringSoon.sort { $0.paidUntil < $1.paidUntil }
+        stats.recentlyExpired.sort { $0.paidUntil > $1.paidUntil }
+        stats.activeDiscounts.sort { $0.username < $1.username }
+        return stats
     }
 
     @discardableResult
@@ -1710,19 +1913,28 @@ actor ChatContextStore {
     /// are excluded — they are not paying sponsors.
     func funnelReport() -> FunnelReport {
         let now = Date()
-        var active = 0, expired = 0, unlimited = 0
+        let lead = Double(max(reminderConfigValue.daysBeforeExpiry, 1)) * 86_400
+        var active = 0, expired = 0, unlimited = 0, expiringSoon = 0, offers = 0
         for (owner, tenant) in tenants where !superAdminUsernames.contains(owner) {
             if let until = tenant.paidUntil {
-                if until > now { active += 1 } else { expired += 1 }
+                if until > now {
+                    active += 1
+                    if until.timeIntervalSince(now) <= lead { expiringSoon += 1 }
+                } else {
+                    expired += 1
+                }
             } else {
                 unlimited += 1
             }
+            if tenant.winbackDiscount?.isActive(now: now) == true { offers += 1 }
         }
         return FunnelReport(
             counters: funnelCounters,
             sponsorsActive: active,
             sponsorsExpired: expired,
-            sponsorsUnlimited: unlimited
+            sponsorsUnlimited: unlimited,
+            sponsorsExpiringSoon: expiringSoon,
+            winbackOffersActive: offers
         )
     }
 

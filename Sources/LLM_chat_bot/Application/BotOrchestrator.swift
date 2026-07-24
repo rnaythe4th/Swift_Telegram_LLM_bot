@@ -25,6 +25,7 @@ final class BotOrchestrator: @unchecked Sendable {
     private let updateDispatcher = ChatUpdateDispatcher()
     private let modelPriceMonitor: ModelPriceMonitor?
     private let cryptoMonitor: CryptoPaymentMonitor?
+    private let reminderService: SubscriptionReminderService
 
     private let backgroundTasks = LockedValue<[Task<Void, Never>]>([])
     private let shutdownStarted = LockedValue(false)
@@ -57,6 +58,14 @@ final class BotOrchestrator: @unchecked Sendable {
         self.cryptoMonitor = cryptoMonitor
 
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
+        let reminderService = SubscriptionReminderService(
+            telegram: telegram,
+            state: state,
+            logger: logger,
+            metrics: metrics
+        )
+        self.reminderService = reminderService
+
         let menuHandler = BotMenuHandler(
             telegram: telegram,
             state: state,
@@ -65,7 +74,8 @@ final class BotOrchestrator: @unchecked Sendable {
             formatOptions: formatOptions,
             botUsername: botUsername,
             modelPriceMonitor: modelPriceMonitor,
-            cryptoService: cryptoService
+            cryptoService: cryptoService,
+            reminderService: reminderService
         )
 
         self.menuHandler = menuHandler
@@ -86,7 +96,8 @@ final class BotOrchestrator: @unchecked Sendable {
             formatOptions: formatOptions,
             menuHandler: menuHandler,
             modelPriceMonitor: modelPriceMonitor,
-            cryptoService: cryptoService
+            cryptoService: cryptoService,
+            reminderService: reminderService
         )
         self.generationCoordinator = GenerationCoordinator(
             telegram: telegram,
@@ -155,6 +166,12 @@ final class BotOrchestrator: @unchecked Sendable {
                 await self?.runPersistenceNotifyLoop()
             })
         }
+        // Renewal reminders / winback (roadmap step 8). Runs regardless of the
+        // storage state: notices are deduplicated in memory too, and a
+        // memory-only bot still shouldn't let subscriptions lapse silently.
+        tasks.append(Task { [weak self] in
+            await self?.reminderService.run()
+        })
         backgroundTasks.value = tasks
 
         flags.ready.value = true
@@ -339,15 +356,25 @@ final class BotOrchestrator: @unchecked Sendable {
                 // Credit pack — Stars only for now; amount must match the live rate.
                 let expected = await state.starsForCents(cents)
                 valid = query.currency == "XTR" && query.total_amount == expected
-            } else if query.currency == "XTR" {
-                let price = await state.starsPrice()
-                valid = price != nil && query.total_amount == price
             } else {
-                // Card payment: currency and amount must match the current config.
-                let card = await state.cardConfig()
-                valid = card.isEnabled
-                    && query.currency == card.currency.rawValue
-                    && query.total_amount == card.priceMinorUnits
+                // Subscription: accept the list price or this user's winback
+                // price (roadmap step 8). The grace window honors an invoice
+                // opened moments before the offer ran out.
+                let pricing = await state.subscriptionPricing(
+                    username: query.from.username,
+                    grace: ChatContextStore.checkoutDiscountGrace
+                )
+                if query.currency == "XTR" {
+                    let accepted = Set([pricing.starsFull, pricing.stars].compactMap { $0 })
+                    valid = !accepted.isEmpty && accepted.contains(query.total_amount)
+                } else {
+                    // Card payment: currency and amount must match the config.
+                    let card = await state.cardConfig()
+                    let accepted = Set([pricing.cardMinorUnitsFull, pricing.cardMinorUnits].compactMap { $0 })
+                    valid = card.isEnabled
+                        && query.currency == card.currency.rawValue
+                        && accepted.contains(query.total_amount)
+                }
             }
             if valid {
                 try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: true, errorMessage: nil)
@@ -503,6 +530,11 @@ final class BotOrchestrator: @unchecked Sendable {
         let activation = await state.activatePaidSubscription(username: username)
         await state.assignChat(chatID: message.chat.id, to: username)
         await state.markPaymentProcessed(chargeID: chargeID)
+        // A winback offer is one-shot: consume it whether or not it was still
+        // valid, and count the ones that actually brought the payment back.
+        if await state.consumeWinbackDiscount(username: username) != nil {
+            await state.bumpFunnel(.winbackRedeemed)
+        }
         // Funnel: count the conversion before the flush so it persists with the
         // payment (not on the next debounce).
         switch activation {

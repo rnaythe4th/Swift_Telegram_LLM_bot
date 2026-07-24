@@ -79,6 +79,12 @@ enum AdminPendingInputKind: Sendable {
     case balanceTopUp
     case cardProviderToken
     case cardPrice
+    // Renewal reminders / winback schedule (roadmap step 8).
+    case reminderDaysBefore
+    case reminderWinbackDays
+    case reminderDiscount
+    case reminderOfferHours
+    case reminderInterval
 }
 
 struct AdminPendingInput: Sendable {

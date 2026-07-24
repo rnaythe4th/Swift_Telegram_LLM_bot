@@ -55,6 +55,11 @@ struct TenantStateSnapshot: Codable, Sendable {
     // Subscription fields; absent in pre-subscription rows (=> unlimited)
     var createdAt: Date?
     var paidUntil: Date?
+    // Lifecycle outreach (roadmap step 8); absent in pre-reminder rows.
+    var noticeCycleUntil: Date?
+    var sentNotices: [String]?
+    var winbackDiscount: SubscriptionDiscount?
+    var remindersOptOut: Bool?
 }
 
 struct ChatContextSnapshot: Codable, Sendable {

@@ -24,6 +24,8 @@ Telegram-бот на Swift (server-side, без Vapor), отвечающий п�
   обычные пользователи. Каждый тенант — изолированная копия настроек.
 - **Монетизация**: подписки (30 дней) через Telegram Stars / карту / крипту;
   pay-as-you-go балансы с наценкой; реклама во free-tier чатах.
+- **Удержание**: напоминание спонсору перед концом подписки и winback-офферы
+  со срочной скидкой после истечения (расписание настраивается суперадмином).
 - **Управление**: слэш-команды + богатое inline-меню (`/menu`).
 - **Надёжность**: webhook с очередью Telegram, дедупликация updates,
   идемпотентность платежей, graceful shutdown, rate limiting, health-эндпоинты.
@@ -89,6 +91,8 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   ×markup, модель, остаток баланса).
 - `Payments/` — `CryptoPaymentService.swift` (инвойсы, курсы, матчинг),
   `CryptoPaymentMonitor.swift` (поллинг блокчейнов).
+- `Lifecycle/SubscriptionReminderService.swift` — фоновый свип подписок:
+  напоминание перед истечением + winback-офферы со скидкой. См. §7/§14.
 - `Persistence/PersistenceCoordinator.swift` — write-behind: дренаж грязных
   сущностей и запись раз в 2с; `flushNow()` для платежей; ретрай слиянием. См. §10.
 - `Providers/ProviderGatewayRegistry.swift` — реестр `ServiceProvider → адаптер`.
@@ -116,6 +120,10 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
 - `Chat/ChatMetaInfo.swift` — человекочитаемая идентичность чата + `InviteRecord`.
 - `Chat/UserBalance.swift` — кошелёк pay-as-you-go.
 - `Chat/AdCampaign.swift` — рекламная кампания (частота + пейсинг).
+- `Chat/SubscriptionLifecycle.swift` — `SubscriptionReminderConfig` (расписание
+  напоминаний/winback + чистое решение «что слать» — `dueNotice`),
+  `SubscriptionNotice`, `SubscriptionDiscount`, `SubscriptionPricing`,
+  `SubscriptionLifecycleStats`.
 - `Chat/MediaTypes.swift`, `UserInputContent.swift` — медиа-рефы и вход юзера.
 - `Providers/ProviderTypes.swift` — `ServiceProvider`, `ProviderCapabilities`,
   `StreamUsageSummary`/`StreamMeta`, `ProviderStreamEvent`, `GenerationOptions`,
@@ -162,7 +170,8 @@ UpdateIntake.enqueue([updates])
   ▼
 BotOrchestrator.dispatch(update:)
   ├─ callback_query      → BotCallbackHandler (в обход per-chat очереди: stop должен прерывать)
-  ├─ pre_checkout_query  → handlePreCheckoutQuery (валидация цены → answerPreCheckoutQuery)
+  ├─ pre_checkout_query  → handlePreCheckoutQuery (цена: полная или winback-скидочная
+  │                        → answerPreCheckoutQuery)
   ├─ my_chat_member      → handleMyChatMemberUpdate (бота добавили в группу →
   │                        разовое приветствие с оффером; вирусный рост)
   └─ message             → ChatUpdateDispatcher.submit(chatKey) { route(message) }
@@ -196,7 +205,8 @@ BotOrchestrator.dispatch(update:)
 - Глобальные конфиги: суперадмины, цена Stars, крипто-конфиг, карта, free-модели,
   processed payments, polling offset, метаданные чатов, инвайты, реклама, markup%,
   балансы пользователей, счётчики воронки (`funnelCounters`), дневной премиум-лимит
-  (`dailyPremiumLimitValue`, §7/§9).
+  (`dailyPremiumLimitValue`, §7/§9), расписание напоминаний/winback
+  (`reminderConfigValue`, §7/§14).
 - **In-memory без персиста** (сброс при рестарте некритичен): `_premiumDailyUsage`
   — дневной счётчик «премиум-вкуса» free-tier (см. §9).
 - **Dirty-tracking**: `dirtyContexts`, `dirtyTenants`, `deletedTenants`,
@@ -221,6 +231,10 @@ BotOrchestrator.dispatch(update:)
 глобальных (тенант-скоуп) пресетов, `whitelistedUserIDs`, `adminUsernames`,
 `licensedUsernames`, `cumulativeUsage`, `createdAt`, **`paidUntil`** (nil =
 бессрочно). `isActive = paidUntil == nil || paidUntil > now`.
+Жизненный цикл подписки (§7 «Напоминания»): `noticeCycleUntil` + `sentNotices`
+(какие письма уже ушли в текущем сроке — продление меняет `paidUntil` и обнуляет
+набор), `winbackDiscount` (одноразовая скидка), `remindersOptOut` (спонсор
+отписался сам).
 
 **Роутинг тенанта**: `tenantState(for: chatID)` = тенант из `chatOwnership` или
 дефолтный владелец. Мутации дефолтов/пресетов идут через `mutateTenant(for:)`.
@@ -317,6 +331,30 @@ charge_id, как у подписок.
 **Дневной премиум-вкус** free-tier: см. §9 (гейт генерации) — `consumeDailyPremium`.
 Дневной лимит настраивается суперадмином (`setDailyPremiumLimit`, кнопка
 «🎁 Премиум-лимит/день» в супер-меню; 0 = премиум-вкус выключен).
+
+**Напоминания и winback** (`SubscriptionReminderService`, §14): фоновый свип
+сравнивает `paidUntil` с now и шлёт спонсору **одно** сообщение на срок подписки:
+за N дней до конца — напоминание продлить, после истечения — winback-волны
+(`winbackDays`, дефолт +1 и +7 дней) с **срочной скидкой** (`SubscriptionDiscount`,
+дефолт −30% на 48 ч). Всё расписание — `SubscriptionReminderConfig` в `bot_config`
+(`GlobalConfigKey.reminders`): вкл/выкл, дни до конца, дни winback, процент и срок
+скидки, интервал свипа, уведомлять ли чаты спонсора. Правится в супер-меню
+(«⏳ Напоминания и winback») и командой `/reminders`, без передеплоя.
+
+- **Дедуп**: `noticeCycleUntil` + `sentNotices` на тенанте; отметка ставится только
+  после успешной доставки (иначе ретрай на следующем свипе, ограниченный окном
+  волны). Продление меняет `paidUntil` → набор отметок сбрасывается.
+- **Скидка** применяется ко всем способам оплаты через **единый источник цен**
+  `subscriptionPricing(username:)` (Stars / крипта / карта; карта не опускается ниже
+  минимума валюты). `pre_checkout_query` принимает и полную, и скидочную цену
+  (grace 1 ч — инвойс, открытый на границе срока). Покупка «съедает» скидку
+  (`consumeWinbackDiscount`) и считает `funnel(.winbackRedeemed)`.
+- **Каналы**: личка спонсора (если он писал боту) и — опционально (`notifyChats`) —
+  его группы (продлить может любой участник; не более 10 чатов на волну, публично
+  только первая winback-волна). Нет ни одного канала → отметка ставится, счётчик
+  «недоступны» растёт (видно суперадмину).
+- **Контроль у спонсора**: кнопка «🔔 Напоминания о продлении» в его админ-панели
+  (`remindersOptOut`) + строка с датой ближайшего напоминания и активной скидкой.
 
 **Реклама** (`AdCampaign`): показывается только во free-tier чатах (нет подписки
 и нет баланса). Два дросселя: частота (раз в N ответов + мин. интервал) и пейсинг
@@ -428,7 +466,8 @@ bot_state(id PK, data jsonb)                         -- legacy-блоб, read-on
 `GlobalConfigKey`: stars_price, stars_per_usd, free_models, crypto, card,
 super_admins, processed_payments, polling_offset, chat_meta, invites, ads,
 markup, balances, **funnel** (счётчики воронки, §7/§11), **daily_premium_limit**
-(суперадмин-настройка дневного премиум-вкуса, §9).
+(суперадмин-настройка дневного премиум-вкуса, §9), **reminders**
+(расписание напоминаний/winback, §7/§14).
 Значения конфигов оборачиваются в `{"value": …}`.
 
 **Boot** (`BotOrchestrator.bootstrapState`): `loadEverything()`; если строковые
@@ -469,12 +508,15 @@ memory-only режим, запись отключена**, чтобы не за�
   персистентности, счётчики, `funnel`).
 - **Метрики** (`RuntimeMetrics`/`MetricName`): updates received/deduplicated/dropped,
   generations, telegram_429, send errors, persistence flushes/errors, payments
-  processed/deduplicated. Легко мапится на Prometheus.
+  processed/deduplicated, reminder sweeps/sent/winbacks/send errors. Легко мапится
+  на Prometheus.
 - **Воронка-аналитика** (`FunnelEvent`/`funnelCounters`, персистится в `bot_config`):
   события start → addedToGroup (вирусный рост, §шаг4) → firstMessage → capHit →
-  openPurchase → invoiceSent → paid/renewed + creditTopup. Отдаётся в `/metrics`
+  openPurchase → invoiceSent → paid/renewed + creditTopup, плюс удержание:
+  expiryReminder → winbackSent → winbackRedeemed (§7). Отдаётся в `/metrics`
   (`funnel`: счётчики + живой подсчёт спонсоров
-  active/expired/unlimited) и на странице супер-меню «📊 Воронка» (`renderSuperFunnel`)
+  active/expired/unlimited/expiring_soon и активных winback-скидок) и на странице
+  супер-меню «📊 Воронка» (`renderSuperFunnel`)
   с пошаговой конверсией. Счётчики — событийные (не уникальные юзеры), переживают
   рестарт. Ретеншн D1/D7 требует когортных таймстемпов — отложен.
 - **Режим апдейтов** (`UpdateMode`): `auto` (webhook если есть публичный URL —
@@ -496,8 +538,9 @@ memory-only режим, запись отключена**, чтобы не за�
 `/users`, `/presets`, `/tenant` (assign/release/adduser/register/remove/freemodels/
 crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 
-**Суперадминские**: `/superadmin` (add/remove), `/simulate`, глобальные free-модели,
-цены, наценка, балансы (в основном через супер-меню).
+**Суперадминские**: `/superadmin` (add/remove), `/simulate`, `/reminders`
+(on/off/days/winback/discount/hours/interval/chats/run/test/clear — §7/§14),
+глобальные free-модели, цены, наценка, балансы (в основном через супер-меню).
 
 Неизвестная команда/упоминание → `.mention`/`.unknown` (игнор или обычная генерация).
 
@@ -510,7 +553,9 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 `adminchats`, `adminusers`, `adminwl`, `admindef`, `admininvite`), супер-панель
 (`superadmin`, `superadminhelp`, `superstars`, `supercrypto`, `supercard`,
 `superfreemodels`, `supertenants`, `superadmins`, `supersim`, `superchats`,
-`superads`, `superbal`, `superfunnel` — воронка-аналитика).
+`superads`, `superbal`, `superfunnel` — воронка-аналитика, `superreminders` —
+напоминания/winback: расписание, ручная проверка, предпросмотр, список подписок
+под наблюдением).
 
 - `sendMenu` / `showPage` / `renderPage` — рендер клавиатур под роль/контекст.
 - **Pending-input flow**: кнопка вроде «✏️ Изменить цену» кладёт «ожидание ввода»
@@ -532,6 +577,12 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
   открытым инвойсам, засчитывает частичные оплаты, экспайрит просроченные.
 - **`runPersistenceNotifyLoop`** (каждые 60с): чатам с `backupNotify=true` шлёт
   строку статуса хранилища (замена старого 60-секундного бэкап-отчёта).
+- **`SubscriptionReminderService.run`** (первый проход через 60с после старта,
+  дальше — каждые `sweepIntervalMinutes`, дефолт 60): свип подписок → напоминания
+  перед истечением и winback-офферы со скидкой (§7). Свип сериализован (флаг
+  `sweeping`), поэтому кнопка «🔄 Проверить сейчас» / `/reminders run` не пересекается
+  с циклом. Результат последнего свипа (`SweepResult`) — на странице супер-меню.
+  Работает и в memory-only режиме: подписка не должна тихо истечь.
 
 Бесплатные модели: эффективное множество = закреплённые суперадмином
 (`_freeModelIDs`) ∪ бесплатные с OpenRouter. Если множество пустое (не настроено)
@@ -579,6 +630,10 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
   `GlobalConfigKey`/DTO.
 - **Цены пользователю — всегда через `priceMultiplier()`** (`billedCost`,
   футер, списания). Не показывай сырой `totalCost`.
+- **Цена подписки — всегда через `subscriptionPricing(username:)`** (меню, `/buy`,
+  крипто-инвойс, `pre_checkout_query`). Прямое чтение `starsPrice()`/`cardConfig()`
+  для выставления счёта разъедет показанную и списанную цену, когда у юзера есть
+  winback-скидка.
 - **Платежи — `flushNow()`**, не полагайся на 2-секундный debounce.
 - **Идемпотентность**: любой платёжный путь дедуплицируется (charge_id / tx-хеш) —
   Telegram и блокчейн-поллинг доставляют события повторно.

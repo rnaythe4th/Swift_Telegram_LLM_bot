@@ -72,7 +72,9 @@ actor CryptoPaymentService {
         let priceCents: Int
         switch purpose {
         case .subscription:
-            guard let sub = await state.cryptoPriceUsdCents() else {
+            // Winback offers discount the subscription price (roadmap step 8);
+            // credit packs always cost their face value.
+            guard let sub = await state.subscriptionPricing(username: username).cryptoCents else {
                 throw CryptoPaymentError.priceNotSet
             }
             priceCents = sub
@@ -316,6 +318,16 @@ actor CryptoPaymentService {
             case .subscription:
                 let activation = await state.activatePaidSubscription(username: copy.username)
                 await state.assignChat(chatID: copy.userChatID, to: copy.username)
+                // Same post-payment bookkeeping as the Stars/card path: a
+                // winback offer is one-shot, and the funnel counts the sale.
+                if await state.consumeWinbackDiscount(username: copy.username) != nil {
+                    await state.bumpFunnel(.winbackRedeemed)
+                }
+                switch activation {
+                case .started: await state.bumpFunnel(.paid)
+                case .extended: await state.bumpFunnel(.renewed)
+                case .alreadyUnlimited: break
+                }
                 await notifyFullPayment(copy, activation: activation)
             case .credit(let cents):
                 let wallet = await state.creditBalance(username: copy.username, amountUsd: Double(cents) / 100.0)
