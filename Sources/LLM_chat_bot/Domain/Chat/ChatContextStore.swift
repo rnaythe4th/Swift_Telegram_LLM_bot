@@ -150,6 +150,13 @@ actor ChatContextStore {
     /// Pay-as-you-go wallets, keyed by lowercased username.
     var userBalances: [String: UserBalance] = [:]
 
+    /// Daily free "taste" of premium for free-tier chats/users. In-memory only:
+    /// per §17 CLAUDE.md this is the sanctioned simplification — resetting the
+    /// counter on restart is non-critical, so it is neither dirty-tracked nor
+    /// persisted. Group chats share one counter (`c<chatID>`); private chats
+    /// count per user (`u<userID>`). Value = (UTC day number, units used).
+    private var _premiumDailyUsage: [String: (day: Int, used: Int)] = [:]
+
     private var _pendingInputs: [ChatKey: PendingInput] = [:]
     // Internal (not private): restored by ChatContextStore+Persistence.swift.
     var _starsPrice: Int? = nil
@@ -276,6 +283,11 @@ actor ChatContextStore {
     // MARK: - Subscription
 
     static let subscriptionDays = 30
+
+    /// Free premium answers granted per day to a free-tier chat (group, shared)
+    /// or user (private) before the paid model falls back to free. Hardcoded for
+    /// now; a super-menu setting can replace this later (roadmap step 6).
+    static let dailyPremiumLimit = 5
 
     /// Payment path: creates the tenant if needed and extends the subscription
     /// by `days` from max(now, current end). An unlimited tenant stays
@@ -1636,6 +1648,33 @@ actor ChatContextStore {
             return true
         }
         return hasPositiveBalance(username: username)
+    }
+
+    // MARK: - Daily premium "taste" (free-tier)
+
+    enum DailyPremiumDecision: Sendable {
+        /// One unit was consumed; the paid model may answer this turn.
+        case allowed
+        /// Today's allowance is spent; caller should fall back to free + upsell.
+        case exhausted(limit: Int)
+    }
+
+    /// Consumes one unit of today's free premium allowance for a free-tier
+    /// chat/user and reports whether a paid-model answer is allowed. Group chats
+    /// share one counter (chatID → social pressure); private chats count per
+    /// user (userID). Counter resets at the UTC day boundary. In-memory only
+    /// (see `_premiumDailyUsage`). `.exhausted` does not consume a unit.
+    func consumeDailyPremium(chatID: Int, userID: Int?, isGroup: Bool) -> DailyPremiumDecision {
+        let limit = Self.dailyPremiumLimit
+        guard limit > 0 else { return .exhausted(limit: limit) }
+        let key = isGroup ? "c\(chatID)" : "u\(userID ?? chatID)"
+        let today = Int(Date().timeIntervalSince1970 / 86_400)
+        var entry = _premiumDailyUsage[key] ?? (day: today, used: 0)
+        if entry.day != today { entry = (day: today, used: 0) }
+        guard entry.used < limit else { return .exhausted(limit: limit) }
+        entry.used += 1
+        _premiumDailyUsage[key] = entry
+        return .allowed
     }
 
     // MARK: - Per-tenant licensed users (paid access for individuals)

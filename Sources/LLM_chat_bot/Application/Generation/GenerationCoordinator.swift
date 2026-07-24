@@ -70,6 +70,35 @@ final class GenerationCoordinator: @unchecked Sendable {
         ))
     }
 
+    /// Sent when a free-tier chat/user spends its daily premium allowance: the
+    /// paid model has fallen back to free and an upgrade is pitched at the pain
+    /// point (roadmap step 5 buttons, both opening the unified purchase page).
+    /// Group copy stresses the shared cap ("для всех"); private copy is personal.
+    private func sendDailyLimitOffer(chatKey: ChatKey, isGroup: Bool, limit: Int, freeModel: String) async throws {
+        let payAction = BotCallbackAction.menu(action: "nav:pay").rawData
+        let text: String
+        let markup: InlineKeyboardMarkup
+        if isGroup {
+            text = "🚦 Умные ответы у этого чата на сегодня закончились (\(limit)/\(limit)). Отвечаю на бесплатной — <code>\(freeModel)</code>. Снять лимит для всех — <b>Премиум</b>."
+            markup = InlineKeyboardMarkup(inline_keyboard: [[
+                InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: payAction)
+            ]])
+        } else {
+            text = "🚦 Премиум на сегодня закончился (\(limit)/\(limit)). Продолжаю бесплатно — <code>\(freeModel)</code>. Или сними лимит навсегда:"
+            markup = InlineKeyboardMarkup(inline_keyboard: [[
+                InlineKeyboardButton(text: "⚡ Открыть безлимит", callback_data: payAction),
+                InlineKeyboardButton(text: "💰 Баланс", callback_data: payAction)
+            ]])
+        }
+        _ = try await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: text,
+            replyMarkup: markup
+        ))
+    }
+
     /// Customer-facing footer: costs go through the markup multiplier; for
     /// balance-billed users the projected post-charge balance is appended
     /// (the actual deduction in appendAssistant uses the same formula).
@@ -154,7 +183,12 @@ final class GenerationCoordinator: @unchecked Sendable {
     private func processContent(message: TelegramMessage, content: UserInputContent, chatKey: ChatKey) async throws {
         let username = message.from?.username
 
-        // Enforce free model restriction for non-tenants
+        // Free-tier gate with a daily premium "taste": a sender without full
+        // access who selected a paid model gets N smart-model answers per day
+        // (group = shared per chat, private = per user). Once the daily
+        // allowance is spent, the chat falls back to the first free model and an
+        // upgrade is pitched at the pain point. Free models are unlimited
+        // (retention); sponsored chats never reach here (hasFullModelAccess).
         if let effectiveFree = await state.effectiveFreeModelIDs(),
            !(await state.hasFullModelAccess(username: username, userID: message.from?.id, chatID: chatKey.chatID)) {
             let currentModel = await state.model(chatKey: chatKey)
@@ -163,23 +197,20 @@ final class GenerationCoordinator: @unchecked Sendable {
                     try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Бесплатные модели не настроены. Обратитесь к администратору.")
                     return
                 }
-                await state.setModelOnly(chatKey: chatKey, model: firstFree)
-                // Pain-point upsell: the block on a paid model is the moment
-                // willingness to buy peaks — offer premium (whole chat) and
-                // pay-as-you-go balance as tappable buttons, both opening the
-                // unified purchase page. Still answers on the free model.
-                let payAction = BotCallbackAction.menu(action: "nav:pay").rawData
-                let offerMarkup = InlineKeyboardMarkup(inline_keyboard: [[
-                    InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: payAction),
-                    InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction)
-                ]])
-                _ = try? await telegram.sendMessage(.init(
+                let isGroup = message.chat.type != "private"
+                let decision = await state.consumeDailyPremium(
                     chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: "ℹ️ Это умная (платная) модель. Пока отвечаю на бесплатной — <code>\(firstFree)</code>.\n\nОткрыть умные модели для этого чата — <b>Премиум</b>, или плати по факту — пополни <b>баланс</b>.",
-                    replyMarkup: offerMarkup
-                ))
+                    userID: message.from?.id,
+                    isGroup: isGroup
+                )
+                switch decision {
+                case .allowed:
+                    // Daily premium taste: let the paid model answer this turn.
+                    break
+                case .exhausted(let limit):
+                    await state.setModelOnly(chatKey: chatKey, model: firstFree)
+                    try? await sendDailyLimitOffer(chatKey: chatKey, isGroup: isGroup, limit: limit, freeModel: firstFree)
+                }
             }
         }
 
