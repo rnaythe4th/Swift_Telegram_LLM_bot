@@ -47,4 +47,10 @@ actor SessionRegistry {
     func cancellationReason(for generationID: GenerationID) -> CancellationReason? {
         cancellationReasons[generationID]
     }
+
+    /// Number of in-flight generations — used by graceful shutdown to wait for
+    /// streams to complete and by /metrics.
+    var activeCount: Int {
+        sessions.count
+    }
 }

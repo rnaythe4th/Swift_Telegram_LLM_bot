@@ -7,17 +7,24 @@ enum EnvironmentKey: String {
     case companyChatId = "COMPANY_CHAT_ID"
     case supabaseURL = "SUPABASE_URL"
     case supabaseAnonKey = "SUPABASE_ANON_KEY"
+    case supabaseServiceKey = "SUPABASE_SERVICE_KEY"
     case healthPort = "PORT"
     case bscscanApiKey = "BSCSCAN_API_KEY"
     case etherscanApiKey = "ETHERSCAN_API_KEY"
     case trongridApiKey = "TRONGRID_API_KEY"
     case tonapiKey = "TONAPI_KEY"
+    case updateMode = "UPDATE_MODE"
+    case webhookPublicURL = "WEBHOOK_PUBLIC_URL"
+    case railwayPublicDomain = "RAILWAY_PUBLIC_DOMAIN"
+    case webhookSecret = "TELEGRAM_WEBHOOK_SECRET"
+    case logLevel = "LOG_LEVEL"
+    case maxConcurrentGenerations = "MAX_CONCURRENT_GENERATIONS"
 }
 
 enum AppConfigError: LocalizedError {
     case missingEnvironment(EnvironmentKey)
     case invalidCompanyChatId(String)
-    
+
     var errorDescription: String? {
         switch self {
         case .missingEnvironment(let key):
@@ -28,6 +35,14 @@ enum AppConfigError: LocalizedError {
     }
 }
 
+/// How updates are received from Telegram.
+/// `auto` picks webhook when a public URL is available (Railway) and falls
+/// back to long polling (local development).
+enum UpdateMode: String, Sendable {
+    case auto
+    case webhook
+    case polling
+}
 
 struct AppConfig: Sendable {
     let telegramToken: String
@@ -36,11 +51,22 @@ struct AppConfig: Sendable {
     let companyChatId: Int
     let supabaseURL: String?
     let supabaseAnonKey: String?
+    let supabaseServiceKey: String?
     let healthPort: Int
     let bscscanApiKey: String?
     let etherscanApiKey: String?
     let trongridApiKey: String?
     let tonapiKey: String?
+    let updateMode: UpdateMode
+    let webhookPublicURL: String?
+    let webhookSecret: String?
+    let maxConcurrentGenerations: Int
+
+    /// Server-side Supabase key: the service key bypasses RLS and never ships
+    /// to clients — preferred. The anon key remains a fallback for setups
+    /// created before the split.
+    var supabaseKey: String? { supabaseServiceKey ?? supabaseAnonKey }
+    var usesAnonSupabaseKey: Bool { supabaseServiceKey == nil && supabaseAnonKey != nil }
 
     static func load() throws -> AppConfig {
         let telegramToken = try env(.telegramToken)
@@ -52,25 +78,35 @@ struct AppConfig: Sendable {
             throw AppConfigError.invalidCompanyChatId(companyChatIdRaw)
         }
 
-        let supabaseURL = optionalEnv(.supabaseURL)
-        let supabaseAnonKey = optionalEnv(.supabaseAnonKey)
         let healthPort = Int(optionalEnv(.healthPort) ?? "") ?? 8000
+
+        // Railway injects RAILWAY_PUBLIC_DOMAIN for services with a domain;
+        // an explicit WEBHOOK_PUBLIC_URL always wins.
+        let webhookPublicURL = optionalEnv(.webhookPublicURL)
+            ?? optionalEnv(.railwayPublicDomain).map { "https://\($0)" }
+
+        let updateMode = optionalEnv(.updateMode).flatMap { UpdateMode(rawValue: $0.lowercased()) } ?? .auto
 
         return .init(
             telegramToken: telegramToken,
             deepseekKey: deepseekKey,
             routerApiKey: routerApiKey,
             companyChatId: companyChatId,
-            supabaseURL: supabaseURL,
-            supabaseAnonKey: supabaseAnonKey,
+            supabaseURL: optionalEnv(.supabaseURL),
+            supabaseAnonKey: optionalEnv(.supabaseAnonKey),
+            supabaseServiceKey: optionalEnv(.supabaseServiceKey),
             healthPort: healthPort,
             bscscanApiKey: optionalEnv(.bscscanApiKey),
             etherscanApiKey: optionalEnv(.etherscanApiKey),
             trongridApiKey: optionalEnv(.trongridApiKey),
-            tonapiKey: optionalEnv(.tonapiKey)
+            tonapiKey: optionalEnv(.tonapiKey),
+            updateMode: updateMode,
+            webhookPublicURL: webhookPublicURL,
+            webhookSecret: optionalEnv(.webhookSecret),
+            maxConcurrentGenerations: Int(optionalEnv(.maxConcurrentGenerations) ?? "") ?? 64
         )
     }
-    
+
     private static func env(_ key: EnvironmentKey) throws -> String {
         guard let value = ProcessInfo.processInfo.environment[key.rawValue], !value.isEmpty else {
             throw AppConfigError.missingEnvironment(key)

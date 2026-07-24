@@ -100,11 +100,38 @@ struct TelegramUser: Codable, Sendable {
 struct TelegramChat: Codable, Sendable {
     let id: Int
     let type: String
+    /// Group/channel title (nil for private chats).
+    let title: String?
+    /// Peer @username for private chats (nil when the user has none).
+    let username: String?
+    /// Peer first name for private chats.
+    let first_name: String?
+
+    init(id: Int, type: String, title: String? = nil, username: String? = nil, first_name: String? = nil) {
+        self.id = id
+        self.type = type
+        self.title = title
+        self.username = username
+        self.first_name = first_name
+    }
 }
 
 struct InlineKeyboardButton: Codable, Sendable {
     let text: String
-    let callback_data: String
+    let callback_data: String?
+    let url: String?
+
+    init(text: String, callback_data: String) {
+        self.text = text
+        self.callback_data = callback_data
+        self.url = nil
+    }
+
+    init(text: String, url: String) {
+        self.text = text
+        self.callback_data = nil
+        self.url = url
+    }
 }
 
 struct InlineKeyboardMarkup: Codable, Sendable {
@@ -143,11 +170,32 @@ struct TelegramSuccessfulPayment: Codable, Sendable {
 }
 
 struct SendInvoiceRequest: Sendable {
+    enum PaymentKind: Sendable {
+        /// Telegram Stars (currency XTR, no provider needed).
+        case stars(amount: Int)
+        /// Card payment through a BotFather-connected provider.
+        /// `amountMinorUnits` — price in cents/kopecks.
+        case fiat(currency: String, amountMinorUnits: Int, providerToken: String)
+    }
+
     let chatID: Int
     let title: String
     let description: String
     let payload: String
-    let starsAmount: Int
+    let kind: PaymentKind
+
+    /// Backward-compatible convenience for Stars invoices.
+    init(chatID: Int, title: String, description: String, payload: String, starsAmount: Int) {
+        self.init(chatID: chatID, title: title, description: description, payload: payload, kind: .stars(amount: starsAmount))
+    }
+
+    init(chatID: Int, title: String, description: String, payload: String, kind: PaymentKind) {
+        self.chatID = chatID
+        self.title = title
+        self.description = description
+        self.payload = payload
+        self.kind = kind
+    }
 }
 
 enum MessageSplitter {

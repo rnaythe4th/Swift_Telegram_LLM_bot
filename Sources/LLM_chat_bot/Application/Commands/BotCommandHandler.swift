@@ -117,7 +117,27 @@ final class BotCommandHandler: @unchecked Sendable {
             try await handleSimulate(chatKey: chatKey, fromUser: fromUser, argument: parsed.argument)
 
         case .start:
-            try await handleStart(chatKey: chatKey)
+            try await handleStart(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
+
+        case .chatid:
+            try await handleChatID(chatKey: chatKey)
+
+        case .inspect:
+            guard await isSuperAdmin(fromUser) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                return
+            }
+            try await handleInspect(chatKey: chatKey, argument: parsed.argument)
+
+        case .ads:
+            guard await isSuperAdmin(fromUser) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                return
+            }
+            try await handleAds(chatKey: chatKey, argument: parsed.argument)
+
+        case .balance:
+            try await handleBalance(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
         case .setRole:
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -178,8 +198,9 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             var priceNote = ""
             if let price = await state.openRouterModelPrice(for: modelID) {
-                let inP = BotMenuHandler.formatPriceM(price.inputPerToken)
-                let outP = BotMenuHandler.formatPriceM(price.outputPerToken)
+                let multiplier = await state.priceMultiplier()
+                let inP = BotMenuHandler.formatPriceM(price.inputPerToken * multiplier)
+                let outP = BotMenuHandler.formatPriceM(price.outputPerToken * multiplier)
                 priceNote = "\n⬇️$\(inP)/M · ⬆️$\(outP)/M"
             }
             let providerNote = providerRouting.map { "\nПровайдер: <code>\($0)</code>" } ?? ""
@@ -309,23 +330,128 @@ final class BotCommandHandler: @unchecked Sendable {
         }
     }
 
-    private func handleStart(chatKey: ChatKey) async throws {
+    private func handleStart(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
+        // Deep-link invite: t.me/<bot>?start=inv_<token> — grants paid-model
+        // access under the issuing admin's licence.
+        let payload = argument.trimmingCharacters(in: .whitespacesAndNewlines)
+        if payload.hasPrefix("inv_") {
+            try await handleInviteRedemption(token: String(payload.dropFirst(4)), chatKey: chatKey, fromUser: fromUser)
+            return
+        }
+        try await sendStartGreeting(chatKey: chatKey)
+    }
+
+    private func handleInviteRedemption(token: String, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+        guard let owner = await state.redeemInvite(token: token) else {
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                ⚠️ Пригласительная ссылка недействительна или её лицензия неактивна.
+                Попросите у администратора новую ссылку.
+                """)
+            try await sendStartGreeting(chatKey: chatKey)
+            return
+        }
+
+        if let username = fromUser?.username, username.lowercased() == owner {
+            try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Это ваша собственная пригласительная ссылка — доступ у вас и так есть.")
+            return
+        }
+
+        var grantedLines: [String] = []
+        if let username = fromUser?.username {
+            _ = await state.addLicensedUser(ownerUsername: owner, target: username)
+            grantedLines.append("• платные модели доступны вам (@\(username)) во всех чатах с этим ботом")
+        }
+        // Private chat: attach it to the inviter's licence so access works
+        // even without a @username.
+        if chatKey.chatID > 0, await state.chatOwner(chatID: chatKey.chatID) == nil {
+            _ = await state.assignChat(chatID: chatKey.chatID, to: owner)
+            grantedLines.append("• этот чат подключён к лицензии @\(owner)")
+        }
+
+        guard !grantedLines.isEmpty else {
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                ⚠️ Не удалось активировать приглашение: у вас нет @username, а этот чат уже привязан к другой лицензии.
+                """)
+            return
+        }
+
+        try await sendUserFeedback(chatKey: chatKey, text: """
+            🎟 <b>Приглашение от @\(owner) активировано!</b>
+
+            \(grantedLines.joined(separator: "\n"))
+
+            Просто напишите сообщение — бот ответит. Настройки: /menu
+            """)
+    }
+
+    private func handleChatID(chatKey: ChatKey) async throws {
+        let owner = await state.chatOwner(chatID: chatKey.chatID)
+        let meta = await state.chatMeta(chatID: chatKey.chatID)
+        var lines = ["<b>🆔 Этот чат</b>", ""]
+        lines.append("ID · <code>\(chatKey.chatID)</code>")
+        if chatKey.threadID != 0 {
+            lines.append("Топик (thread) · <code>\(chatKey.threadID)</code>")
+        }
+        if let meta {
+            lines.append("Тип · \(meta.type)" + (meta.title.map { " · «\($0)»" } ?? ""))
+        }
+        lines.append(owner.map { "Лицензия · @\($0)" } ?? "Лицензия · <i>не привязан</i>")
+        lines.append("")
+        lines.append("<i>Привязать чат к своей лицензии: /tenant claim (для админов)</i>")
+        try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+    }
+
+    private func handleInspect(chatKey: ChatKey, argument: String) async throws {
+        let parts = argument.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard let first = parts.first, let targetChatID = Int(first) else {
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                <b>👁 Инспекция чата</b>
+
+                <code>/inspect &lt;chatID&gt;</code> — настройки и роль чата
+                Список чатов с ID — /chats, либо /menu → Супер-админ → 👁 Чаты
+                """)
+            return
+        }
+
+        let label = await state.chatDisplayLabel(chatID: targetChatID)
+        let owner = await state.chatOwner(chatID: targetChatID)
+        let keys = await state.existingContextKeys(chatID: targetChatID)
+
+        guard !keys.isEmpty else {
+            try await sendUserFeedback(chatKey: chatKey, text: "Чат <code>\(targetChatID)</code> ещё не общался с ботом.")
+            return
+        }
+
+        var lines = ["<b>👁 \(label)</b> · <code>\(targetChatID)</code>"]
+        lines.append(owner.map { "Лицензия · @\($0)" } ?? "Лицензия · <i>нет (бесплатный)</i>")
+
+        for key in keys.prefix(6) {
+            guard let help = await state.peekHelp(chatKey: key) else { continue }
+            lines.append("")
+            lines.append(key.threadID == 0 ? "<b>Основной тред</b>" : "<b>Топик \(key.threadID)</b>")
+            lines.append("🤖 <code>\(help.model)</code> · 🌡 \(BotMenuHandler.formatTemp(help.temp)) · 📝 \(help.maxHistory)")
+            let realStr = String(format: "$%.4f", help.cumulativeUsage.totalCost)
+            let billedStr = String(format: "$%.4f", await state.billedCost(of: help.cumulativeUsage))
+            lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(Int(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
+            let rolePreview = help.role.count > 300 ? String(help.role.prefix(300)) + "…" : help.role
+            lines.append("🎭 <blockquote expandable>\(rolePreview)</blockquote>")
+        }
+        if keys.count > 6 {
+            lines.append("\n<i>…и ещё \(keys.count - 6) топиков</i>")
+        }
+
+        try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+    }
+
+    private func sendStartGreeting(chatKey: ChatKey) async throws {
         let text = """
-        <b>👋 Привет!</b>
+        <b>👋 Привет!</b> Я — умный ИИ-ассистент в Telegram.
 
-        Я — ИИ-ассистент в Telegram. Просто напишите — отвечу.
+        Напишите мне — отвечу. Понимаю текст, фото, голос и видео, помню разговор.
 
-        <b>Умею:</b>
-        • Отвечать на вопросы, помогать и рассуждать
-        • Понимать картинки, голосовые и видео
-        • Помнить контекст разговора
-        • Работать с GPT, Claude, Gemini, DeepSeek и другими
+        <b>Хотите умного ИИ в свой групповой чат?</b> Меня можно добавить — премиум откроет любой участник, и доступ заработает сразу для всех.
 
-        <b>Быстрый старт:</b>
-        ⚙️ /menu — все настройки
-        📘 /help — полная инструкция
-        🎭 /setrole — задать характер бота
-        ↺ /reset — сбросить к стандарту
+        ⚙️ /menu · 📘 /help
         """
         let markup = InlineKeyboardMarkup(inline_keyboard: [
             [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
@@ -342,6 +468,299 @@ final class BotCommandHandler: @unchecked Sendable {
 
 
     private func onOff(_ v: Bool) -> String { v ? "вкл" : "выкл" }
+
+    // MARK: - Balance (pay-as-you-go)
+
+    private func handleBalance(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
+        let parts = argument.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        let subcommand = (parts.first ?? "").lowercased()
+        let isSuper = await isSuperAdmin(fromUser)
+
+        func normalizeUsername(_ raw: String) -> String {
+            raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        }
+
+        func formatUsd(_ value: Double) -> String {
+            String(format: "$%.4f", value)
+        }
+
+        // Super-admin management subcommands
+        if isSuper {
+            switch subcommand {
+            case "add", "set":
+                guard parts.count >= 3,
+                      let amount = Double(parts[2].replacingOccurrences(of: ",", with: ".")) else {
+                    try await sendUserFeedback(chatKey: chatKey, text: """
+                        <i>Использование:</i>
+                        <code>/balance add @username 5</code> — начислить $5 (минус — списать)
+                        <code>/balance set @username 10</code> — установить баланс ровно $10
+                        """)
+                    return
+                }
+                let target = normalizeUsername(parts[1])
+                guard !target.isEmpty else {
+                    try await sendUserFeedback(chatKey: chatKey, text: "<i>Укажите @username.</i>")
+                    return
+                }
+                let wallet = subcommand == "add"
+                    ? await state.creditBalance(username: target, amountUsd: amount)
+                    : await state.setBalanceAmount(username: target, amountUsd: amount)
+                try await sendUserFeedback(chatKey: chatKey, text: """
+                    ✓ Баланс @\(target.lowercased()) · <b>\(formatUsd(wallet.balanceUsd))</b>
+                    Потрачено: клиентская цена \(formatUsd(wallet.spentBilledUsd)) · реально \(formatUsd(wallet.spentRealUsd))
+                    """)
+                return
+
+            case "remove", "rm":
+                guard parts.count >= 2 else {
+                    try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/balance remove @username</code>")
+                    return
+                }
+                let target = normalizeUsername(parts[1])
+                let removed = await state.removeBalance(username: target)
+                try await sendUserFeedback(chatKey: chatKey, text: removed
+                    ? "✓ Кошелёк @\(target.lowercased()) удалён."
+                    : "У @\(target.lowercased()) нет кошелька.")
+                return
+
+            case "list", "stats":
+                let balances = await state.allBalances()
+                let markup = await state.markupPercent()
+                var lines = ["<b>💰 Балансы</b> (\(balances.count)) · наценка <b>\(markup)%</b>"]
+                if balances.isEmpty {
+                    lines.append("<i>кошельков нет</i>")
+                } else {
+                    var totalBalance = 0.0, totalBilled = 0.0, totalReal = 0.0
+                    for entry in balances {
+                        let w = entry.wallet
+                        totalBalance += w.balanceUsd
+                        totalBilled += w.spentBilledUsd
+                        totalReal += w.spentRealUsd
+                        let marginStr = formatUsd(w.spentBilledUsd - w.spentRealUsd)
+                        lines.append("")
+                        lines.append("• <b>@\(entry.username)</b> · остаток <b>\(formatUsd(w.balanceUsd))</b>")
+                        lines.append("  списано \(formatUsd(w.spentBilledUsd)) · реально \(formatUsd(w.spentRealUsd)) · маржа <b>\(marginStr)</b>")
+                    }
+                    lines.append("")
+                    lines.append("<b>Итого</b> · остатки \(formatUsd(totalBalance)) · списано \(formatUsd(totalBilled)) · реально \(formatUsd(totalReal)) · маржа <b>\(formatUsd(totalBilled - totalReal))</b>")
+                }
+                lines.append("")
+                lines.append("""
+                    <code>/balance add @user 5</code> · <code>/balance set @user 10</code> · <code>/balance remove @user</code>
+                    <code>/tenant markup 30</code> — наценка
+                    """)
+                try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+                return
+
+            default:
+                break
+            }
+        }
+
+        // Personal view (everyone, incl. superadmin without subcommand)
+        guard let username = fromUser?.username else {
+            try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Для баланса нужен @username в Telegram.")
+            return
+        }
+        guard let wallet = await state.balance(username: username) else {
+            var lines = ["💰 У вас нет кошелька. Баланс — способ платить за платные модели по факту использования, без подписки."]
+            if isSuper {
+                lines.append("\n<i>Суперадмин:</i> <code>/balance add @\(username) 5</code> — начислить себе, <code>/balance list</code> — все кошельки.")
+            } else {
+                lines.append("Чтобы открыть баланс, обратитесь к администратору бота. Подписка — /buy.")
+            }
+            try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+            return
+        }
+
+        let status = wallet.balanceUsd > 0
+            ? "🟢 активен — платные модели доступны"
+            : "⛔ исчерпан — доступны только бесплатные модели"
+        var lines = ["<b>💰 Ваш баланс</b>", ""]
+        lines.append("Остаток · <b>\(formatUsd(wallet.balanceUsd))</b>")
+        lines.append("Потрачено всего · \(formatUsd(wallet.spentBilledUsd))")
+        lines.append(status)
+        lines.append("")
+        lines.append("<i>Списание за каждый ответ видно в футере сообщений (включите /show_cost). Пополнение — у администратора бота.</i>")
+        if isSuper {
+            lines.append("<i>Реально потрачено (суперадмин): \(formatUsd(wallet.spentRealUsd)) · маржа \(formatUsd(wallet.spentBilledUsd - wallet.spentRealUsd))</i>")
+        }
+        try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+    }
+
+    // MARK: - Ads (superadmin)
+
+    private static let adsDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "dd.MM.yyyy"
+        return f
+    }()
+
+    private func adSummaryLines(_ c: AdCampaign) -> [String] {
+        var lines: [String] = []
+        let status = c.enabled ? (c.isRunning() ? "🟢" : "🟡") : "⚪"
+        var limits = "каждые \(c.everyNReplies) отв. · пауза \(c.minIntervalSeconds / 60) мин"
+        if let target = c.totalImpressionsTarget {
+            limits += " · показы \(c.impressionsUsed)/\(target)"
+        } else {
+            limits += " · показов \(c.impressionsUsed)"
+        }
+        if let endAt = c.endAt {
+            limits += " · до \(Self.adsDateFormatter.string(from: endAt))"
+        }
+        lines.append("\(status) <b>\(c.id)</b> · \(limits)")
+        let preview = c.text.count > 120 ? String(c.text.prefix(120)) + "…" : c.text
+        lines.append("<blockquote expandable>\(preview)</blockquote>")
+        if let bt = c.buttonText, let url = c.buttonURL {
+            lines.append("🔗 [\(bt)] → \(url)")
+        }
+        return lines
+    }
+
+    private func handleAds(chatKey: ChatKey, argument: String) async throws {
+        let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
+        let subcommand = (parts.first ?? "").lowercased()
+        let rest = parts.count > 1 ? parts[1] : ""
+
+        switch subcommand {
+        case "add":
+            let text = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads add &lt;текст объявления&gt;</code> (HTML разрешён)")
+                return
+            }
+            let campaign = AdCampaign.new(text: text)
+            await state.upsertAdCampaign(campaign)
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                ✓ Кампания <b>\(campaign.id)</b> создана и включена.
+                По умолчанию: каждые 10 ответов, пауза 60 мин, без лимита показов.
+
+                Настроить:
+                <code>/ads freq \(campaign.id) 10 60</code> — каждые N ответов, пауза в минутах
+                <code>/ads limit \(campaign.id) 1000 30</code> — 1000 показов, размазанных на 30 дней
+                <code>/ads button \(campaign.id) Открыть | https://example.com</code>
+                """)
+
+        case "remove", "rm":
+            let id = rest.trimmingCharacters(in: .whitespaces)
+            let removed = await state.removeAdCampaign(id: id)
+            try await sendUserFeedback(chatKey: chatKey, text: removed ? "✓ Кампания \(id) удалена." : "Кампания \(id) не найдена.")
+
+        case "on", "off":
+            let id = rest.trimmingCharacters(in: .whitespaces)
+            let ok = await state.setAdCampaignEnabled(id: id, enabled: subcommand == "on")
+            try await sendUserFeedback(chatKey: chatKey, text: ok
+                ? "✓ Кампания \(id) · \(subcommand == "on" ? "включена" : "выключена")."
+                : "Кампания \(id) не найдена.")
+
+        case "freq":
+            let args = rest.split(separator: " ").map(String.init)
+            guard args.count >= 2, let everyN = Int(args[1]), everyN >= 1,
+                  var campaign = await state.adCampaign(id: args[0]) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads freq &lt;id&gt; &lt;каждые_N_ответов&gt; [пауза_минут]</code>")
+                return
+            }
+            campaign.everyNReplies = everyN
+            if args.count >= 3, let minutes = Int(args[2]), minutes >= 0 {
+                campaign.minIntervalSeconds = minutes * 60
+            }
+            await state.upsertAdCampaign(campaign)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): каждые <b>\(campaign.everyNReplies)</b> ответов · пауза <b>\(campaign.minIntervalSeconds / 60) мин</b>.")
+
+        case "limit":
+            let args = rest.split(separator: " ").map(String.init)
+            guard let id = args.first, var campaign = await state.adCampaign(id: id) else {
+                try await sendUserFeedback(chatKey: chatKey, text: """
+                    <i>Использование:</i>
+                    <code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code> — лимит, равномерно на период
+                    <code>/ads limit &lt;id&gt; off</code> — снять лимит
+                    """)
+                return
+            }
+            if args.count >= 2, args[1].lowercased() == "off" {
+                campaign.totalImpressionsTarget = nil
+                campaign.endAt = nil
+                await state.upsertAdCampaign(campaign)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): лимит показов снят.")
+                return
+            }
+            guard args.count >= 2, let target = Int(args[1]), target > 0 else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code>")
+                return
+            }
+            campaign.totalImpressionsTarget = target
+            campaign.startAt = Date()
+            campaign.impressionsUsed = 0
+            if args.count >= 3, let days = Int(args[2]), days > 0 {
+                campaign.endAt = Date().addingTimeInterval(TimeInterval(days) * 86_400)
+            } else {
+                campaign.endAt = nil
+            }
+            await state.upsertAdCampaign(campaign)
+            let window = campaign.endAt.map { " до \(Self.adsDateFormatter.string(from: $0)) (показы размазаны равномерно)" } ?? " (без даты окончания)"
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): <b>\(target)</b> показов\(window). Счётчик обнулён.")
+
+        case "button":
+            let args = rest.split(separator: " ", maxSplits: 1).map(String.init)
+            guard let id = args.first, var campaign = await state.adCampaign(id: id) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads button &lt;id&gt; &lt;текст&gt; | &lt;url&gt;</code> или <code>/ads button &lt;id&gt; off</code>")
+                return
+            }
+            let value = args.count > 1 ? args[1] : ""
+            if value.lowercased() == "off" || value.isEmpty {
+                campaign.buttonText = nil
+                campaign.buttonURL = nil
+                await state.upsertAdCampaign(campaign)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): кнопка убрана.")
+                return
+            }
+            let buttonParts = value.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard buttonParts.count == 2, !buttonParts[0].isEmpty, buttonParts[1].hasPrefix("http") else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads button &lt;id&gt; Открыть сайт | https://example.com</code>")
+                return
+            }
+            campaign.buttonText = buttonParts[0]
+            campaign.buttonURL = buttonParts[1]
+            await state.upsertAdCampaign(campaign)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): кнопка «\(buttonParts[0])» → \(buttonParts[1])")
+
+        case "text":
+            let args = rest.split(separator: " ", maxSplits: 1).map(String.init)
+            guard args.count == 2, var campaign = await state.adCampaign(id: args[0]) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads text &lt;id&gt; &lt;новый текст&gt;</code>")
+                return
+            }
+            campaign.text = args[1]
+            await state.upsertAdCampaign(campaign)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): текст обновлён.")
+
+        case "list", "stats", "":
+            let campaigns = await state.adCampaigns()
+            var lines = ["<b>📣 Рекламные кампании</b> (\(campaigns.count))"]
+            if campaigns.isEmpty {
+                lines.append("<i>нет</i>")
+            } else {
+                for c in campaigns {
+                    lines.append("")
+                    lines.append(contentsOf: adSummaryLines(c))
+                }
+            }
+            lines.append("")
+            lines.append("""
+                <code>/ads add &lt;текст&gt;</code> — создать
+                <code>/ads freq &lt;id&gt; &lt;N&gt; [мин]</code> — частота: каждые N ответов, пауза
+                <code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code> — лимит с равномерным пейсингом
+                <code>/ads button &lt;id&gt; &lt;текст&gt; | &lt;url&gt;</code> — кнопка-ссылка
+                <code>/ads text &lt;id&gt; &lt;текст&gt;</code> · <code>on|off|remove &lt;id&gt;</code>
+
+                <i>Показы — только в чатах без активной платной лицензии, после ответа бота. Проверить самому: /simulate user, затем написать боту.</i>
+                """)
+            try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Неизвестная подкоманда.</i> Список: <code>/ads</code>")
+        }
+    }
 
     private func handleWhitelist(chatKey: ChatKey, argument: String) async throws {
         let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
@@ -456,7 +875,8 @@ final class BotCommandHandler: @unchecked Sendable {
         } else {
             for (chatID, threadID) in groups.sorted(by: { $0.chatID < $1.chatID }) {
                 let threadInfo = threadID != 0 ? " · thread \(threadID)" : ""
-                lines.append("• <code>\(chatID)</code>\(threadInfo)")
+                let label = await state.chatMeta(chatID: chatID).map { " · \($0.displayLabel)" } ?? ""
+                lines.append("• <code>\(chatID)</code>\(threadInfo)\(label)")
             }
         }
 
@@ -467,8 +887,14 @@ final class BotCommandHandler: @unchecked Sendable {
         } else {
             for (chatID, threadID) in privates.sorted(by: { $0.chatID < $1.chatID }) {
                 let threadInfo = threadID != 0 ? " · thread \(threadID)" : ""
-                lines.append("• <code>\(chatID)</code>\(threadInfo)")
+                let label = await state.chatMeta(chatID: chatID).map { " · \($0.displayLabel)" } ?? ""
+                lines.append("• <code>\(chatID)</code>\(threadInfo)\(label)")
             }
+        }
+
+        if isSuperAdmin {
+            lines.append("")
+            lines.append("<i>Настройки любого чата: /inspect &lt;chatID&gt;</i>")
         }
 
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
@@ -485,10 +911,14 @@ final class BotCommandHandler: @unchecked Sendable {
         }
 
         let sorted = privates.sorted(by: { $0.chatID < $1.chatID })
-        let list = sorted.map { "• <code>\($0.chatID)</code>" }.joined(separator: "\n")
+        var list: [String] = []
+        for entry in sorted {
+            let label = await state.chatMeta(chatID: entry.chatID).map { " · \($0.displayLabel)" } ?? ""
+            list.append("• <code>\(entry.chatID)</code>\(label)")
+        }
         try await sendUserFeedback(chatKey: chatKey, text: """
             <b>👤 Пользователи в личке</b> (\(sorted.count))
-            \(list)
+            \(list.joined(separator: "\n"))
 
             <i>Добавить в whitelist:</i> <code>/whitelist add &lt;ID&gt;</code>
             """)
@@ -663,7 +1093,8 @@ final class BotCommandHandler: @unchecked Sendable {
         let invokerIsSuper = await state.isSuperAdmin(username: fromUser?.username)
         let superOnlySubs: Set<String> = [
             "remove", "price", "freemodels", "cryptoprice", "cryptoaddr",
-            "cryptomode", "cryptopool", "stats", "cryptoinvoices"
+            "cryptomode", "cryptopool", "stats", "cryptoinvoices",
+            "extend", "unlimited", "expire", "markup"
         ]
         if superOnlySubs.contains(subcommand.lowercased()), !invokerIsSuper {
             try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
@@ -809,11 +1240,96 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             let users = await state.licensedUsers(ownerUsername: username)
             if users.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "В вашей лицензии нет добавленных пользователей.")
+                try await sendUserFeedback(chatKey: chatKey, text: "В вашей лицензии нет добавленных пользователей.\n\n<i>Удобнее всего — пригласительная ссылка: /tenant invite</i>")
             } else {
                 let list = users.map { "• @\($0)" }.joined(separator: "\n")
                 try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Лицензированные пользователи @\(username)</b> (\(users.count))\n\(list)")
             }
+
+        case "invite":
+            guard let username = invokerUsername else {
+                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                return
+            }
+            guard await state.isTenant(username: username) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "Лицензия не активна — оформите доступ: /buy")
+                return
+            }
+            let wantsNew = arg1.lowercased() == "new"
+            let existing = await state.inviteToken(owner: username)
+            let token: String?
+            if wantsNew || existing == nil {
+                token = await state.regenerateInviteToken(owner: username)
+            } else {
+                token = existing
+            }
+            guard let token else {
+                try await sendUserFeedback(chatKey: chatKey, text: "Не удалось создать ссылку — лицензия не найдена.")
+                return
+            }
+            let link = "https://t.me/\(botUsername)?start=inv_\(token)"
+            let renewedNote = wantsNew ? "\n<i>Старая ссылка больше не действует.</i>" : ""
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                🔗 <b>Пригласительная ссылка вашей лицензии</b>
+
+                \(link)
+
+                Любой, кто откроет её и нажмёт Start, получит доступ к платным моделям за ваш счёт (и попадёт в список /tenant users).\(renewedNote)
+
+                <code>/tenant invite new</code> — перевыпустить (старая перестанет работать)
+                """)
+
+        case "extend":
+            let username = normalizeUsername(arg1)
+            guard !username.isEmpty, let days = Int(arg2), days > 0 else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant extend @username &lt;дней&gt;</code>")
+                return
+            }
+            if let until = await state.extendTenantSubscription(username: username, days: days) {
+                let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Подписка @\(username) продлена до <b>\(f.string(from: until))</b>.")
+            } else {
+                try await sendUserFeedback(chatKey: chatKey, text: "Tenant @\(username) не найден.")
+            }
+
+        case "unlimited":
+            let username = normalizeUsername(arg1)
+            guard !username.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant unlimited @username</code>")
+                return
+            }
+            let ok = await state.setTenantUnlimited(username: username)
+            try await sendUserFeedback(chatKey: chatKey, text: ok
+                ? "✓ Подписка @\(username) теперь бессрочная."
+                : "Tenant @\(username) не найден.")
+
+        case "expire":
+            let username = normalizeUsername(arg1)
+            guard !username.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant expire @username</code>")
+                return
+            }
+            let ok = await state.expireTenantSubscription(username: username)
+            try await sendUserFeedback(chatKey: chatKey, text: ok
+                ? "✓ Подписка @\(username) немедленно завершена (лицензия и настройки сохранены)."
+                : "Tenant @\(username) не найден или это владелец бота.")
+
+        case "markup":
+            if arg1.isEmpty {
+                let pct = await state.markupPercent()
+                try await sendUserFeedback(chatKey: chatKey, text: """
+                    💹 Наценка на цены моделей: <b>\(pct)%</b>
+
+                    Применяется ко всем ценам, которые видят пользователи (футер, меню, /model), и к списаниям с балансов.
+                    <i>Изменить:</i> <code>/tenant markup 30</code>
+                    """)
+            } else if let pct = Int(arg1), (0...500).contains(pct) {
+                await state.setMarkupPercent(pct)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Наценка: <b>\(pct)%</b> (множитель ×\(String(format: "%.2f", 1.0 + Double(pct) / 100.0)))")
+            } else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant markup &lt;0–500&gt;</code>")
+            }
+
 
         case "stats":
             let rows = await state.tenantStats()
@@ -821,13 +1337,22 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(chatKey: chatKey, text: "Tenants: пусто.")
             } else {
                 var lines = ["<b>📊 Статистика tenants</b>"]
+                let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 for row in rows {
                     let mark = row.isSuperAdmin ? "🛡" : "🛠"
-                    let costStr = String(format: "$%.4f", row.usage.totalCost)
+                    let realStr = String(format: "$%.4f", row.usage.totalCost)
+                    let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
                     let tokens = Int(row.usage.totalTokens)
-                    lines.append("\n\(mark) <b>@\(row.username)</b>")
+                    let subscription: String
+                    if let until = row.paidUntil {
+                        subscription = row.isActive ? "до \(f.string(from: until))" : "⛔ истекла \(f.string(from: until))"
+                    } else {
+                        subscription = "бессрочно"
+                    }
+                    lines.append("\n\(mark) <b>@\(row.username)</b> · \(subscription)")
                     lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b>")
-                    lines.append("  запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(tokens)</b> · итого <b>\(costStr)</b>")
+                    lines.append("  запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(tokens)</b>")
+                    lines.append("  💵 реально <b>\(realStr)</b> · клиентская цена <b>\(billedStr)</b>")
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             }
@@ -889,6 +1414,7 @@ final class BotCommandHandler: @unchecked Sendable {
             let adminHelp = """
                 <b>🏢 Управление лицензией</b>
 
+                <code>/tenant invite</code> — 🔗 пригласительная ссылка (самый простой способ дать доступ)
                 <code>/tenant claim</code> — привязать этот чат к вашей лицензии
                 <code>/tenant release</code> — отвязать этот чат
                 <code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат вручную
@@ -897,14 +1423,18 @@ final class BotCommandHandler: @unchecked Sendable {
                 <code>/tenant adduser @username</code> — дать пользователю доступ
                 <code>/tenant removeuser @username</code> — отозвать доступ
                 <code>/tenant users</code> — лицензированные пользователи
+                <code>/chatid</code> — ID текущего чата
+                <code>/buy</code> — статус и продление подписки
                 """
             let superHelp = """
 
                 <b>🛡 Только суперадмин</b>
-                <code>/tenant add @username</code> — зарегистрировать
+                <code>/tenant add @username</code> — зарегистрировать (бессрочно)
                 <code>/tenant remove @username</code> — удалить
+                <code>/tenant extend @username &lt;дней&gt;</code> — продлить подписку
+                <code>/tenant unlimited @username</code> · <code>/tenant expire @username</code>
                 <code>/tenant list</code> — все tenants
-                <code>/tenant stats</code> — статистика по tenants
+                <code>/tenant stats</code> — статистика и подписки
                 <code>/tenant price &lt;число&gt;</code> — цена в Stars (0 = отключить)
                 <code>/tenant freemodels add|remove|list|available &lt;id&gt;</code>
                 <code>/tenant cryptoprice &lt;USD&gt;</code> — цена крипто-доступа
@@ -994,6 +1524,7 @@ final class BotCommandHandler: @unchecked Sendable {
 
                 <code>/simulate admin</code> — тест от админа
                 <code>/simulate user</code> — тест от обычного пользователя
+                <code>/simulate buy</code> — тест покупки (активация подписки без оплаты)
                 <code>/simulate off</code> — выключить
                 <code>/simulate status</code> — статус
 
@@ -1016,8 +1547,32 @@ final class BotCommandHandler: @unchecked Sendable {
             await state.setSimulatedRole(username: username, role: nil)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Симуляция выключена. Вы снова суперадмин.")
 
+        case "buy":
+            // Test purchase: exercises the same activation logic as a real
+            // Stars payment, without money changing hands.
+            let activation = await state.activatePaidSubscription(username: username)
+            await state.assignChat(chatID: chatKey.chatID, to: username)
+            let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+            let resultLine: String
+            switch activation {
+            case .started(let until):
+                resultLine = "Создан tenant @\(username), подписка до <b>\(f.string(from: until))</b>."
+            case .extended(let until):
+                resultLine = "Подписка @\(username) продлена до <b>\(f.string(from: until))</b>."
+            case .alreadyUnlimited:
+                resultLine = "У @\(username) бессрочный доступ — активация ничего не меняет."
+            }
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                🧪 <b>Тест покупки выполнен.</b>
+                \(resultLine)
+                Этот чат привязан к лицензии @\(username).
+
+                Откатить: <code>/tenant remove @\(username)</code>
+                Проверить поведение подписки: /menu → Админ-панель, /buy
+                """)
+
         default:
-            try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/simulate admin|user|off|status</code>")
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/simulate admin|user|buy|off|status</code>")
         }
     }
 
@@ -1216,8 +1771,10 @@ final class BotCommandHandler: @unchecked Sendable {
             return await service.availableAssets()
         }()
         let cryptoAvailable = cryptoPriceCents != nil && !cryptoAssets.isEmpty
+        let card = await state.cardConfig()
+        let cardAvailable = card.isEnabled
 
-        guard (starsPrice ?? 0) > 0 || cryptoAvailable else {
+        guard (starsPrice ?? 0) > 0 || cryptoAvailable || cardAvailable else {
             try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Продажа доступа сейчас недоступна.")
             return
         }
@@ -1229,29 +1786,51 @@ final class BotCommandHandler: @unchecked Sendable {
                 """)
             return
         }
+        // Existing tenant: unlimited → nothing to buy; with an expiry →
+        // the same purchase flow extends the subscription.
         if await state.isTenant(username: username) {
-            try await sendUserFeedback(chatKey: chatKey, text: "✅ У вас уже есть доступ к боту.")
-            return
+            let sub = await state.tenantSubscription(ownerUsername: username)
+            if sub.paidUntil == nil {
+                try await sendUserFeedback(chatKey: chatKey, text: "✅ У вас бессрочный доступ к боту.")
+                return
+            }
+            let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+            let statusLine = sub.isActive
+                ? "Ваша подписка активна до <b>\(f.string(from: sub.paidUntil!))</b>."
+                : "⛔ Ваша подписка истекла <b>\(f.string(from: sub.paidUntil!))</b>."
+            try await sendUserFeedback(chatKey: chatKey, text: statusLine + "\nОплата ниже продлит её на \(ChatContextStore.subscriptionDays) дней.")
         }
 
-        // Both methods available → show choice; only Stars or only Crypto → go straight.
-        if let starsPrice, starsPrice > 0, !cryptoAvailable {
-            try await telegram.sendInvoice(.init(
-                chatID: chatKey.chatID,
-                title: "Доступ к боту",
-                description: "Персональная копия ИИ-бота — единоразовая покупка",
-                payload: "buy_access",
-                starsAmount: starsPrice
-            ))
-            return
+        // Single method available → go straight; several → show choice menu.
+        let methodCount = ((starsPrice ?? 0) > 0 ? 1 : 0) + (cryptoAvailable ? 1 : 0) + (cardAvailable ? 1 : 0)
+        if methodCount == 1 {
+            if let starsPrice, starsPrice > 0 {
+                try await telegram.sendInvoice(.init(
+                    chatID: chatKey.chatID,
+                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней",
+                    description: "Персональная копия ИИ-бота: платные модели, свои чаты и пользователи",
+                    payload: "buy_access",
+                    starsAmount: starsPrice
+                ))
+                return
+            }
+            if cryptoAvailable {
+                await menuHandler.sendCryptoAssetChoice(chatKey: chatKey)
+                return
+            }
+            if cardAvailable, let token = card.providerToken, let minorUnits = card.priceMinorUnits {
+                try await telegram.sendInvoice(.init(
+                    chatID: chatKey.chatID,
+                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней",
+                    description: "Персональная копия ИИ-бота: платные модели, свои чаты и пользователи",
+                    payload: "buy_access_card",
+                    kind: .fiat(currency: card.currency.rawValue, amountMinorUnits: minorUnits, providerToken: token)
+                ))
+                return
+            }
         }
 
-        if cryptoAvailable, (starsPrice ?? 0) == 0 {
-            await menuHandler.sendCryptoAssetChoice(chatKey: chatKey)
-            return
-        }
-
-        // Both available → choice menu
+        // Several methods available → choice menu
         var rows: [[InlineKeyboardButton]] = []
         if let starsPrice, starsPrice > 0 {
             rows.append([InlineKeyboardButton(
@@ -1264,6 +1843,12 @@ final class BotCommandHandler: @unchecked Sendable {
             rows.append([InlineKeyboardButton(
                 text: label,
                 callback_data: BotCallbackAction.menu(action: "buy:crypto").rawData
+            )])
+        }
+        if cardAvailable, let priceLabel = card.priceLabel {
+            rows.append([InlineKeyboardButton(
+                text: "💳 Картой · \(priceLabel)",
+                callback_data: BotCallbackAction.menu(action: "buy:card").rawData
             )])
         }
         let markup = InlineKeyboardMarkup(inline_keyboard: rows)

@@ -6,6 +6,7 @@ enum RequestMethod {
     case get
     case post
     case patch
+    case delete
 }
 
 struct AnyEncodable: Encodable, @unchecked Sendable {
@@ -205,6 +206,8 @@ final class NetworkClient: @unchecked Sendable {
             request.method = .POST
         case .patch:
             request.method = .PATCH
+        case .delete:
+            request.method = .DELETE
         }
         
         for (name, value) in spec.headers {

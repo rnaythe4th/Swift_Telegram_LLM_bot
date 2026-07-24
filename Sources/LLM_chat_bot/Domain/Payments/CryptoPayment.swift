@@ -98,6 +98,14 @@ enum CryptoInvoiceStatus: String, Codable, Sendable {
     case cancelled
 }
 
+/// What a crypto invoice buys. Absent (nil) on invoices persisted before credit
+/// packs existed → decoded as `.subscription` via `resolvedPurpose`.
+enum CryptoInvoicePurpose: Codable, Sendable, Equatable {
+    case subscription
+    /// Top up the pay-as-you-go balance by `cents` USD (face value credited).
+    case credit(cents: Int)
+}
+
 struct CryptoInvoice: Codable, Sendable, Identifiable {
     var id: String
     var username: String
@@ -121,8 +129,14 @@ struct CryptoInvoice: Codable, Sendable, Identifiable {
     var creditedTxHashes: [String]
     /// Slot offset (0..maxConcurrentSlots) used to keep amount unique.
     var slotOffset: Int
+    /// What this invoice buys. Optional for backward compatibility with rows
+    /// written before credit packs existed; read via `resolvedPurpose`.
+    var purpose: CryptoInvoicePurpose? = nil
 
     var remainingAtomic: Int64 { max(0, exactAmountAtomic - accumulatedAtomic) }
+
+    /// Purpose with the legacy default applied (nil → subscription).
+    var resolvedPurpose: CryptoInvoicePurpose { purpose ?? .subscription }
 }
 
 struct CryptoConfigSnapshot: Codable, Sendable {

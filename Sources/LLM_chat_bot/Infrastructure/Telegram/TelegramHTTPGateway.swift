@@ -20,13 +20,39 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     private let network: NetworkClient
     private let telegramURL: String
     private let botToken: String
-    
-    init(network: NetworkClient, botToken: String) {
+    private let rateLimiter: TelegramRateLimiter?
+    private let metrics: RuntimeMetrics?
+
+    init(
+        network: NetworkClient,
+        botToken: String,
+        rateLimiter: TelegramRateLimiter? = nil,
+        metrics: RuntimeMetrics? = nil
+    ) {
         self.network = network
         self.botToken = botToken
         self.telegramURL = "https://api.telegram.org/bot\(botToken)"
+        self.rateLimiter = rateLimiter
+        self.metrics = metrics
     }
-    
+
+    /// Retries a Telegram call that failed with 429, honoring `retry_after`.
+    /// Centralizes what used to be scattered per-call-site retry loops.
+    private func with429Retry<T>(attempts: Int = 3, _ op: () async throws -> T) async throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try await op()
+            } catch let error as TelegramAPIError where error.retryAfter != nil {
+                await metrics?.increment(MetricName.telegramRateLimited)
+                attempt += 1
+                guard attempt < attempts else { throw error }
+                let delay = min(error.retryAfter ?? 1, 30)
+                try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+            }
+        }
+    }
+
     func deleteWebhook() async throws {
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/deleteWebhook",
@@ -37,6 +63,39 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         )
         let raw = try await network.perform(spec)
         try validateTelegramEnvelope(action: "deleteWebhook", statusCode: raw.statusCode, data: raw.data)
+    }
+
+    func setWebhook(url: String, secretToken: String, allowedUpdates: [String]) async throws {
+        struct Body: Codable {
+            let url: String
+            let secret_token: String
+            let allowed_updates: [String]
+            let max_connections: Int
+            let drop_pending_updates: Bool
+        }
+        let body = Body(
+            url: url,
+            secret_token: secretToken,
+            allowed_updates: allowedUpdates,
+            max_connections: 40,
+            drop_pending_updates: false
+        )
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/setWebhook",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 15,
+            maxBodyBytes: 1 << 18,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "setWebhook", statusCode: raw.statusCode, data: raw.data)
+    }
+
+    func decodeIncomingUpdate(_ data: Data) throws -> TelegramUpdate {
+        let decoded = try JSONDecoder().decode(TelegramAPIUpdate.self, from: data)
+        return map(decoded)
     }
     
     func getMe() async throws -> TelegramUser {
@@ -114,7 +173,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             parse_mode: "HTML",
             reply_markup: request.replyMarkup
         )
-        
+
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/sendMessage",
             method: .post,
@@ -123,19 +182,22 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             timeoutSeconds: 30,
             validStatusCodes: 100..<600
         )
-        
-        let raw = try await network.perform(spec)
-        let decoded: TelegramResponse<TelegramAPIMessage> = try decodeEnvelope(
-            action: "sendMessage",
-            statusCode: raw.statusCode,
-            data: raw.data
-        )
-        
-        guard decoded.ok, let result = decoded.result else {
-            throw buildTelegramError(action: "sendMessage", statusCode: raw.statusCode, data: raw.data)
+
+        await rateLimiter?.waitForMessageSlot(chatID: request.chatID)
+        return try await with429Retry {
+            let raw = try await network.perform(spec)
+            let decoded: TelegramResponse<TelegramAPIMessage> = try decodeEnvelope(
+                action: "sendMessage",
+                statusCode: raw.statusCode,
+                data: raw.data
+            )
+
+            guard decoded.ok, let result = decoded.result else {
+                throw buildTelegramError(action: "sendMessage", statusCode: raw.statusCode, data: raw.data)
+            }
+
+            return map(result)
         }
-        
-        return map(result)
     }
     
     func editMessage(_ request: EditMessageRequest) async throws {
@@ -156,12 +218,32 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             maxBodyBytes: 1 << 20,
             validStatusCodes: 100..<600
         )
-        
-        let raw = try await network.perform(spec)
-        try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
+
+        await rateLimiter?.waitForMessageSlot(chatID: request.chatID)
+        try await with429Retry {
+            let raw = try await network.perform(spec)
+            try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
+        }
     }
     
     func sendMessageDraft(_ request: SendMessageDraftRequest) async throws {
+        // Drafts are cosmetic previews: when the shared draft budget is spent,
+        // fail fast with a synthetic retry_after so DraftStreamer backs off
+        // one tick instead of queueing. The initial empty draft (generation
+        // start) always goes through — it happens once and drives the
+        // draft-capability probe.
+        if let rateLimiter, !request.text.isEmpty {
+            guard await rateLimiter.tryTakeDraftSlot() else {
+                throw TelegramAPIError(
+                    action: "sendMessageDraft",
+                    statusCode: 429,
+                    descriptionText: "local draft budget exhausted",
+                    retryAfter: 1,
+                    migrateToChatID: nil,
+                    rawBody: ""
+                )
+            }
+        }
         let body = TelegramSendMessageDraftBody(
             chat_id: request.chatID,
             message_thread_id: request.threadID,
@@ -195,11 +277,18 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             maxBodyBytes: 1 << 18,
             validStatusCodes: 100..<600
         )
-        let raw = try await network.perform(spec)
-        try validateTelegramEnvelope(action: "deleteMessage", statusCode: raw.statusCode, data: raw.data)
+        await rateLimiter?.waitForGlobalSlot()
+        try await with429Retry {
+            let raw = try await network.perform(spec)
+            try validateTelegramEnvelope(action: "deleteMessage", statusCode: raw.statusCode, data: raw.data)
+        }
     }
 
     func sendChatAction(chatID: Int, threadID: Int64?, action: String) async throws {
+        // Typing indicators are cosmetic: skip silently under load.
+        if let rateLimiter {
+            guard await rateLimiter.tryTakeCosmeticSlot() else { return }
+        }
         struct Body: Codable {
             let chat_id: Int
             let action: String
@@ -225,7 +314,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             text: text,
             show_alert: nil
         )
-        
+
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/answerCallbackQuery",
             method: .post,
@@ -235,7 +324,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             maxBodyBytes: 1 << 20,
             validStatusCodes: 100..<600
         )
-        
+
+        await rateLimiter?.waitForGlobalSlot()
         let raw = try await network.perform(spec)
         try validateTelegramEnvelope(action: "answerCallbackQuery", statusCode: raw.statusCode, data: raw.data)
     }
@@ -313,14 +403,27 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
 
     func sendInvoice(_ request: SendInvoiceRequest) async throws {
+        let currency: String
+        let amount: Int
+        let providerToken: String
+        switch request.kind {
+        case .stars(let starsAmount):
+            currency = "XTR"
+            amount = starsAmount
+            providerToken = ""
+        case .fiat(let fiatCurrency, let minorUnits, let token):
+            currency = fiatCurrency
+            amount = minorUnits
+            providerToken = token
+        }
         let body = TelegramSendInvoiceBody(
             chat_id: request.chatID,
             title: request.title,
             description: request.description,
             payload: request.payload,
-            currency: "XTR",
-            prices: [TelegramLabeledPrice(label: request.title, amount: request.starsAmount)],
-            provider_token: ""
+            currency: currency,
+            prices: [TelegramLabeledPrice(label: request.title, amount: amount)],
+            provider_token: providerToken
         )
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/sendInvoice",
@@ -330,8 +433,11 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             timeoutSeconds: 30,
             validStatusCodes: 100..<600
         )
-        let raw = try await network.perform(spec)
-        try validateTelegramEnvelope(action: "sendInvoice", statusCode: raw.statusCode, data: raw.data)
+        await rateLimiter?.waitForMessageSlot(chatID: request.chatID)
+        try await with429Retry {
+            let raw = try await network.perform(spec)
+            try validateTelegramEnvelope(action: "sendInvoice", statusCode: raw.statusCode, data: raw.data)
+        }
     }
 
     func answerPreCheckoutQuery(queryID: String, ok: Bool, errorMessage: String?) async throws {
@@ -470,7 +576,13 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     private func map(_ chat: TelegramAPIChat) -> TelegramChat {
-        TelegramChat(id: chat.id, type: chat.type)
+        TelegramChat(
+            id: chat.id,
+            type: chat.type,
+            title: chat.title,
+            username: chat.username,
+            first_name: chat.first_name
+        )
     }
     
     private func map(_ voice: TelegramAPIVoice) -> TelegramVoice {

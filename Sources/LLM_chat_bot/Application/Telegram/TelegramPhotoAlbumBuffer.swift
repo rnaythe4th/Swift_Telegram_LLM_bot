@@ -20,6 +20,12 @@ struct TelegramPhotoAlbumBuffer {
     private var pendingAlbums: [AlbumKey: PendingAlbum] = [:]
     private var pendingAlbumCountsByChat: [ChatKey: Int] = [:]
     private var blockedUpdates: [ChatKey: [TelegramUpdate]] = [:]
+
+    /// True while album parts (or updates blocked behind them) are held back
+    /// and a future `ingest([])` tick is required to release them.
+    var hasBufferedUpdates: Bool {
+        !pendingAlbums.isEmpty || !blockedUpdates.isEmpty
+    }
     
     init(holdbackInterval: TimeInterval = 0.75) {
         self.holdbackInterval = holdbackInterval

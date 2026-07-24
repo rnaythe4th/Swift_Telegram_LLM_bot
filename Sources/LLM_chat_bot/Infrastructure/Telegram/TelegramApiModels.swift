@@ -86,6 +86,9 @@ struct TelegramAPIUser: Decodable, Sendable {
 struct TelegramAPIChat: Decodable, Sendable {
     let id: Int
     let type: String
+    let title: String?
+    let username: String?
+    let first_name: String?
 }
 
 struct ReplyParameters: Codable, Sendable {

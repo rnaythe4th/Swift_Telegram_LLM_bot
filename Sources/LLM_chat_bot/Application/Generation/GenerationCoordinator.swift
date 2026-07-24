@@ -14,7 +14,9 @@ final class GenerationCoordinator: @unchecked Sendable {
     private let gateways: ProviderGatewayRegistry
     private let logger: LoggerPort
     private let botUsername: String
-    
+    private let generationLimiter: GenerationLimiter
+    private let metrics: RuntimeMetrics?
+
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
@@ -22,7 +24,9 @@ final class GenerationCoordinator: @unchecked Sendable {
         mediaResolver: MediaResolverPort,
         gateways: ProviderGatewayRegistry,
         logger: LoggerPort,
-        botUsername: String
+        botUsername: String,
+        generationLimiter: GenerationLimiter,
+        metrics: RuntimeMetrics? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -31,6 +35,63 @@ final class GenerationCoordinator: @unchecked Sendable {
         self.gateways = gateways
         self.logger = logger
         self.botUsername = botUsername
+        self.generationLimiter = generationLimiter
+        self.metrics = metrics
+    }
+
+    /// Releases the concurrency slot and closes the session. Every generation
+    /// that passed `generationLimiter.acquire()` must end through here exactly
+    /// once, whatever path it takes.
+    private func finishGeneration(_ generationID: GenerationID) async {
+        await generationLimiter.release()
+        await sessionRegistry.finish(generationID: generationID)
+    }
+
+    /// Free-tier monetization: after a completed reply in a chat without an
+    /// active paid licence, the store may pick an ad campaign to show
+    /// (frequency + pacing rules live there). Failure to send is non-fatal.
+    private func maybeServeAd(chatKey: ChatKey) async {
+        guard let ad = await state.nextAdToShow(chatKey: chatKey) else { return }
+        var markup: InlineKeyboardMarkup?
+        if let buttonText = ad.buttonText, let url = ad.buttonURL {
+            markup = InlineKeyboardMarkup(inline_keyboard: [[
+                InlineKeyboardButton(text: buttonText, url: url)
+            ]])
+        }
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: "<i>📣 Реклама</i>\n\n" + ad.text,
+            replyMarkup: markup
+        ))
+    }
+
+    /// Customer-facing footer: costs go through the markup multiplier; for
+    /// balance-billed users the projected post-charge balance is appended
+    /// (the actual deduction in appendAssistant uses the same formula).
+    private func makeFooter(
+        streamMeta: StreamMeta?,
+        fallbackModel: String,
+        options: GenerationOptions,
+        billedTo: String?,
+        hasContent: Bool
+    ) async -> String {
+        let multiplier = await state.priceMultiplier()
+        var balanceAfter: Double?
+        if let billedTo, hasContent {
+            let realCost = streamMeta?.usage?.cost ?? 0
+            balanceAfter = await state.projectedBalanceAfterCharge(username: billedTo, realCost: realCost)
+        }
+        return ResponseFooterFormatter.formatFooter(
+            meta: streamMeta,
+            fallbackModel: fallbackModel,
+            showTokens: options.showStats,
+            showCost: options.showCost,
+            showModel: options.showModel,
+            costMultiplier: multiplier,
+            balanceAfter: balanceAfter
+        ) ?? ""
     }
     
     func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
@@ -97,6 +158,20 @@ final class GenerationCoordinator: @unchecked Sendable {
             }
         }
 
+        // Billing: a chat covered by a tenant subscription costs the sender
+        // nothing; otherwise a sender with a positive balance pays per message
+        // (marked-up). Everyone else is free-tier → sees ads.
+        let covered = await state.hasSubscriptionCoverage(
+            username: username,
+            userID: message.from?.id,
+            chatID: chatKey.chatID
+        )
+        var billedTo: String? = nil
+        if !covered, let username, await state.hasPositiveBalance(username: username) {
+            billedTo = username
+        }
+        let adEligible = !covered && billedTo == nil
+
         let generationID = await sessionRegistry.register(chatKey: chatKey)
 
         let typingTask = Task {
@@ -110,6 +185,12 @@ final class GenerationCoordinator: @unchecked Sendable {
             }
         }
         defer { typingTask.cancel() }
+
+        // Global concurrency cap: with hundreds of chats firing at once the
+        // excess waits here (typing indicator already running) instead of
+        // exhausting sockets/memory.
+        await generationLimiter.acquire()
+        await metrics?.increment(MetricName.generationsStarted)
         
         var processedContent = content
         if let username, let text = processedContent.text, !text.isEmpty {
@@ -158,11 +239,13 @@ final class GenerationCoordinator: @unchecked Sendable {
                 chatKey: chatKey,
                 replyToMessageID: message.message_id,
                 generationID: generationID,
-                isPrivateChat: message.chat.type == "private"
+                isPrivateChat: message.chat.type == "private",
+                adEligible: adEligible,
+                billedTo: billedTo
             )
         } catch {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            await sessionRegistry.finish(generationID: generationID)
+            await finishGeneration(generationID)
             throw error
         }
     }
@@ -175,29 +258,26 @@ final class GenerationCoordinator: @unchecked Sendable {
         chatKey: ChatKey,
         replyToMessageID: Int,
         generationID: GenerationID,
-        isPrivateChat: Bool
+        isPrivateChat: Bool,
+        adEligible: Bool,
+        billedTo: String?
     ) async throws {
         let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
             .init(text: "⏹ Остановить", callback_data: BotCallbackAction.stop(generationID).rawData)
         ]])
 
-        let placeholder: TelegramMessage
-
-        do {
-            placeholder = try await telegram.sendMessage(
-                .init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: replyToMessageID,
-                    text: "💭 <i>Думаю…</i>",
-                    replyMarkup: stopMarkup
-                )
+        // On failure just rethrow: processContent's catch owns the cleanup
+        // (cancelPendingTurn + finishGeneration) — doing it here too would
+        // release the generation slot twice.
+        let placeholder = try await telegram.sendMessage(
+            .init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: replyToMessageID,
+                text: "💭 <i>Думаю…</i>",
+                replyMarkup: stopMarkup
             )
-        } catch {
-            await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            await sessionRegistry.finish(generationID: generationID)
-            throw error
-        }
+        )
 
         // Drafts work only in private chats; begin() returns nil when the Bot API
         // server has no sendMessageDraft (then we fall back to edit-based streaming).
@@ -223,7 +303,9 @@ final class GenerationCoordinator: @unchecked Sendable {
                     chatKey: chatKey,
                     replyToMessageID: replyToMessageID,
                     generationID: generationID,
-                    controlMessage: placeholder
+                    controlMessage: placeholder,
+                    adEligible: adEligible,
+                    billedTo: billedTo
                 )
             }
         } else {
@@ -236,7 +318,9 @@ final class GenerationCoordinator: @unchecked Sendable {
                     chatKey: chatKey,
                     generationID: generationID,
                     placeholder: placeholder,
-                    stopMarkup: stopMarkup
+                    stopMarkup: stopMarkup,
+                    adEligible: adEligible,
+                    billedTo: billedTo
                 )
             }
         }
@@ -258,7 +342,9 @@ final class GenerationCoordinator: @unchecked Sendable {
         chatKey: ChatKey,
         replyToMessageID: Int,
         generationID: GenerationID,
-        controlMessage: TelegramMessage
+        controlMessage: TelegramMessage,
+        adEligible: Bool,
+        billedTo: String?
     ) async {
         var fullAccumulator = ""
         var messageAccumulator = ""
@@ -340,7 +426,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             _ = await persist("⚠️ <b>Ошибка генерации</b>\n" + UserFacingError.message(error))
             await removeControlMessage()
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            await sessionRegistry.finish(generationID: generationID)
+            await finishGeneration(generationID)
             return
         }
 
@@ -360,13 +446,13 @@ final class GenerationCoordinator: @unchecked Sendable {
                 ? stopNotice
                 : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + "\n\n" + stopNotice
         } else {
-            let footer = ResponseFooterFormatter.formatFooter(
-                meta: streamMeta,
+            let footer = await makeFooter(
+                streamMeta: streamMeta,
                 fallbackModel: fallbackModel,
-                showTokens: options.showStats,
-                showCost: options.showCost,
-                showModel: options.showModel
-            ) ?? ""
+                options: options,
+                billedTo: billedTo,
+                hasContent: !fullAccumulator.isEmpty
+            )
 
             let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
             finalText = messageAccumulator.isEmpty
@@ -392,11 +478,14 @@ final class GenerationCoordinator: @unchecked Sendable {
         if isCancelled {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
         } else if !fullAccumulator.isEmpty {
-            await state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage)
+            await state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
+            if adEligible {
+                await maybeServeAd(chatKey: chatKey)
+            }
         } else {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
         }
-        await sessionRegistry.finish(generationID: generationID)
+        await finishGeneration(generationID)
     }
 
     /// Legacy streaming for group chats and Bot API servers without drafts:
@@ -409,7 +498,9 @@ final class GenerationCoordinator: @unchecked Sendable {
         chatKey: ChatKey,
         generationID: GenerationID,
         placeholder: TelegramMessage,
-        stopMarkup: InlineKeyboardMarkup
+        stopMarkup: InlineKeyboardMarkup,
+        adEligible: Bool,
+        billedTo: String?
     ) async {
         let emptyMarkup = InlineKeyboardMarkup(inline_keyboard: [])
         let logger = self.logger
@@ -515,7 +606,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 )
             )
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            await self.sessionRegistry.finish(generationID: generationID)
+            await self.finishGeneration(generationID)
             return
         }
 
@@ -530,13 +621,13 @@ final class GenerationCoordinator: @unchecked Sendable {
                 ? stopNotice
                 : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + "\n\n" + stopNotice
         } else {
-            let footer = ResponseFooterFormatter.formatFooter(
-                meta: streamMeta,
+            let footer = await makeFooter(
+                streamMeta: streamMeta,
                 fallbackModel: fallbackModel,
-                showTokens: options.showStats,
-                showCost: options.showCost,
-                showModel: options.showModel
-            ) ?? ""
+                options: options,
+                billedTo: billedTo,
+                hasContent: !fullAccumulator.isEmpty
+            )
 
             let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
             finalText = messageAccumulator.isEmpty
@@ -556,11 +647,14 @@ final class GenerationCoordinator: @unchecked Sendable {
         if isCancelled {
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
         } else if !fullAccumulator.isEmpty {
-            await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage)
+            await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
+            if adEligible {
+                await self.maybeServeAd(chatKey: chatKey)
+            }
         } else {
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
         }
-        await self.sessionRegistry.finish(generationID: generationID)
+        await self.finishGeneration(generationID)
     }
 
     private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {

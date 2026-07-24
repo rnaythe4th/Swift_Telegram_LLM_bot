@@ -1,20 +1,33 @@
 import Foundation
 
+/// How the orchestrator receives updates.
+enum IntakeRunMode: Sendable {
+    /// Production: Telegram pushes updates to our public URL. Undelivered
+    /// updates are queued by Telegram for 24h, so deploys lose nothing.
+    case webhook(publicBaseURL: String, secret: String)
+    /// Development fallback: long polling with the offset persisted in
+    /// `bot_config`.
+    case polling
+}
+
 final class BotOrchestrator: @unchecked Sendable {
     private let telegram: TelegramGatewayPort
     private let state: ChatContextStore
-    private let persistence: StatePersistencePort?
+    private let sessionRegistry: SessionRegistry
+    private let persistence: PersistenceCoordinator?
     private let logger: LoggerPort
+    private let metrics: RuntimeMetrics
+    private let flags: RuntimeFlags
     private let callbackHandler: BotCallbackHandler
     private let commandHandler: BotCommandHandler
     private let generationCoordinator: GenerationCoordinator
     private let menuHandler: BotMenuHandler
     private let updateDispatcher = ChatUpdateDispatcher()
-    private var photoAlbumBuffer = TelegramPhotoAlbumBuffer()
     private let modelPriceMonitor: ModelPriceMonitor?
     private let cryptoMonitor: CryptoPaymentMonitor?
 
-    private static let backupIntervalSeconds: Int64 = 60
+    private let backgroundTasks = LockedValue<[Task<Void, Never>]>([])
+    private let shutdownStarted = LockedValue(false)
 
     init(
         telegram: TelegramGatewayPort,
@@ -22,8 +35,11 @@ final class BotOrchestrator: @unchecked Sendable {
         sessionRegistry: SessionRegistry,
         mediaResolver: MediaResolverPort,
         providers: [ServiceProvider: ProviderGatewayPort],
-        persistence: StatePersistencePort?,
+        persistence: PersistenceCoordinator?,
         logger: LoggerPort,
+        metrics: RuntimeMetrics,
+        flags: RuntimeFlags,
+        generationLimiter: GenerationLimiter,
         botUsername: String,
         formatOptions: String,
         modelPriceMonitor: ModelPriceMonitor? = nil,
@@ -32,8 +48,11 @@ final class BotOrchestrator: @unchecked Sendable {
     ) {
         self.telegram = telegram
         self.state = state
+        self.sessionRegistry = sessionRegistry
         self.persistence = persistence
         self.logger = logger
+        self.metrics = metrics
+        self.flags = flags
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoMonitor = cryptoMonitor
 
@@ -44,6 +63,7 @@ final class BotOrchestrator: @unchecked Sendable {
             gateways: gatewayRegistry,
             logger: logger,
             formatOptions: formatOptions,
+            botUsername: botUsername,
             modelPriceMonitor: modelPriceMonitor,
             cryptoService: cryptoService
         )
@@ -75,103 +95,176 @@ final class BotOrchestrator: @unchecked Sendable {
             mediaResolver: mediaResolver,
             gateways: gatewayRegistry,
             logger: logger,
-            botUsername: botUsername
+            botUsername: botUsername,
+            generationLimiter: generationLimiter,
+            metrics: metrics
         )
     }
 
-    func run() async {
-        let restored = await restoreState()
-        var currentOffset = restored.offset
-        let lastBackupOffset = LockedValue(currentOffset ?? 0)
-        let backupsEnabled = restored.canBackup
+    // MARK: - Boot: restore state (with one-time legacy migration)
+
+    /// Loads state from the row-based schema; if those tables are empty and a
+    /// legacy blob exists, imports it once and flushes everything as rows.
+    /// On load failure the bot runs memory-only (persistence loop stays off)
+    /// rather than risking partial overwrites of good data.
+    func bootstrapState(rawPersistence: StatePersistencePort?) async -> Bool {
+        guard let rawPersistence, let persistence else {
+            logger.warning("persistence disabled (missing Supabase credentials) — state is in-memory only")
+            return false
+        }
+        do {
+            let stored = try await rawPersistence.loadEverything()
+            if stored.isEmpty {
+                if let legacy = try await rawPersistence.loadLegacySnapshot() {
+                    await state.restoreFromSnapshot(legacy)
+                    await state.markAllDirty()
+                    await persistence.flushNow()
+                    logger.info("migrated legacy snapshot to row schema (chats: \(legacy.contexts.count))")
+                } else {
+                    logger.info("no saved state found, starting fresh")
+                }
+            } else {
+                await state.restore(from: stored)
+                logger.info("state restored (chats: \(stored.contexts.count), tenants: \(stored.tenants.count))")
+            }
+            return true
+        } catch {
+            logger.error("state restore failed — running memory-only, writes disabled to protect stored data: \(error)")
+            return false
+        }
+    }
+
+    // MARK: - Run
+
+    func run(mode: IntakeRunMode, intake: UpdateIntake, persistenceHealthy: Bool) async {
+        if persistenceHealthy {
+            await persistence?.start()
+        }
 
         await modelPriceMonitor?.performInitialFetch()
 
-        let priceMonitorTask = Task { [weak self] in
+        var tasks: [Task<Void, Never>] = []
+        tasks.append(Task { [weak self] in
             await self?.modelPriceMonitor?.run()
-        }
-
-        let cryptoMonitorTask = Task { [weak self] in
+        })
+        tasks.append(Task { [weak self] in
             await self?.cryptoMonitor?.run()
+        })
+        if persistenceHealthy {
+            tasks.append(Task { [weak self] in
+                await self?.runPersistenceNotifyLoop()
+            })
         }
+        backgroundTasks.value = tasks
 
-        let backupTask = Task { [weak self] in
-            guard let self, let persistence = self.persistence, backupsEnabled else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(Self.backupIntervalSeconds) * 1_000_000_000)
-                let offset = lastBackupOffset.value
-                let dateFormatter = ISO8601DateFormatter()
-                dateFormatter.timeZone = TimeZone(abbreviation: "UTC")
-                let timeString = dateFormatter.string(from: Date())
-                let success: String
-                do {
-                    let snapshot = await self.state.exportSnapshot(telegramUpdateOffset: offset)
-                    try await persistence.saveState(snapshot)
-                    success = "✓ Успешно"
-                } catch {
-                    self.logger.error("state backup failed: \(error)")
-                    success = "✗ " + UserFacingError.message(error)
-                }
-                let chatKeys = await self.state.chatsWithBackupNotify()
-                for chatKey in chatKeys {
-                    _ = try? await self.telegram.sendMessage(
-                        .init(
-                            chatID: chatKey.chatID,
-                            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                            replyTo: nil,
-                            text: "💾 <b>Бэкап</b> · \(success)\n<i>\(timeString) · offset \(offset)</i>",
-                            replyMarkup: nil
-                        )
-                    )
-                }
-            }
-        }
+        flags.ready.value = true
 
-        while true {
+        switch mode {
+        case .webhook(let publicBaseURL, let secret):
             do {
-                let updates = try await telegram.getUpdates(offset: currentOffset)
-                if let maxUpdateID = updates.map(\.update_id).max() {
-                    currentOffset = maxUpdateID + 1
-                    lastBackupOffset.value = currentOffset!
+                let url = publicBaseURL + WebhookEndpoint.path
+                try await telegram.setWebhook(
+                    url: url,
+                    secretToken: secret,
+                    allowedUpdates: ["message", "callback_query", "pre_checkout_query"]
+                )
+                logger.info("webhook registered: \(url)")
+                // Updates now arrive via AppHTTPServer → intake; park until drain.
+                while !flags.draining.value {
+                    try? await Task.sleep(for: .seconds(1))
                 }
+            } catch {
+                logger.error("setWebhook failed, falling back to polling: \(error)")
+                await runPollingLoop(intake: intake)
+            }
+        case .polling:
+            try? await telegram.deleteWebhook()
+            logger.info("long polling started")
+            await runPollingLoop(intake: intake)
+        }
+    }
 
-                for update in photoAlbumBuffer.ingest(updates) {
-                    await self.dispatch(update: update)
+    private func runPollingLoop(intake: UpdateIntake) async {
+        var offset = await state.pollingOffset()
+        while !flags.draining.value {
+            do {
+                let updates = try await telegram.getUpdates(offset: offset)
+                if let maxUpdateID = updates.map(\.update_id).max() {
+                    let next = maxUpdateID + 1
+                    offset = next
+                    await state.setPollingOffset(next)
                 }
+                await intake.enqueue(updates)
             } catch {
                 logger.error("getUpdates error: \(error)")
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
         }
-
-        priceMonitorTask.cancel()
-        cryptoMonitorTask.cancel()
-        backupTask.cancel()
     }
 
-    private struct RestoreResult {
-        let offset: Int?
-        let canBackup: Bool
-    }
-
-    private func restoreState() async -> RestoreResult {
-        guard let persistence else { return RestoreResult(offset: nil, canBackup: true) }
-        do {
-            guard let snapshot = try await persistence.loadState() else {
-                logger.info("no saved state found, starting fresh")
-                return RestoreResult(offset: nil, canBackup: true)
+    /// Periodic persistence status for chats that opted into backup
+    /// notifications (the write-behind replacement for the old 60s backup
+    /// report).
+    private func runPersistenceNotifyLoop() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+            guard let persistence else { return }
+            let chatKeys = await state.chatsWithBackupNotify()
+            guard !chatKeys.isEmpty else { continue }
+            let line = await persistence.statusLine()
+            let formatter = ISO8601DateFormatter()
+            formatter.timeZone = TimeZone(abbreviation: "UTC")
+            let timeString = formatter.string(from: Date())
+            for chatKey in chatKeys {
+                _ = try? await telegram.sendMessage(
+                    .init(
+                        chatID: chatKey.chatID,
+                        threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                        replyTo: nil,
+                        text: "💾 <b>Хранилище</b> · \(line)\n<i>\(timeString)</i>",
+                        replyMarkup: nil
+                    )
+                )
             }
-            await state.restoreFromSnapshot(snapshot)
-            logger.info("state restored (offset: \(snapshot.telegramUpdateOffset), chats: \(snapshot.contexts.count))")
-            return RestoreResult(offset: snapshot.telegramUpdateOffset, canBackup: true)
-        } catch {
-            logger.error("state restore failed; backups disabled to avoid overwriting saved state: \(error)")
-            return RestoreResult(offset: nil, canBackup: false)
         }
     }
 
-    private func dispatch(update: TelegramUpdate) async {
+    // MARK: - Graceful shutdown
+
+    /// SIGTERM path: stop taking updates (webhook answers 503 → Telegram
+    /// redelivers after restart), let in-flight generations finish briefly,
+    /// then flush all dirty state.
+    func shutdown() async {
+        let alreadyStarted = shutdownStarted.withLock { started -> Bool in
+            let was = started
+            started = true
+            return was
+        }
+        guard !alreadyStarted else { return }
+
+        logger.info("shutdown: draining…")
+        flags.draining.value = true
+        flags.ready.value = false
+
+        let deadline = ContinuousClock().now + .seconds(8)
+        while await sessionRegistry.activeCount > 0, ContinuousClock().now < deadline {
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+
+        for task in backgroundTasks.value {
+            task.cancel()
+        }
+
+        await persistence?.stop()
+        logger.info("shutdown: state flushed, exiting")
+    }
+
+    // MARK: - Dispatch
+
+    func dispatch(update: TelegramUpdate) async {
         if let callback = update.callback_query {
+            // Callbacks bypass the per-chat queue on purpose: the stop button
+            // must cancel the generation that is blocking that queue.
             Task {
                 await self.callbackHandler.handleIfSupported(callback)
             }
@@ -188,7 +281,7 @@ final class BotOrchestrator: @unchecked Sendable {
         guard let message = update.message else { return }
         let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
 
-        await updateDispatcher.submit(chatKey: chatKey) { [self] in
+        let result = await updateDispatcher.submit(chatKey: chatKey) { [self] in
             do {
                 try await route(message: message, chatKey: chatKey)
             } catch {
@@ -207,12 +300,49 @@ final class BotOrchestrator: @unchecked Sendable {
                 }
             }
         }
+
+        if case .rejected(let shouldNotify) = result {
+            await metrics.increment(MetricName.updatesDropped)
+            logger.warning("chat \(chatKey.chatID) queue full, update dropped")
+            if shouldNotify {
+                // Fire-and-forget: dispatch() runs on the intake path and must
+                // not wait for a rate-limiter slot.
+                Task { [telegram] in
+                    _ = try? await telegram.sendMessage(
+                        .init(
+                            chatID: chatKey.chatID,
+                            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                            replyTo: nil,
+                            text: "⏳ Слишком много сообщений подряд — часть пропущена. Дождитесь ответа на предыдущие.",
+                            replyMarkup: nil
+                        )
+                    )
+                }
+            }
+        }
     }
 
     private func handlePreCheckoutQuery(_ query: TelegramPreCheckoutQuery) async {
         do {
-            let price = await state.starsPrice()
-            if let price, query.total_amount == price {
+            let valid: Bool
+            let payload = query.invoice_payload
+            if payload.hasPrefix("credits_"),
+               let cents = Int(payload.dropFirst("credits_".count)),
+               CreditPack.isValid(cents: cents) {
+                // Credit pack — Stars only for now; amount must match the live rate.
+                let expected = await state.starsForCents(cents)
+                valid = query.currency == "XTR" && query.total_amount == expected
+            } else if query.currency == "XTR" {
+                let price = await state.starsPrice()
+                valid = price != nil && query.total_amount == price
+            } else {
+                // Card payment: currency and amount must match the current config.
+                let card = await state.cardConfig()
+                valid = card.isEnabled
+                    && query.currency == card.currency.rawValue
+                    && query.total_amount == card.priceMinorUnits
+            }
+            if valid {
                 try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: true, errorMessage: nil)
             } else {
                 try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Цена изменилась. Попробуйте снова с командой /buy.")
@@ -228,7 +358,20 @@ final class BotOrchestrator: @unchecked Sendable {
         let senderUserID = message.from?.id
         let isPrivate = message.chat.type == "private"
 
-        // Successful payment — handle before access gate since payer isn't a tenant yet
+        // Keep the human-readable chat identity fresh so admin tooling can
+        // show titles/usernames instead of bare IDs.
+        await state.recordChatMeta(
+            chatID: message.chat.id,
+            info: ChatMetaInfo(
+                type: message.chat.type,
+                title: message.chat.title,
+                username: isPrivate ? (message.chat.username ?? message.from?.username) : nil,
+                firstName: isPrivate ? (message.chat.first_name ?? message.from?.first_name) : nil
+            )
+        )
+
+        // Successful payment — handle before the access gate since the payer
+        // isn't a tenant yet
         if let payment = message.successful_payment {
             await handleSuccessfulPayment(message: message, payment: payment)
             return
@@ -258,7 +401,18 @@ final class BotOrchestrator: @unchecked Sendable {
     }
 
     private func handleSuccessfulPayment(message: TelegramMessage, payment: TelegramSuccessfulPayment) async {
+        // Telegram redelivers updates after webhook timeouts and restarts;
+        // the charge ID makes activation idempotent.
+        let chargeID = payment.telegram_payment_charge_id
+        if await state.isPaymentProcessed(chargeID: chargeID) {
+            await metrics.increment(MetricName.paymentsDeduplicated)
+            logger.info("duplicate successful_payment ignored (charge \(chargeID))")
+            return
+        }
+
         guard let username = message.from?.username else {
+            await state.markPaymentProcessed(chargeID: chargeID)
+            await persistence?.flushNow()
             _ = try? await telegram.sendMessage(.init(
                 chatID: message.chat.id,
                 threadID: message.message_thread_id,
@@ -268,36 +422,102 @@ final class BotOrchestrator: @unchecked Sendable {
             ))
             return
         }
-        await state.registerTenant(username: username)
+
+        // Credit-pack top-up: add face value to the wallet, no subscription/tenant.
+        let payload = payment.invoice_payload
+        if payload.hasPrefix("credits_"),
+           let cents = Int(payload.dropFirst("credits_".count)),
+           CreditPack.isValid(cents: cents) {
+            let wallet = await state.creditBalance(username: username, amountUsd: Double(cents) / 100.0)
+            await state.markPaymentProcessed(chargeID: chargeID)
+            await metrics.increment(MetricName.paymentsProcessed)
+            await persistence?.flushNow()
+            _ = try? await telegram.sendMessage(.init(
+                chatID: message.chat.id,
+                threadID: message.message_thread_id,
+                replyTo: nil,
+                text: String(
+                    format: "✅ <b>Баланс пополнен на %@.</b>\n\nТекущий баланс: <b>$%.2f</b>. Теперь доступны любые модели — плата за каждый ответ по факту, остаток видно в футере (включите /show_cost).",
+                    CreditPack.label(cents: cents), wallet.balanceUsd
+                ),
+                replyMarkup: nil
+            ))
+            logger.info("credit top-up for @\(username): +\(cents)c (charge \(chargeID))")
+            return
+        }
+
+        let activation = await state.activatePaidSubscription(username: username)
         await state.assignChat(chatID: message.chat.id, to: username)
-        _ = try? await telegram.sendMessage(.init(
-            chatID: message.chat.id,
-            threadID: message.message_thread_id,
-            replyTo: nil,
-            text: """
+        await state.markPaymentProcessed(chargeID: chargeID)
+        await metrics.increment(MetricName.paymentsProcessed)
+        // Payments are the one thing that must never wait out the debounce.
+        await persistence?.flushNow()
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd.MM.yyyy"
+        let text: String
+        switch activation {
+        case .started(let until):
+            text = """
             ✅ <b>Оплата получена!</b>
 
             Добро пожаловать, @\(username)!
             Ваша персональная копия бота активирована.
+            Подписка действует до <b>\(formatter.string(from: until))</b>.
 
             Используйте /menu для настройки или просто начните общение.
-            """,
+            Продлить в любой момент — /buy.
+            """
+        case .extended(let until):
+            text = """
+            ✅ <b>Подписка продлена!</b>
+
+            Доступ активен до <b>\(formatter.string(from: until))</b>.
+            """
+        case .alreadyUnlimited:
+            text = "✅ Оплата получена. У вас бессрочный доступ — ничего не изменилось."
+        }
+        _ = try? await telegram.sendMessage(.init(
+            chatID: message.chat.id,
+            threadID: message.message_thread_id,
+            replyTo: nil,
+            text: text,
             replyMarkup: nil
         ))
-        logger.info("new tenant registered via Stars payment: @\(username), amount: \(payment.total_amount) XTR")
-    }
-}
-
-private final class LockedValue<Value: Sendable>: @unchecked Sendable {
-    private var _value: Value
-    private let lock = NSLock()
-
-    init(_ value: Value) {
-        self._value = value
+        logger.info("payment processed for @\(username): \(payment.total_amount) \(payment.currency) (\(activation))")
     }
 
-    var value: Value {
-        get { lock.withLock { _value } }
-        set { lock.withLock { _value = newValue } }
+    // MARK: - Metrics report (GET /metrics)
+
+    struct MetricsReport: Codable, Sendable {
+        let uptimeSeconds: Int
+        let activeGenerations: Int
+        let queuedChatOperations: Int
+        let dirtyEntities: Int
+        let persistence: String
+        let counters: [String: Int]
+    }
+
+    func metricsReport() async -> MetricsReport {
+        let snapshot = await metrics.snapshot()
+        let persistenceLine: String
+        if let persistence {
+            let status = await persistence.status()
+            if let error = status.lastErrorMessage {
+                persistenceLine = "error: \(error) (retry pending: \(status.pendingRetryEntities))"
+            } else {
+                persistenceLine = "ok (flushes: \(status.totalFlushes), entities: \(status.totalEntitiesFlushed))"
+            }
+        } else {
+            persistenceLine = "disabled"
+        }
+        return MetricsReport(
+            uptimeSeconds: snapshot.uptimeSeconds,
+            activeGenerations: await sessionRegistry.activeCount,
+            queuedChatOperations: await updateDispatcher.totalQueuedOperations,
+            dirtyEntities: await state.dirtyEntityCount,
+            persistence: persistenceLine,
+            counters: snapshot.counters
+        )
     }
 }

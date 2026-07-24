@@ -1,14 +1,20 @@
 import Foundation
 
 enum ResponseFooterFormatter {
+    /// `costMultiplier` converts the provider's real cost into the customer
+    /// price (markup); every user-visible dollar amount goes through it.
+    /// `balanceAfter` adds the remaining pay-as-you-go balance for users who
+    /// were charged per-message.
     static func formatFooter(
         meta: StreamMeta?,
         fallbackModel: String,
         showTokens: Bool,
         showCost: Bool,
-        showModel: Bool
+        showModel: Bool,
+        costMultiplier: Double = 1.0,
+        balanceAfter: Double? = nil
     ) -> String? {
-        guard showTokens || showCost || showModel else { return nil }
+        guard showTokens || showCost || showModel || balanceAfter != nil else { return nil }
 
         let usage = meta?.usage
         var lines: [String] = []
@@ -19,7 +25,7 @@ enum ResponseFooterFormatter {
 
         if showCost {
             if let cost = usage?.cost {
-                lines.append("💵 $\(formatCost(cost))")
+                lines.append("💵 $\(formatCost(cost * costMultiplier))")
             } else {
                 lines.append("💵 —")
             }
@@ -27,6 +33,10 @@ enum ResponseFooterFormatter {
 
         if showModel {
             lines.append("🤖 <code>\(meta?.model ?? fallbackModel)</code>")
+        }
+
+        if let balanceAfter {
+            lines.append(String(format: "💰 Баланс · $%.4f", max(balanceAfter, 0)) + (balanceAfter <= 0 ? " <i>(исчерпан)</i>" : ""))
         }
 
         guard !lines.isEmpty else { return nil }

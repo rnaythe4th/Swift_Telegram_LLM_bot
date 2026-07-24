@@ -67,6 +67,17 @@ enum AdminPendingInputKind: Sendable {
     case superAdminAdd
     case superAdminRemove
     case simulateAs
+    case adAddText
+    // User-level custom value inputs from the settings menu.
+    case chatCustomRole
+    case chatCustomModel
+    case chatCustomTemp
+    case chatCustomHistory
+    // Super-admin monetization inputs.
+    case markupPercent
+    case balanceTopUp
+    case cardProviderToken
+    case cardPrice
 }
 
 struct AdminPendingInput: Sendable {

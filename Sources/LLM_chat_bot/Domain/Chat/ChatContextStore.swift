@@ -18,6 +18,21 @@ struct TenantState: Sendable {
     var adminUsernames: Set<String>
     var licensedUsernames: Set<String>
     var cumulativeUsage: CumulativeUsage
+    var createdAt: Date?
+    /// Subscription end. nil = unlimited (root owner, manually added tenants).
+    var paidUntil: Date?
+
+    var isActive: Bool {
+        guard let paidUntil else { return true }
+        return paidUntil > Date()
+    }
+}
+
+/// Outcome of a paid activation — drives the confirmation message wording.
+enum SubscriptionActivation: Sendable {
+    case started(until: Date)
+    case extended(until: Date)
+    case alreadyUnlimited
 }
 
 struct TenantStatsRow: Sendable {
@@ -26,6 +41,8 @@ struct TenantStatsRow: Sendable {
     let chatCount: Int
     let licensedUserCount: Int
     let isSuperAdmin: Bool
+    let paidUntil: Date?
+    let isActive: Bool
 }
 
 struct ChatContext: Sendable {
@@ -61,6 +78,9 @@ struct ChatContext: Sendable {
     var chatTempPresets: [Preset]
     var chatHistoryLengthPresets: [Preset]
     var chatRolePresets: [Preset]
+    /// Bot replies in this chat since the last ad impression.
+    var adReplyCounter: Int = 0
+    var adLastShownAt: Date? = nil
 }
 
 struct GenerationSnapshot: Sendable {
@@ -90,32 +110,63 @@ struct HelpData: Sendable {
 }
 
 actor ChatContextStore {
-    private var contexts: [ChatKey: ChatContext] = [:]
-    private var tenants: [String: TenantState] = [:]
-    private var chatOwnership: [Int: String] = [:]
-    private var userTenantMap: [Int: String] = [:]
+    // Storage is `internal` (not private) so ChatContextStore+Persistence.swift
+    // can export/restore rows; nothing outside the actor touches it directly.
+    var contexts: [ChatKey: ChatContext] = [:]
+    var tenants: [String: TenantState] = [:]
+    var chatOwnership: [Int: String] = [:]
+    var userTenantMap: [Int: String] = [:]
 
-    private var superAdminUsernames: Set<String>
-    private let rootSuperAdminUsername: String
+    var superAdminUsernames: Set<String>
+    let rootSuperAdminUsername: String
     let defaultOwnerUsername: String
     var formatOptions: String
     let companyChatId: Int
     let companyMembers: String
     let defaultSuffix: Int?
 
-    private let initialDefaultModel: String
-    private let initialDefaultRole: String
-    private let initialDefaultHistoryLength: Int
+    let initialDefaultModel: String
+    let initialDefaultRole: String
+    let initialDefaultHistoryLength: Int
+
+    // MARK: - Dirty tracking (drained by PersistenceCoordinator)
+
+    var dirtyContexts = Set<ChatKey>()
+    var dirtyTenants = Set<String>()
+    var deletedTenants = Set<String>()
+    var dirtyOwnership = Set<Int>()
+    var deletedOwnership = Set<Int>()
+    var dirtyConfigs = Set<GlobalConfigKey>()
+    /// Telegram Stars charge IDs already handled — makes payment processing
+    /// idempotent across update redeliveries and restarts.
+    var processedPaymentChargeIDs: [String] = []
+    var pollingOffsetValue: Int? = nil
+    var chatMetaByID: [Int: ChatMetaInfo] = [:]
+    var inviteRecords: [String: InviteRecord] = [:]
+    var adCampaignList: [AdCampaign] = []
+    /// Markup percent on provider prices for customer-facing costs and
+    /// balance charging.
+    var markupPercentValue: Int = 30
+    /// Pay-as-you-go wallets, keyed by lowercased username.
+    var userBalances: [String: UserBalance] = [:]
 
     private var _pendingInputs: [ChatKey: PendingInput] = [:]
-    private var _starsPrice: Int? = nil
+    // Internal (not private): restored by ChatContextStore+Persistence.swift.
+    var _starsPrice: Int? = nil
+    /// Stars charged per $1 when buying credit packs. Telegram pays devs
+    /// ~$0.013/⭐, so 77⭐/$ recovers the pack's face value; the 30% spend
+    /// markup on top is the margin. Tunable live from the super-admin menu.
+    var _starsPerUsd: Int = 77
     private var _pendingStarsPriceInputs: [ChatKey: Int] = [:]
+    private var _pendingStarsPerUsdInputs: [ChatKey: Int] = [:]
     private var _pendingFreeModelInputs: [ChatKey: Int] = [:]
-    private var _freeModelIDs: [String] = []
+    var _freeModelIDs: [String] = []
     private var _openRouterFreeModelIDs: Set<String>? = nil
     private var _openRouterModelPrices: [String: ModelPriceInfo] = [:]
 
     private var _cryptoPriceUsdCents: Int? = nil
+    // Internal (not private): restored by ChatContextStore+Persistence.swift.
+    var _cardConfig: CardPaymentConfig = .empty
     private var _cryptoAddresses: [CryptoChain: String] = [:]
     private var _cryptoInvoices: [String: CryptoInvoice] = [:]
     private var _cryptoSlotCounters: [CryptoAsset: Int] = [:]
@@ -163,7 +214,9 @@ actor ChatContextStore {
                 whitelistedUserIDs: [],
                 adminUsernames: [],
                 licensedUsernames: [],
-                cumulativeUsage: .zero
+                cumulativeUsage: .zero,
+                createdAt: Date(),
+                paidUntil: nil
             )
         ]
     }
@@ -180,6 +233,7 @@ actor ChatContextStore {
         guard var tenant = tenants[owner] else { return }
         block(&tenant)
         tenants[owner] = tenant
+        dirtyTenants.insert(owner)
     }
 
     private func mutateTenantByOwner(_ ownerUsername: String, _ block: (inout TenantState) -> Void) {
@@ -187,10 +241,14 @@ actor ChatContextStore {
         guard var tenant = tenants[u] else { return }
         block(&tenant)
         tenants[u] = tenant
+        dirtyTenants.insert(u)
     }
 
     // MARK: - Tenant management
 
+    /// Registers a tenant without a subscription term (unlimited) — the
+    /// super-admin manual path. Paid activations go through
+    /// `activatePaidSubscription`.
     func registerTenant(username: String) {
         let u = username.lowercased()
         guard tenants[u] == nil else { return }
@@ -207,8 +265,87 @@ actor ChatContextStore {
             whitelistedUserIDs: [],
             adminUsernames: [],
             licensedUsernames: [],
-            cumulativeUsage: .zero
+            cumulativeUsage: .zero,
+            createdAt: Date(),
+            paidUntil: nil
         )
+        dirtyTenants.insert(u)
+        deletedTenants.remove(u)
+    }
+
+    // MARK: - Subscription
+
+    static let subscriptionDays = 30
+
+    /// Payment path: creates the tenant if needed and extends the subscription
+    /// by `days` from max(now, current end). An unlimited tenant stays
+    /// unlimited — paying never shortens access.
+    func activatePaidSubscription(username: String, days: Int = ChatContextStore.subscriptionDays) -> SubscriptionActivation {
+        let u = username.lowercased()
+        let isNew = tenants[u] == nil
+        if isNew {
+            registerTenant(username: u)
+        }
+        guard var tenant = tenants[u] else { return .alreadyUnlimited }
+
+        if !isNew, tenant.paidUntil == nil {
+            return .alreadyUnlimited
+        }
+
+        let base = max(Date(), tenant.paidUntil ?? Date())
+        let until = base.addingTimeInterval(TimeInterval(days) * 86_400)
+        tenant.paidUntil = until
+        tenants[u] = tenant
+        dirtyTenants.insert(u)
+        return isNew ? .started(until: until) : .extended(until: until)
+    }
+
+    /// True when the owner exists and the subscription hasn't expired.
+    /// Expired tenants keep their admin panel (to renew) but lose paid models.
+    func tenantIsActive(_ ownerUsername: String) -> Bool {
+        tenants[ownerUsername.lowercased()]?.isActive ?? false
+    }
+
+    func tenantSubscription(ownerUsername: String) -> (exists: Bool, paidUntil: Date?, isActive: Bool) {
+        guard let tenant = tenants[ownerUsername.lowercased()] else {
+            return (false, nil, false)
+        }
+        return (true, tenant.paidUntil, tenant.isActive)
+    }
+
+    /// Super-admin: extend by N days (from max(now, current end)).
+    @discardableResult
+    func extendTenantSubscription(username: String, days: Int) -> Date? {
+        let u = username.lowercased()
+        guard var tenant = tenants[u] else { return nil }
+        let base = max(Date(), tenant.paidUntil ?? Date())
+        let until = base.addingTimeInterval(TimeInterval(days) * 86_400)
+        tenant.paidUntil = until
+        tenants[u] = tenant
+        dirtyTenants.insert(u)
+        return until
+    }
+
+    /// Super-admin: make the subscription unlimited.
+    @discardableResult
+    func setTenantUnlimited(username: String) -> Bool {
+        let u = username.lowercased()
+        guard var tenant = tenants[u] else { return false }
+        tenant.paidUntil = nil
+        tenants[u] = tenant
+        dirtyTenants.insert(u)
+        return true
+    }
+
+    /// Super-admin: expire the subscription immediately.
+    @discardableResult
+    func expireTenantSubscription(username: String) -> Bool {
+        let u = username.lowercased()
+        guard u != defaultOwnerUsername, var tenant = tenants[u] else { return false }
+        tenant.paidUntil = Date()
+        tenants[u] = tenant
+        dirtyTenants.insert(u)
+        return true
     }
 
     @discardableResult
@@ -216,8 +353,20 @@ actor ChatContextStore {
         let u = username.lowercased()
         guard u != defaultOwnerUsername, tenants[u] != nil else { return false }
         tenants.removeValue(forKey: u)
-        chatOwnership = chatOwnership.filter { $0.value != u }
+        let ownedChats = chatOwnership.filter { $0.value == u }.map(\.key)
+        for chatID in ownedChats {
+            chatOwnership.removeValue(forKey: chatID)
+            dirtyOwnership.remove(chatID)
+            deletedOwnership.insert(chatID)
+        }
         userTenantMap = userTenantMap.filter { $0.value != u }
+        let hadInvites = inviteRecords.contains { $0.value.ownerUsername == u }
+        if hadInvites {
+            inviteRecords = inviteRecords.filter { $0.value.ownerUsername != u }
+            dirtyConfigs.insert(.invites)
+        }
+        dirtyTenants.remove(u)
+        deletedTenants.insert(u)
         return true
     }
 
@@ -242,12 +391,19 @@ actor ChatContextStore {
         let u = ownerUsername.lowercased()
         guard tenants[u] != nil else { return false }
         chatOwnership[chatID] = u
+        dirtyOwnership.insert(chatID)
+        deletedOwnership.remove(chatID)
         return true
     }
 
     @discardableResult
     func unassignChat(chatID: Int) -> String? {
-        chatOwnership.removeValue(forKey: chatID)
+        let removed = chatOwnership.removeValue(forKey: chatID)
+        if removed != nil {
+            dirtyOwnership.remove(chatID)
+            deletedOwnership.insert(chatID)
+        }
+        return removed
     }
 
     func chatsOwnedBy(_ ownerUsername: String) -> [Int] {
@@ -257,11 +413,22 @@ actor ChatContextStore {
 
     func autoAssignIfNeeded(chatID: Int, senderUsername: String?, senderUserID: Int?) {
         guard chatOwnership[chatID] == nil else { return }
-        if let username = senderUsername?.lowercased(), tenants[username] != nil {
+        let lowered = senderUsername?.lowercased()
+        // A super-admin simulating a regular user must be able to keep a chat
+        // unowned (after /tenant release) to test ads and balance billing —
+        // otherwise their own tenant would instantly re-claim it here.
+        if let u = lowered, superAdminUsernames.contains(u), _simulatedRoles[u] != nil {
+            return
+        }
+        if let username = lowered, tenants[username] != nil {
             chatOwnership[chatID] = username
         } else if let userID = senderUserID, let owner = userTenantMap[userID] {
             chatOwnership[chatID] = owner
+        } else {
+            return
         }
+        dirtyOwnership.insert(chatID)
+        deletedOwnership.remove(chatID)
     }
 
     // MARK: - Auth
@@ -295,14 +462,18 @@ actor ChatContextStore {
     func addSuperAdmin(target: String) -> Bool {
         let u = target.lowercased()
         guard !u.isEmpty else { return false }
-        return superAdminUsernames.insert(u).inserted
+        let inserted = superAdminUsernames.insert(u).inserted
+        if inserted { dirtyConfigs.insert(.superAdmins) }
+        return inserted
     }
 
     @discardableResult
     func removeSuperAdmin(target: String) -> Bool {
         let u = target.lowercased()
         guard u != rootSuperAdminUsername else { return false }
-        return superAdminUsernames.remove(u) != nil
+        let removed = superAdminUsernames.remove(u) != nil
+        if removed { dirtyConfigs.insert(.superAdmins) }
+        return removed
     }
 
     func simulatedRole(username: String?) -> SimulatedRole? {
@@ -595,6 +766,7 @@ actor ChatContextStore {
             chatRolePresets: []
         )
         contexts[chatKey] = context
+        dirtyContexts.insert(chatKey)
         return context
     }
 
@@ -602,6 +774,7 @@ actor ChatContextStore {
         var context = ensure(chatKey: chatKey)
         block(&context)
         contexts[chatKey] = context
+        dirtyContexts.insert(chatKey)
     }
 
     private func trimHistory(_ history: [ChatMessage], limit: Int) -> [ChatMessage] {
@@ -637,8 +810,24 @@ actor ChatContextStore {
     // MARK: - Help
 
     func fetchHelp(chatKey: ChatKey) -> HelpData {
-        let context = ensure(chatKey: chatKey)
-        return .init(
+        makeHelpData(ensure(chatKey: chatKey), chatKey: chatKey)
+    }
+
+    /// Read-only variant for inspection: never creates a context (and so never
+    /// marks anything dirty) for chats the bot merely looks at.
+    func peekHelp(chatKey: ChatKey) -> HelpData? {
+        contexts[chatKey].map { makeHelpData($0, chatKey: chatKey) }
+    }
+
+    /// Thread keys with an existing context for the chat, main thread first.
+    func existingContextKeys(chatID: Int) -> [ChatKey] {
+        contexts.keys
+            .filter { $0.chatID == chatID }
+            .sorted { $0.threadID < $1.threadID }
+    }
+
+    private func makeHelpData(_ context: ChatContext, chatKey: ChatKey) -> HelpData {
+        .init(
             model: context.model,
             modelProviderRouting: context.modelProviderRouting,
             role: displayRole(context.role, chatID: chatKey.chatID),
@@ -808,7 +997,15 @@ actor ChatContextStore {
         )
     }
 
-    func appendAssistant(chatKey: ChatKey, generationID: GenerationID, content: String, usage: StreamUsageSummary? = nil) {
+    func appendAssistant(
+        chatKey: ChatKey,
+        generationID: GenerationID,
+        content: String,
+        usage: StreamUsageSummary? = nil,
+        billedTo: String? = nil
+    ) {
+        let real = usage?.cost ?? 0
+        let billed = real * priceMultiplier()
         mutate(chatKey: chatKey) { context in
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
                 return
@@ -816,10 +1013,14 @@ actor ChatContextStore {
             context.pendingTurns[index].state = .completed(content)
             flushResolvedTurns(&context)
             context.cumulativeUsage.totalTokens += usage?.totalTokens ?? 0
-            context.cumulativeUsage.totalCost += usage?.cost ?? 0
+            context.cumulativeUsage.totalCost += real
+            context.cumulativeUsage.totalBilledCost += billed
             context.cumulativeUsage.generationCount += 1
         }
         accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
+        if let billedTo {
+            chargeBalance(username: billedTo, billedUsd: billed, realUsd: real)
+        }
     }
 
     func cancelPendingTurn(chatKey: ChatKey, generationID: GenerationID) {
@@ -833,10 +1034,9 @@ actor ChatContextStore {
     }
 
     func accumulateUsage(chatKey: ChatKey, usage: StreamUsageSummary?) {
+        let multiplier = priceMultiplier()
         mutate(chatKey: chatKey) { context in
-            context.cumulativeUsage.totalTokens += usage?.totalTokens ?? 0
-            context.cumulativeUsage.totalCost += usage?.cost ?? 0
-            context.cumulativeUsage.generationCount += 1
+            context.cumulativeUsage.add(usage, priceMultiplier: multiplier)
         }
         accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
     }
@@ -945,6 +1145,7 @@ actor ChatContextStore {
 
     func setStarsPrice(_ price: Int?) {
         _starsPrice = price.flatMap { $0 > 0 ? $0 : nil }
+        dirtyConfigs.insert(.starsPrice)
     }
 
     func setPendingStarsPriceInput(menuMessageID: Int, chatKey: ChatKey) {
@@ -961,6 +1162,36 @@ actor ChatContextStore {
 
     func clearPendingStarsPriceInput(chatKey: ChatKey) {
         _pendingStarsPriceInputs.removeValue(forKey: chatKey)
+    }
+
+    // MARK: - Stars-per-USD rate (credit packs)
+
+    func starsPerUsd() -> Int { _starsPerUsd }
+
+    func setStarsPerUsd(_ rate: Int) {
+        _starsPerUsd = max(1, rate)
+        dirtyConfigs.insert(.starsPerUsd)
+    }
+
+    /// Stars to charge for a credit pack worth `cents` USD.
+    func starsForCents(_ cents: Int) -> Int {
+        max(1, Int((Double(cents) / 100.0 * Double(_starsPerUsd)).rounded()))
+    }
+
+    func setPendingStarsPerUsdInput(menuMessageID: Int, chatKey: ChatKey) {
+        _pendingStarsPerUsdInputs[chatKey] = menuMessageID
+    }
+
+    func consumePendingStarsPerUsdInput(chatKey: ChatKey) -> Int? {
+        _pendingStarsPerUsdInputs.removeValue(forKey: chatKey)
+    }
+
+    func hasPendingStarsPerUsdInput(chatKey: ChatKey) -> Bool {
+        _pendingStarsPerUsdInputs[chatKey] != nil
+    }
+
+    func clearPendingStarsPerUsdInput(chatKey: ChatKey) {
+        _pendingStarsPerUsdInputs.removeValue(forKey: chatKey)
     }
 
     // MARK: - Pending free model input
@@ -987,6 +1218,7 @@ actor ChatContextStore {
 
     func setFreeModelIDs(_ ids: [String]) {
         _freeModelIDs = ids.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        dirtyConfigs.insert(.freeModels)
     }
 
     @discardableResult
@@ -994,6 +1226,7 @@ actor ChatContextStore {
         let trimmed = id.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !_freeModelIDs.contains(trimmed) else { return false }
         _freeModelIDs.append(trimmed)
+        dirtyConfigs.insert(.freeModels)
         return true
     }
 
@@ -1001,7 +1234,9 @@ actor ChatContextStore {
     func removeFreeModel(_ id: String) -> Bool {
         let before = _freeModelIDs.count
         _freeModelIDs.removeAll { $0 == id }
-        return _freeModelIDs.count < before
+        let removed = _freeModelIDs.count < before
+        if removed { dirtyConfigs.insert(.freeModels) }
+        return removed
     }
 
     func effectiveFreeModelIDs() -> Set<String>? {
@@ -1036,12 +1271,33 @@ actor ChatContextStore {
         for (k, v) in prices { _openRouterModelPrices[k] = v }
     }
 
+    // MARK: - Card payment config
+
+    func cardConfig() -> CardPaymentConfig { _cardConfig }
+
+    func setCardProviderToken(_ token: String?) {
+        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        _cardConfig.providerToken = trimmed.isEmpty ? nil : trimmed
+        dirtyConfigs.insert(.card)
+    }
+
+    func setCardCurrency(_ currency: CardCurrency) {
+        _cardConfig.currency = currency
+        dirtyConfigs.insert(.card)
+    }
+
+    func setCardPriceMinorUnits(_ value: Int?) {
+        _cardConfig.priceMinorUnits = value.flatMap { $0 > 0 ? $0 : nil }
+        dirtyConfigs.insert(.card)
+    }
+
     // MARK: - Crypto config
 
     func cryptoPriceUsdCents() -> Int? { _cryptoPriceUsdCents }
 
     func setCryptoPriceUsdCents(_ value: Int?) {
         _cryptoPriceUsdCents = value.flatMap { $0 > 0 ? $0 : nil }
+        dirtyConfigs.insert(.crypto)
     }
 
     func cryptoAddress(_ chain: CryptoChain) -> String? {
@@ -1057,6 +1313,7 @@ actor ChatContextStore {
         } else {
             _cryptoAddresses[chain] = trimmed
         }
+        dirtyConfigs.insert(.crypto)
     }
 
     func nextCryptoSlot(asset: CryptoAsset) -> Int {
@@ -1064,11 +1321,13 @@ actor ChatContextStore {
         let current = (_cryptoSlotCounters[asset] ?? Int.random(in: 0..<max))
         let next = (current + 1) % max
         _cryptoSlotCounters[asset] = next
+        dirtyConfigs.insert(.crypto)
         return next
     }
 
     func upsertCryptoInvoice(_ invoice: CryptoInvoice) {
         _cryptoInvoices[invoice.id] = invoice
+        dirtyConfigs.insert(.crypto)
     }
 
     func cryptoInvoice(id: String) -> CryptoInvoice? {
@@ -1085,10 +1344,11 @@ actor ChatContextStore {
         }
     }
 
-    func openCryptoInvoiceForUser(username: String, asset: CryptoAsset) -> CryptoInvoice? {
+    func openCryptoInvoiceForUser(username: String, asset: CryptoAsset, purpose: CryptoInvoicePurpose) -> CryptoInvoice? {
         let u = username.lowercased()
         return _cryptoInvoices.values.first {
-            $0.username == u && $0.asset == asset && ($0.status == .open || $0.status == .partial)
+            $0.username == u && $0.asset == asset && $0.resolvedPurpose == purpose
+                && ($0.status == .open || $0.status == .partial)
         }
     }
 
@@ -1097,6 +1357,7 @@ actor ChatContextStore {
         if inv.status == .open || inv.status == .partial {
             inv.status = .cancelled
             _cryptoInvoices[id] = inv
+            dirtyConfigs.insert(.crypto)
         }
     }
 
@@ -1111,6 +1372,7 @@ actor ChatContextStore {
                 expired.append(copy)
             }
         }
+        if !expired.isEmpty { dirtyConfigs.insert(.crypto) }
         return expired
     }
 
@@ -1158,6 +1420,7 @@ actor ChatContextStore {
 
     func setCryptoMatchMode(_ mode: CryptoMatchMode) {
         _cryptoMatchMode = mode
+        dirtyConfigs.insert(.crypto)
     }
 
     func cryptoAddressPool(_ chain: CryptoChain) -> [String] {
@@ -1174,6 +1437,7 @@ actor ChatContextStore {
         guard !pool.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) else { return false }
         pool.append(trimmed)
         _cryptoAddressPools[chain] = pool
+        dirtyConfigs.insert(.crypto)
         return true
     }
 
@@ -1186,6 +1450,7 @@ actor ChatContextStore {
         } else {
             _cryptoAddressPools[chain] = pool
         }
+        dirtyConfigs.insert(.crypto)
         return true
     }
 
@@ -1315,30 +1580,48 @@ actor ChatContextStore {
         contexts.keys.filter { $0.chatID > 0 && chatOwnership[$0.chatID] == defaultOwnerUsername }.map { $0 }
     }
 
-    func hasFullModelAccess(username: String?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
+    /// Subscription/licence coverage only — the generation is paid by a
+    /// tenant's subscription, not by the sender's personal balance.
+    func hasSubscriptionCoverage(username: String?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
         let lowered = username?.lowercased()
         let simulated: Bool = {
             guard let u = lowered else { return false }
             return superAdminUsernames.contains(u) && _simulatedRoles[u] != nil
         }()
 
+        // Every path below requires the granting tenant's subscription to be
+        // active: an expired admin keeps their panel (to renew) but their
+        // chats and users fall back to free models.
         if !simulated, let u = lowered {
-            if tenants[u] != nil { return true }
-            for tenant in tenants.values where tenant.licensedUsernames.contains(u) {
+            if let own = tenants[u], own.isActive { return true }
+            for tenant in tenants.values where tenant.licensedUsernames.contains(u) && tenant.isActive {
                 return true
             }
         }
 
         // Chat-level licensing: chat assigned to a tenant grants access to all members.
-        if let chatID, chatOwnership[chatID] != nil {
+        if let chatID, let owner = chatOwnership[chatID],
+           tenants[owner]?.isActive == true {
             return true
         }
         // Per-chat whitelisted user IDs (set by tenant owner for this chat).
-        if let chatID, let userID,
-           tenantState(for: chatID).whitelistedUserIDs.contains(userID) {
-            return true
+        if let chatID, let userID {
+            let tenant = tenantState(for: chatID)
+            if tenant.whitelistedUserIDs.contains(userID), tenant.isActive {
+                return true
+            }
         }
         return false
+    }
+
+    /// Paid-model access: subscription coverage OR a positive personal
+    /// balance. The balance path deliberately ignores role simulation so the
+    /// super-admin can test pay-as-you-go end to end.
+    func hasFullModelAccess(username: String?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
+        if hasSubscriptionCoverage(username: username, userID: userID, chatID: chatID) {
+            return true
+        }
+        return hasPositiveBalance(username: username)
     }
 
     // MARK: - Per-tenant licensed users (paid access for individuals)
@@ -1382,7 +1665,9 @@ actor ChatContextStore {
                 usage: tenant.cumulativeUsage,
                 chatCount: chats,
                 licensedUserCount: tenant.licensedUsernames.count,
-                isSuperAdmin: superAdminUsernames.contains(owner)
+                isSuperAdmin: superAdminUsernames.contains(owner),
+                paidUntil: tenant.paidUntil,
+                isActive: tenant.isActive
             )
         }
         .sorted { $0.username < $1.username }
@@ -1390,10 +1675,9 @@ actor ChatContextStore {
 
     private func accumulateTenantUsage(chatID: Int, usage: StreamUsageSummary?) {
         let owner = chatOwnership[chatID] ?? defaultOwnerUsername
+        let multiplier = priceMultiplier()
         mutateTenantByOwner(owner) {
-            $0.cumulativeUsage.totalTokens += usage?.totalTokens ?? 0
-            $0.cumulativeUsage.totalCost += usage?.cost ?? 0
-            $0.cumulativeUsage.generationCount += 1
+            $0.cumulativeUsage.add(usage, priceMultiplier: multiplier)
         }
     }
 
@@ -1474,180 +1758,225 @@ actor ChatContextStore {
             chatHistoryLengthPresets: [],
             chatRolePresets: []
         )
+        dirtyContexts.insert(chatKey)
     }
 
-    // MARK: - Snapshot export / restore
+    // MARK: - Chat metadata (titles / usernames for admin tooling)
 
-    func exportSnapshot(telegramUpdateOffset: Int) -> BotStateSnapshot {
-        var ctxSnapshots: [String: ChatContextSnapshot] = [:]
-        for (chatKey, context) in contexts {
-            ctxSnapshots[chatKey.snapshotKey] = ChatContextSnapshot(
-                role: context.role,
-                history: context.history,
-                model: context.model,
-                modelProvider: context.modelProviderRouting,
-                temp: context.temp,
-                showStats: context.showStats,
-                maxHistory: context.maxHistory,
-                showCost: context.showCost,
-                showModel: context.showModel,
-                provider: context.provider,
-                suffix: context.suffix,
-                reasoningEffort: context.reasoningEffort,
-                backupNotify: context.backupNotify,
-                cumulativeUsage: context.cumulativeUsage,
-                chatModelPresets: context.chatModelPresets.isEmpty ? nil : context.chatModelPresets,
-                chatTempPresets: context.chatTempPresets.isEmpty ? nil : context.chatTempPresets,
-                chatHistoryLengthPresets: context.chatHistoryLengthPresets.isEmpty ? nil : context.chatHistoryLengthPresets,
-                chatRolePresets: context.chatRolePresets.isEmpty ? nil : context.chatRolePresets
-            )
-        }
-
-        var tenantSnapshots: [String: TenantStateSnapshot] = [:]
-        for (owner, tenant) in tenants {
-            tenantSnapshots[owner] = TenantStateSnapshot(
-                ownerUsername: tenant.ownerUsername,
-                defaultModel: tenant.defaultModel,
-                defaultRole: tenant.defaultRole,
-                defaultHistoryLength: tenant.defaultHistoryLength,
-                modelPresets: tenant.modelPresets,
-                tempPresets: tenant.tempPresets,
-                historyLengthPresets: tenant.historyLengthPresets,
-                rolePresets: tenant.rolePresets,
-                whitelistedUserIDs: Array(tenant.whitelistedUserIDs),
-                adminUsernames: Array(tenant.adminUsernames),
-                licensedUsernames: Array(tenant.licensedUsernames),
-                cumulativeUsage: tenant.cumulativeUsage
-            )
-        }
-
-        var ownershipStrings: [String: String] = [:]
-        for (chatID, owner) in chatOwnership {
-            ownershipStrings[String(chatID)] = owner
-        }
-
-        let extraSupers = superAdminUsernames.subtracting([rootSuperAdminUsername])
-
-        return BotStateSnapshot(
-            contexts: ctxSnapshots,
-            tenants: tenantSnapshots,
-            chatOwnership: ownershipStrings,
-            telegramUpdateOffset: telegramUpdateOffset,
-            starsPrice: _starsPrice,
-            freeModelIDs: _freeModelIDs.isEmpty ? nil : _freeModelIDs,
-            crypto: cryptoConfigSnapshot(),
-            superAdminUsernames: extraSupers.isEmpty ? nil : Array(extraSupers).sorted()
-        )
+    func recordChatMeta(chatID: Int, info: ChatMetaInfo) {
+        guard chatMetaByID[chatID] != info else { return }
+        chatMetaByID[chatID] = info
+        dirtyConfigs.insert(.chatMeta)
     }
 
-    func restoreFromSnapshot(_ snapshot: BotStateSnapshot) {
-        contexts.removeAll()
-        for (key, ctxSnapshot) in snapshot.contexts {
-            guard let chatKey = ChatKey(snapshotKey: key) else { continue }
-            contexts[chatKey] = ChatContext(
-                role: ctxSnapshot.role,
-                history: ctxSnapshot.history,
-                pendingTurns: [],
-                model: ctxSnapshot.model,
-                modelProviderRouting: ctxSnapshot.modelProvider,
-                temp: ctxSnapshot.temp,
-                showStats: ctxSnapshot.showStats,
-                maxHistory: ctxSnapshot.maxHistory,
-                showCost: ctxSnapshot.showCost,
-                showModel: ctxSnapshot.showModel,
-                provider: ctxSnapshot.provider,
-                suffix: ctxSnapshot.suffix,
-                reasoningEffort: ctxSnapshot.reasoningEffort,
-                backupNotify: ctxSnapshot.backupNotify,
-                cumulativeUsage: ctxSnapshot.cumulativeUsage ?? .zero,
-                chatModelPresets: ctxSnapshot.chatModelPresets ?? [],
-                chatTempPresets: ctxSnapshot.chatTempPresets ?? [],
-                chatHistoryLengthPresets: ctxSnapshot.chatHistoryLengthPresets ?? [],
-                chatRolePresets: ctxSnapshot.chatRolePresets ?? []
-            )
-        }
+    func chatMeta(chatID: Int) -> ChatMetaInfo? {
+        chatMetaByID[chatID]
+    }
 
-        chatOwnership.removeAll()
-        for (chatIDStr, owner) in snapshot.chatOwnership ?? [:] {
-            if let chatID = Int(chatIDStr) {
-                chatOwnership[chatID] = owner.lowercased()
-            }
-        }
+    /// "Title" / "@username" when known, bare ID otherwise.
+    func chatDisplayLabel(chatID: Int) -> String {
+        chatMetaByID[chatID]?.displayLabel ?? String(chatID)
+    }
 
-        tenants.removeAll()
-        if let tenantsSnapshot = snapshot.tenants, !tenantsSnapshot.isEmpty {
-            for (owner, ts) in tenantsSnapshot {
-                tenants[owner] = TenantState(
-                    ownerUsername: ts.ownerUsername,
-                    defaultModel: ts.defaultModel,
-                    defaultRole: ts.defaultRole,
-                    defaultHistoryLength: ts.defaultHistoryLength,
-                    modelPresets: ts.modelPresets,
-                    tempPresets: ts.tempPresets,
-                    historyLengthPresets: ts.historyLengthPresets,
-                    rolePresets: ts.rolePresets,
-                    whitelistedUserIDs: Set(ts.whitelistedUserIDs),
-                    adminUsernames: Set(ts.adminUsernames),
-                    licensedUsernames: Set((ts.licensedUsernames ?? []).map { $0.lowercased() }),
-                    cumulativeUsage: ts.cumulativeUsage ?? .zero
-                )
-            }
+    // MARK: - Invite links (referral access under an admin's licence)
+
+    func inviteToken(owner: String) -> String? {
+        let u = owner.lowercased()
+        return inviteRecords.first(where: { $0.value.ownerUsername == u })?.key
+    }
+
+    /// Replaces the owner's invite with a fresh token (old links stop working).
+    func regenerateInviteToken(owner: String) -> String? {
+        let u = owner.lowercased()
+        guard tenants[u] != nil else { return nil }
+        inviteRecords = inviteRecords.filter { $0.value.ownerUsername != u }
+        let token = Self.makeInviteToken()
+        inviteRecords[token] = InviteRecord(ownerUsername: u, createdAt: Date())
+        dirtyConfigs.insert(.invites)
+        return token
+    }
+
+    @discardableResult
+    func revokeInviteToken(owner: String) -> Bool {
+        let u = owner.lowercased()
+        let before = inviteRecords.count
+        inviteRecords = inviteRecords.filter { $0.value.ownerUsername != u }
+        if inviteRecords.count != before {
+            dirtyConfigs.insert(.invites)
+            return true
+        }
+        return false
+    }
+
+    /// Returns the issuing owner when the token is valid and their
+    /// subscription is active.
+    func redeemInvite(token: String) -> String? {
+        guard let record = inviteRecords[token],
+              tenants[record.ownerUsername]?.isActive == true else { return nil }
+        return record.ownerUsername
+    }
+
+    private static func makeInviteToken() -> String {
+        let alphabet = Array("abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<16).map { _ in alphabet.randomElement()! })
+    }
+
+    // MARK: - Markup & balances (pay-as-you-go)
+
+    func markupPercent() -> Int { markupPercentValue }
+
+    func setMarkupPercent(_ percent: Int) {
+        markupPercentValue = max(0, min(500, percent))
+        dirtyConfigs.insert(.markup)
+    }
+
+    /// Multiplier applied to real provider cost for everything customers see
+    /// and pay: 30% markup → 1.3.
+    func priceMultiplier() -> Double {
+        1.0 + Double(markupPercentValue) / 100.0
+    }
+
+    /// Customer-facing total for a usage record. Rows written before markup
+    /// existed carry no billed value — approximate with the current rate.
+    func billedCost(of usage: CumulativeUsage) -> Double {
+        if usage.totalBilledCost > 0 { return usage.totalBilledCost }
+        return usage.totalCost * priceMultiplier()
+    }
+
+    func balance(username: String?) -> UserBalance? {
+        guard let u = username?.lowercased() else { return nil }
+        return userBalances[u]
+    }
+
+    func hasPositiveBalance(username: String?) -> Bool {
+        (balance(username: username)?.balanceUsd ?? 0) > 0
+    }
+
+    /// Adds (or subtracts, for corrections) to the user's balance. Creates the
+    /// wallet on first credit.
+    @discardableResult
+    func creditBalance(username: String, amountUsd: Double) -> UserBalance {
+        let u = username.lowercased()
+        var wallet = userBalances[u] ?? .empty
+        wallet.balanceUsd += amountUsd
+        wallet.updatedAt = Date()
+        userBalances[u] = wallet
+        dirtyConfigs.insert(.balances)
+        return wallet
+    }
+
+    @discardableResult
+    func setBalanceAmount(username: String, amountUsd: Double) -> UserBalance {
+        let u = username.lowercased()
+        var wallet = userBalances[u] ?? .empty
+        wallet.balanceUsd = amountUsd
+        wallet.updatedAt = Date()
+        userBalances[u] = wallet
+        dirtyConfigs.insert(.balances)
+        return wallet
+    }
+
+    @discardableResult
+    func removeBalance(username: String) -> Bool {
+        let removed = userBalances.removeValue(forKey: username.lowercased()) != nil
+        if removed { dirtyConfigs.insert(.balances) }
+        return removed
+    }
+
+    func allBalances() -> [(username: String, wallet: UserBalance)] {
+        userBalances
+            .map { (username: $0.key, wallet: $0.value) }
+            .sorted { $0.username < $1.username }
+    }
+
+    /// What the footer will show as the post-charge balance. The actual charge
+    /// happens in `appendAssistant`; formula is identical.
+    func projectedBalanceAfterCharge(username: String, realCost: Double) -> Double {
+        let current = userBalances[username.lowercased()]?.balanceUsd ?? 0
+        return current - realCost * priceMultiplier()
+    }
+
+    private func chargeBalance(username: String, billedUsd: Double, realUsd: Double) {
+        guard billedUsd > 0 else { return }
+        let u = username.lowercased()
+        var wallet = userBalances[u] ?? .empty
+        wallet.balanceUsd -= billedUsd
+        wallet.spentBilledUsd += billedUsd
+        wallet.spentRealUsd += realUsd
+        wallet.updatedAt = Date()
+        userBalances[u] = wallet
+        dirtyConfigs.insert(.balances)
+    }
+
+    // MARK: - Ad campaigns
+
+    func adCampaigns() -> [AdCampaign] {
+        adCampaignList.sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func adCampaign(id: String) -> AdCampaign? {
+        adCampaignList.first { $0.id == id }
+    }
+
+    func upsertAdCampaign(_ campaign: AdCampaign) {
+        if let index = adCampaignList.firstIndex(where: { $0.id == campaign.id }) {
+            adCampaignList[index] = campaign
         } else {
-            // Migrate from pre-tenant snapshot format
-            tenants[defaultOwnerUsername] = TenantState(
-                ownerUsername: defaultOwnerUsername,
-                defaultModel: snapshot.defaultModel ?? initialDefaultModel,
-                defaultRole: snapshot.defaultRole ?? initialDefaultRole,
-                defaultHistoryLength: snapshot.defaultHistoryLength ?? initialDefaultHistoryLength,
-                modelPresets: snapshot.modelPresets ?? [],
-                tempPresets: snapshot.tempPresets ?? [],
-                historyLengthPresets: snapshot.historyLengthPresets ?? [],
-                rolePresets: snapshot.rolePresets ?? [],
-                whitelistedUserIDs: Set(snapshot.whitelistedUserIDs ?? []),
-                adminUsernames: Set(
-                    (snapshot.adminUsernames ?? [])
-                        .map { $0.lowercased() }
-                        .filter { $0 != defaultOwnerUsername }
-                ),
-                licensedUsernames: [],
-                cumulativeUsage: .zero
-            )
+            adCampaignList.append(campaign)
+        }
+        dirtyConfigs.insert(.ads)
+    }
+
+    @discardableResult
+    func removeAdCampaign(id: String) -> Bool {
+        let before = adCampaignList.count
+        adCampaignList.removeAll { $0.id == id }
+        let removed = adCampaignList.count < before
+        if removed { dirtyConfigs.insert(.ads) }
+        return removed
+    }
+
+    @discardableResult
+    func setAdCampaignEnabled(id: String, enabled: Bool) -> Bool {
+        guard let index = adCampaignList.firstIndex(where: { $0.id == id }) else { return false }
+        adCampaignList[index].enabled = enabled
+        dirtyConfigs.insert(.ads)
+        return true
+    }
+
+    /// Counts a bot reply in an ad-eligible chat and returns the campaign to
+    /// show now, if frequency/pacing allow one. Recording the impression and
+    /// resetting the per-chat counters happens here so the decision is atomic.
+    func nextAdToShow(chatKey: ChatKey) -> AdCampaign? {
+        var context = ensure(chatKey: chatKey)
+        context.adReplyCounter += 1
+        contexts[chatKey] = context
+        dirtyContexts.insert(chatKey)
+
+        guard !adCampaignList.isEmpty else { return nil }
+        let now = Date()
+
+        let candidates = adCampaignList.filter { campaign in
+            campaign.isRunning(now: now)
+                && campaign.pacingAllows(now: now)
+                && context.adReplyCounter >= campaign.everyNReplies
+                && (context.adLastShownAt.map {
+                    now.timeIntervalSince($0) >= TimeInterval(campaign.minIntervalSeconds)
+                } ?? true)
+        }
+        // Least-shown campaign first → fair rotation between active ads.
+        guard let chosen = candidates.min(by: { $0.impressionsUsed < $1.impressionsUsed }),
+              let index = adCampaignList.firstIndex(where: { $0.id == chosen.id }) else {
+            return nil
         }
 
-        // Ensure default owner tenant always exists
-        if tenants[defaultOwnerUsername] == nil {
-            tenants[defaultOwnerUsername] = TenantState(
-                ownerUsername: defaultOwnerUsername,
-                defaultModel: initialDefaultModel,
-                defaultRole: initialDefaultRole,
-                defaultHistoryLength: initialDefaultHistoryLength,
-                modelPresets: [],
-                tempPresets: [],
-                historyLengthPresets: [],
-                rolePresets: [],
-                whitelistedUserIDs: [],
-                adminUsernames: [],
-                licensedUsernames: [],
-                cumulativeUsage: .zero
-            )
-        }
+        adCampaignList[index].impressionsUsed += 1
+        dirtyConfigs.insert(.ads)
 
-        superAdminUsernames = [rootSuperAdminUsername]
-        for u in snapshot.superAdminUsernames ?? [] {
-            let lc = u.lowercased()
-            if !lc.isEmpty { superAdminUsernames.insert(lc) }
-        }
-
-        // Rebuild reverse userID → tenant mapping from whitelist data
-        userTenantMap.removeAll()
-        for (owner, tenant) in tenants {
-            for userID in tenant.whitelistedUserIDs {
-                userTenantMap[userID] = owner
-            }
-        }
-
-        _starsPrice = snapshot.starsPrice
-        _freeModelIDs = snapshot.freeModelIDs ?? []
-        restoreCryptoConfig(snapshot.crypto)
+        context.adReplyCounter = 0
+        context.adLastShownAt = now
+        contexts[chatKey] = context
+        dirtyContexts.insert(chatKey)
+        return adCampaignList[index]
     }
 }

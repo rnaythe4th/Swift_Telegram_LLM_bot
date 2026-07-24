@@ -61,14 +61,32 @@ actor CryptoPaymentService {
 
     // MARK: - Invoice creation
 
-    func createOrRefreshInvoice(username: String, userChatID: Int, asset: CryptoAsset) async throws -> CryptoInvoice {
-        guard let priceCents = await state.cryptoPriceUsdCents() else {
-            throw CryptoPaymentError.priceNotSet
+    func createOrRefreshInvoice(
+        username: String,
+        userChatID: Int,
+        asset: CryptoAsset,
+        purpose: CryptoInvoicePurpose = .subscription
+    ) async throws -> CryptoInvoice {
+        // Subscription uses the admin-set crypto price; a credit pack is priced
+        // at its own USD face value.
+        let priceCents: Int
+        switch purpose {
+        case .subscription:
+            guard let sub = await state.cryptoPriceUsdCents() else {
+                throw CryptoPaymentError.priceNotSet
+            }
+            priceCents = sub
+        case .credit(let cents):
+            priceCents = cents
         }
 
         let normalizedUser = username.lowercased()
 
-        if let existing = await state.openCryptoInvoiceForUser(username: normalizedUser, asset: asset),
+        // Note (amountDelta mode): slot allocation keeps every open invoice's
+        // amount unique across all purposes, so a payment attributes to one
+        // invoice. Distinct pack prices sit far outside the slot-step range of
+        // the subscription price, so purposes don't alias in practice.
+        if let existing = await state.openCryptoInvoiceForUser(username: normalizedUser, asset: asset, purpose: purpose),
            existing.expiresAt > Date() {
             return existing
         }
@@ -128,7 +146,8 @@ actor CryptoPaymentService {
             status: .open,
             linkedSenders: [],
             creditedTxHashes: [],
-            slotOffset: slot
+            slotOffset: slot,
+            purpose: purpose
         )
 
         await state.upsertCryptoInvoice(invoice)
@@ -293,8 +312,15 @@ actor CryptoPaymentService {
         if copy.accumulatedAtomic >= copy.exactAmountAtomic {
             copy.status = .paid
             await state.upsertCryptoInvoice(copy)
-            await state.registerTenant(username: copy.username)
-            await notifyFullPayment(copy)
+            switch copy.resolvedPurpose {
+            case .subscription:
+                let activation = await state.activatePaidSubscription(username: copy.username)
+                await state.assignChat(chatID: copy.userChatID, to: copy.username)
+                await notifyFullPayment(copy, activation: activation)
+            case .credit(let cents):
+                let wallet = await state.creditBalance(username: copy.username, amountUsd: Double(cents) / 100.0)
+                await notifyCreditPayment(copy, cents: cents, balanceUsd: wallet.balanceUsd)
+            }
             return .fullyPaid(copy)
         } else {
             copy.status = .partial
@@ -307,14 +333,25 @@ actor CryptoPaymentService {
 
     // MARK: - Notifications
 
-    private func notifyFullPayment(_ invoice: CryptoInvoice) async {
+    private func notifyFullPayment(_ invoice: CryptoInvoice, activation: SubscriptionActivation) async {
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd.MM.yyyy"
+        let subscriptionLine: String
+        switch activation {
+        case .started(let until):
+            subscriptionLine = "Добро пожаловать, @\(invoice.username)! Персональная копия бота активирована, подписка до <b>\(formatter.string(from: until))</b>."
+        case .extended(let until):
+            subscriptionLine = "Подписка @\(invoice.username) продлена до <b>\(formatter.string(from: until))</b>."
+        case .alreadyUnlimited:
+            subscriptionLine = "У @\(invoice.username) бессрочный доступ."
+        }
         let text = """
         ✅ <b>Оплата получена!</b>
 
         Принято: <b>\(amount) \(invoice.asset.symbol)</b> (\(invoice.asset.displayLabel))
 
-        Добро пожаловать, @\(invoice.username)! Ваша персональная копия бота активирована.
+        \(subscriptionLine)
         Используйте /menu для настройки или просто начните общение.
         """
         _ = try? await telegram.sendMessage(.init(
@@ -325,6 +362,26 @@ actor CryptoPaymentService {
             replyMarkup: nil
         ))
         logger.info("crypto: invoice \(invoice.id) fully paid by @\(invoice.username) [\(invoice.asset.rawValue)]")
+    }
+
+    private func notifyCreditPayment(_ invoice: CryptoInvoice, cents: Int, balanceUsd: Double) async {
+        let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
+        let text = """
+        ✅ <b>Баланс пополнен на \(CreditPack.label(cents: cents))!</b>
+
+        Принято: <b>\(amount) \(invoice.asset.symbol)</b> (\(invoice.asset.displayLabel))
+        Текущий баланс: <b>$\(String(format: "%.2f", balanceUsd))</b>
+
+        Теперь доступны любые модели — плата за каждый ответ по факту, остаток видно в футере (включите /show_cost).
+        """
+        _ = try? await telegram.sendMessage(.init(
+            chatID: invoice.userChatID,
+            threadID: nil,
+            replyTo: nil,
+            text: text,
+            replyMarkup: nil
+        ))
+        logger.info("crypto: credit invoice \(invoice.id) fully paid by @\(invoice.username) +\(cents)c [\(invoice.asset.rawValue)]")
     }
 
     private func notifyPartialPayment(_ invoice: CryptoInvoice, addedAtomic: Int64, remainingAtomic: Int64) async {

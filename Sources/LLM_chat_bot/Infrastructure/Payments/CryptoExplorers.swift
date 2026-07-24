@@ -147,16 +147,19 @@ final class TonExplorer: @unchecked Sendable {
     }
 }
 
-// MARK: - EVM (BSC / Ethereum) — etherscan-compatible
+// MARK: - EVM (BSC / Ethereum) — Etherscan API V2 (multichain, one key)
 
 final class EvmExplorer: @unchecked Sendable {
     private let network: NetworkClient
     private let baseURL: String
+    /// Etherscan V2 chain id: 1 = Ethereum, 56 = BSC.
+    private let chainID: Int
     private let apiKey: String
 
-    init(network: NetworkClient, baseURL: String, apiKey: String) {
+    init(network: NetworkClient, baseURL: String = "https://api.etherscan.io/v2/api", chainID: Int, apiKey: String) {
         self.network = network
         self.baseURL = baseURL
+        self.chainID = chainID
         self.apiKey = apiKey
     }
 
@@ -192,7 +195,7 @@ final class EvmExplorer: @unchecked Sendable {
         guard let contract = asset.contractAddress else {
             return ([], cursor)
         }
-        let urlString = "\(baseURL)?module=account&action=tokentx&contractaddress=\(contract)&address=\(address)&page=1&offset=100&sort=desc&apikey=\(apiKey)"
+        let urlString = "\(baseURL)?chainid=\(chainID)&module=account&action=tokentx&contractaddress=\(contract)&address=\(address)&page=1&offset=100&sort=desc&apikey=\(apiKey)"
         let spec = HTTPRequestSpec(
             url: urlString,
             method: .get,

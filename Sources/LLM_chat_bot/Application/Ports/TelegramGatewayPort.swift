@@ -24,6 +24,9 @@ struct SendMessageDraftRequest: Sendable {
 
 protocol TelegramGatewayPort: Sendable {
     func deleteWebhook() async throws
+    func setWebhook(url: String, secretToken: String, allowedUpdates: [String]) async throws
+    /// Decodes a single update delivered to the webhook endpoint.
+    func decodeIncomingUpdate(_ data: Data) throws -> TelegramUpdate
     func getMe() async throws -> TelegramUser
     func getUpdates(offset: Int?) async throws -> [TelegramUpdate]
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage
