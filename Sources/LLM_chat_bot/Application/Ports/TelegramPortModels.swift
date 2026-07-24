@@ -5,6 +5,16 @@ struct TelegramUpdate: Codable, Sendable {
     let message: TelegramMessage?
     let callback_query: CallbackQuery?
     let pre_checkout_query: TelegramPreCheckoutQuery?
+    let my_chat_member: ChatMemberUpdate?
+}
+
+/// The bot's own membership transition in a chat (added / removed / promoted).
+struct ChatMemberUpdate: Codable, Sendable {
+    let chat: TelegramChat
+    /// User who caused the change — i.e. who added the bot.
+    let from: TelegramUser
+    let oldStatus: String
+    let newStatus: String
 }
 
 final class TelegramMessage: Codable, @unchecked Sendable {

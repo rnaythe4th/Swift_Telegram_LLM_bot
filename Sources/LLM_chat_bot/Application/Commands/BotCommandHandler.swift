@@ -453,10 +453,15 @@ final class BotCommandHandler: @unchecked Sendable {
 
         ⚙️ /menu · 📘 /help
         """
-        let markup = InlineKeyboardMarkup(inline_keyboard: [
-            [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
-            [InlineKeyboardButton(text: "📘 Инструкция", callback_data: BotCallbackAction.faq.rawData)],
-        ])
+        var rows: [[InlineKeyboardButton]] = []
+        // Viral loop entry: one tap opens Telegram's group picker and adds the
+        // bot; the group-entry greeting then pitches premium to the owner.
+        if !botUsername.isEmpty {
+            rows.append([InlineKeyboardButton(text: "➕ Добавить в свой чат", url: "https://t.me/\(botUsername)?startgroup=add")])
+        }
+        rows.append([InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)])
+        rows.append([InlineKeyboardButton(text: "📘 Инструкция", callback_data: BotCallbackAction.faq.rawData)])
+        let markup = InlineKeyboardMarkup(inline_keyboard: rows)
         _ = try await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,

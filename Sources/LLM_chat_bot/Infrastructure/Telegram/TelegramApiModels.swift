@@ -25,6 +25,23 @@ struct TelegramAPIUpdate: Decodable {
     let message: TelegramAPIMessage?
     let callback_query: TelegramAPICallbackQuery?
     let pre_checkout_query: TelegramAPIPreCheckoutQuery?
+    let my_chat_member: TelegramAPIChatMemberUpdated?
+}
+
+/// The bot's own membership in a chat changing (added / removed / promoted).
+/// Delivered as a `my_chat_member` update — the reliable signal that the bot
+/// was added to a group.
+struct TelegramAPIChatMemberUpdated: Decodable, Sendable {
+    let chat: TelegramAPIChat
+    let from: TelegramAPIUser
+    let date: Int
+    let old_chat_member: TelegramAPIChatMember
+    let new_chat_member: TelegramAPIChatMember
+}
+
+struct TelegramAPIChatMember: Decodable, Sendable {
+    let status: String
+    let user: TelegramAPIUser
 }
 
 final class TelegramAPIMessage: Decodable, @unchecked Sendable {

@@ -166,7 +166,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 try await telegram.setWebhook(
                     url: url,
                     secretToken: secret,
-                    allowedUpdates: ["message", "callback_query", "pre_checkout_query"]
+                    allowedUpdates: ["message", "callback_query", "pre_checkout_query", "my_chat_member"]
                 )
                 logger.info("webhook registered: \(url)")
                 // Updates now arrive via AppHTTPServer → intake; park until drain.
@@ -278,6 +278,13 @@ final class BotOrchestrator: @unchecked Sendable {
             return
         }
 
+        if let memberUpdate = update.my_chat_member {
+            Task {
+                await self.handleMyChatMemberUpdate(memberUpdate)
+            }
+            return
+        }
+
         guard let message = update.message else { return }
         let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
 
@@ -351,6 +358,49 @@ final class BotOrchestrator: @unchecked Sendable {
             logger.error("answerPreCheckoutQuery failed: \(error)")
             try? await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Внутренняя ошибка. Попробуйте позже.")
         }
+    }
+
+    /// The bot's membership in a chat changed. Greet once on a genuine join to
+    /// a group so the person who added it sees what it does and how to unlock
+    /// premium for everyone (roadmap step 4). The intake dedups by update_id,
+    /// so Telegram redelivery won't double-greet.
+    private func handleMyChatMemberUpdate(_ update: ChatMemberUpdate) async {
+        let type = update.chat.type
+        // Private-chat my_chat_member fires on block/unblock; DMs get the /start
+        // greeting instead, so only groups receive this welcome.
+        guard type == "group" || type == "supergroup" else { return }
+
+        // Greet only on a real entry: previously out (left/kicked) → now in
+        // (member/administrator). Skips promotions and permission tweaks so a
+        // member→administrator change doesn't re-greet.
+        let wasOut = update.oldStatus == "left" || update.oldStatus == "kicked"
+        let isIn = update.newStatus == "member" || update.newStatus == "administrator"
+        guard wasOut, isIn else { return }
+
+        // Keep the chat identity fresh for admin tooling (mirrors route()).
+        await state.recordChatMeta(
+            chatID: update.chat.id,
+            info: ChatMetaInfo(type: type, title: update.chat.title, username: nil, firstName: nil)
+        )
+
+        let text = """
+        <b>👋 Всем привет!</b> Я умный ИИ-ассистент. Отвечаю на @упоминание или реплай на моё сообщение.
+
+        Понимаю текст, фото, голос и видео, помню разговор.
+
+        Полный доступ — умные модели, без рекламы и лимитов — для этого чата откроет любой участник → /buy
+        """
+        let markup = InlineKeyboardMarkup(inline_keyboard: [
+            [InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: BotCallbackAction.menu(action: "nav:pay").rawData)],
+        ])
+        _ = try? await telegram.sendMessage(.init(
+            chatID: update.chat.id,
+            threadID: nil,
+            replyTo: nil,
+            text: text,
+            replyMarkup: markup
+        ))
+        logger.info("greeted new group \(update.chat.id) (added by @\(update.from.username ?? String(update.from.id)))")
     }
 
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {

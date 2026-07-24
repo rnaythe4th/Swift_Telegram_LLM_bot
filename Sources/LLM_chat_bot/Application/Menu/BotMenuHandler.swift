@@ -1476,6 +1476,10 @@ final class BotMenuHandler: @unchecked Sendable {
             let payLabel = isTenant ? "🔄 Продлить премиум" : "⚡ Премиум-доступ"
             rows.append([menuButton(payLabel, action: "nav:pay")])
         }
+        // Viral loop: one tap opens Telegram's group picker and adds the bot.
+        if !botUsername.isEmpty {
+            rows.append([InlineKeyboardButton(text: "➕ Добавить в свой чат", url: "https://t.me/\(botUsername)?startgroup=add")])
+        }
         rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сбросить", action: "reset")])
         if await state.isSuperAdmin(username: username) {
             rows.append([

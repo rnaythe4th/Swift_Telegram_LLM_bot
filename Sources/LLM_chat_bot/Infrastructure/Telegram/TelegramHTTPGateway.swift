@@ -505,7 +505,17 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             update_id: update.update_id,
             message: update.message.map(map),
             callback_query: update.callback_query.map(map),
-            pre_checkout_query: update.pre_checkout_query.map(map)
+            pre_checkout_query: update.pre_checkout_query.map(map),
+            my_chat_member: update.my_chat_member.map(map)
+        )
+    }
+
+    private func map(_ member: TelegramAPIChatMemberUpdated) -> ChatMemberUpdate {
+        ChatMemberUpdate(
+            chat: map(member.chat),
+            from: map(member.from),
+            oldStatus: member.old_chat_member.status,
+            newStatus: member.new_chat_member.status
         )
     }
     
