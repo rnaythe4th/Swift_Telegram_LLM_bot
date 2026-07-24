@@ -1614,6 +1614,20 @@ actor ChatContextStore {
         return false
     }
 
+    /// The sponsor of a group chat: the owner whose *active* subscription opens
+    /// paid access to the whole chat. Used for the hero credit under answers.
+    /// Returns nil when the chat has no active-tenant owner, or when the asker
+    /// is the sponsor themselves (no self-crediting).
+    func chatSponsor(chatID: Int, askerUsername: String?) -> String? {
+        guard let owner = chatOwnership[chatID], tenants[owner]?.isActive == true else {
+            return nil
+        }
+        if let asker = askerUsername?.lowercased(), asker == owner {
+            return nil
+        }
+        return owner
+    }
+
     /// Paid-model access: subscription coverage OR a positive personal
     /// balance. The balance path deliberately ignores role simulation so the
     /// super-admin can test pay-as-you-go end to end.

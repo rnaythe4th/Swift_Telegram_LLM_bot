@@ -75,7 +75,8 @@ final class GenerationCoordinator: @unchecked Sendable {
         fallbackModel: String,
         options: GenerationOptions,
         billedTo: String?,
-        hasContent: Bool
+        hasContent: Bool,
+        sponsorLine: String?
     ) async -> String {
         let multiplier = await state.priceMultiplier()
         var balanceAfter: Double?
@@ -90,10 +91,22 @@ final class GenerationCoordinator: @unchecked Sendable {
             showCost: options.showCost,
             showModel: options.showModel,
             costMultiplier: multiplier,
-            balanceAfter: balanceAfter
+            balanceAfter: balanceAfter,
+            sponsorLine: sponsorLine
         ) ?? ""
     }
-    
+
+    /// Hero credit shown under answers in a group whose paid access comes from
+    /// another member's active subscription. Suppressed in private chats and
+    /// when the asker is the sponsor themselves.
+    private func sponsorCreditLine(chatID: Int, askerUsername: String?, isPrivate: Bool) async -> String? {
+        guard !isPrivate else { return nil }
+        guard let sponsor = await state.chatSponsor(chatID: chatID, askerUsername: askerUsername) else {
+            return nil
+        }
+        return "⚡ премиум для чата открыл @\(sponsor)"
+    }
+
     func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
         switch try await resolveProcessableContent(message: message, chatKey: chatKey) {
         case .content(let content):
@@ -230,7 +243,13 @@ final class GenerationCoordinator: @unchecked Sendable {
             
             let request = gateway.makeRequest(plan)
             let fallbackModel = gateway.fallbackModel(for: plan)
-            
+
+            let sponsorLine = await sponsorCreditLine(
+                chatID: chatKey.chatID,
+                askerUsername: message.from?.username,
+                isPrivate: message.chat.type == "private"
+            )
+
             try await streamReply(
                 gateway: gateway,
                 request: request,
@@ -241,7 +260,8 @@ final class GenerationCoordinator: @unchecked Sendable {
                 generationID: generationID,
                 isPrivateChat: message.chat.type == "private",
                 adEligible: adEligible,
-                billedTo: billedTo
+                billedTo: billedTo,
+                sponsorLine: sponsorLine
             )
         } catch {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
@@ -260,7 +280,8 @@ final class GenerationCoordinator: @unchecked Sendable {
         generationID: GenerationID,
         isPrivateChat: Bool,
         adEligible: Bool,
-        billedTo: String?
+        billedTo: String?,
+        sponsorLine: String?
     ) async throws {
         let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
             .init(text: "⏹ Остановить", callback_data: BotCallbackAction.stop(generationID).rawData)
@@ -305,7 +326,8 @@ final class GenerationCoordinator: @unchecked Sendable {
                     generationID: generationID,
                     controlMessage: placeholder,
                     adEligible: adEligible,
-                    billedTo: billedTo
+                    billedTo: billedTo,
+                    sponsorLine: sponsorLine
                 )
             }
         } else {
@@ -320,7 +342,8 @@ final class GenerationCoordinator: @unchecked Sendable {
                     placeholder: placeholder,
                     stopMarkup: stopMarkup,
                     adEligible: adEligible,
-                    billedTo: billedTo
+                    billedTo: billedTo,
+                    sponsorLine: sponsorLine
                 )
             }
         }
@@ -344,7 +367,8 @@ final class GenerationCoordinator: @unchecked Sendable {
         generationID: GenerationID,
         controlMessage: TelegramMessage,
         adEligible: Bool,
-        billedTo: String?
+        billedTo: String?,
+        sponsorLine: String?
     ) async {
         var fullAccumulator = ""
         var messageAccumulator = ""
@@ -451,7 +475,8 @@ final class GenerationCoordinator: @unchecked Sendable {
                 fallbackModel: fallbackModel,
                 options: options,
                 billedTo: billedTo,
-                hasContent: !fullAccumulator.isEmpty
+                hasContent: !fullAccumulator.isEmpty,
+                sponsorLine: sponsorLine
             )
 
             let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
@@ -500,7 +525,8 @@ final class GenerationCoordinator: @unchecked Sendable {
         placeholder: TelegramMessage,
         stopMarkup: InlineKeyboardMarkup,
         adEligible: Bool,
-        billedTo: String?
+        billedTo: String?,
+        sponsorLine: String?
     ) async {
         let emptyMarkup = InlineKeyboardMarkup(inline_keyboard: [])
         let logger = self.logger
@@ -626,7 +652,8 @@ final class GenerationCoordinator: @unchecked Sendable {
                 fallbackModel: fallbackModel,
                 options: options,
                 billedTo: billedTo,
-                hasContent: !fullAccumulator.isEmpty
+                hasContent: !fullAccumulator.isEmpty,
+                sponsorLine: sponsorLine
             )
 
             let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"

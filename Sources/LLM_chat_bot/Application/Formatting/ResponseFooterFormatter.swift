@@ -12,9 +12,10 @@ enum ResponseFooterFormatter {
         showCost: Bool,
         showModel: Bool,
         costMultiplier: Double = 1.0,
-        balanceAfter: Double? = nil
+        balanceAfter: Double? = nil,
+        sponsorLine: String? = nil
     ) -> String? {
-        guard showTokens || showCost || showModel || balanceAfter != nil else { return nil }
+        guard showTokens || showCost || showModel || balanceAfter != nil || sponsorLine != nil else { return nil }
 
         let usage = meta?.usage
         var lines: [String] = []
@@ -37,6 +38,10 @@ enum ResponseFooterFormatter {
 
         if let balanceAfter {
             lines.append(String(format: "💰 Баланс · $%.4f", max(balanceAfter, 0)) + (balanceAfter <= 0 ? " <i>(исчерпан)</i>" : ""))
+        }
+
+        if let sponsorLine {
+            lines.append("<i>\(sponsorLine)</i>")
         }
 
         guard !lines.isEmpty else { return nil }

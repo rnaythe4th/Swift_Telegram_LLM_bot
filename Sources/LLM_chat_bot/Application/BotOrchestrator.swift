@@ -453,27 +453,37 @@ final class BotOrchestrator: @unchecked Sendable {
         // Payments are the one thing that must never wait out the debounce.
         await persistence?.flushNow()
 
+        let isPrivate = message.chat.type == "private"
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy"
         let text: String
         switch activation {
         case .started(let until):
-            text = """
-            ✅ <b>Оплата получена!</b>
+            if isPrivate {
+                text = """
+                ✅ <b>Оплата получена!</b>
 
-            Добро пожаловать, @\(username)!
-            Ваша персональная копия бота активирована.
-            Подписка действует до <b>\(formatter.string(from: until))</b>.
+                Добро пожаловать, @\(username)!
+                Премиум-доступ активирован — для вас и всех ваших чатов.
+                Подписка действует до <b>\(formatter.string(from: until))</b>.
 
-            Используйте /menu для настройки или просто начните общение.
-            Продлить в любой момент — /buy.
-            """
+                Используйте /menu для настройки или просто начните общение.
+                Продлить в любой момент — /buy.
+                """
+            } else {
+                // Group: credit the sponsor publicly (hero status).
+                text = "🎉 @\(username) открыл премиум-доступ для этого чата! Теперь всем доступны умные модели без рекламы."
+            }
         case .extended(let until):
-            text = """
-            ✅ <b>Подписка продлена!</b>
+            if isPrivate {
+                text = """
+                ✅ <b>Подписка продлена!</b>
 
-            Доступ активен до <b>\(formatter.string(from: until))</b>.
-            """
+                Доступ активен до <b>\(formatter.string(from: until))</b>.
+                """
+            } else {
+                text = "🎉 @\(username) продлил премиум-доступ для этого чата — умные модели снова доступны всем."
+            }
         case .alreadyUnlimited:
             text = "✅ Оплата получена. У вас бессрочный доступ — ничего не изменилось."
         }

@@ -337,12 +337,18 @@ actor CryptoPaymentService {
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy"
+        // Telegram convention: negative chat IDs are groups/supergroups.
+        let isGroup = invoice.userChatID < 0
         let subscriptionLine: String
         switch activation {
         case .started(let until):
-            subscriptionLine = "Добро пожаловать, @\(invoice.username)! Персональная копия бота активирована, подписка до <b>\(formatter.string(from: until))</b>."
+            subscriptionLine = isGroup
+                ? "🎉 @\(invoice.username) открыл премиум-доступ для этого чата — теперь всем доступны умные модели без рекламы."
+                : "Добро пожаловать, @\(invoice.username)! Премиум-доступ активирован, подписка до <b>\(formatter.string(from: until))</b>."
         case .extended(let until):
-            subscriptionLine = "Подписка @\(invoice.username) продлена до <b>\(formatter.string(from: until))</b>."
+            subscriptionLine = isGroup
+                ? "🎉 @\(invoice.username) продлил премиум-доступ для этого чата."
+                : "Подписка @\(invoice.username) продлена до <b>\(formatter.string(from: until))</b>."
         case .alreadyUnlimited:
             subscriptionLine = "У @\(invoice.username) бессрочный доступ."
         }
