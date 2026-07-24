@@ -31,6 +31,7 @@ private enum MenuPage: String {
     case superBalances = "superbal"
     case superFunnel = "superfunnel"
     case superReminders = "superreminders"
+    case superOnboarding = "superonboarding"
     case adminInvite = "admininvite"
     case close
 }
@@ -1180,6 +1181,34 @@ final class BotMenuHandler: @unchecked Sendable {
             try await handleReminderAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
             return
 
+        case "examples":
+            // Open to everyone: posts the example buttons as a fresh message so
+            // the settings menu stays where it is (roadmap step 9).
+            let onboarding = await state.onboardingConfig()
+            let exampleRows = OnboardingPresenter.exampleRows(onboarding)
+            guard !exampleRows.isEmpty else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Примеров сейчас нет")
+                return
+            }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: OnboardingPresenter.invitation,
+                replyMarkup: InlineKeyboardMarkup(inline_keyboard: exampleRows)
+            ))
+            await state.bumpFunnel(.onboardingShown)
+            return
+
+        case "onb":
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            try await handleOnboardingAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            return
+
         case "sbal":
             guard await state.isSuperAdmin(username: callback.from.username) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
@@ -1448,6 +1477,8 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderSuperFunnel(chatKey: chatKey)
         case .superReminders:
             return await renderSuperReminders(chatKey: chatKey)
+        case .superOnboarding:
+            return await renderSuperOnboarding(chatKey: chatKey)
         case .adminInvite:
             return await renderAdminInvite(chatKey: chatKey, username: username)
         case .close:
@@ -1511,6 +1542,11 @@ final class BotMenuHandler: @unchecked Sendable {
         rows.append([menuButton("📊 Что показывать в ответе", action: "nav:stats")])
         if usage.generationCount > 0 {
             rows.append([menuButton("🗑 Сбросить статистику", action: "stats:usage-reset")])
+        }
+        // Onboarding (roadmap step 9): a way back to the ready-made prompts
+        // after the greeting has scrolled away.
+        if !(await state.onboardingConfig().activeExamples.isEmpty) {
+            rows.append([menuButton("💡 Примеры-запросы", action: "examples")])
         }
         // Monetization entry point: shown whenever there is something to buy
         // or an existing subscription/wallet to inspect.
@@ -2498,6 +2534,134 @@ final class BotMenuHandler: @unchecked Sendable {
         }
     }
 
+    // MARK: - Onboarding examples (roadmap step 9)
+
+    private func handleOnboardingAdminAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard parts.count >= 2 else {
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+            return
+        }
+        var config = await state.onboardingConfig()
+
+        /// The example a positional action refers to; nil answers the callback.
+        func example(at index: Int) async -> OnboardingExample? {
+            guard index >= 0, index < config.examples.count else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пример не найден")
+                return nil
+            }
+            return config.examples[index]
+        }
+
+        switch parts[1] {
+        case "toggle":
+            config.enabled.toggle()
+            await state.setOnboardingConfig(config)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: config.enabled ? "🟢 Включены" : "⚪️ Выключены")
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
+        case "groups":
+            config.showInGroups.toggle()
+            await state.setOnboardingConfig(config)
+            try? await telegram.answerCallback(
+                callbackQueryID: callback.id,
+                text: config.showInGroups ? "🟢 И в группах" : "⚪️ Только в личке"
+            )
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
+        case "add":
+            guard config.examples.count < OnboardingConfig.maxExamples else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Максимум \(OnboardingConfig.maxExamples) примеров")
+                return
+            }
+            await state.setAdminPendingInput(.init(kind: .onboardingAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let prompt = """
+            <b>➕ Новый пример-запрос</b>
+
+            Отправьте одним сообщением:
+            <code>Кнопка | Текст запроса</code>
+
+            <i>Пример:</i> <code>🍳 Рецепт | Придумай рецепт ужина из курицы и риса за 20 минут</code>
+
+            Кнопка — до \(OnboardingConfig.maxLabelLength) символов, запрос — до \(OnboardingConfig.maxPromptLength). Запрос должен быть самодостаточным: по тапу он уходит модели как есть.
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superonboarding")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+
+        case "edit":
+            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            await state.setAdminPendingInput(
+                .init(kind: .onboardingEdit, menuMessageID: message.message_id, payload: item.id),
+                chatKey: chatKey
+            )
+            let prompt = """
+            <b>✏️ Пример · \(OnboardingPresenter.escape(item.label))</b>
+
+            Текущий запрос:
+            <blockquote>\(OnboardingPresenter.escape(item.prompt))</blockquote>
+
+            Отправьте новое значение в формате:
+            <code>Кнопка | Текст запроса</code>
+
+            <i>Счётчик тапов (\(item.taps)) сохранится.</i>
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superonboarding")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+
+        case "on":
+            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            let newValue = await state.toggleOnboardingExample(id: item.id)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: newValue == true ? "🟢 Показывается" : "⚪️ Скрыт")
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
+        case "up":
+            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            let moved = await state.moveOnboardingExampleUp(id: item.id)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: moved ? "↑ Выше" : "Уже первый")
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
+        case "del":
+            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            let removed = await state.removeOnboardingExample(id: item.id)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "🗑 Удалён" : "Пример не найден")
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
+        case "preview":
+            // Renders the real buttons; tapping one runs a real generation in
+            // this chat (that is the point — the super-admin sees what users get).
+            let rows = OnboardingPresenter.exampleRows(config)
+            guard !rows.isEmpty else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нет активных примеров")
+                return
+            }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "👁 <i>Так это видит пользователь:</i>\n\n" + OnboardingPresenter.invitation,
+                replyMarkup: InlineKeyboardMarkup(inline_keyboard: rows)
+            ))
+
+        case "reset":
+            await state.resetOnboardingExamplesToDefaults()
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "↺ Стандартный набор")
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
+        case "clearstats":
+            await state.resetOnboardingTapStats()
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Счётчики обнулены")
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
+        default:
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
+
     // MARK: - Crypto admin actions
 
     private func handleCryptoAdminAction(
@@ -2752,6 +2916,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let markupPct = await state.markupPercent()
         let dailyLimit = await state.dailyPremiumLimit()
         let reminders = await state.reminderConfig()
+        let onboarding = await state.onboardingConfig()
         let lifecycle = await state.subscriptionLifecycleStats()
         let balances = await state.allBalances()
         let balancesTotal = balances.reduce(0.0) { $0 + $1.wallet.balanceUsd }
@@ -2771,6 +2936,7 @@ final class BotMenuHandler: @unchecked Sendable {
              menuButton("💹 Наценка · \(markupPct)%", action: "markup:set")],
             [menuButton("🎁 Премиум-лимит/день · \(dailyLimit)", action: "dailylimit:set")],
             [menuButton("⏳ Напоминания и winback · \(reminders.enabled ? "вкл" : "выкл")", action: "nav:superreminders")],
+            [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.activeExamples.count)" : "выкл")", action: "nav:superonboarding")],
             [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
             [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
@@ -2789,6 +2955,7 @@ final class BotMenuHandler: @unchecked Sendable {
         💳 Карта · \(cardLabel)
         💹 Наценка · <b>\(markupPct)%</b> · /tenant markup
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
+        💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · активных <b>\(onboarding.activeExamples.count)</b>\(onboarding.showInGroups ? " · и в группах" : "")
         ⏳ Напоминания · <b>\(reminders.enabled ? "вкл" : "выкл")</b> · скоро истекут <b>\(lifecycle.expiringSoon.count)</b> · winback-офферов <b>\(lifecycle.activeDiscounts.count)</b>
         💰 Балансов · <b>\(balances.count)</b> · остатки \(String(format: "$%.2f", balancesTotal)) · маржа <b>\(String(format: "$%.4f", marginTotal))</b> · /balance list
         🆓 Бесплатных моделей · <b>\(freeCount)</b>
@@ -2813,6 +2980,8 @@ final class BotMenuHandler: @unchecked Sendable {
 
         let start = n(.start)
         let addedToGroup = n(.addedToGroup)
+        let onboardingShown = n(.onboardingShown)
+        let exampleTapped = n(.exampleTapped)
         let firstMsg = n(.firstMessage)
         let capHit = n(.capHit)
         let openPurchase = n(.openPurchase)
@@ -2827,6 +2996,7 @@ final class BotMenuHandler: @unchecked Sendable {
             "",
             "1️⃣ Старт (/start) · <b>\(start)</b>",
             "➕ Добавлен в группы · <b>\(addedToGroup)</b> · вирусный рост",
+            "💡 Примеры показаны · <b>\(onboardingShown)</b> · тапов <b>\(exampleTapped)</b> · вовлечение \(pct(exampleTapped, onboardingShown))",
             "2️⃣ Первое сообщение · <b>\(firstMsg)</b> · активация \(pct(firstMsg, start))",
             "3️⃣ Упёрлись в лимит · <b>\(capHit)</b>",
             "4️⃣ Открыли покупку · <b>\(openPurchase)</b>",
@@ -2853,6 +3023,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let rows: [[InlineKeyboardButton]] = [
             [menuButton("🔄 Обновить", action: "nav:superfunnel")],
             [menuButton("⏳ Напоминания и winback", action: "nav:superreminders")],
+            [menuButton("💡 Примеры-запросы", action: "nav:superonboarding")],
             navButtons(),
         ]
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
@@ -2937,6 +3108,67 @@ final class BotMenuHandler: @unchecked Sendable {
 
         lines.append("")
         lines.append("<i>Каждое напоминание уходит один раз за срок подписки: продление обнуляет отметки. Спонсор может отключить их у себя в админ-панели. Счётчики — на странице «📊 Воронка» и в /metrics.</i>")
+
+        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    /// Onboarding examples (roadmap step 9): the whole set is edited here — no
+    /// example text lives in code — plus the monitoring that says which prompt
+    /// actually gets tapped (taps per example, share of the total).
+    private func renderSuperOnboarding(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let config = await state.onboardingConfig()
+        let report = await state.funnelReport()
+        let shown = report.count(.onboardingShown)
+        let tapped = report.count(.exampleTapped)
+        let totalTaps = config.examples.reduce(0) { $0 + $1.taps }
+
+        func pct(_ num: Int, _ den: Int) -> String {
+            guard den > 0 else { return "—" }
+            return String(format: "%.0f%%", Double(num) / Double(den) * 100)
+        }
+
+        var rows: [[InlineKeyboardButton]] = [
+            [menuButton(config.enabled ? "🟢 Примеры включены" : "⚪️ Примеры выключены", action: "onb:toggle")],
+            [menuButton(config.showInGroups ? "🟢 Показывать в группах" : "⚪️ Только в личке", action: "onb:groups")],
+        ]
+        for (index, example) in config.examples.enumerated() {
+            rows.append([
+                menuButton("\(example.enabled ? "🟢" : "⚪️") \(example.label)", action: "onb:on:\(index)"),
+                menuButton("✏️", action: "onb:edit:\(index)"),
+                menuButton("↑", action: "onb:up:\(index)"),
+                menuButton("❌", action: "onb:del:\(index)"),
+            ])
+        }
+        if config.examples.count < OnboardingConfig.maxExamples {
+            rows.append([menuButton("➕ Добавить пример", action: "onb:add")])
+        }
+        rows.append([menuButton("👁 Предпросмотр", action: "onb:preview"),
+                     menuButton("↺ Стандартные", action: "onb:reset")])
+        if totalTaps > 0 {
+            rows.append([menuButton("🗑 Обнулить счётчики тапов", action: "onb:clearstats")])
+        }
+        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+
+        var lines: [String] = [
+            "<b>💡 Примеры-запросы (онбординг)</b>",
+            "",
+            "Статус · <b>\(config.enabled ? "включены" : "выключены")</b> · в приветствии группы · <b>\(config.showInGroups ? "да" : "нет")</b>",
+            "Показов приветствия с примерами · <b>\(shown)</b> · тапов · <b>\(tapped)</b> · вовлечение <b>\(pct(tapped, shown))</b>",
+            "",
+        ]
+
+        if config.examples.isEmpty {
+            lines.append("<i>Список пуст — пользователь увидит приветствие без кнопок-примеров.</i>")
+        } else {
+            for example in config.examples {
+                let share = totalTaps > 0 ? " · \(pct(example.taps, totalTaps))" : ""
+                lines.append("\(example.enabled ? "🟢" : "⚪️") <b>\(OnboardingPresenter.escape(example.label))</b> · тапов \(example.taps)\(share)")
+                lines.append("<blockquote>\(OnboardingPresenter.escape(example.prompt))</blockquote>")
+            }
+        }
+
+        lines.append("")
+        lines.append("<i>Тап по примеру = обычный запрос: работают лимиты, биллинг и история чата. Тексты и порядок кнопок правятся здесь, без передеплоя. Команда — /examples.</i>")
 
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3852,6 +4084,18 @@ UI: «⏳ Напоминания и winback» в супер-меню — рас�
 <code>/reminders run</code> — проверить сейчас · <code>/reminders test</code> — предпросмотр
 <code>/reminders clear</code> — снять все активные скидки
 
+<b>━━━ 💡 Примеры-запросы (онбординг) ━━━</b>
+
+UI: «💡 Примеры-запросы» в супер-меню — тексты кнопок и запросов, порядок, вкл/выкл каждого, предпросмотр, тапы по каждому примеру.
+
+Кнопки-примеры показываются в приветствии <code>/start</code> и (опционально) при добавлении бота в группу. Тап = обычный запрос: работают дневной лимит, биллинг, история чата.
+
+<code>/examples</code> — показать примеры в чате
+<code>/examples stats</code> — тапы по каждому примеру
+<code>/examples on|off</code> · <code>/examples groups</code>
+<code>/examples reset</code> — вернуть стандартный набор
+<code>/examples clearstats</code> — обнулить счётчики
+
 <b>━━━ 💫 Stars ━━━</b>
 
 UI: «💫 Stars» в супер-меню.
@@ -4276,6 +4520,29 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 toast = "✓ Проверка каждые <b>\(n) мин</b> <i>(применится к следующему циклу)</i>"
             } else {
                 toast = "⚠️ Нужно число \(SubscriptionReminderConfig.sweepIntervalRange.lowerBound)–\(SubscriptionReminderConfig.sweepIntervalRange.upperBound)"
+            }
+
+        case .onboardingAdd, .onboardingEdit:
+            resumePage = .superOnboarding
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            // "Кнопка | Текст запроса" — same shape as preset input, so the
+            // super-admin learns one format for the whole menu.
+            let comps = trimmed.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            let label = comps.first ?? ""
+            let prompt = comps.count > 1 ? comps[1] : ""
+            if label.isEmpty || prompt.isEmpty {
+                toast = "⚠️ Формат: <code>Кнопка | Текст запроса</code>"
+            } else if pending.kind == .onboardingAdd {
+                if let added = await state.addOnboardingExample(label: label, prompt: prompt) {
+                    toast = "✓ Пример добавлен · <b>\(OnboardingPresenter.escape(added.label))</b>"
+                } else {
+                    toast = "⚠️ Не добавлен: список полон (\(OnboardingConfig.maxExamples)) или текст пуст"
+                }
+            } else if let id = pending.payload,
+                      await state.updateOnboardingExample(id: id, label: label, prompt: prompt) {
+                toast = "✓ Пример обновлён · <b>\(OnboardingPresenter.escape(label))</b>"
+            } else {
+                toast = "⚠️ Пример не найден — возможно, он был удалён"
             }
 
         case .balanceTopUp:

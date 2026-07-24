@@ -280,8 +280,18 @@ final class BotOrchestrator: @unchecked Sendable {
 
     func dispatch(update: TelegramUpdate) async {
         if let callback = update.callback_query {
-            // Callbacks bypass the per-chat queue on purpose: the stop button
-            // must cancel the generation that is blocking that queue.
+            // An onboarding example (roadmap step 9) starts a generation, so it
+            // belongs on the message path — same per-chat ordering as if the
+            // user had typed the prompt.
+            if let data = callback.data,
+               case .example(let exampleID)? = BotCallbackAction(rawData: data) {
+                Task {
+                    await self.handleOnboardingExample(id: exampleID, callback: callback)
+                }
+                return
+            }
+            // Other callbacks bypass the per-chat queue on purpose: the stop
+            // button must cancel the generation that is blocking that queue.
             Task {
                 await self.callbackHandler.handleIfSupported(callback)
             }
@@ -343,6 +353,87 @@ final class BotOrchestrator: @unchecked Sendable {
                     )
                 }
             }
+        }
+    }
+
+    /// An onboarding example button was tapped (roadmap step 9): echo the prompt
+    /// into the chat (Telegram cannot post it as the user) and answer it as a
+    /// normal turn — free-tier gate, billing and history all apply.
+    private func handleOnboardingExample(id: String, callback: CallbackQuery) async {
+        guard let message = callback.message else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Сообщение недоступно")
+            return
+        }
+        let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+
+        // Counts the tap (per-example stat + funnel) and resolves the prompt.
+        guard let example = await state.recordOnboardingTap(id: id) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пример больше недоступен — напишите свой вопрос")
+            return
+        }
+        try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+
+        // Mirrors route(): keep chat identity fresh and let the sender's licence
+        // claim an unowned chat before the access gate runs.
+        await state.recordChatMeta(
+            chatID: message.chat.id,
+            info: ChatMetaInfo(
+                type: message.chat.type,
+                title: message.chat.title,
+                username: message.chat.type == "private" ? (message.chat.username ?? callback.from.username) : nil,
+                firstName: message.chat.type == "private" ? (message.chat.first_name ?? callback.from.first_name) : nil
+            )
+        )
+        await state.autoAssignIfNeeded(
+            chatID: chatKey.chatID,
+            senderUsername: callback.from.username,
+            senderUserID: callback.from.id
+        )
+
+        let echo = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: OnboardingPresenter.tapEcho(example: example),
+            replyMarkup: nil
+        ))
+
+        let origin = GenerationOrigin(
+            user: callback.from,
+            isPrivate: message.chat.type == "private",
+            replyToMessageID: echo?.message_id
+        )
+
+        let result = await updateDispatcher.submit(chatKey: chatKey) { [self] in
+            do {
+                try await generationCoordinator.runReadyPrompt(
+                    text: example.prompt,
+                    chatKey: chatKey,
+                    origin: origin
+                )
+            } catch {
+                logger.error("onboarding example failed: \(error)")
+                if !(error is CancellationError) {
+                    _ = try? await telegram.sendMessage(.init(
+                        chatID: chatKey.chatID,
+                        threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                        replyTo: nil,
+                        text: "⚠️ " + UserFacingError.message(error),
+                        replyMarkup: nil
+                    ))
+                }
+            }
+        }
+
+        if case .rejected = result {
+            await metrics.increment(MetricName.updatesDropped)
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "⏳ Слишком много запросов подряд — попробуйте ещё раз через минуту.",
+                replyMarkup: nil
+            ))
         }
     }
 
@@ -413,16 +504,29 @@ final class BotOrchestrator: @unchecked Sendable {
         // Funnel: a real group entry is the viral-growth event (roadmap step 4).
         await state.bumpFunnel(.addedToGroup)
 
-        let text = """
+        var text = """
         <b>👋 Всем привет!</b> Я умный ИИ-ассистент. Отвечаю на @упоминание или реплай на моё сообщение.
 
         Понимаю текст, фото, голос и видео, помню разговор.
 
         Полный доступ — умные модели, без рекламы и лимитов — для этого чата откроет любой участник → /buy
         """
-        let markup = InlineKeyboardMarkup(inline_keyboard: [
-            [InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: BotCallbackAction.menu(action: "nav:pay").rawData)],
-        ])
+        var rows: [[InlineKeyboardButton]] = []
+
+        // Onboarding (roadmap step 9): one tap shows the chat what the bot can
+        // do — the fastest path from "added" to "activated".
+        let onboarding = await state.onboardingConfig()
+        if onboarding.showInGroups {
+            let exampleRows = OnboardingPresenter.exampleRows(onboarding)
+            if !exampleRows.isEmpty {
+                text += "\n\n" + OnboardingPresenter.invitation
+                rows.append(contentsOf: exampleRows)
+                await state.bumpFunnel(.onboardingShown)
+            }
+        }
+
+        rows.append([InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: BotCallbackAction.menu(action: "nav:pay").rawData)])
+        let markup = InlineKeyboardMarkup(inline_keyboard: rows)
         _ = try? await telegram.sendMessage(.init(
             chatID: update.chat.id,
             threadID: nil,

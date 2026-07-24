@@ -82,6 +82,7 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         configs.funnel = try await fetchConfig(.funnel, as: [String: Int].self)
         configs.dailyPremiumLimit = try await fetchConfig(.dailyPremiumLimit, as: Int.self)
         configs.reminders = try await fetchConfig(.reminders, as: SubscriptionReminderConfig.self)
+        configs.onboarding = try await fetchConfig(.onboarding, as: OnboardingConfig.self)
 
         return PersistedBotState(
             contexts: contextRows.map {
@@ -224,6 +225,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         case .dailyPremiumLimit(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .reminders(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .onboarding(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         }
         try await upsert(table: "bot_config", body: body)

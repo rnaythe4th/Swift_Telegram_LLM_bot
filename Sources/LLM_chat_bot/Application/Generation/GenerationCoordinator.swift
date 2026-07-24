@@ -6,6 +6,30 @@ private enum ReplyContentResolution {
     case content(UserInputContent)
 }
 
+/// Everything a turn needs to know about who asked and where. A real Telegram
+/// message yields one; so does a synthetic turn started from a button (an
+/// onboarding example, roadmap step 9), which has no message of its own.
+struct GenerationOrigin: Sendable {
+    let user: TelegramUser?
+    let isPrivate: Bool
+    /// Message the reply should quote; nil = plain reply.
+    let replyToMessageID: Int?
+
+    init(user: TelegramUser?, isPrivate: Bool, replyToMessageID: Int?) {
+        self.user = user
+        self.isPrivate = isPrivate
+        self.replyToMessageID = replyToMessageID
+    }
+
+    init(message: TelegramMessage) {
+        self.init(
+            user: message.from,
+            isPrivate: message.chat.type == "private",
+            replyToMessageID: message.message_id
+        )
+    }
+}
+
 final class GenerationCoordinator: @unchecked Sendable {
     private let telegram: TelegramGatewayPort
     private let state: ChatContextStore
@@ -142,12 +166,24 @@ final class GenerationCoordinator: @unchecked Sendable {
     func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
         switch try await resolveProcessableContent(message: message, chatKey: chatKey) {
         case .content(let content):
-            try await processContent(message: message, content: content, chatKey: chatKey)
+            try await processContent(origin: GenerationOrigin(message: message), content: content, chatKey: chatKey)
         case .unsupported(let feedback):
             try await sendUserFeedback(chatKey: chatKey, text: feedback)
         case .none:
             break
         }
+    }
+
+    /// Runs a ready-made prompt as a normal turn — the onboarding example
+    /// buttons (roadmap step 9). Skips only the routing policy (the tap *is* the
+    /// explicit address to the bot); the free-tier gate, billing, ads and
+    /// history all behave exactly as for a typed message.
+    func runReadyPrompt(text: String, chatKey: ChatKey, origin: GenerationOrigin) async throws {
+        try await processContent(
+            origin: origin,
+            content: UserInputContent(text: text, attachments: []),
+            chatKey: chatKey
+        )
     }
     
     private func resolveProcessableContent(message: TelegramMessage, chatKey: ChatKey) async throws -> ReplyContentResolution {
@@ -180,8 +216,8 @@ final class GenerationCoordinator: @unchecked Sendable {
         return .content(.init(text: normalizedText, attachments: resolved))
     }
     
-    private func processContent(message: TelegramMessage, content: UserInputContent, chatKey: ChatKey) async throws {
-        let username = message.from?.username
+    private func processContent(origin: GenerationOrigin, content: UserInputContent, chatKey: ChatKey) async throws {
+        let username = origin.user?.username
 
         // Funnel: count this chat's first real message (activation, once per chat).
         await state.markFirstMessageIfNeeded(chatKey: chatKey)
@@ -193,17 +229,17 @@ final class GenerationCoordinator: @unchecked Sendable {
         // upgrade is pitched at the pain point. Free models are unlimited
         // (retention); sponsored chats never reach here (hasFullModelAccess).
         if let effectiveFree = await state.effectiveFreeModelIDs(),
-           !(await state.hasFullModelAccess(username: username, userID: message.from?.id, chatID: chatKey.chatID)) {
+           !(await state.hasFullModelAccess(username: username, userID: origin.user?.id, chatID: chatKey.chatID)) {
             let currentModel = await state.model(chatKey: chatKey)
             if !effectiveFree.contains(currentModel) {
                 guard let firstFree = effectiveFree.first else {
                     try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Бесплатные модели не настроены. Обратитесь к администратору.")
                     return
                 }
-                let isGroup = message.chat.type != "private"
+                let isGroup = !origin.isPrivate
                 let decision = await state.consumeDailyPremium(
                     chatID: chatKey.chatID,
-                    userID: message.from?.id,
+                    userID: origin.user?.id,
                     isGroup: isGroup
                 )
                 switch decision {
@@ -223,7 +259,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         // (marked-up). Everyone else is free-tier → sees ads.
         let covered = await state.hasSubscriptionCoverage(
             username: username,
-            userID: message.from?.id,
+            userID: origin.user?.id,
             chatID: chatKey.chatID
         )
         var billedTo: String? = nil
@@ -293,8 +329,8 @@ final class GenerationCoordinator: @unchecked Sendable {
 
             let sponsorLine = await sponsorCreditLine(
                 chatID: chatKey.chatID,
-                askerUsername: message.from?.username,
-                isPrivate: message.chat.type == "private"
+                askerUsername: origin.user?.username,
+                isPrivate: origin.isPrivate
             )
 
             try await streamReply(
@@ -303,9 +339,9 @@ final class GenerationCoordinator: @unchecked Sendable {
                 fallbackModel: fallbackModel,
                 options: snapshot.options,
                 chatKey: chatKey,
-                replyToMessageID: message.message_id,
+                replyToMessageID: origin.replyToMessageID,
                 generationID: generationID,
-                isPrivateChat: message.chat.type == "private",
+                isPrivateChat: origin.isPrivate,
                 adEligible: adEligible,
                 billedTo: billedTo,
                 sponsorLine: sponsorLine
@@ -323,7 +359,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         fallbackModel: String,
         options: GenerationOptions,
         chatKey: ChatKey,
-        replyToMessageID: Int,
+        replyToMessageID: Int?,
         generationID: GenerationID,
         isPrivateChat: Bool,
         adEligible: Bool,
@@ -410,7 +446,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         fallbackModel: String,
         options: GenerationOptions,
         chatKey: ChatKey,
-        replyToMessageID: Int,
+        replyToMessageID: Int?,
         generationID: GenerationID,
         controlMessage: TelegramMessage,
         adEligible: Bool,

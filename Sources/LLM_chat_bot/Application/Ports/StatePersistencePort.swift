@@ -18,6 +18,7 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case funnel = "funnel"
     case dailyPremiumLimit = "daily_premium_limit"
     case reminders = "reminders"
+    case onboarding = "onboarding"
 }
 
 struct ChatContextRow: Sendable {
@@ -60,6 +61,8 @@ enum GlobalConfigValue: Sendable {
     case dailyPremiumLimit(Int)
     /// Renewal-reminder / winback schedule (roadmap step 8).
     case reminders(SubscriptionReminderConfig)
+    /// Greeting example prompts + their tap counters (roadmap step 9).
+    case onboarding(OnboardingConfig)
 
     var key: GlobalConfigKey {
         switch self {
@@ -79,6 +82,7 @@ enum GlobalConfigValue: Sendable {
         case .funnel: return .funnel
         case .dailyPremiumLimit: return .dailyPremiumLimit
         case .reminders: return .reminders
+        case .onboarding: return .onboarding
         }
     }
 }
@@ -167,13 +171,14 @@ struct PersistedGlobalConfigs: Sendable {
     var funnel: [String: Int]?
     var dailyPremiumLimit: Int?
     var reminders: SubscriptionReminderConfig?
+    var onboarding: OnboardingConfig?
 
     var hasAnyValue: Bool {
         starsPrice != nil || starsPerUsd != nil || freeModelIDs != nil || crypto != nil || card != nil
             || superAdmins != nil || processedPayments != nil || pollingOffset != nil
             || chatMeta != nil || invites != nil || ads != nil
             || markup != nil || balances != nil || funnel != nil || dailyPremiumLimit != nil
-            || reminders != nil
+            || reminders != nil || onboarding != nil
     }
 }
 

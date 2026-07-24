@@ -179,6 +179,8 @@ extension ChatContextStore {
             return .dailyPremiumLimit(dailyPremiumLimitValue)
         case .reminders:
             return .reminders(reminderConfigValue)
+        case .onboarding:
+            return .onboarding(onboardingConfigValue)
         }
     }
 
@@ -264,6 +266,7 @@ extension ChatContextStore {
         funnelCounters = state.configs.funnel ?? [:]
         dailyPremiumLimitValue = state.configs.dailyPremiumLimit ?? 5
         reminderConfigValue = (state.configs.reminders ?? .default).normalized
+        onboardingConfigValue = (state.configs.onboarding ?? .default).normalized
     }
 
     // MARK: - Legacy snapshot restore (one-time migration path)

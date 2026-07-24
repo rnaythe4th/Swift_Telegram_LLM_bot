@@ -149,6 +149,9 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             try await handleReminders(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
+        case .examples:
+            try await handleExamples(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
+
         case .setRole:
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
@@ -455,7 +458,7 @@ final class BotCommandHandler: @unchecked Sendable {
     }
 
     private func sendStartGreeting(chatKey: ChatKey) async throws {
-        let text = """
+        var text = """
         <b>👋 Привет!</b> Я — умный ИИ-ассистент в Telegram.
 
         Напишите мне — отвечу. Понимаю текст, фото, голос и видео, помню разговор.
@@ -465,6 +468,17 @@ final class BotCommandHandler: @unchecked Sendable {
         ⚙️ /menu · 📘 /help
         """
         var rows: [[InlineKeyboardButton]] = []
+
+        // Onboarding (roadmap step 9): ready-made prompts turn the empty chat
+        // after /start — the biggest drop-off point — into one tap to value.
+        let onboarding = await state.onboardingConfig()
+        let exampleRows = OnboardingPresenter.exampleRows(onboarding)
+        if !exampleRows.isEmpty {
+            text += "\n\n" + OnboardingPresenter.invitation
+            rows.append(contentsOf: exampleRows)
+            await state.bumpFunnel(.onboardingShown)
+        }
+
         // Viral loop entry: one tap opens Telegram's group picker and adds the
         // bot; the group-entry greeting then pitches premium to the owner.
         if !botUsername.isEmpty {
@@ -482,6 +496,84 @@ final class BotCommandHandler: @unchecked Sendable {
         ))
     }
 
+    // MARK: - Onboarding examples (roadmap step 9)
+
+    /// `/examples` — re-sends the ready-made prompt buttons to anyone (the
+    /// greeting scrolls away fast). Super-admins get the same switches the
+    /// super-menu page has, so the feature is controllable without the UI.
+    private func handleExamples(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
+        let parts = argument.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        let subcommand = (parts.first ?? "").lowercased()
+        let isSuper = await isSuperAdmin(fromUser)
+
+        if isSuper, !subcommand.isEmpty {
+            var config = await state.onboardingConfig()
+            switch subcommand {
+            case "on", "off":
+                config.enabled = subcommand == "on"
+                await state.setOnboardingConfig(config)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Примеры в приветствии: <b>\(onOff(config.enabled))</b>")
+                return
+            case "groups":
+                config.showInGroups.toggle()
+                await state.setOnboardingConfig(config)
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Примеры в приветствии группы: <b>\(onOff(config.showInGroups))</b>")
+                return
+            case "reset":
+                await state.resetOnboardingExamplesToDefaults()
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Стандартный набор примеров восстановлен.")
+                return
+            case "clearstats":
+                await state.resetOnboardingTapStats()
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Счётчики тапов обнулены.")
+                return
+            case "stats":
+                let fresh = await state.onboardingConfig()
+                var lines = ["<b>💡 Примеры-запросы · статистика</b>", ""]
+                lines.append("Статус · <b>\(onOff(fresh.enabled))</b> · в группах · <b>\(onOff(fresh.showInGroups))</b>")
+                if fresh.examples.isEmpty {
+                    lines.append("<i>Список пуст.</i>")
+                } else {
+                    for example in fresh.examples {
+                        lines.append("\(example.enabled ? "🟢" : "⚪️") \(OnboardingPresenter.escape(example.label)) · тапов <b>\(example.taps)</b> · <code>\(example.id)</code>")
+                    }
+                }
+                lines.append("")
+                lines.append("<i>Редактирование — /menu → 🛡 Супер-админ → 💡 Примеры-запросы</i>")
+                try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+                return
+            default:
+                try await sendUserFeedback(chatKey: chatKey, text: """
+                    <b>💡 Примеры-запросы</b>
+
+                    <code>/examples</code> — показать примеры
+                    <code>/examples stats</code> — тапы по каждому примеру
+                    <code>/examples on|off</code> — показывать в приветствии
+                    <code>/examples groups</code> — показывать при входе в группу
+                    <code>/examples reset</code> — вернуть стандартный набор
+                    <code>/examples clearstats</code> — обнулить счётчики
+
+                    Тексты примеров редактируются кнопками: /menu → 🛡 Супер-админ → 💡 Примеры-запросы
+                    """)
+                return
+            }
+        }
+
+        let onboarding = await state.onboardingConfig()
+        let rows = OnboardingPresenter.exampleRows(onboarding)
+        guard !rows.isEmpty else {
+            try await sendUserFeedback(chatKey: chatKey, text: "Готовых примеров сейчас нет — просто напишите свой вопрос, я отвечу.")
+            return
+        }
+        _ = try await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: OnboardingPresenter.invitation,
+            replyMarkup: InlineKeyboardMarkup(inline_keyboard: rows)
+        ))
+        await state.bumpFunnel(.onboardingShown)
+    }
 
     private func onOff(_ v: Bool) -> String { v ? "вкл" : "выкл" }
 

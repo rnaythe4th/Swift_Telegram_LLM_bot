@@ -85,6 +85,9 @@ enum AdminPendingInputKind: Sendable {
     case reminderDiscount
     case reminderOfferHours
     case reminderInterval
+    // Greeting example prompts (roadmap step 9); edit carries the example id.
+    case onboardingAdd
+    case onboardingEdit
 }
 
 struct AdminPendingInput: Sendable {

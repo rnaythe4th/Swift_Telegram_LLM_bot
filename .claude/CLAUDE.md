@@ -26,6 +26,8 @@ Telegram-бот на Swift (server-side, без Vapor), отвечающий п�
   pay-as-you-go балансы с наценкой; реклама во free-tier чатах.
 - **Удержание**: напоминание спонсору перед концом подписки и winback-офферы
   со срочной скидкой после истечения (расписание настраивается суперадмином).
+- **Онбординг**: кнопки-примеры в приветствии — тап запускает готовый запрос и
+  бот сразу отвечает (набор примеров правится суперадмином из меню).
 - **Управление**: слэш-команды + богатое inline-меню (`/menu`).
 - **Надёжность**: webhook с очередью Telegram, дедупликация updates,
   идемпотентность платежей, graceful shutdown, rate limiting, health-эндпоинты.
@@ -77,14 +79,20 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   и нормализует текст (убирает @упоминание).
 - `Telegram/TelegramPhotoAlbumBuffer.swift` — склейка `media_group` (альбомов) в
   один синтетический апдейт.
+- `Telegram/OnboardingPresenter.swift` — рендер кнопок-примеров онбординга
+  (клавиатура, приглашение, эхо запроса, HTML-escape). См. §7 «Онбординг».
 - `Generation/GenerationCoordinator.swift` — весь пайплайн генерации ответа:
   проверка доступа к модели, выбор режима биллинга, snapshot истории, запуск
   стрима (draft или edit), сборка футера, показ рекламы. См. §9.
+  Вход в пайплайн — `GenerationOrigin` (кто спросил, личка ли, на что отвечать):
+  строится из `TelegramMessage` либо синтезируется для тапа по примеру
+  (`runReadyPrompt`).
 - `Generation/DraftStreamer.swift` — «печатающая машинка» через `sendMessageDraft`.
 - `Commands/` — `CommandParser.swift` (парсинг `/cmd@bot`+suffix) и
   `BotCommandHandler.swift` (~1900 строк, реализация всех команд). См. §12.
 - `Callbacks/` — `BotCallbackAction.swift` (типы callback_data: `stop`, `menu`,
-  `faq`) и `BotCallbackHandler.swift` (роутинг нажатий кнопок).
+  `faq`, `ex:<id>` — пример онбординга) и `BotCallbackHandler.swift` (роутинг
+  нажатий кнопок).
 - `Menu/BotMenuHandler.swift` — inline-меню (~3700 строк): страницы, рендеринг,
   обработка ввода текста после нажатия кнопок. См. §13.
 - `Formatting/ResponseFooterFormatter.swift` — футер под ответом (токены, стоимость
@@ -124,6 +132,9 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   напоминаний/winback + чистое решение «что слать» — `dueNotice`),
   `SubscriptionNotice`, `SubscriptionDiscount`, `SubscriptionPricing`,
   `SubscriptionLifecycleStats`.
+- `Chat/Onboarding.swift` — `OnboardingExample` (id, подпись кнопки, готовый
+  запрос, вкл/выкл, счётчик тапов) и `OnboardingConfig` (вкл/выкл, показывать ли
+  в группах, список примеров + границы и нормализация). См. §7 «Онбординг».
 - `Chat/MediaTypes.swift`, `UserInputContent.swift` — медиа-рефы и вход юзера.
 - `Providers/ProviderTypes.swift` — `ServiceProvider`, `ProviderCapabilities`,
   `StreamUsageSummary`/`StreamMeta`, `ProviderStreamEvent`, `GenerationOptions`,
@@ -169,6 +180,8 @@ UpdateIntake.enqueue([updates])
   │  дедуп по update_id (кольцевой буфер 2048) + склейка альбомов (holdback 300мс)
   ▼
 BotOrchestrator.dispatch(update:)
+  ├─ callback_query `ex:` → handleOnboardingExample (тап по примеру = обычный запрос:
+  │                        учёт тапа, эхо запроса в чат, затем per-chat очередь)
   ├─ callback_query      → BotCallbackHandler (в обход per-chat очереди: stop должен прерывать)
   ├─ pre_checkout_query  → handlePreCheckoutQuery (цена: полная или winback-скидочная
   │                        → answerPreCheckoutQuery)
@@ -188,7 +201,9 @@ BotOrchestrator.dispatch(update:)
 ```
 
 Ключевое: **callback'и минуют per-chat очередь** — иначе кнопка «Стоп» не смогла
-бы отменить генерацию, которая эту очередь и держит.
+бы отменить генерацию, которая эту очередь и держит. Исключение — `ex:` (пример
+онбординга): он **запускает** генерацию, поэтому идёт через ту же очередь, что и
+обычное сообщение (порядок в чате не ломается).
 
 ---
 
@@ -206,7 +221,8 @@ BotOrchestrator.dispatch(update:)
   processed payments, polling offset, метаданные чатов, инвайты, реклама, markup%,
   балансы пользователей, счётчики воронки (`funnelCounters`), дневной премиум-лимит
   (`dailyPremiumLimitValue`, §7/§9), расписание напоминаний/winback
-  (`reminderConfigValue`, §7/§14).
+  (`reminderConfigValue`, §7/§14), примеры онбординга + их тапы
+  (`onboardingConfigValue`, §7 «Онбординг»).
 - **In-memory без персиста** (сброс при рестарте некритичен): `_premiumDailyUsage`
   — дневной счётчик «премиум-вкуса» free-tier (см. §9).
 - **Dirty-tracking**: `dirtyContexts`, `dirtyTenants`, `deletedTenants`,
@@ -365,6 +381,30 @@ charge_id, как у подписок.
 Страница «📣 Реклама» в супер-меню явно показывает, что при отсутствии кампаний слот
 занимает само-оффер (прозрачность, §шаг5).
 
+**Онбординг с примерами** (`OnboardingConfig`/`OnboardingExample`, роадмап шаг 9):
+пустой чат после `/start` — главная точка отвала, поэтому приветствие несёт
+кнопки-примеры (`✍️ Написать пост`, `💡 Объяснить простыми словами`, `🌍 Перевести`).
+
+- **Тап = обычный запрос**: `callback_data` = `ex:<id>` → `handleOnboardingExample`
+  считает тап, шлёт эхо запроса в чат (`<blockquote>`, Telegram не умеет писать «от
+  имени юзера») и ставит генерацию в **per-chat очередь** через
+  `GenerationCoordinator.runReadyPrompt` c синтетическим `GenerationOrigin`.
+  Обходится только `MessageRoutingPolicy` (тап и есть явное обращение); дневной
+  лимит, биллинг, реклама, история и футер работают как для набранного текста.
+- **Где показывается**: приветствие `/start`, приветствие при входе в группу
+  (`showInGroups`; тап активирует весь чат сразу), кнопка «💡 Примеры-запросы» в
+  главном меню и команда `/examples` (приветствие быстро уезжает вверх).
+- **Ничего не захардкожено**: набор, тексты, порядок и вкл/выкл каждого примера
+  правятся суперадмином на странице «💡 Примеры-запросы» (`superonboarding`) или
+  командой `/examples`; лежит в `bot_config` (`GlobalConfigKey.onboarding`),
+  границы (`maxExamples` 6, длина подписи/запроса) нормализуются на set и на
+  decode. Есть предпросмотр и «↺ Стандартные».
+- **Мониторинг**: счётчик тапов на каждом примере (персистится) + доля от всех
+  тапов на странице; воронка `onboardingShown` → `exampleTapped` (вовлечение) в
+  «📊 Воронка», `/metrics` и `/examples stats`.
+- Изменение текста примера сохраняет его `id` и счётчик тапов — уже отправленные
+  приветствия продолжают работать, статистика не обнуляется.
+
 ---
 
 ## 8. LLM-провайдеры
@@ -467,7 +507,8 @@ bot_state(id PK, data jsonb)                         -- legacy-блоб, read-on
 super_admins, processed_payments, polling_offset, chat_meta, invites, ads,
 markup, balances, **funnel** (счётчики воронки, §7/§11), **daily_premium_limit**
 (суперадмин-настройка дневного премиум-вкуса, §9), **reminders**
-(расписание напоминаний/winback, §7/§14).
+(расписание напоминаний/winback, §7/§14), **onboarding** (примеры-запросы и
+счётчики их тапов, §7 «Онбординг»).
 Значения конфигов оборачиваются в `{"value": …}`.
 
 **Boot** (`BotOrchestrator.bootstrapState`): `loadEverything()`; если строковые
@@ -511,7 +552,8 @@ memory-only режим, запись отключена**, чтобы не за�
   processed/deduplicated, reminder sweeps/sent/winbacks/send errors. Легко мапится
   на Prometheus.
 - **Воронка-аналитика** (`FunnelEvent`/`funnelCounters`, персистится в `bot_config`):
-  события start → addedToGroup (вирусный рост, §шаг4) → firstMessage → capHit →
+  события start → addedToGroup (вирусный рост, §шаг4) → onboardingShown →
+  exampleTapped (онбординг, §шаг9) → firstMessage → capHit →
   openPurchase → invoiceSent → paid/renewed + creditTopup, плюс удержание:
   expiryReminder → winbackSent → winbackRedeemed (§7). Отдаётся в `/metrics`
   (`funnel`: счётчики + живой подсчёт спонсоров
@@ -532,7 +574,8 @@ memory-only режим, запись отключена**, чтобы не за�
 **Пользовательские / настройки чата**: `/setrole`, `/clear_history`, `/settemp`,
 `/model`, `/historylength`, `/show_model`, `/show_cost`, `/show_tokens`,
 `/provider`, `/testmode`, `/reasoning`, `/help`, `/menu`, `/reset`, `/history`,
-`/reset_stats`, `/backup_notify`, `/chatid`, `/start`, `/buy`, `/balance`.
+`/reset_stats`, `/backup_notify`, `/chatid`, `/start`, `/buy`, `/balance`,
+`/examples` (кнопки-примеры онбординга).
 
 **Админские / тенант**: `/default_role`, `/defaults`, `/whitelist`, `/chats`,
 `/users`, `/presets`, `/tenant` (assign/release/adduser/register/remove/freemodels/
@@ -540,6 +583,7 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 
 **Суперадминские**: `/superadmin` (add/remove), `/simulate`, `/reminders`
 (on/off/days/winback/discount/hours/interval/chats/run/test/clear — §7/§14),
+`/examples` (stats/on/off/groups/reset/clearstats — §7 «Онбординг»),
 глобальные free-модели, цены, наценка, балансы (в основном через супер-меню).
 
 Неизвестная команда/упоминание → `.mention`/`.unknown` (игнор или обычная генерация).
@@ -555,7 +599,8 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 `superfreemodels`, `supertenants`, `superadmins`, `supersim`, `superchats`,
 `superads`, `superbal`, `superfunnel` — воронка-аналитика, `superreminders` —
 напоминания/winback: расписание, ручная проверка, предпросмотр, список подписок
-под наблюдением).
+под наблюдением, `superonboarding` — примеры-запросы: тексты, порядок, вкл/выкл,
+предпросмотр, тапы по каждому примеру).
 
 - `sendMenu` / `showPage` / `renderPage` — рендер клавиатур под роль/контекст.
 - **Pending-input flow**: кнопка вроде «✏️ Изменить цену» кладёт «ожидание ввода»
@@ -640,6 +685,9 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 - **Роли**: `isSuperAdmin` учитывает симуляцию, `isActuallySuperAdmin` — нет.
   Для гейтов, которые должны работать при симуляции, используй второй.
 - **Callback'и вне per-chat очереди** — не ломай это (Стоп должен прерывать).
+  Исключение: кнопка, которая **запускает** генерацию (`ex:` — пример онбординга),
+  обязана идти через `ChatUpdateDispatcher`, иначе порядок сообщений в чате
+  разъедется.
 - **Draft — только личка**; в группах и на старых Bot API — edit-стриминг.
   Draft эфемерен → финальный текст обязательно `sendMessage`, не только draft.
 - **Telegram-вывод — HTML** (`TelegramHTMLFormatter`), не Markdown. В system prompt

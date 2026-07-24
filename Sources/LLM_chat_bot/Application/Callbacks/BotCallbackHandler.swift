@@ -70,6 +70,12 @@ final class BotCallbackHandler: @unchecked Sendable {
                 replyMarkup: nil
             ))
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+        case .example:
+            // Onboarding examples start a generation, so the orchestrator takes
+            // them off the callback fast path before this handler is reached.
+            // Landing here means that routing was bypassed — fail visibly.
+            logger.warning("onboarding example callback reached the fast path")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Попробуйте ещё раз")
         }
     }
     
@@ -108,6 +114,7 @@ final class BotCallbackHandler: @unchecked Sendable {
 <b>━━━ 🛠 Прочее ━━━</b>
 
 <code>/menu</code> — интерактивные настройки (там же текущие параметры чата)
+<code>/examples</code> — готовые примеры-запросы: нажали кнопку — бот сразу ответил
 <code>/help</code> — эта справка
 <code>/reset</code> — сбросить чат к стандарту
 <code>/testmode</code> — суффикс к командам для тестов (или тумблер в /menu → Что показывать)

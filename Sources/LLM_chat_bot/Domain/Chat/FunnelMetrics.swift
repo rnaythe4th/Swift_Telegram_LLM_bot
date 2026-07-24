@@ -8,6 +8,8 @@ import Foundation
 enum FunnelEvent: String, CaseIterable, Sendable {
     case start          // /start received
     case addedToGroup   // bot added to a new group (viral growth, roadmap step 4)
+    case onboardingShown // greeting delivered with example buttons (step 9)
+    case exampleTapped  // an onboarding example prompt was tapped (step 9)
     case firstMessage   // first LLM turn in a chat (activation)
     case capHit         // daily premium allowance exhausted (hit the wall)
     case openPurchase   // purchase page / flow opened
@@ -21,7 +23,8 @@ enum FunnelEvent: String, CaseIterable, Sendable {
 
     /// Ordered as the funnel flows, for rendering the super-menu page.
     static let funnelOrder: [FunnelEvent] = [
-        .start, .addedToGroup, .firstMessage, .capHit, .openPurchase, .invoiceSent, .paid, .renewed, .creditTopup,
+        .start, .addedToGroup, .onboardingShown, .exampleTapped, .firstMessage, .capHit,
+        .openPurchase, .invoiceSent, .paid, .renewed, .creditTopup,
         .expiryReminder, .winbackSent, .winbackRedeemed,
     ]
 
@@ -30,6 +33,8 @@ enum FunnelEvent: String, CaseIterable, Sendable {
         switch self {
         case .start: return "Старт (/start)"
         case .addedToGroup: return "Добавлен в группу"
+        case .onboardingShown: return "Примеры показаны"
+        case .exampleTapped: return "Тап по примеру"
         case .firstMessage: return "Первое сообщение"
         case .capHit: return "Упёрлись в лимит"
         case .openPurchase: return "Открыли покупку"
