@@ -163,6 +163,8 @@ UpdateIntake.enqueue([updates])
 BotOrchestrator.dispatch(update:)
   ├─ callback_query      → BotCallbackHandler (в обход per-chat очереди: stop должен прерывать)
   ├─ pre_checkout_query  → handlePreCheckoutQuery (валидация цены → answerPreCheckoutQuery)
+  ├─ my_chat_member      → handleMyChatMemberUpdate (бота добавили в группу →
+  │                        разовое приветствие с оффером; вирусный рост)
   └─ message             → ChatUpdateDispatcher.submit(chatKey) { route(message) }
                               │  (сериализация per-chat, очередь ≤16)
                               ▼
@@ -193,7 +195,9 @@ BotOrchestrator.dispatch(update:)
 - `userTenantMap: [Int: String]` — userID → тенант (для автопривязки).
 - Глобальные конфиги: суперадмины, цена Stars, крипто-конфиг, карта, free-модели,
   processed payments, polling offset, метаданные чатов, инвайты, реклама, markup%,
-  балансы пользователей.
+  балансы пользователей, счётчики воронки (`funnelCounters`).
+- **In-memory без персиста** (сброс при рестарте некритичен): `_premiumDailyUsage`
+  — дневной счётчик «премиум-вкуса» free-tier (см. §9).
 - **Dirty-tracking**: `dirtyContexts`, `dirtyTenants`, `deletedTenants`,
   `dirtyOwnership`, `deletedOwnership`, `dirtyConfigs` (+ `deleted*`). Любая
   мутация помечает грязным — это то, что дренирует `PersistenceCoordinator`.
@@ -202,7 +206,8 @@ BotOrchestrator.dispatch(update:)
 `pendingTurns`, `model` (+`modelProviderRouting`), `temp`, `maxHistory`,
 `showStats`/`showCost`/`showModel`, `provider`, `suffix` (test-mode),
 `reasoningEffort`, `backupNotify`, `cumulativeUsage`, per-chat пресеты, счётчики
-рекламы.
+рекламы, `funnelFirstMessageCounted` (флаг воронки: первое сообщение чата
+засчитано).
 
 **`pendingTurns`** — важный механизм: пока идёт генерация, user-сообщение висит в
 `pending`; при завершении (`completed`/`cancelled`) `flushResolvedTurns`
@@ -292,14 +297,30 @@ false во время симуляции; `isActuallySuperAdmin` игнорир�
 `spentBilledUsd` → суперадмин видит маржу. `hasFullModelAccess` = подписка ИЛИ
 положительный баланс.
 
+**Кредиты / самостоятельное пополнение** (`CreditPack`, низкий порог первой
+оплаты): любой юзер покупает пакет ($2/$5/$10) через Stars или крипту прямо на
+странице покупки. Инвойс с payload `credits_<центы>`; `handleSuccessfulPayment`
+по этому префиксу зачисляет номинал на баланс (`creditBalance`), а не активирует
+подписку. `pre_checkout_query` пропускает credit-payload. Идемпотентность — по
+charge_id, как у подписок.
+
 **Наценка** (`markupPercentValue`, дефолт 30%): `priceMultiplier() = 1 + %/100`.
 **Все** видимые пользователю цены и списания идут через этот множитель
 (`billedCost`, футер, `chargeBalance`). Настраивается суперадмином (0–500%).
 
+**Спонсор-герой**: в группе, покрытой чужой подпиской, под ответами показывается
+строка `⚡ премиум для чата открыл @{sponsor}` (`chatSponsor` → `sponsorCreditLine`;
+только группы, не сам спонсор), а при оплате, открывшей чат, в чат летит публичное
+поздравление. Снимает проблему «безбилетника».
+
+**Дневной премиум-вкус** free-tier: см. §9 (гейт генерации) — `consumeDailyPremium`.
+
 **Реклама** (`AdCampaign`): показывается только во free-tier чатах (нет подписки
 и нет баланса). Два дросселя: частота (раз в N ответов + мин. интервал) и пейсинг
 (равномерное распределение показов по времени кампании). `nextAdToShow` атомарно
-решает, считает показ и ротирует кампании (least-shown first).
+решает, считает показ и ротирует кампании (least-shown first). Когда нет активной
+кампании суперадмина, слот заполняет встроенный **само-оффер** (`AdCampaign.selfPromo`,
+синтетический, не персистится, тот же дроссель) — реклама продаёт сам премиум.
 
 ---
 
@@ -338,8 +359,14 @@ Gemini 3.1 Flash Lite, DeepSeek V4 Pro/Flash, Grok 4.3. Дефолтная мо�
 ## 9. Генерация и стриминг
 
 `GenerationCoordinator.processContent`:
-1. **Free-model gate**: если у отправителя нет полного доступа и текущая модель не
-   бесплатна — автоматически переключает на первую бесплатную и уведомляет.
+1. **Воронка + free-model gate с дневным премиум-вкусом**: сначала
+   `markFirstMessageIfNeeded` (первое сообщение чата → аналитика, §7). Затем: если у
+   отправителя нет полного доступа и текущая модель платная — `consumeDailyPremium`
+   (группа: общий счётчик на чат; личка: на `userID`; сброс по UTC-суткам, лимит
+   `dailyPremiumLimit`=5, **in-memory**). Остаток есть → платная модель отвечает
+   (бесплатный «вкус премиума»); исчерпан → переключение на первую бесплатную +
+   оффер с кнопками покупки/баланса (`sendDailyLimitOffer`) + `funnel(.capHit)`.
+   Free-модели безлимитны; спонсируемые чаты сюда не доходят (`hasFullModelAccess`).
 2. **Режим биллинга**: `covered` (подписка/лицензия) → бесплатно для отправителя;
    иначе `billedTo` (положительный баланс) → списание per-message; иначе free-tier
    → `adEligible`.
@@ -391,8 +418,9 @@ bot_chat_ownership(chat_id PK, owner_username)
 bot_config(key PK, data jsonb)                       -- синглтоны (GlobalConfigKey)
 bot_state(id PK, data jsonb)                         -- legacy-блоб, read-only для миграции
 ```
-`GlobalConfigKey`: stars_price, free_models, crypto, card, super_admins,
-processed_payments, polling_offset, chat_meta, invites, ads, markup, balances.
+`GlobalConfigKey`: stars_price, stars_per_usd, free_models, crypto, card,
+super_admins, processed_payments, polling_offset, chat_meta, invites, ads,
+markup, balances, **funnel** (счётчики воронки, §7/§11).
 Значения конфигов оборачиваются в `{"value": …}`.
 
 **Boot** (`BotOrchestrator.bootstrapState`): `loadEverything()`; если строковые
@@ -430,10 +458,16 @@ memory-only режим, запись отключена**, чтобы не за�
 - **Health-эндпоинты** (`AppHTTPServer`): `/health` (liveness), `/ready` (503 пока
   restore не завершён и при draining — Railway healthcheck), `/metrics` (JSON:
   uptime, активные генерации, глубина очередей, dirty-сущности, статус
-  персистентности, счётчики).
+  персистентности, счётчики, `funnel`).
 - **Метрики** (`RuntimeMetrics`/`MetricName`): updates received/deduplicated/dropped,
   generations, telegram_429, send errors, persistence flushes/errors, payments
   processed/deduplicated. Легко мапится на Prometheus.
+- **Воронка-аналитика** (`FunnelEvent`/`funnelCounters`, персистится в `bot_config`):
+  события start → firstMessage → capHit → openPurchase → invoiceSent → paid/renewed
+  + creditTopup. Отдаётся в `/metrics` (`funnel`: счётчики + живой подсчёт спонсоров
+  active/expired/unlimited) и на странице супер-меню «📊 Воронка» (`renderSuperFunnel`)
+  с пошаговой конверсией. Счётчики — событийные (не уникальные юзеры), переживают
+  рестарт. Ретеншн D1/D7 требует когортных таймстемпов — отложен.
 - **Режим апдейтов** (`UpdateMode`): `auto` (webhook если есть публичный URL —
   Railway; иначе polling), `webhook`, `polling`. Webhook защищён secret-заголовком.
 
@@ -462,11 +496,12 @@ crypto/…), `/inspect`, `/ads`, `/invite` (через меню).
 
 ## 13. Inline-меню (`BotMenuHandler`)
 
-Страницы (`MenuPage`, callback_data `menu:<action>`): главная (`help`), admin-панель
-(`admin`, `adminhelp`, `adminchats`, `adminusers`, `adminwl`, `admindef`,
-`admininvite`), супер-панель (`superadmin`, `superadminhelp`, `superstars`,
-`supercrypto`, `supercard`, `superfreemodels`, `supertenants`, `superadmins`,
-`supersim`, `superchats`, `superads`, `superbal`).
+Страницы (`MenuPage`, callback_data `menu:<action>`): главная (`help`), страница
+покупки (`pay` — подписка + пакеты кредитов), admin-панель (`admin`, `adminhelp`,
+`adminchats`, `adminusers`, `adminwl`, `admindef`, `admininvite`), супер-панель
+(`superadmin`, `superadminhelp`, `superstars`, `supercrypto`, `supercard`,
+`superfreemodels`, `supertenants`, `superadmins`, `supersim`, `superchats`,
+`superads`, `superbal`, `superfunnel` — воронка-аналитика).
 
 - `sendMenu` / `showPage` / `renderPage` — рендер клавиатур под роль/контекст.
 - **Pending-input flow**: кнопка вроде «✏️ Изменить цену» кладёт «ожидание ввода»
