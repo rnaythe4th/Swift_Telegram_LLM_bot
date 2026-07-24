@@ -48,6 +48,30 @@ struct AdCampaign: Codable, Sendable, Equatable {
         )
     }
 
+    /// Reserved id of the built-in self-promo campaign (never stored in the
+    /// campaign list; recognised by the sender to skip the "Реклама" label).
+    static let selfPromoID = "selfpromo"
+
+    /// Built-in fallback shown in free-tier chats when no super-admin campaign
+    /// is running: the ad slot promotes premium itself. Synthetic — it is never
+    /// persisted, so it needs no dirty-tracking. Same default throttle as `new`.
+    static var selfPromo: AdCampaign {
+        AdCampaign(
+            id: selfPromoID,
+            text: "📣 Надоела реклама и лимиты? Премиум для чата откроет любой участник → /buy",
+            buttonText: nil,
+            buttonURL: nil,
+            enabled: true,
+            everyNReplies: 10,
+            minIntervalSeconds: 3600,
+            totalImpressionsTarget: nil,
+            impressionsUsed: 0,
+            startAt: Date(),
+            endAt: nil,
+            createdAt: Date()
+        )
+    }
+
     func isRunning(now: Date = Date()) -> Bool {
         guard enabled, now >= startAt else { return false }
         if let endAt, now >= endAt { return false }

@@ -1967,7 +1967,6 @@ actor ChatContextStore {
         contexts[chatKey] = context
         dirtyContexts.insert(chatKey)
 
-        guard !adCampaignList.isEmpty else { return nil }
         let now = Date()
 
         let candidates = adCampaignList.filter { campaign in
@@ -1979,18 +1978,32 @@ actor ChatContextStore {
                 } ?? true)
         }
         // Least-shown campaign first → fair rotation between active ads.
-        guard let chosen = candidates.min(by: { $0.impressionsUsed < $1.impressionsUsed }),
-              let index = adCampaignList.firstIndex(where: { $0.id == chosen.id }) else {
-            return nil
+        if let chosen = candidates.min(by: { $0.impressionsUsed < $1.impressionsUsed }),
+           let index = adCampaignList.firstIndex(where: { $0.id == chosen.id }) {
+            adCampaignList[index].impressionsUsed += 1
+            dirtyConfigs.insert(.ads)
+
+            context.adReplyCounter = 0
+            context.adLastShownAt = now
+            contexts[chatKey] = context
+            dirtyContexts.insert(chatKey)
+            return adCampaignList[index]
         }
 
-        adCampaignList[index].impressionsUsed += 1
-        dirtyConfigs.insert(.ads)
+        // Fallback: the built-in self-promo fills the slot when no super-admin
+        // campaign is running. If a real campaign is running but its throttle
+        // isn't met this call, it owns the slot — don't undercut it. Same
+        // per-chat throttle; synthetic, so no impression count / persistence.
+        guard !adCampaignList.contains(where: { $0.isRunning(now: now) }) else { return nil }
+        let promo = AdCampaign.selfPromo
+        guard context.adReplyCounter >= promo.everyNReplies,
+              context.adLastShownAt.map({ now.timeIntervalSince($0) >= TimeInterval(promo.minIntervalSeconds) }) ?? true
+        else { return nil }
 
         context.adReplyCounter = 0
         context.adLastShownAt = now
         contexts[chatKey] = context
         dirtyContexts.insert(chatKey)
-        return adCampaignList[index]
+        return promo
     }
 }

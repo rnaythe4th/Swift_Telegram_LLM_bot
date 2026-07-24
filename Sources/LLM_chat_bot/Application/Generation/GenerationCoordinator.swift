@@ -58,11 +58,14 @@ final class GenerationCoordinator: @unchecked Sendable {
                 InlineKeyboardButton(text: buttonText, url: url)
             ]])
         }
+        // The built-in self-promo already reads as a pitch; the "Реклама"
+        // label is only prepended to real super-admin banners.
+        let body = ad.id == AdCampaign.selfPromoID ? ad.text : "<i>📣 Реклама</i>\n\n" + ad.text
         _ = try? await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
             replyTo: nil,
-            text: "<i>📣 Реклама</i>\n\n" + ad.text,
+            text: body,
             replyMarkup: markup
         ))
     }
@@ -161,12 +164,21 @@ final class GenerationCoordinator: @unchecked Sendable {
                     return
                 }
                 await state.setModelOnly(chatKey: chatKey, model: firstFree)
+                // Pain-point upsell: the block on a paid model is the moment
+                // willingness to buy peaks — offer premium (whole chat) and
+                // pay-as-you-go balance as tappable buttons, both opening the
+                // unified purchase page. Still answers on the free model.
+                let payAction = BotCallbackAction.menu(action: "nav:pay").rawData
+                let offerMarkup = InlineKeyboardMarkup(inline_keyboard: [[
+                    InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: payAction),
+                    InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction)
+                ]])
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                     replyTo: nil,
-                    text: "ℹ️ Это платная модель. Переключаю на бесплатную — <code>\(firstFree)</code>\n\nДля доступа к платным моделям: /buy",
-                    replyMarkup: nil
+                    text: "ℹ️ Это умная (платная) модель. Пока отвечаю на бесплатной — <code>\(firstFree)</code>.\n\nОткрыть умные модели для этого чата — <b>Премиум</b>, или плати по факту — пополни <b>баланс</b>.",
+                    replyMarkup: offerMarkup
                 ))
             }
         }
