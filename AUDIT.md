@@ -164,6 +164,10 @@ let url = "\(telegramURL)/getUpdates?timeout=30&offset=\(offset ?? 0)"
 
 ### B5. `/chats` и `/users` для админа всегда показывают пусто
 
+> ✅ **Исправлено.** `BotCommandHandler.ownerKey(for:)` / `actorKey(_:)` —
+> userID-first ключ; на него переведены `/chats`, `/users` и все гейты ролей
+> в командах.
+
 **Где:** `Application/Commands/BotCommandHandler.swift:1488` и `:1527`.
 
 ```swift
@@ -187,6 +191,9 @@ let groups = await state.groupChats(ownedBy: ownerFilter)
 ---
 
 ### B6. Владелец не может отменить свой крипто-инвойс
+
+> ✅ **Исправлено.** Сравнение с `invokerKey(callback)`; та же проверка добавлена
+> в `case "refresh"` — чужой callback_data больше не покажет адрес и сумму.
 
 **Где:** `Application/Menu/BotMenuHandler.swift:2519`.
 
@@ -612,6 +619,10 @@ Stars и карты это починили, для крипты — нет.
 
 ### B22. Гейты ролей в меню ломаются у человека без @username
 
+> ✅ **Исправлено.** `BotMenuHandler.invokerKey(callback)` (userID есть в callback
+> всегда) во всех 27 гейтах, в `sim` и в `handleTenantAction`; ветки
+> «Нужен @username» там больше не нужны и убраны.
+
 **Где:** `Application/Menu/BotMenuHandler.swift` — 32 использования
 `callback.from.username`, из них критичны `:533` (`isSuperAdmin`), `:548`
 (`isAdmin`), `:1032/1041` (`isRootSuperAdmin`), `:1106/1110` (`/simulate`),
@@ -634,6 +645,8 @@ Stars и карты это починили, для крипты — нет.
 ---
 
 ### B23. Проверка «это моя же пригласительная ссылка» не работает без ника
+
+> ✅ **Исправлено.** `userKeys(username:userID:).contains(owner)`.
 
 **Где:** `Application/Commands/BotCommandHandler.swift:573`.
 

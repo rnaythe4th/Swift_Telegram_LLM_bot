@@ -57,12 +57,28 @@ final class BotCommandHandler: @unchecked Sendable {
         return true
     }
 
+    /// Storage key of whoever is issuing the command, userID first. Every stored
+    /// record — roles, ownership, wallets — is keyed this way, and someone with
+    /// no @username has nothing else to be recognised by; passing the raw handle
+    /// silently fails every gate for them (CLAUDE.md §6). Store methods take a
+    /// key through their `username:` parameter unchanged.
+    private func actorKey(_ user: TelegramUser?) async -> String? {
+        if let userID = user?.id { return state.userKey(userID: userID) }
+        return await state.userKey(username: user?.username)
+    }
+
+    /// Alias used where the caller means "which tenant owns this" rather than
+    /// "who is asking" — same key, clearer at the call site.
+    private func ownerKey(for user: TelegramUser?) async -> String? {
+        await actorKey(user)
+    }
+
     private func isSuperAdmin(_ user: TelegramUser?) async -> Bool {
-        await state.isSuperAdmin(username: user?.username)
+        await state.isSuperAdmin(username: actorKey(user))
     }
 
     private func isAdmin(_ user: TelegramUser?, chatID: Int) async -> Bool {
-        await state.isAdmin(username: user?.username, chatID: chatID)
+        await state.isAdmin(username: actorKey(user), chatID: chatID)
     }
 
     private func requireAdmin(_ user: TelegramUser?, chatKey: ChatKey) async throws -> Bool {
@@ -103,7 +119,7 @@ final class BotCommandHandler: @unchecked Sendable {
             try await handleTenant(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
         case .superadmin:
-            guard await state.isRootSuperAdmin(username: fromUser?.username) else {
+            guard await state.isRootSuperAdmin(username: actorKey(fromUser)) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для главного суперадмина.")
                 return
             }
@@ -113,7 +129,7 @@ final class BotCommandHandler: @unchecked Sendable {
             try await handleBuy(chatKey: chatKey, fromUser: fromUser)
 
         case .simulate:
-            guard await state.isActuallySuperAdmin(username: fromUser?.username) else {
+            guard await state.isActuallySuperAdmin(username: actorKey(fromUser)) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
                 return
             }
@@ -579,7 +595,10 @@ final class BotCommandHandler: @unchecked Sendable {
         }
 
         let ownerLabel = await state.displayLabel(forKey: owner)
-        if await state.userKey(username: fromUser?.username) == owner {
+        // Match against every key this person could be filed under: with no
+        // @username the handle-only comparison is nil == "#id", so the owner
+        // would "activate" their own invite and add themselves as their own guest.
+        if await state.userKeys(username: fromUser?.username, userID: fromUser?.id).contains(owner) {
             try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Это ваша собственная пригласительная ссылка — доступ у вас и так есть.")
             return
         }
@@ -1077,7 +1096,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 return
             }
             // Renders the real texts with real prices; nothing goes to sponsors.
-            for preview in await reminderService.previewTexts(username: fromUser?.username) {
+            for preview in await reminderService.previewTexts(username: actorKey(fromUser)) {
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
@@ -1494,7 +1513,10 @@ final class BotCommandHandler: @unchecked Sendable {
 
     private func handleChats(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         let isSuperAdmin = await self.isSuperAdmin(fromUser)
-        let ownerFilter: String? = isSuperAdmin ? nil : fromUser?.username?.lowercased()
+        // `chatOwnership` stores a UserKey (`#12345`), so a raw handle would
+        // never match and the licence owner would see an empty list. Filtering
+        // is off entirely for a super-admin (nil = every chat).
+        let ownerFilter: String? = isSuperAdmin ? nil : await ownerKey(for: fromUser)
         let groups = await state.groupChats(ownedBy: ownerFilter)
         let privates = await state.privateChats(ownedBy: ownerFilter)
 
@@ -1533,7 +1555,10 @@ final class BotCommandHandler: @unchecked Sendable {
 
     private func handleUsers(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         let isSuperAdmin = await self.isSuperAdmin(fromUser)
-        let ownerFilter: String? = isSuperAdmin ? nil : fromUser?.username?.lowercased()
+        // `chatOwnership` stores a UserKey (`#12345`), so a raw handle would
+        // never match and the licence owner would see an empty list. Filtering
+        // is off entirely for a super-admin (nil = every chat).
+        let ownerFilter: String? = isSuperAdmin ? nil : await ownerKey(for: fromUser)
         let privates = await state.privateChats(ownedBy: ownerFilter)
 
         if privates.isEmpty {
@@ -1722,8 +1747,8 @@ final class BotCommandHandler: @unchecked Sendable {
 
         // Storage key: stored owners are keyed by userID, so comparisons must
         // use the key rather than the rentable handle.
-        let invokerUsername = await state.userKey(username: fromUser?.username)
-        let invokerIsSuper = await state.isSuperAdmin(username: fromUser?.username)
+        let invokerUsername = await actorKey(fromUser)
+        let invokerIsSuper = await state.isSuperAdmin(username: invokerUsername)
         let superOnlySubs: Set<String> = [
             "remove", "price", "freemodels", "cryptoprice", "cryptoaddr",
             "cryptomode", "cryptopool", "stats", "cryptoinvoices",
@@ -2132,8 +2157,11 @@ final class BotCommandHandler: @unchecked Sendable {
     }
 
     private func handleSimulate(chatKey: ChatKey, fromUser: TelegramUser?, argument: String) async throws {
-        guard let username = fromUser?.username else {
-            try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан username в Telegram.")
+        // Keyed by userID, so simulation (and the test purchase below) works for
+        // a super-admin who never set a @username — the gate above already let
+        // them in by key, and demanding a handle here would contradict it.
+        guard let username = await actorKey(fromUser) else {
+            try await sendUserFeedback(chatKey: chatKey, text: "Не удалось определить ваш аккаунт — напишите боту в личку и повторите.")
             return
         }
 

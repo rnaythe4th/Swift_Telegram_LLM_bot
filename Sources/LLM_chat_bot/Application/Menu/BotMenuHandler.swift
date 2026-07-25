@@ -71,6 +71,15 @@ final class BotMenuHandler: @unchecked Sendable {
         self.reminderService = reminderService
     }
 
+    /// Storage key of whoever tapped the button, always resolvable: a callback
+    /// always carries a userID, while a @username is optional and rentable. Role
+    /// gates keyed off the raw handle locked out anyone without one — including
+    /// a super-admin whose record sits under `#<userID>` (CLAUDE.md §6). Store
+    /// APIs that take `username:` pass a key through unchanged.
+    private func invokerKey(_ callback: CallbackQuery) -> String {
+        state.userKey(userID: callback.from.id)
+    }
+
     func handle(action rawAction: String, callback: CallbackQuery) async {
         guard let message = callback.message else {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Сообщение недоступно")
@@ -530,7 +539,7 @@ final class BotMenuHandler: @unchecked Sendable {
             }
             switch menuPage {
             case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superReferrals:
-                guard await state.isSuperAdmin(username: callback.from.username) else {
+                guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                     return
                 }
@@ -545,7 +554,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     return
                 }
             case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults, .adminInvite:
-                guard await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID) else {
+                guard await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
                     return
                 }
@@ -681,7 +690,7 @@ final class BotMenuHandler: @unchecked Sendable {
             guard parts.count >= 3 else { return }
             let modelValue = parts[2]
             if parts[1] == "markfree" {
-                guard await state.isSuperAdmin(username: callback.from.username) else {
+                guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                     return
                 }
@@ -690,7 +699,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
                 return
             } else if parts[1] == "unmarkfree" {
-                guard await state.isSuperAdmin(username: callback.from.username) else {
+                guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                     return
                 }
@@ -877,7 +886,7 @@ final class BotMenuHandler: @unchecked Sendable {
             try await showPage(.helpPage, chatKey: chatKey, callback: callback, message: message)
 
         case "freemodels":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -913,7 +922,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "stars":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -971,7 +980,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "wl":
-            guard await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID) else {
+            guard await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
                 return
             }
@@ -999,7 +1008,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "def":
-            guard await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID) else {
+            guard await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
                 return
             }
@@ -1026,14 +1035,14 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "sa":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
             guard parts.count >= 2 else { return }
             switch parts[1] {
             case "add":
-                guard await state.isRootSuperAdmin(username: callback.from.username) else {
+                guard await state.isRootSuperAdmin(username: invokerKey(callback)) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
                     return
                 }
@@ -1042,7 +1051,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superadmins")]])
                 try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
             case "rm":
-                guard await state.isRootSuperAdmin(username: callback.from.username) else {
+                guard await state.isRootSuperAdmin(username: invokerKey(callback)) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
                     return
                 }
@@ -1057,7 +1066,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "stenant":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1107,14 +1116,13 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "sim":
-            guard await state.isActuallySuperAdmin(username: callback.from.username) else {
+            guard await state.isActuallySuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
-            guard parts.count >= 2, let username = callback.from.username else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
-                return
-            }
+            guard parts.count >= 2 else { return }
+            // Simulation is filed under the same key as the role it shadows.
+            let username = invokerKey(callback)
             switch parts[1] {
             case "admin":
                 _ = await state.setSimulatedRole(username: username, role: .admin)
@@ -1143,7 +1151,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "sinspect":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1153,7 +1161,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "ads":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1188,7 +1196,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "funnel":
             // Period switcher on the analytics page (roadmap step 7).
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1200,7 +1208,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "promo":
             // Built-in self-promo that fills the free ad slot (roadmap step 5).
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1270,7 +1278,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "markup":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1289,7 +1297,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "dailylimit":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1308,7 +1316,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "rem":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1336,7 +1344,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "onb":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1344,7 +1352,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "sref":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1352,7 +1360,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "sbal":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1385,7 +1393,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "crypto":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1393,7 +1401,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "card":
-            guard await state.isSuperAdmin(username: callback.from.username) else {
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                 return
             }
@@ -1403,7 +1411,7 @@ final class BotMenuHandler: @unchecked Sendable {
         case "pm":
             guard parts.count >= 2, let category = PresetCategory(rawValue: parts[1]) else { return }
             await state.clearPendingInput(chatKey: chatKey)
-            let canManageGlobal = await state.isAdmin(username: callback.from.username, chatID: chatKey.chatID)
+            let canManageGlobal = await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID)
 
             if parts.count == 2 {
                 let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
@@ -2517,6 +2525,12 @@ final class BotMenuHandler: @unchecked Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Счёт не найден")
                 return
             }
+            // An invoice names an address and an exact amount — a hand-made
+            // callback should not be able to read someone else's.
+            guard invoice.username == invokerKey(callback) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш счёт")
+                return
+            }
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             let (text, markup) = renderInvoice(invoice)
             try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
@@ -2528,7 +2542,9 @@ final class BotMenuHandler: @unchecked Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Счёт не найден")
                 return
             }
-            if invoice.username != (callback.from.username?.lowercased() ?? "") {
+            // Invoices are filed under a UserKey (`#12345`), so comparing a raw
+            // handle was true for everyone — nobody could cancel their own.
+            guard invoice.username == invokerKey(callback) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш счёт")
                 return
             }
@@ -2825,7 +2841,7 @@ final class BotMenuHandler: @unchecked Sendable {
             }
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             // Renders the real texts with real prices; sends nothing to sponsors.
-            for preview in await reminderService.previewTexts(username: callback.from.username) {
+            for preview in await reminderService.previewTexts(username: invokerKey(callback)) {
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
@@ -3103,12 +3119,11 @@ final class BotMenuHandler: @unchecked Sendable {
         message: MaybeInaccessibleMessage
     ) async throws {
         guard parts.count >= 2 else { return }
-        let invokerUsername = callback.from.username
         // Storage key, not the raw handle: everything below compares against
         // stored owners, which are keyed by userID.
-        let invoker = await state.userKey(username: invokerUsername)
-        let isSuper = await state.isSuperAdmin(username: invokerUsername)
-        let isAdmin = await state.isAdmin(username: invokerUsername, chatID: chatKey.chatID)
+        let invoker = invokerKey(callback)
+        let isSuper = await state.isSuperAdmin(username: invoker)
+        let isAdmin = await state.isAdmin(username: invoker, chatID: chatKey.chatID)
         guard isAdmin || isSuper else {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только админ")
             return
@@ -3116,11 +3131,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         switch parts[1] {
         case "claim":
-            guard let username = invoker else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
-                return
-            }
-            let ok = await state.assignChat(chatID: chatKey.chatID, to: username)
+            let ok = await state.assignChat(chatID: chatKey.chatID, to: invoker)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Чат привязан" : "Премиум неактивен")
             try await showPage(.adminPanel, chatKey: chatKey, callback: callback, message: message)
 
@@ -3136,12 +3147,8 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "remtoggle":
             // Sponsor's own opt-out from renewal reminders (roadmap step 8).
-            guard let username = invoker else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
-                return
-            }
-            let wasOptedOut = await state.remindersOptOut(username: username)
-            let changed = await state.setRemindersOptOut(username: username, optOut: !wasOptedOut)
+            let wasOptedOut = await state.remindersOptOut(username: invoker)
+            let changed = await state.setRemindersOptOut(username: invoker, optOut: !wasOptedOut)
             try? await telegram.answerCallback(
                 callbackQueryID: callback.id,
                 text: !changed ? "Нет подписки" : (wasOptedOut ? "🔔 Буду напоминать" : "🔕 Напоминать не буду")
@@ -3160,10 +3167,6 @@ final class BotMenuHandler: @unchecked Sendable {
             try await showPage(.adminChats, chatKey: chatKey, callback: callback, message: message)
 
         case "assignprompt":
-            guard let invoker else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
-                return
-            }
             await state.setAdminPendingInput(.init(kind: .tenantAssignChat, menuMessageID: message.message_id, payload: invoker), chatKey: chatKey)
             let prompt = """
             <b>📥 Привязать чат по ID</b>
@@ -3175,10 +3178,6 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "adduserprompt":
-            guard let invoker else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
-                return
-            }
             await state.setAdminPendingInput(.init(kind: .tenantAddUser, menuMessageID: message.message_id, payload: invoker), chatKey: chatKey)
             let prompt = "<b>➕ Добавить гостя премиума</b>\n\nОтправьте @username одним сообщением — этот человек будет пользоваться умными моделями за ваш счёт."
             let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminusers")]])
@@ -3186,7 +3185,7 @@ final class BotMenuHandler: @unchecked Sendable {
             return
 
         case "rmuser":
-            guard parts.count >= 3, let index = Int(parts[2]), let invoker else { return }
+            guard parts.count >= 3, let index = Int(parts[2]) else { return }
             let users = await state.licensedUsers(ownerUsername: invoker)
             guard index >= 0, index < users.count else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Не найдено")
@@ -3197,10 +3196,6 @@ final class BotMenuHandler: @unchecked Sendable {
             try await showPage(.adminUsers, chatKey: chatKey, callback: callback, message: message)
 
         case "newinvite":
-            guard let invoker else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нужен @username")
-                return
-            }
             if await state.regenerateInviteToken(owner: invoker) != nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Новая ссылка создана")
             } else {

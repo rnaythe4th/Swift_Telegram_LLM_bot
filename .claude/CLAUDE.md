@@ -1087,6 +1087,15 @@ crypto/…), `/inspect`, `/ads` (+ `/ads promo` — само-реклама, §7
   только ключи: `state.userKey(username:)` / `state.userKey(userID:)`. Сравнение
   вида `owner?.lowercased() == username` молча ломается, как только человек
   идентифицирован (`owner` = `#12345`).
+- **Кто спрашивает — тоже ключ, и он берётся из userID.** У обработчиков есть
+  готовые хелперы: `BotMenuHandler.invokerKey(callback)` (userID у callback есть
+  всегда) и `BotCommandHandler.actorKey(fromUser)` / `ownerKey(for:)`. Через них
+  идут **все** гейты ролей (`isSuperAdmin`/`isAdmin`/`isRootSuperAdmin`/
+  `isActuallySuperAdmin`), фильтры «мои чаты/юзеры» (`groupChats(ownedBy:)`,
+  `privateChats(ownedBy:)`), симуляция и владение крипто-инвойсом. Сырой
+  `callback.from.username` / `fromUser?.username` в гейте = человек без ника
+  теряет доступ, а `nil` не совпадает ни с чем. Свою же принадлежность
+  («это моя ссылка?») проверяй через `userKeys(username:userID:).contains(owner)`.
 - **Ключ наружу не показывать.** Любая строка, называющая сохранённого
   пользователя, идёт через `displayLabel(forKey:)` или через готовое поле
   `label`. Метки уже содержат `@`, второй раз его дописывать не надо.
