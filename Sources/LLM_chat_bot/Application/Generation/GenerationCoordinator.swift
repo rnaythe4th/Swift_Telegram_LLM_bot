@@ -74,17 +74,36 @@ final class GenerationCoordinator: @unchecked Sendable {
     /// Free-tier monetization: after a completed reply in a chat without an
     /// active paid licence, the store may pick an ad campaign to show
     /// (frequency + pacing rules live there). Failure to send is non-fatal.
-    private func maybeServeAd(chatKey: ChatKey) async {
+    private func maybeServeAd(chatKey: ChatKey, isPrivate: Bool) async {
         guard let ad = await state.nextAdToShow(chatKey: chatKey) else { return }
         var markup: InlineKeyboardMarkup?
-        if let buttonText = ad.buttonText, let url = ad.buttonURL {
+        let isSelfPromo = ad.id == AdCampaign.selfPromoID
+        if isSelfPromo {
+            // A pitch that ends in "type /buy" loses everyone who won't type.
+            // The tap is tagged so the funnel can tell this slot apart from the
+            // plain menu button (roadmap steps 5 and 7).
+            var rows: [[InlineKeyboardButton]] = [[
+                InlineKeyboardButton(
+                    text: "⚡ Открыть премиум",
+                    callback_data: BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.promo.rawValue)").rawData
+                )
+            ]]
+            let referral = await state.referralConfig()
+            if isPrivate, referral.enabled, referral.inviterRewardCents > 0 {
+                rows.append([InlineKeyboardButton(
+                    text: "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))",
+                    callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
+                )])
+            }
+            markup = InlineKeyboardMarkup(inline_keyboard: rows)
+        } else if let buttonText = ad.buttonText, let url = ad.buttonURL {
             markup = InlineKeyboardMarkup(inline_keyboard: [[
                 InlineKeyboardButton(text: buttonText, url: url)
             ]])
         }
         // The built-in self-promo already reads as a pitch; the "Реклама"
         // label is only prepended to real super-admin banners.
-        let body = ad.id == AdCampaign.selfPromoID ? ad.text : "<i>📣 Реклама</i>\n\n" + ad.text
+        let body = isSelfPromo ? ad.text : "<i>📣 Реклама</i>\n\n" + ad.text
         _ = try? await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
@@ -98,17 +117,22 @@ final class GenerationCoordinator: @unchecked Sendable {
     /// paid model has fallen back to free and an upgrade is pitched at the pain
     /// point (roadmap step 5 buttons, both opening the unified purchase page).
     /// Group copy stresses the shared cap ("для всех"); private copy is personal.
+    /// With the taste switched off (limit 0) nothing "ran out" — say what is
+    /// actually true instead of "0 из 0".
     private func sendDailyLimitOffer(chatKey: ChatKey, isGroup: Bool, limit: Int, freeModel: String) async throws {
-        let payAction = BotCallbackAction.menu(action: "nav:pay").rawData
+        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.cap.rawValue)").rawData
+        let spent = limit > 0
+            ? "🚦 Ответы умных моделей на сегодня закончились (\(limit) из \(limit)). Завтра будут снова — счётчик обнуляется каждый день."
+            : "🚦 Эта модель — из умных, они доступны с премиумом."
         let text: String
         let markup: InlineKeyboardMarkup
         if isGroup {
-            text = "🚦 Ответы умных моделей у этого чата на сегодня закончились (\(limit) из \(limit)). Завтра будут снова — счётчик обнуляется каждый день.\n\nПока отвечаю на бесплатной модели — <code>\(freeModel)</code>. Убрать лимит совсем, сразу для всех участников:"
+            text = "\(spent)\n\nПока отвечаю на бесплатной модели — <code>\(freeModel)</code>. Умные модели сразу для всех участников чата:"
             markup = InlineKeyboardMarkup(inline_keyboard: [[
                 InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: payAction)
             ]])
         } else {
-            text = "🚦 Ответы умных моделей на сегодня закончились (\(limit) из \(limit)). Завтра будут снова — счётчик обнуляется каждый день.\n\nПока отвечаю на бесплатной модели — <code>\(freeModel)</code>. Или уберите лимит совсем:"
+            text = "\(spent)\n\nПока отвечаю на бесплатной модели — <code>\(freeModel)</code>. Как получить умные без лимита:"
             var rows: [[InlineKeyboardButton]] = [[
                 InlineKeyboardButton(text: "⚡ Премиум на месяц", callback_data: payAction),
                 InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction)
@@ -133,11 +157,71 @@ final class GenerationCoordinator: @unchecked Sendable {
         ))
     }
 
+    /// Fired once, on the turn that spends the *last* daily premium answer. The
+    /// wall itself arrives one message later; saying so now turns a silent
+    /// countdown into a visible one — and the offer lands while the person is
+    /// still getting the good answer, not after it was taken away.
+    private func sendLastPremiumCallNotice(chatKey: ChatKey, isGroup: Bool, limit: Int) async {
+        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.cap.rawValue)").rawData
+        let text = isGroup
+            ? "⏳ Это был последний умный ответ для этого чата на сегодня (\(limit) из \(limit)). Дальше отвечаю на бесплатной модели — до завтра. Снять лимит для всех:"
+            : "⏳ Это был ваш последний умный ответ на сегодня (\(limit) из \(limit)). Дальше отвечаю на бесплатной модели — до завтра. Снять лимит:"
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: text,
+            replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[
+                InlineKeyboardButton(text: isGroup ? "⚡ Премиум для чата" : "⚡ Премиум на месяц", callback_data: payAction),
+                InlineKeyboardButton(text: "💰 Баланс", callback_data: payAction)
+            ]])
+        ))
+        await state.bumpFunnel(.capWarned)
+    }
+
+    /// Fired on the answer whose charge emptied a pay-as-you-go wallet. The
+    /// next turn silently drops to the free tier, so without this the user only
+    /// finds out by noticing worse answers (roadmap step 5: sell at the pain
+    /// point, and only there — `chargeBalance` reports the crossing once).
+    private func sendBalanceEmptyNotice(chatKey: ChatKey) async {
+        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.balance.rawValue)").rawData
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: "💸 <b>Баланс закончился</b> — этот ответ был последним оплаченным.\n\nДальше отвечаю на бесплатной модели. Чтобы вернуть умные: пополните баланс (платите только за ответы, обычно доли цента) или возьмите премиум на месяц — он без лимитов и работает во всех ваших чатах.",
+            replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[
+                InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction),
+                InlineKeyboardButton(text: "⚡ Премиум на месяц", callback_data: payAction)
+            ]])
+        ))
+    }
+
+    /// Identifies the daily-premium counter this turn consumed, so a turn that
+    /// ends without an answer can hand the unit back.
+    private struct DailyPremiumTicket: Sendable {
+        let chatID: Int
+        let userID: Int?
+        let isGroup: Bool
+    }
+
+    /// A free user's daily allowance is tiny — a provider error, a stop or an
+    /// empty reply must not eat one of it.
+    private func refundPremium(_ ticket: DailyPremiumTicket?) async {
+        guard let ticket else { return }
+        await state.refundDailyPremium(chatID: ticket.chatID, userID: ticket.userID, isGroup: ticket.isGroup)
+    }
+
     /// Credits a resolved referral pair and tells both sides (roadmap step 10).
     /// The store resolves the record and both wallets in one actor step, so a
     /// redelivered update or a retried turn can never pay twice; failing to
     /// deliver a notification is non-fatal — the money is already there.
-    private func payReferralIfDue(userID: Int, username: String?, chatKey: ChatKey) async {
+    ///
+    /// Both notices go to DMs, never into the room the friend happened to write
+    /// in: the reward is personal, and announcing "вас пригласил @X" in a group
+    /// tells everyone something the friend did not choose to share. The friend
+    /// always has a DM — the attribution came from `/start` in one.
+    private func payReferralIfDue(userID: Int, username: String?) async {
         guard let payout = await state.redeemReferralIfDue(userID: userID, username: username) else { return }
         let refButton = InlineKeyboardButton(
             text: "🎁 Пригласить друга",
@@ -146,11 +230,11 @@ final class GenerationCoordinator: @unchecked Sendable {
 
         if payout.inviteeRewardUsd > 0 {
             _ = try? await telegram.sendMessage(.init(
-                chatID: chatKey.chatID,
-                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                chatID: userID,
+                threadID: nil,
                 replyTo: nil,
                 text: String(
-                    format: "🎁 <b>Бонус за приглашение: $%.2f на баланс</b> — спасибо @%@!\n\nПока баланс не пуст, вам доступны любые модели: с него списывается стоимость каждого ответа, обычно доли цента. Сколько списалось — видно под самим ответом (включите показ: /show_cost).\n\nВаша ссылка для друзей — /ref.",
+                    format: "🎁 <b>Бонус за приглашение: $%.2f на баланс</b> — спасибо %@!\n\nПока баланс не пуст, вам доступны любые модели: с него списывается стоимость каждого ответа, обычно доли цента. Сколько списалось — видно под самим ответом (включите показ: /show_cost).\n\nВаша ссылка для друзей — /ref.",
                     payout.inviteeRewardUsd, payout.inviterUsername
                 ),
                 replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
@@ -158,20 +242,26 @@ final class GenerationCoordinator: @unchecked Sendable {
         }
 
         if payout.inviterRewardUsd > 0 {
-            let friend = payout.invitedUsername.map { "@\($0)" } ?? "ваш друг"
-            _ = try? await telegram.sendMessage(.init(
+            // The label works without a @username (the migration to userID keys
+            // made nicks optional), so a friend without one is still named.
+            let notified = (try? await telegram.sendMessage(.init(
                 chatID: payout.inviterUserID,
                 threadID: nil,
                 replyTo: nil,
                 text: String(
                     format: "🎉 <b>Ваше приглашение сработало: %@ уже пишет боту.</b>\n\nВам начислено <b>$%.2f</b> на баланс · приглашений с наградой: <b>%d</b>.",
-                    friend, payout.inviterRewardUsd, payout.inviterRewardedTotal
+                    payout.invitedLabel, payout.inviterRewardUsd, payout.inviterRewardedTotal
                 ),
                 replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
-            ))
+            ))) != nil
+            if !notified {
+                // Money is already on their balance; only the good news failed
+                // to land (blocked DM, never wrote to the bot).
+                logger.warning("referral: could not notify inviter \(payout.inviterUsername) about +$\(payout.inviterRewardUsd)")
+            }
         }
 
-        logger.info("referral payout: @\(payout.inviterUsername) +$\(payout.inviterRewardUsd), \(payout.invitedUsername.map { "@\($0)" } ?? "friend") +$\(payout.inviteeRewardUsd)")
+        logger.info("referral payout: \(payout.inviterUsername) +$\(payout.inviterRewardUsd), \(payout.invitedLabel) +$\(payout.inviteeRewardUsd)")
     }
 
     /// Customer-facing footer: costs go through the markup multiplier; for
@@ -205,13 +295,15 @@ final class GenerationCoordinator: @unchecked Sendable {
 
     /// Hero credit shown under answers in a group whose paid access comes from
     /// another member's active subscription. Suppressed in private chats and
-    /// when the asker is the sponsor themselves.
+    /// when the asker is the sponsor themselves. Repeats at most once an hour
+    /// per chat (the store owns that timer) — under every single answer the
+    /// credit stops reading as status and starts reading as clutter.
     private func sponsorCreditLine(chatID: Int, askerUsername: String?, isPrivate: Bool) async -> String? {
         guard !isPrivate else { return nil }
-        guard let sponsor = await state.chatSponsor(chatID: chatID, askerUsername: askerUsername) else {
+        guard let sponsor = await state.chatSponsorForCredit(chatID: chatID, askerUsername: askerUsername) else {
             return nil
         }
-        return "⚡ премиум для чата открыл @\(sponsor)"
+        return "⚡ премиум для чата открыл \(sponsor)"
     }
 
     func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
@@ -273,11 +365,13 @@ final class GenerationCoordinator: @unchecked Sendable {
         // Funnel: count this chat's first real message (activation, once per chat).
         await state.markFirstMessageIfNeeded(chatKey: chatKey)
 
-        // Referral (roadmap step 10): the invited friend's first real turn in
-        // their own DM is what releases the two-sided reward. Attribution alone
-        // pays nothing, so a farm of idle accounts earns nothing.
-        if origin.isPrivate, let userID = origin.user?.id {
-            await payReferralIfDue(userID: userID, username: username, chatKey: chatKey)
+        // Referral (roadmap step 10): the invited friend's first real turn is
+        // what releases the two-sided reward — in a DM or in a group, since a
+        // friend who goes straight to a group chat did exactly what we wanted.
+        // Attribution alone pays nothing, so a farm of idle accounts earns
+        // nothing; both notices are delivered to DMs (see the method).
+        if let userID = origin.user?.id {
+            await payReferralIfDue(userID: userID, username: username)
         }
 
         // Free-tier gate with a daily premium "taste": a sender without full
@@ -286,8 +380,28 @@ final class GenerationCoordinator: @unchecked Sendable {
         // allowance is spent, the chat falls back to the first free model and an
         // upgrade is pitched at the pain point. Free models are unlimited
         // (retention); sponsored chats never reach here (hasFullModelAccess).
-        if let effectiveFree = await state.effectiveFreeModelIDs(),
-           !(await state.hasFullModelAccess(username: username, userID: origin.user?.id, chatID: chatKey.chatID)) {
+        let hasAccess = await state.hasFullModelAccess(
+            username: username,
+            userID: origin.user?.id,
+            chatID: chatKey.chatID
+        )
+        /// Set when this turn spent a daily-premium unit — refunded if the turn
+        /// produces no answer; `lastPremiumCall` carries the limit when this was
+        /// the last unit of the day (scarcity notice after the answer lands).
+        var premiumTicket: DailyPremiumTicket?
+        var lastPremiumCall: Int?
+        if hasAccess {
+            // Access is back (subscription, sponsor, referral or a top-up): give
+            // back the paid model the cap had parked, otherwise the purchase
+            // silently changes nothing and the chat keeps answering on the
+            // fallback (roadmap steps 2 and 6).
+            if let restored = await state.restoreDowngradedModel(chatKey: chatKey) {
+                try? await sendUserFeedback(
+                    chatKey: chatKey,
+                    text: "⚡ Дневной лимит вам больше не мешает — вернул умную модель <code>\(restored)</code>. Сменить: /menu → 🤖 Модель"
+                )
+            }
+        } else if let effectiveFree = await state.effectiveFreeModelIDs() {
             let currentModel = await state.model(chatKey: chatKey)
             if !effectiveFree.contains(currentModel) {
                 guard let firstFree = effectiveFree.first else {
@@ -301,12 +415,19 @@ final class GenerationCoordinator: @unchecked Sendable {
                     isGroup: isGroup
                 )
                 switch decision {
-                case .allowed:
+                case .allowed(let remaining, let limit):
                     // Daily premium taste: let the paid model answer this turn.
-                    break
+                    // The unit is booked now and given back if the turn ends
+                    // without an answer (see `refundPremium`).
+                    premiumTicket = DailyPremiumTicket(
+                        chatID: chatKey.chatID,
+                        userID: origin.user?.id,
+                        isGroup: isGroup
+                    )
+                    lastPremiumCall = remaining == 0 ? limit : nil
                 case .exhausted(let limit):
                     await state.bumpFunnel(.capHit)
-                    await state.setModelOnly(chatKey: chatKey, model: firstFree)
+                    await state.downgradeModelToFree(chatKey: chatKey, freeModel: firstFree)
                     try? await sendDailyLimitOffer(chatKey: chatKey, isGroup: isGroup, limit: limit, freeModel: firstFree)
                 }
             }
@@ -320,9 +441,11 @@ final class GenerationCoordinator: @unchecked Sendable {
             userID: origin.user?.id,
             chatID: chatKey.chatID
         )
+        // Wallet key, not a handle: charges follow the person through a rename
+        // and work for someone who never set a @username.
         var billedTo: String? = nil
-        if !covered, let username, await state.hasPositiveBalance(username: username) {
-            billedTo = username
+        if !covered {
+            billedTo = await state.billingKey(username: username, userID: origin.user?.id)
         }
         let adEligible = !covered && billedTo == nil
 
@@ -402,10 +525,13 @@ final class GenerationCoordinator: @unchecked Sendable {
                 isPrivateChat: origin.isPrivate,
                 adEligible: adEligible,
                 billedTo: billedTo,
-                sponsorLine: sponsorLine
+                sponsorLine: sponsorLine,
+                premiumTicket: premiumTicket,
+                lastPremiumCall: lastPremiumCall
             )
         } catch {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await refundPremium(premiumTicket)
             await finishGeneration(generationID)
             throw error
         }
@@ -422,7 +548,9 @@ final class GenerationCoordinator: @unchecked Sendable {
         isPrivateChat: Bool,
         adEligible: Bool,
         billedTo: String?,
-        sponsorLine: String?
+        sponsorLine: String?,
+        premiumTicket: DailyPremiumTicket?,
+        lastPremiumCall: Int?
     ) async throws {
         let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
             .init(text: "⏹ Остановить", callback_data: BotCallbackAction.stop(generationID).rawData)
@@ -468,7 +596,9 @@ final class GenerationCoordinator: @unchecked Sendable {
                     controlMessage: placeholder,
                     adEligible: adEligible,
                     billedTo: billedTo,
-                    sponsorLine: sponsorLine
+                    sponsorLine: sponsorLine,
+                    premiumTicket: premiumTicket,
+                    lastPremiumCall: lastPremiumCall
                 )
             }
         } else {
@@ -484,7 +614,9 @@ final class GenerationCoordinator: @unchecked Sendable {
                     stopMarkup: stopMarkup,
                     adEligible: adEligible,
                     billedTo: billedTo,
-                    sponsorLine: sponsorLine
+                    sponsorLine: sponsorLine,
+                    premiumTicket: premiumTicket,
+                    lastPremiumCall: lastPremiumCall
                 )
             }
         }
@@ -509,7 +641,9 @@ final class GenerationCoordinator: @unchecked Sendable {
         controlMessage: TelegramMessage,
         adEligible: Bool,
         billedTo: String?,
-        sponsorLine: String?
+        sponsorLine: String?,
+        premiumTicket: DailyPremiumTicket?,
+        lastPremiumCall: Int?
     ) async {
         var fullAccumulator = ""
         var messageAccumulator = ""
@@ -591,6 +725,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             _ = await persist("⚠️ <b>Не получилось ответить</b>\n" + UserFacingError.message(error))
             await removeControlMessage()
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await refundPremium(premiumTicket)
             await finishGeneration(generationID)
             return
         }
@@ -643,13 +778,21 @@ final class GenerationCoordinator: @unchecked Sendable {
 
         if isCancelled {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await refundPremium(premiumTicket)
         } else if !fullAccumulator.isEmpty {
-            await state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
+            let walletEmptied = await state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
+            if walletEmptied {
+                await sendBalanceEmptyNotice(chatKey: chatKey)
+            }
+            if let limit = lastPremiumCall {
+                await sendLastPremiumCallNotice(chatKey: chatKey, isGroup: false, limit: limit)
+            }
             if adEligible {
-                await maybeServeAd(chatKey: chatKey)
+                await maybeServeAd(chatKey: chatKey, isPrivate: true)
             }
         } else {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await refundPremium(premiumTicket)
         }
         await finishGeneration(generationID)
     }
@@ -667,7 +810,9 @@ final class GenerationCoordinator: @unchecked Sendable {
         stopMarkup: InlineKeyboardMarkup,
         adEligible: Bool,
         billedTo: String?,
-        sponsorLine: String?
+        sponsorLine: String?,
+        premiumTicket: DailyPremiumTicket?,
+        lastPremiumCall: Int?
     ) async {
         let emptyMarkup = InlineKeyboardMarkup(inline_keyboard: [])
         let logger = self.logger
@@ -773,6 +918,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 )
             )
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await self.refundPremium(premiumTicket)
             await self.finishGeneration(generationID)
             return
         }
@@ -812,15 +958,26 @@ final class GenerationCoordinator: @unchecked Sendable {
             )
         )
 
+        // Edit streaming serves groups *and* private chats on Bot API servers
+        // without drafts, so the copy has to be chosen per chat, not per mode.
+        let isGroup = chatKey.chatID < 0
         if isCancelled {
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await self.refundPremium(premiumTicket)
         } else if !fullAccumulator.isEmpty {
-            await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
+            let walletEmptied = await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
+            if walletEmptied {
+                await self.sendBalanceEmptyNotice(chatKey: chatKey)
+            }
+            if let limit = lastPremiumCall {
+                await self.sendLastPremiumCallNotice(chatKey: chatKey, isGroup: isGroup, limit: limit)
+            }
             if adEligible {
-                await self.maybeServeAd(chatKey: chatKey)
+                await self.maybeServeAd(chatKey: chatKey, isPrivate: !isGroup)
             }
         } else {
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
+            await self.refundPremium(premiumTicket)
         }
         await self.finishGeneration(generationID)
     }

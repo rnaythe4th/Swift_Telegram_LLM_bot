@@ -80,11 +80,15 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         configs.markup = try await fetchConfig(.markup, as: Int.self)
         configs.balances = try await fetchConfig(.balances, as: [String: UserBalance].self)
         configs.funnel = try await fetchConfig(.funnel, as: [String: Int].self)
+        configs.funnelDaily = try await fetchConfig(.funnelDaily, as: FunnelDailyLog.self)
         configs.dailyPremiumLimit = try await fetchConfig(.dailyPremiumLimit, as: Int.self)
+        configs.dailyPremiumUsage = try await fetchConfig(.dailyPremiumUsage, as: [String: DailyPremiumUsage].self)
+        configs.selfPromo = try await fetchConfig(.selfPromo, as: SelfPromoConfig.self)
         configs.reminders = try await fetchConfig(.reminders, as: SubscriptionReminderConfig.self)
         configs.onboarding = try await fetchConfig(.onboarding, as: OnboardingConfig.self)
         configs.referrals = try await fetchConfig(.referrals, as: ReferralConfig.self)
         configs.referralLedger = try await fetchConfig(.referralLedger, as: ReferralLedger.self)
+        configs.userDirectory = try await fetchConfig(.userDirectory, as: UserDirectory.self)
 
         return PersistedBotState(
             contexts: contextRows.map {
@@ -224,7 +228,13 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .funnel(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .funnelDaily(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .dailyPremiumLimit(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .dailyPremiumUsage(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .selfPromo(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .reminders(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
@@ -233,6 +243,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         case .referrals(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .referralLedger(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .userDirectory(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         }
         try await upsert(table: "bot_config", body: body)

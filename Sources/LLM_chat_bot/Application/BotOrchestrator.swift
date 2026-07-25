@@ -280,6 +280,12 @@ final class BotOrchestrator: @unchecked Sendable {
 
     func dispatch(update: TelegramUpdate) async {
         if let callback = update.callback_query {
+            // Every path that carries a user refreshes the identity directory,
+            // so a rename can never orphan a wallet or a subscription. Awaited
+            // rather than detached: the handler below resolves keys, and it
+            // must not race the sighting that produces them.
+            let from = callback.from
+            await state.identifyUser(userID: from.id, username: from.username, firstName: from.first_name)
             // An onboarding example (roadmap step 9) starts a generation, so it
             // belongs on the message path — same per-chat ordering as if the
             // user had typed the prompt.
@@ -371,7 +377,9 @@ final class BotOrchestrator: @unchecked Sendable {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Этого примера больше нет — просто напишите свой вопрос")
             return
         }
-        try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+        // Answer with a word, not silence: the answer itself takes seconds to
+        // start, and a button that visibly does nothing gets tapped again.
+        try? await telegram.answerCallback(callbackQueryID: callback.id, text: "💡 Отправил запрос — сейчас отвечу")
 
         // Mirrors route(): keep chat identity fresh and let the sender's licence
         // claim an unowned chat before the access gate runs.
@@ -390,17 +398,24 @@ final class BotOrchestrator: @unchecked Sendable {
             senderUserID: callback.from.id
         )
 
+        // In a group the echo has to name who tapped: several people share the
+        // chat, and an unattributed question followed by an answer reads as the
+        // bot talking to itself.
+        let isPrivate = message.chat.type == "private"
+        let asker = isPrivate
+            ? nil
+            : callback.from.username.map { "@\($0)" } ?? callback.from.first_name
         let echo = try? await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
             replyTo: nil,
-            text: OnboardingPresenter.tapEcho(example: example),
+            text: OnboardingPresenter.tapEcho(example: example, asker: asker),
             replyMarkup: nil
         ))
 
         let origin = GenerationOrigin(
             user: callback.from,
-            isPrivate: message.chat.type == "private",
+            isPrivate: isPrivate,
             replyToMessageID: echo?.message_id
         )
 
@@ -438,21 +453,33 @@ final class BotOrchestrator: @unchecked Sendable {
     }
 
     private func handlePreCheckoutQuery(_ query: TelegramPreCheckoutQuery) async {
+        await state.identifyUser(userID: query.from.id, username: query.from.username, firstName: query.from.first_name)
         do {
             let valid: Bool
             let payload = query.invoice_payload
             if payload.hasPrefix("credits_"),
                let cents = Int(payload.dropFirst("credits_".count)),
                CreditPack.isValid(cents: cents) {
-                // Credit pack — Stars only for now; amount must match the live rate.
-                let expected = await state.starsForCents(cents)
-                valid = query.currency == "XTR" && query.total_amount == expected
+                // Credit pack: Stars at the live rate, or the card at the live
+                // FX rate. Either way the charged amount must still match what
+                // the invoice quoted — a rate change between the two invalidates
+                // the invoice rather than charging a stale price.
+                if query.currency == "XTR" {
+                    let starsEnabled = await state.starsCreditsEnabled()
+                    let expected = await state.starsForCents(cents)
+                    valid = starsEnabled && query.total_amount == expected
+                } else {
+                    let card = await state.cardConfig()
+                    valid = card.creditsEnabled
+                        && query.currency == card.currency.rawValue
+                        && query.total_amount == card.creditMinorUnits(cents: cents)
+                }
             } else {
                 // Subscription: accept the list price or this user's winback
                 // price (roadmap step 8). The grace window honors an invoice
                 // opened moments before the offer ran out.
                 let pricing = await state.subscriptionPricing(
-                    username: query.from.username,
+                    username: state.userKey(userID: query.from.id),
                     grace: ChatContextStore.checkoutDiscountGrace
                 )
                 if query.currency == "XTR" {
@@ -484,63 +511,98 @@ final class BotOrchestrator: @unchecked Sendable {
     /// so Telegram redelivery won't double-greet.
     private func handleMyChatMemberUpdate(_ update: ChatMemberUpdate) async {
         let type = update.chat.type
-        // Private-chat my_chat_member fires on block/unblock; DMs get the /start
-        // greeting instead, so only groups receive this welcome.
+        let wasOut = update.oldStatus == "left" || update.oldStatus == "kicked"
+        let isIn = update.newStatus == "member" || update.newStatus == "administrator"
+
+        // Private chats: `my_chat_member` is the only signal that someone
+        // blocked the bot. Telegram forbids bot-initiated conversations, so a
+        // blocked DM is a dead delivery address — renewal notices, winback and
+        // referral payouts must stop aiming at it instead of collecting 403s
+        // every sweep. Unblocking (kicked → member) revives it.
+        if type == "private" {
+            let isBlocked = update.newStatus == "kicked" || update.newStatus == "left"
+            if isBlocked || isIn {
+                await state.identifyUser(userID: update.from.id, username: update.from.username, firstName: update.from.first_name)
+                await state.setBotPresence(chatID: update.chat.id, isMember: !isBlocked, type: "private")
+                logger.info("private chat \(update.chat.id) \(isBlocked ? "blocked" : "unblocked") the bot")
+            }
+            // The DM greeting is the job of /start, not of this event.
+            return
+        }
         guard type == "group" || type == "supergroup" else { return }
+
+        // Removal: the licence and the history stay (re-adding restores them),
+        // but the chat stops being a delivery channel — renewal notices and
+        // sponsor congratulations skip it instead of failing one by one. Only
+        // an explicit exit counts; "restricted" is still a member (muted, not
+        // gone) and must not silence the chat's notices.
+        let isOut = update.newStatus == "left" || update.newStatus == "kicked"
+        if !wasOut, isOut {
+            await state.setBotPresence(chatID: update.chat.id, isMember: false, type: type, title: update.chat.title)
+            logger.info("removed from group \(update.chat.id) (by @\(update.from.username ?? String(update.from.id)))")
+            return
+        }
 
         // Greet only on a real entry: previously out (left/kicked) → now in
         // (member/administrator). Skips promotions and permission tweaks so a
         // member→administrator change doesn't re-greet.
-        let wasOut = update.oldStatus == "left" || update.oldStatus == "kicked"
-        let isIn = update.newStatus == "member" || update.newStatus == "administrator"
         guard wasOut, isIn else { return }
 
-        // Keep the chat identity fresh for admin tooling (mirrors route()).
-        await state.recordChatMeta(
-            chatID: update.chat.id,
-            info: ChatMetaInfo(type: type, title: update.chat.title, username: nil, firstName: nil)
-        )
+        // Keep the chat identity fresh for admin tooling (mirrors route()) and
+        // clear any "removed" mark from an earlier exit.
+        await state.setBotPresence(chatID: update.chat.id, isMember: true, type: type, title: update.chat.title)
+        await state.identifyUser(userID: update.from.id, username: update.from.username, firstName: update.from.first_name)
 
         // Funnel: a real group entry is the viral-growth event (roadmap step 4).
         await state.bumpFunnel(.addedToGroup)
 
-        var text = """
-        <b>👋 Всем привет!</b> Я умный ИИ-ассистент. Отвечаю на @упоминание или реплай на моё сообщение.
-
-        Понимаю текст, фото, голос и видео, помню разговор.
-
-        Полный доступ — умные модели, без рекламы и лимитов — для этого чата откроет любой участник → /buy
-        """
-        var rows: [[InlineKeyboardButton]] = []
-
-        // Onboarding (roadmap step 9): one tap shows the chat what the bot can
-        // do — the fastest path from "added" to "activated".
-        let onboarding = await state.onboardingConfig()
-        if onboarding.showInGroups {
-            let exampleRows = OnboardingPresenter.exampleRows(onboarding)
-            if !exampleRows.isEmpty {
-                text += "\n\n" + OnboardingPresenter.invitation
-                rows.append(contentsOf: exampleRows)
-                await state.bumpFunnel(.onboardingShown)
-            }
-        }
-
-        rows.append([InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: BotCallbackAction.menu(action: "nav:pay").rawData)])
-        let markup = InlineKeyboardMarkup(inline_keyboard: rows)
-        _ = try? await telegram.sendMessage(.init(
+        // The person who added the bot may already be paying. Claiming the chat
+        // for their licence here (instead of waiting for their first message)
+        // means the group is premium from its very first answer — and lets the
+        // welcome credit them rather than pitch them something they own.
+        await state.autoAssignIfNeeded(
             chatID: update.chat.id,
+            senderUsername: update.from.username,
+            senderUserID: update.from.id
+        )
+
+        await sendGroupWelcome(chatID: update.chat.id)
+        logger.info("greeted new group \(update.chat.id) (added by @\(update.from.username ?? String(update.from.id)))")
+    }
+
+    /// Sends the group welcome unless this chat was greeted moments ago — the
+    /// `?startgroup=` link makes Telegram deliver a join twice (as
+    /// `my_chat_member` and as a `/start <payload>` message), and the two race
+    /// on different paths.
+    private func sendGroupWelcome(chatID: Int) async {
+        guard await state.claimGroupGreeting(chatID: chatID) else { return }
+        let sponsor = await state.chatSponsor(chatID: chatID, askerUsername: nil)
+        let welcome = GroupWelcomePresenter.welcome(
+            sponsor: sponsor,
+            onboarding: await state.onboardingConfig()
+        )
+        if welcome.showsExamples {
+            await state.bumpFunnel(.onboardingShown)
+        }
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatID,
             threadID: nil,
             replyTo: nil,
-            text: text,
-            replyMarkup: markup
+            text: welcome.text,
+            replyMarkup: welcome.markup
         ))
-        logger.info("greeted new group \(update.chat.id) (added by @\(update.from.username ?? String(update.from.id)))")
     }
 
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
         let senderUsername = message.from?.username
         let senderUserID = message.from?.id
         let isPrivate = message.chat.type == "private"
+
+        // Identity first: this is what keeps a wallet, a subscription and a
+        // licence attached to the person rather than to a rentable @username.
+        if let from = message.from {
+            await state.identifyUser(userID: from.id, username: from.username, firstName: from.first_name)
+        }
 
         // Keep the human-readable chat identity fresh so admin tooling can
         // show titles/usernames instead of bare IDs.
@@ -577,7 +639,7 @@ final class BotOrchestrator: @unchecked Sendable {
             return
         }
 
-        if let text = message.text, await menuHandler.processTextInput(text: text, chatKey: chatKey, username: message.from?.username) {
+        if let text = message.text, await menuHandler.processTextInput(text: text, chatKey: chatKey, userID: message.from?.id, username: message.from?.username) {
             return
         }
 
@@ -594,29 +656,32 @@ final class BotOrchestrator: @unchecked Sendable {
             return
         }
 
-        guard let username = message.from?.username else {
+        // The payer is identified by userID, so a missing @username is no
+        // longer a dead end — the money lands on their account either way.
+        guard let payer = message.from else {
             await state.markPaymentProcessed(chargeID: chargeID)
             await persistence?.flushNow()
-            _ = try? await telegram.sendMessage(.init(
-                chatID: message.chat.id,
-                threadID: message.message_thread_id,
-                replyTo: nil,
-                text: "✅ Оплата получена! Но у вас не задан @username в Telegram, поэтому доступ пока не включён. Задайте его в настройках Telegram и напишите администратору бота.",
-                replyMarkup: nil
-            ))
+            logger.error("successful_payment without a sender (charge \(chargeID))")
             return
         }
+        let payerKey = state.userKey(userID: payer.id)
+        let payerLabel = await state.displayLabel(forKey: payerKey)
 
         // Credit-pack top-up: add face value to the wallet, no subscription/tenant.
         let payload = payment.invoice_payload
         if payload.hasPrefix("credits_"),
            let cents = Int(payload.dropFirst("credits_".count)),
            CreditPack.isValid(cents: cents) {
-            let wallet = await state.creditBalance(username: username, amountUsd: Double(cents) / 100.0)
+            let wallet = await state.creditPurchasedBalance(key: payerKey, amountUsd: Double(cents) / 100.0)
             await state.markPaymentProcessed(chargeID: chargeID)
             await state.bumpFunnel(.creditTopup)
+            // Referral (step 10): a friend who pays is what the program is
+            // actually for — credit the inviter before the payment flush, so
+            // the bonus is as durable as the payment that earned it.
+            let topupBonus = await state.redeemReferralPaymentBonus(payerUserID: payer.id)
             await metrics.increment(MetricName.paymentsProcessed)
             await persistence?.flushNow()
+            await announceReferralBonus(topupBonus)
             _ = try? await telegram.sendMessage(.init(
                 chatID: message.chat.id,
                 threadID: message.message_thread_id,
@@ -627,16 +692,16 @@ final class BotOrchestrator: @unchecked Sendable {
                 ),
                 replyMarkup: nil
             ))
-            logger.info("credit top-up for @\(username): +\(cents)c (charge \(chargeID))")
+            logger.info("credit top-up for \(payerLabel): +\(cents)c (charge \(chargeID))")
             return
         }
 
-        let activation = await state.activatePaidSubscription(username: username)
-        await state.assignChat(chatID: message.chat.id, to: username)
+        let activation = await state.activatePaidSubscription(username: payerKey)
+        await state.assignChat(chatID: message.chat.id, to: payerKey)
         await state.markPaymentProcessed(chargeID: chargeID)
         // A winback offer is one-shot: consume it whether or not it was still
         // valid, and count the ones that actually brought the payment back.
-        if await state.consumeWinbackDiscount(username: username) != nil {
+        if await state.consumeWinbackDiscount(username: payerKey) != nil {
             await state.bumpFunnel(.winbackRedeemed)
         }
         // Funnel: count the conversion before the flush so it persists with the
@@ -646,9 +711,11 @@ final class BotOrchestrator: @unchecked Sendable {
         case .extended: await state.bumpFunnel(.renewed)
         case .alreadyUnlimited: break
         }
+        let referralBonus = await state.redeemReferralPaymentBonus(payerUserID: payer.id)
         await metrics.increment(MetricName.paymentsProcessed)
         // Payments are the one thing that must never wait out the debounce.
         await persistence?.flushNow()
+        await announceReferralBonus(referralBonus)
 
         let isPrivate = message.chat.type == "private"
         let formatter = DateFormatter()
@@ -660,7 +727,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 text = """
                 ✅ <b>Оплата получена!</b>
 
-                Добро пожаловать, @\(username)!
+                Добро пожаловать, \(payerLabel)!
                 Премиум-доступ активирован — для вас и всех ваших чатов.
                 Подписка действует до <b>\(formatter.string(from: until))</b>.
 
@@ -669,7 +736,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 """
             } else {
                 // Group: credit the sponsor publicly (hero status).
-                text = "🎉 @\(username) открыл премиум-доступ для этого чата! Теперь всем доступны умные модели без рекламы."
+                text = "🎉 \(payerLabel) открыл премиум-доступ для этого чата! Теперь всем доступны умные модели без рекламы."
             }
         case .extended(let until):
             if isPrivate {
@@ -679,7 +746,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 Доступ активен до <b>\(formatter.string(from: until))</b>.
                 """
             } else {
-                text = "🎉 @\(username) продлил премиум-доступ для этого чата — умные модели снова доступны всем."
+                text = "🎉 \(payerLabel) продлил премиум-доступ для этого чата — умные модели снова доступны всем."
             }
         case .alreadyUnlimited:
             text = "✅ Оплата получена. У вас бессрочный доступ — ничего не изменилось."
@@ -691,7 +758,25 @@ final class BotOrchestrator: @unchecked Sendable {
             text: text,
             replyMarkup: nil
         ))
-        logger.info("payment processed for @\(username): \(payment.total_amount) \(payment.currency) (\(activation))")
+        logger.info("payment processed for \(payerLabel): \(payment.total_amount) \(payment.currency) (\(activation))")
+    }
+
+    /// Tells an inviter their friend converted. The money is already on their
+    /// balance, so a failed DM (blocked bot, never wrote to it) costs nothing
+    /// but the good news.
+    private func announceReferralBonus(_ bonus: ReferralPaymentBonus?) async {
+        guard let bonus else { return }
+        let delivered = (try? await telegram.sendMessage(.init(
+            chatID: bonus.inviterUserID,
+            threadID: nil,
+            replyTo: nil,
+            text: ReferralPresenter.paymentBonusText(bonus),
+            replyMarkup: ReferralPresenter.paymentBonusMarkup()
+        ))) != nil
+        if !delivered {
+            logger.warning("referral: could not notify \(bonus.inviterLabel) about the conversion bonus")
+        }
+        logger.info("referral conversion bonus: \(bonus.inviterLabel) +$\(bonus.amountUsd) (friend \(bonus.friendLabel))")
     }
 
     // MARK: - Metrics report (GET /metrics)
@@ -705,10 +790,15 @@ final class BotOrchestrator: @unchecked Sendable {
         let counters: [String: Int]
         /// Conversion-funnel event counts + live sponsor tallies (roadmap step 7).
         let funnel: [String: Int]
+        /// The same events over the last day / 7 days: a total says how big,
+        /// a window says whether it is moving.
+        let funnelToday: [String: Int]
+        let funnelWeek: [String: Int]
     }
 
     func metricsReport() async -> MetricsReport {
         let snapshot = await metrics.snapshot()
+        let funnel = await state.funnelReport()
         let persistenceLine: String
         if let persistence {
             let status = await persistence.status()
@@ -727,7 +817,9 @@ final class BotOrchestrator: @unchecked Sendable {
             dirtyEntities: await state.dirtyEntityCount,
             persistence: persistenceLine,
             counters: snapshot.counters,
-            funnel: await state.funnelReport().flat
+            funnel: funnel.flat,
+            funnelToday: funnel.todayCounters,
+            funnelWeek: funnel.weekCounters
         )
     }
 }

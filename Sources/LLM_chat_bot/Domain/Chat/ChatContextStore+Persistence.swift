@@ -29,7 +29,8 @@ extension ChatContextStore {
             chatRolePresets: context.chatRolePresets.isEmpty ? nil : context.chatRolePresets,
             adReplyCounter: context.adReplyCounter == 0 ? nil : context.adReplyCounter,
             adLastShownAt: context.adLastShownAt,
-            funnelCounted: context.funnelFirstMessageCounted ? true : nil
+            funnelCounted: context.funnelFirstMessageCounted ? true : nil,
+            downgradedFrom: context.downgradedFromModel
         )
     }
 
@@ -79,7 +80,8 @@ extension ChatContextStore {
             chatRolePresets: snapshot.chatRolePresets ?? [],
             adReplyCounter: snapshot.adReplyCounter ?? 0,
             adLastShownAt: snapshot.adLastShownAt,
-            funnelFirstMessageCounted: snapshot.funnelCounted ?? false
+            funnelFirstMessageCounted: snapshot.funnelCounted ?? false,
+            downgradedFromModel: snapshot.downgradedFrom
         )
     }
 
@@ -156,7 +158,7 @@ extension ChatContextStore {
         case .card:
             return .card(_cardConfig)
         case .superAdmins:
-            return .superAdmins(Array(superAdminUsernames.subtracting([rootSuperAdminUsername])).sorted())
+            return .superAdmins(Array(superAdminUsernames.subtracting([rootSuperAdminKey, rootSuperAdminUsername])).sorted())
         case .processedPayments:
             return .processedPayments(processedPaymentChargeIDs)
         case .pollingOffset:
@@ -175,8 +177,14 @@ extension ChatContextStore {
             return .balances(userBalances)
         case .funnel:
             return .funnel(funnelCounters)
+        case .funnelDaily:
+            return .funnelDaily(funnelDailyValue)
         case .dailyPremiumLimit:
             return .dailyPremiumLimit(dailyPremiumLimitValue)
+        case .dailyPremiumUsage:
+            return .dailyPremiumUsage(premiumDailyUsage)
+        case .selfPromo:
+            return .selfPromo(selfPromoConfigValue)
         case .reminders:
             return .reminders(reminderConfigValue)
         case .onboarding:
@@ -185,6 +193,8 @@ extension ChatContextStore {
             return .referrals(referralConfigValue)
         case .referralLedger:
             return .referralLedger(referralLedgerValue)
+        case .userDirectory:
+            return .userDirectory(userDirectoryValue)
         }
     }
 
@@ -227,6 +237,11 @@ extension ChatContextStore {
     // MARK: - Row-based restore (new schema)
 
     func restore(from state: PersistedBotState) {
+        // The directory comes first: `defaultOwnerKey` / `rootSuperAdminKey`
+        // resolve through it, so seeding the owner rows before it is loaded
+        // would file them under the wrong key until that person next writes.
+        userDirectoryValue = state.configs.userDirectory ?? .empty
+
         contexts.removeAll()
         for row in state.contexts {
             contexts[row.key] = makeContext(from: row.snapshot)
@@ -243,7 +258,7 @@ extension ChatContextStore {
             chatOwnership[row.chatID] = row.owner.lowercased()
         }
 
-        superAdminUsernames = [rootSuperAdminUsername]
+        superAdminUsernames = [rootSuperAdminKey]
         for name in state.configs.superAdmins ?? [] {
             let lowered = name.lowercased()
             if !lowered.isEmpty { superAdminUsernames.insert(lowered) }
@@ -268,7 +283,13 @@ extension ChatContextStore {
         markupPercentValue = state.configs.markup ?? 30
         userBalances = state.configs.balances ?? [:]
         funnelCounters = state.configs.funnel ?? [:]
+        funnelDailyValue = state.configs.funnelDaily ?? .empty
         dailyPremiumLimitValue = state.configs.dailyPremiumLimit ?? 5
+        // Yesterday's counters are dead weight — a restore is as good a moment
+        // to drop them as a write is.
+        premiumDailyUsage = (state.configs.dailyPremiumUsage ?? [:])
+            .filter { $0.value.day == FunnelDailyLog.dayNumber() }
+        selfPromoConfigValue = (state.configs.selfPromo ?? .default).normalized
         reminderConfigValue = (state.configs.reminders ?? .default).normalized
         onboardingConfigValue = (state.configs.onboarding ?? .default).normalized
         referralConfigValue = (state.configs.referrals ?? .default).normalized
@@ -298,8 +319,8 @@ extension ChatContextStore {
             }
         } else {
             // Migrate from pre-tenant snapshot format
-            tenants[defaultOwnerUsername] = TenantState(
-                ownerUsername: defaultOwnerUsername,
+            tenants[defaultOwnerKey] = TenantState(
+                ownerUsername: defaultOwnerKey,
                 defaultModel: snapshot.defaultModel ?? initialDefaultModel,
                 defaultRole: snapshot.defaultRole ?? initialDefaultRole,
                 defaultHistoryLength: snapshot.defaultHistoryLength ?? initialDefaultHistoryLength,
@@ -311,7 +332,7 @@ extension ChatContextStore {
                 adminUsernames: Set(
                     (snapshot.adminUsernames ?? [])
                         .map { $0.lowercased() }
-                        .filter { $0 != defaultOwnerUsername }
+                        .filter { $0 != defaultOwnerKey }
                 ),
                 licensedUsernames: [],
                 cumulativeUsage: .zero,
@@ -321,7 +342,7 @@ extension ChatContextStore {
         }
         ensureDefaultOwnerTenant()
 
-        superAdminUsernames = [rootSuperAdminUsername]
+        superAdminUsernames = [rootSuperAdminKey]
         for u in snapshot.superAdminUsernames ?? [] {
             let lc = u.lowercased()
             if !lc.isEmpty { superAdminUsernames.insert(lc) }
@@ -338,9 +359,9 @@ extension ChatContextStore {
     // MARK: - Shared restore helpers
 
     private func ensureDefaultOwnerTenant() {
-        guard tenants[defaultOwnerUsername] == nil else { return }
-        tenants[defaultOwnerUsername] = TenantState(
-            ownerUsername: defaultOwnerUsername,
+        guard tenants[defaultOwnerKey] == nil else { return }
+        tenants[defaultOwnerKey] = TenantState(
+            ownerUsername: defaultOwnerKey,
             defaultModel: initialDefaultModel,
             defaultRole: initialDefaultRole,
             defaultHistoryLength: initialDefaultHistoryLength,

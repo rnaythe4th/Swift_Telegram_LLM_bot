@@ -11,6 +11,12 @@ struct ChatMetaInfo: Codable, Sendable, Equatable {
     var username: String?
     /// Peer first name (private chats).
     var firstName: String?
+    /// Set when the bot was removed from this group (`my_chat_member` →
+    /// left/kicked). Nothing can be delivered there any more, so broadcasts
+    /// (renewal notices, sponsor congratulations) skip it. Cleared as soon as
+    /// the bot is back or the chat talks to it again — hence optional, so old
+    /// stored rows decode unchanged.
+    var botRemoved: Bool?
 
     /// Compact display label: title for groups, @username / name for privates.
     var displayLabel: String {

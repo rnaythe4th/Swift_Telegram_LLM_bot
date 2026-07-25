@@ -1,5 +1,42 @@
 import Foundation
 
+/// Where an example prompt is offered. A DM and a group are different rooms:
+/// "напиши пост" is a personal errand, "переведи" is something a group actually
+/// does together — showing both everywhere wastes the two or three button slots
+/// that decide whether a new user ever gets to a first answer.
+enum OnboardingPlacement: String, Codable, Sendable, CaseIterable {
+    case everywhere
+    case privateOnly
+    case groupsOnly
+
+    func matches(isGroup: Bool) -> Bool {
+        switch self {
+        case .everywhere: return true
+        case .privateOnly: return !isGroup
+        case .groupsOnly: return isGroup
+        }
+    }
+
+    /// Short caption for the super-admin button; the label doubles as the
+    /// toggle, so it has to read at a glance.
+    var shortLabel: String {
+        switch self {
+        case .everywhere: return "везде"
+        case .privateOnly: return "личка"
+        case .groupsOnly: return "группы"
+        }
+    }
+
+    /// Cycles through the options — the menu button is a three-state toggle.
+    var next: OnboardingPlacement {
+        switch self {
+        case .everywhere: return .privateOnly
+        case .privateOnly: return .groupsOnly
+        case .groupsOnly: return .everywhere
+        }
+    }
+}
+
 /// One ready-made prompt offered as a button in the greeting (roadmap step 9).
 /// Tapping it runs the prompt as a normal turn, so a new user sees a real
 /// answer without having to invent a first question.
@@ -12,28 +49,45 @@ struct OnboardingExample: Codable, Sendable, Equatable {
     /// The prompt sent to the model.
     var prompt: String
     var enabled: Bool
+    /// Where this one is offered — DM, groups, or both.
+    var placement: OnboardingPlacement
     /// Monitoring: how many times this example was tapped (persisted).
     var taps: Int
 
-    init(id: String, label: String, prompt: String, enabled: Bool = true, taps: Int = 0) {
+    init(
+        id: String,
+        label: String,
+        prompt: String,
+        enabled: Bool = true,
+        placement: OnboardingPlacement = .everywhere,
+        taps: Int = 0
+    ) {
         self.id = id
         self.label = label
         self.prompt = prompt
         self.enabled = enabled
+        self.placement = placement
         self.taps = taps
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, prompt, enabled, taps
+        case id, label, prompt, enabled, placement, taps
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Placement is decoded through its raw string rather than as the enum:
+        // an unrecognised value (a row written by a newer build) must cost one
+        // example its placement, not throw away the entire onboarding config —
+        // texts, order and tap counters included.
+        let placement = (try? c.decodeIfPresent(String.self, forKey: .placement))
+            .flatMap { $0.flatMap(OnboardingPlacement.init(rawValue:)) } ?? .everywhere
         self.init(
             id: try c.decode(String.self, forKey: .id),
             label: try c.decode(String.self, forKey: .label),
             prompt: try c.decode(String.self, forKey: .prompt),
             enabled: try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
+            placement: placement,
             taps: try c.decodeIfPresent(Int.self, forKey: .taps) ?? 0
         )
     }
@@ -64,7 +118,8 @@ struct OnboardingConfig: Codable, Sendable, Equatable {
             OnboardingExample(
                 id: "post",
                 label: "✍️ Написать пост",
-                prompt: "Напиши короткий пост для Telegram-канала о том, как ИИ-ассистент экономит время в повседневных задачах. Живой тон, без воды, 3–4 абзаца, в конце — один вопрос читателю."
+                prompt: "Напиши короткий пост для Telegram-канала о том, как ИИ-ассистент экономит время в повседневных задачах. Живой тон, без воды, 3–4 абзаца, в конце — один вопрос читателю.",
+                placement: .privateOnly
             ),
             OnboardingExample(
                 id: "explain",
@@ -76,11 +131,25 @@ struct OnboardingConfig: Codable, Sendable, Equatable {
                 label: "🌍 Перевести",
                 prompt: "Переведи на английский: «Привет! Мы подключили ИИ-ассистента в наш чат — задай ему любой вопрос». Дай два варианта: дружелюбный и деловой."
             ),
+            OnboardingExample(
+                id: "summar",
+                label: "📝 Пересказать обсуждение",
+                prompt: "Сейчас я пришлю кусок переписки, а ты сделай из него короткую выжимку: о чём договорились, что осталось нерешённым и кто что должен сделать. Ответь одной фразой, что готов, и жди текст.",
+                placement: .groupsOnly
+            ),
         ]
     )
 
-    /// Examples actually shown/tappable right now.
-    var activeExamples: [OnboardingExample] {
+    /// Examples actually shown/tappable right now, for the room they are being
+    /// rendered into.
+    func activeExamples(inGroup: Bool) -> [OnboardingExample] {
+        guard enabled else { return [] }
+        return examples.filter { $0.enabled && $0.placement.matches(isGroup: inGroup) }
+    }
+
+    /// Every enabled example, regardless of room — for admin surfaces that only
+    /// need to know whether the feature has anything to show at all.
+    var enabledExamples: [OnboardingExample] {
         enabled ? examples.filter(\.enabled) : []
     }
 

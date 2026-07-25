@@ -16,11 +16,15 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case markup = "markup"
     case balances = "balances"
     case funnel = "funnel"
+    case funnelDaily = "funnel_daily"
     case dailyPremiumLimit = "daily_premium_limit"
+    case dailyPremiumUsage = "daily_premium_usage"
+    case selfPromo = "self_promo"
     case reminders = "reminders"
     case onboarding = "onboarding"
     case referrals = "referrals"
     case referralLedger = "referral_ledger"
+    case userDirectory = "user_directory"
 }
 
 struct ChatContextRow: Sendable {
@@ -55,12 +59,18 @@ enum GlobalConfigValue: Sendable {
     case ads([AdCampaign])
     /// Markup percent applied to provider prices for customers.
     case markup(Int)
-    /// Keyed by lowercased username.
+    /// Keyed by `UserKey` (`#<userID>`, or a bare username while pending).
     case balances([String: UserBalance])
     /// Conversion-funnel event counters, keyed by FunnelEvent.rawValue.
     case funnel([String: Int])
+    /// The same counters bucketed per day, for period views (roadmap step 7).
+    case funnelDaily(FunnelDailyLog)
     /// Daily free-premium "taste" allowance per free-tier chat/user (roadmap step 6).
     case dailyPremiumLimit(Int)
+    /// How much of today's allowance each free-tier chat/user has spent (step 6).
+    case dailyPremiumUsage([String: DailyPremiumUsage])
+    /// Built-in self-promo filling the free-tier ad slot (roadmap step 5).
+    case selfPromo(SelfPromoConfig)
     /// Renewal-reminder / winback schedule (roadmap step 8).
     case reminders(SubscriptionReminderConfig)
     /// Greeting example prompts + their tap counters (roadmap step 9).
@@ -69,6 +79,8 @@ enum GlobalConfigValue: Sendable {
     case referrals(ReferralConfig)
     /// Referral attributions + per-inviter aggregates (roadmap step 10).
     case referralLedger(ReferralLedger)
+    /// userID ↔ @username directory behind every `UserKey`.
+    case userDirectory(UserDirectory)
 
     var key: GlobalConfigKey {
         switch self {
@@ -86,11 +98,15 @@ enum GlobalConfigValue: Sendable {
         case .markup: return .markup
         case .balances: return .balances
         case .funnel: return .funnel
+        case .funnelDaily: return .funnelDaily
         case .dailyPremiumLimit: return .dailyPremiumLimit
+        case .dailyPremiumUsage: return .dailyPremiumUsage
+        case .selfPromo: return .selfPromo
         case .reminders: return .reminders
         case .onboarding: return .onboarding
         case .referrals: return .referrals
         case .referralLedger: return .referralLedger
+        case .userDirectory: return .userDirectory
         }
     }
 }
@@ -177,18 +193,24 @@ struct PersistedGlobalConfigs: Sendable {
     var markup: Int?
     var balances: [String: UserBalance]?
     var funnel: [String: Int]?
+    var funnelDaily: FunnelDailyLog?
     var dailyPremiumLimit: Int?
+    var dailyPremiumUsage: [String: DailyPremiumUsage]?
+    var selfPromo: SelfPromoConfig?
     var reminders: SubscriptionReminderConfig?
     var onboarding: OnboardingConfig?
     var referrals: ReferralConfig?
     var referralLedger: ReferralLedger?
+    var userDirectory: UserDirectory?
 
     var hasAnyValue: Bool {
         starsPrice != nil || starsPerUsd != nil || freeModelIDs != nil || crypto != nil || card != nil
             || superAdmins != nil || processedPayments != nil || pollingOffset != nil
             || chatMeta != nil || invites != nil || ads != nil
-            || markup != nil || balances != nil || funnel != nil || dailyPremiumLimit != nil
+            || markup != nil || balances != nil || funnel != nil || funnelDaily != nil
+            || dailyPremiumLimit != nil || dailyPremiumUsage != nil || selfPromo != nil
             || reminders != nil || onboarding != nil || referrals != nil || referralLedger != nil
+            || userDirectory != nil
     }
 }
 

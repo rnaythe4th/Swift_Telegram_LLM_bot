@@ -88,6 +88,9 @@ struct ChatContextSnapshot: Codable, Sendable {
     // Funnel: whether this chat's first-message activation was already counted;
     // absent in pre-funnel rows (treated as false → re-counted once).
     var funnelCounted: Bool?
+    // Paid model parked by the daily-cap fallback, restored once the chat has
+    // full access again; absent when nothing was downgraded.
+    var downgradedFrom: String?
 }
 
 struct BotStateSnapshot: Codable, Sendable {

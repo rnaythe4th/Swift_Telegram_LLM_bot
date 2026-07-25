@@ -17,11 +17,12 @@ actor SubscriptionReminderService {
         var due: Int = 0
         var expiryRemindersSent: Int = 0
         var winbacksSent: Int = 0
+        var walletWinbacksSent: Int = 0
         var unreachable: Int = 0
         var failed: Int = 0
         var skippedDisabled: Bool = false
 
-        var sentTotal: Int { expiryRemindersSent + winbacksSent }
+        var sentTotal: Int { expiryRemindersSent + winbacksSent + walletWinbacksSent }
 
         var summaryLine: String {
             if skippedDisabled { return "выключены" }
@@ -29,6 +30,7 @@ actor SubscriptionReminderService {
             var parts = ["к отправке \(due)"]
             if expiryRemindersSent > 0 { parts.append("напоминаний \(expiryRemindersSent)") }
             if winbacksSent > 0 { parts.append("winback \(winbacksSent)") }
+            if walletWinbacksSent > 0 { parts.append("по балансу \(walletWinbacksSent)") }
             if unreachable > 0 { parts.append("недоступны \(unreachable)") }
             if failed > 0 { parts.append("ошибок \(failed)") }
             return parts.joined(separator: " · ")
@@ -73,9 +75,19 @@ actor SubscriptionReminderService {
         // first pass, so a redeploy never sends from half-loaded state.
         try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
         while !Task.isCancelled {
+            let startedAt = Date()
             await sweep()
-            let minutes = await state.reminderConfig().sweepIntervalMinutes
-            try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
+            // Wait in short slices instead of one long sleep: the interval is a
+            // live super-admin setting, and shortening it must take effect
+            // within a minute rather than after the old (possibly 24 h) sleep.
+            while !Task.isCancelled {
+                let minutes = await state.reminderConfig().sweepIntervalMinutes
+                let due = startedAt.addingTimeInterval(Double(minutes) * 60)
+                let remaining = due.timeIntervalSinceNow
+                guard remaining > 0 else { break }
+                let slice = min(remaining, 60)
+                try? await Task.sleep(nanoseconds: UInt64(slice * 1_000_000_000))
+            }
         }
     }
 
@@ -138,6 +150,8 @@ actor SubscriptionReminderService {
             }
         }
 
+        await sweepLapsedWallets(now: now, into: &result)
+
         result.finishedAt = Date()
         lastResult = result
         lastRunAt = result.finishedAt
@@ -145,6 +159,60 @@ actor SubscriptionReminderService {
             logger.info("subscription reminders: \(result.summaryLine)")
         }
         return result
+    }
+
+    /// Second half of the sweep: people who paid into a pay-as-you-go balance,
+    /// spent it and drifted away. A subscription expires loudly and gets a
+    /// winback; a wallet just runs out, and nothing has ever said "вернитесь".
+    /// One message per lapse, proven payers only (see `dueWalletWinbacks`).
+    private func sweepLapsedWallets(now: Date, into result: inout SweepResult) async {
+        let targets = await state.dueWalletWinbacks(now: now)
+        guard !targets.isEmpty else { return }
+        result.due += targets.count
+
+        for target in targets {
+            switch await send(
+                chatID: target.privateChatID,
+                text: walletWinbackText(target: target),
+                pricing: nil,
+                markup: walletWinbackMarkup()
+            ) {
+            case .ok:
+                await state.markWalletWinbackSent(key: target.key)
+                result.walletWinbacksSent += 1
+                await metrics.increment(MetricName.winbacksSent)
+                await state.bumpFunnel(.walletWinbackSent)
+            case .dead:
+                // The DM is gone for good; mark it handled so the sweep stops
+                // reconsidering a wallet it can never reach.
+                await state.markWalletWinbackSent(key: target.key)
+                result.unreachable += 1
+            case .transient:
+                result.failed += 1
+                await metrics.increment(MetricName.reminderSendErrors)
+            }
+        }
+    }
+
+    private func walletWinbackText(target: WalletWinbackTarget) -> String {
+        String(
+            format: """
+            👋 <b>Давно вас не было.</b>
+
+            Ваш баланс закончился — умные модели снова недоступны, и бот отвечает бесплатными.
+
+            Пополнить можно от %@: с баланса списывается стоимость каждого ответа, обычно доли цента, — этого хватает надолго. Нужен доступ без счётчика и для ваших чатов — есть премиум на месяц.
+            """,
+            CreditPack.label(cents: CreditPack.centsOptions.first ?? 200)
+        )
+    }
+
+    private func walletWinbackMarkup() -> InlineKeyboardMarkup {
+        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.reminder.rawValue)").rawData
+        return InlineKeyboardMarkup(inline_keyboard: [[
+            InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction),
+            InlineKeyboardButton(text: "⚡ Премиум на месяц", callback_data: payAction),
+        ]])
     }
 
     private enum DeliveryOutcome {
@@ -157,10 +225,11 @@ actor SubscriptionReminderService {
     private func deliver(target: SubscriptionNoticeTarget, config: SubscriptionReminderConfig) async -> DeliveryOutcome {
         // Group notice: the sponsor may be gone, but any member can renew.
         // Only the first winback wave posts publicly — later waves would nag a
-        // chat that already saw the message.
+        // chat that already saw the message. Pre-expiry reminders go out on
+        // the widest wave only, for the same reason.
         let publicWave: Bool
         switch target.notice {
-        case .expiring: publicWave = true
+        case .expiring(let days): publicWave = days == config.expiryReminderDays.max()
         case .winback(let day): publicWave = day == config.winbackDays.min()
         }
         let groupChatIDs = config.notifyChats && publicWave
@@ -178,37 +247,93 @@ actor SubscriptionReminderService {
                 hours: config.winbackOfferHours
             )
         }
+        // The sponsor's price carries their personal discount; the group's does
+        // not. A winback offer belongs to one account, so quoting it to a chat
+        // where anyone may tap "renew" would advertise a price the payer is not
+        // going to be charged.
         let pricing = await state.subscriptionPricing(username: target.username)
+        let listPricing = await state.subscriptionPricing(username: nil)
         var delivered = false
+        var deadChannels = 0
+        var attempted = 0
 
         if let chatID = target.privateChatID {
+            attempted += 1
             let text = personalText(target: target, pricing: pricing, discount: discount)
-            delivered = await send(chatID: chatID, text: text, pricing: pricing, notice: target.notice)
+            switch await send(chatID: chatID, text: text, pricing: pricing, notice: target.notice) {
+            case .ok: delivered = true
+            case .dead: deadChannels += 1
+            case .transient: break
+            }
         }
         if !groupChatIDs.isEmpty {
             let text = groupText(target: target)
             for chatID in groupChatIDs {
-                let ok = await send(chatID: chatID, text: text, pricing: pricing, notice: target.notice)
-                delivered = delivered || ok
+                attempted += 1
+                switch await send(chatID: chatID, text: text, pricing: listPricing, notice: target.notice) {
+                case .ok: delivered = true
+                case .dead: deadChannels += 1
+                case .transient: break
+                }
             }
         }
-        return delivered ? .sent : .failed
+        if delivered { return .sent }
+        // Every channel is gone for good (blocked DM, kicked from every chat):
+        // retrying next hour would burn the same 403s. The store now knows they
+        // are dead, so the next cycle will not even list them.
+        return deadChannels == attempted ? .noChannel : .failed
     }
 
-    private func send(chatID: Int, text: String, pricing: SubscriptionPricing, notice: SubscriptionNotice) async -> Bool {
+    private enum SendOutcome {
+        case ok
+        /// Permanent: the bot cannot post here any more (blocked / kicked /
+        /// chat deleted). Recorded so this address stops being a channel.
+        case dead
+        case transient
+    }
+
+    private func send(
+        chatID: Int,
+        text: String,
+        pricing: SubscriptionPricing?,
+        notice: SubscriptionNotice? = nil,
+        markup: InlineKeyboardMarkup? = nil
+    ) async -> SendOutcome {
+        let keyboard: InlineKeyboardMarkup?
+        if let markup {
+            keyboard = markup
+        } else if let pricing, let notice {
+            keyboard = buyMarkup(pricing: pricing, notice: notice)
+        } else {
+            keyboard = nil
+        }
         do {
             _ = try await telegram.sendMessage(.init(
                 chatID: chatID,
                 threadID: nil,
                 replyTo: nil,
                 text: text,
-                replyMarkup: buyMarkup(pricing: pricing, notice: notice)
+                replyMarkup: keyboard
             ))
-            return true
+            return .ok
         } catch {
             logger.warning("subscription notice to chat \(chatID) failed: \(error)")
-            return false
+            if Self.isPermanentDeliveryFailure(error) {
+                await state.setBotPresence(chatID: chatID, isMember: false)
+                return .dead
+            }
+            return .transient
         }
+    }
+
+    /// 403 means blocked/kicked, 400 "chat not found" means the chat is gone —
+    /// neither is worth another attempt. Anything else (429, 5xx, network) is
+    /// retried on the next sweep.
+    private static func isPermanentDeliveryFailure(_ error: Error) -> Bool {
+        guard let api = error as? TelegramAPIError else { return false }
+        if api.statusCode == 403 { return true }
+        let text = api.descriptionText.lowercased()
+        return api.statusCode == 400 && (text.contains("chat not found") || text.contains("group chat was upgraded"))
     }
 
     // MARK: - Texts
@@ -226,7 +351,7 @@ actor SubscriptionReminderService {
     }()
 
     private func buyMarkup(pricing: SubscriptionPricing, notice: SubscriptionNotice) -> InlineKeyboardMarkup {
-        let payAction = BotCallbackAction.menu(action: "nav:pay").rawData
+        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.reminder.rawValue)").rawData
         let priceSuffix = pricing.stars.map { " · \($0) ⭐" } ?? ""
         let label = notice.isWinback
             ? "⚡ Вернуть премиум\(priceSuffix)"
@@ -270,13 +395,16 @@ actor SubscriptionReminderService {
         var lines: [String] = []
         switch target.notice {
         case .expiring:
-            let days = max(1, Int(ceil(target.paidUntil.timeIntervalSinceNow / 86_400)))
+            let hoursLeft = target.paidUntil.timeIntervalSinceNow / 3600
+            let when = hoursLeft <= 36
+                ? "Завтра"
+                : "Через \(max(1, Int(ceil(hoursLeft / 24)))) дн."
             let chatsSuffix = target.groupChatIDs.isEmpty
                 ? "."
                 : " — и у вас, и во всех ваших чатах (\(target.groupChatIDs.count))."
             lines.append("⏳ <b>Премиум заканчивается \(until)</b>")
             lines.append("")
-            lines.append("Через \(days) дн. умные модели выключатся, вернутся реклама и дневной лимит\(chatsSuffix)")
+            lines.append("\(when) умные модели выключатся, вернутся реклама и дневной лимит\(chatsSuffix)")
         case .winback:
             lines.append("⛔ <b>Премиум истёк \(until).</b>")
             lines.append("")
@@ -312,45 +440,52 @@ actor SubscriptionReminderService {
     /// the wording and the buttons can be checked before real sends go out.
     func previewTexts(username: String?) async -> [(text: String, markup: InlineKeyboardMarkup)] {
         let config = await state.reminderConfig()
-        let pricing = await state.subscriptionPricing(username: username)
-        let sample = Date().addingTimeInterval(Double(max(config.daysBeforeExpiry, 1)) * 86_400)
-        let expiring = SubscriptionNoticeTarget(
-            username: username ?? "",
-            notice: .expiring,
-            paidUntil: sample,
-            privateChatID: nil,
-            groupChatIDs: []
-        )
-        let winbackDay = config.winbackDays.first ?? 1
-        let winback = SubscriptionNoticeTarget(
-            username: username ?? "",
-            notice: .winback(dayOffset: winbackDay),
-            paidUntil: Date().addingTimeInterval(-Double(winbackDay) * 86_400),
-            privateChatID: nil,
-            groupChatIDs: []
-        )
-        // Preview discount is hypothetical — nothing is granted here.
+        // List price: a preview must not inherit the previewing admin's own
+        // live winback offer, or it stops showing what sponsors will see.
+        let pricing = await state.subscriptionPricing(username: nil)
+        let label = username.map { "@\($0)" } ?? "—"
+        var previews: [(text: String, markup: InlineKeyboardMarkup)] = []
+
+        for days in config.expiryReminderDays.sorted(by: >) {
+            let notice = SubscriptionNotice.expiring(daysBefore: days)
+            let target = SubscriptionNoticeTarget(
+                username: username ?? "",
+                label: label,
+                notice: notice,
+                paidUntil: Date().addingTimeInterval(Double(days) * 86_400),
+                privateChatID: nil,
+                groupChatIDs: []
+            )
+            previews.append((
+                personalText(target: target, pricing: pricing, discount: nil),
+                buyMarkup(pricing: pricing, notice: notice)
+            ))
+        }
+
+        // Preview discount is hypothetical — nothing is granted here, but it is
+        // priced through the same store method as a real one, so the card and
+        // crypto lines are as accurate as the Stars line.
         let previewDiscount = config.winbackDiscountPercent > 0
             ? SubscriptionDiscount(
                 percent: config.winbackDiscountPercent,
                 expiresAt: Date().addingTimeInterval(Double(config.winbackOfferHours) * 3600)
               )
             : nil
-        var discountedPricing = pricing
-        if let previewDiscount {
-            discountedPricing.discount = previewDiscount
-            discountedPricing.stars = pricing.starsFull.map { previewDiscount.apply(to: $0) }
-            discountedPricing.cryptoCents = pricing.cryptoCentsFull.map { previewDiscount.apply(to: $0) }
-        }
-        return [
-            (
-                personalText(target: expiring, pricing: pricing, discount: nil),
-                buyMarkup(pricing: pricing, notice: .expiring)
-            ),
-            (
-                personalText(target: winback, pricing: discountedPricing, discount: previewDiscount),
-                buyMarkup(pricing: discountedPricing, notice: .winback(dayOffset: winbackDay))
-            ),
-        ]
+        let discountedPricing = await state.subscriptionPricing(username: nil, applying: previewDiscount)
+        let winbackDay = config.winbackDays.first ?? 1
+        let winbackNotice = SubscriptionNotice.winback(dayOffset: winbackDay)
+        let winback = SubscriptionNoticeTarget(
+            username: username ?? "",
+            label: label,
+            notice: winbackNotice,
+            paidUntil: Date().addingTimeInterval(-Double(winbackDay) * 86_400),
+            privateChatID: nil,
+            groupChatIDs: []
+        )
+        previews.append((
+            personalText(target: winback, pricing: discountedPricing, discount: previewDiscount),
+            buyMarkup(pricing: discountedPricing, notice: winbackNotice)
+        ))
+        return previews
     }
 }

@@ -82,7 +82,9 @@ actor CryptoPaymentService {
             priceCents = cents
         }
 
-        let normalizedUser = username.lowercased()
+        // Invoices are filed under the payer's storage key, so a rename
+        // between opening and paying still credits the right wallet.
+        let normalizedUser = await state.userKeyOrRaw(username)
 
         // Note (amountDelta mode): slot allocation keeps every open invoice's
         // amount unique across all purposes, so a payment attributes to one
@@ -330,9 +332,13 @@ actor CryptoPaymentService {
                 }
                 await notifyFullPayment(copy, activation: activation)
             case .credit(let cents):
-                let wallet = await state.creditBalance(username: copy.username, amountUsd: Double(cents) / 100.0)
+                let wallet = await state.creditPurchasedBalance(username: copy.username, amountUsd: Double(cents) / 100.0)
                 await notifyCreditPayment(copy, cents: cents, balanceUsd: wallet.balanceUsd)
             }
+            // Referral (step 10): the same conversion bonus the Telegram
+            // payment path pays, so the reward does not depend on how the
+            // friend happened to pay.
+            await payReferralConversionBonus(payerKey: copy.username)
             return .fullyPaid(copy)
         } else {
             copy.status = .partial
@@ -345,7 +351,26 @@ actor CryptoPaymentService {
 
     // MARK: - Notifications
 
+    /// Credits and announces the inviter's conversion bonus. The invoice stores
+    /// the payer's `UserKey`; a pending record (a person the bot has only been
+    /// told about) carries no userID, and referral attributions are keyed by
+    /// userID — so there is simply nothing to look up in that case.
+    private func payReferralConversionBonus(payerKey: String) async {
+        guard let payerUserID = UserKey.userID(from: payerKey),
+              let bonus = await state.redeemReferralPaymentBonus(payerUserID: payerUserID) else { return }
+        _ = try? await telegram.sendMessage(.init(
+            chatID: bonus.inviterUserID,
+            threadID: nil,
+            replyTo: nil,
+            text: ReferralPresenter.paymentBonusText(bonus),
+            replyMarkup: ReferralPresenter.paymentBonusMarkup()
+        ))
+        logger.info("crypto: referral conversion bonus \(bonus.inviterLabel) +$\(bonus.amountUsd)")
+    }
+
     private func notifyFullPayment(_ invoice: CryptoInvoice, activation: SubscriptionActivation) async {
+        // The invoice carries the payer's storage key; the notice names them.
+        let payerLabel = await state.displayLabel(forKey: invoice.username)
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy"
@@ -355,14 +380,14 @@ actor CryptoPaymentService {
         switch activation {
         case .started(let until):
             subscriptionLine = isGroup
-                ? "🎉 @\(invoice.username) открыл премиум-доступ для этого чата — теперь всем доступны умные модели без рекламы."
-                : "Добро пожаловать, @\(invoice.username)! Премиум-доступ активирован, подписка до <b>\(formatter.string(from: until))</b>."
+                ? "🎉 \(payerLabel) открыл премиум-доступ для этого чата — теперь всем доступны умные модели без рекламы."
+                : "Добро пожаловать, \(payerLabel)! Премиум-доступ активирован, подписка до <b>\(formatter.string(from: until))</b>."
         case .extended(let until):
             subscriptionLine = isGroup
-                ? "🎉 @\(invoice.username) продлил премиум-доступ для этого чата."
-                : "Подписка @\(invoice.username) продлена до <b>\(formatter.string(from: until))</b>."
+                ? "🎉 \(payerLabel) продлил премиум-доступ для этого чата."
+                : "Подписка \(payerLabel) продлена до <b>\(formatter.string(from: until))</b>."
         case .alreadyUnlimited:
-            subscriptionLine = "У @\(invoice.username) бессрочный доступ."
+            subscriptionLine = "У \(payerLabel) бессрочный доступ."
         }
         let text = """
         ✅ <b>Оплата получена!</b>

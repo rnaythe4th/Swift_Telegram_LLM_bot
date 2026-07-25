@@ -90,7 +90,12 @@ final class BotMenuHandler: @unchecked Sendable {
         }
     }
 
-    func processTextInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+    /// `username` here — and everywhere it is threaded onward — is the
+    /// caller's **storage key**, not their raw handle: store lookups are keyed
+    /// by userID, and keys round-trip through the username-taking APIs
+    /// unchanged. Anything a person reads is resolved through `displayLabel`.
+    func processTextInput(text: String, chatKey: ChatKey, userID: Int?, username: String?) async -> Bool {
+        let username = userID.map { self.state.userKey(userID: $0) } ?? username
         if text.hasPrefix("/") { return false }
 
         if await state.hasPendingStarsPriceInput(chatKey: chatKey) {
@@ -149,7 +154,8 @@ final class BotMenuHandler: @unchecked Sendable {
                 return true
             }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let value = Int(trimmed), value >= 1 {
+            // 0 turns Stars top-ups off without touching the subscription price.
+            if let value = Int(trimmed), value >= 0 {
                 await state.setStarsPerUsd(value)
                 let (menuText, markup) = await renderSuperStars(chatKey: chatKey)
                 try? await telegram.editMessage(.init(
@@ -162,7 +168,9 @@ final class BotMenuHandler: @unchecked Sendable {
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                     replyTo: nil,
-                    text: "✓ Курс кредитов: <b>\(value) ⭐ за $1</b>",
+                    text: value == 0
+                        ? "✓ Пополнение баланса через Stars отключено."
+                        : "✓ Курс пополнений: <b>\(value) ⭐ за $1</b>",
                     replyMarkup: nil
                 ))
             } else {
@@ -171,7 +179,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                     replyTo: nil,
-                    text: "⚠️ Введите целое число ≥ 1 (например <code>77</code>).",
+                    text: "⚠️ Введите целое число (например <code>77</code>) или <code>0</code>, чтобы отключить пополнения через Stars.",
                     replyMarkup: nil
                 ))
             }
@@ -456,7 +464,8 @@ final class BotMenuHandler: @unchecked Sendable {
         await state.clearAdminPendingInput(chatKey: chatKey)
     }
 
-    func sendMenu(chatKey: ChatKey, username: String? = nil) async {
+    func sendMenu(chatKey: ChatKey, userID: Int? = nil, username: String? = nil) async {
+        let username = userID.map { self.state.userKey(userID: $0) } ?? username
         await clearAllPendingInputs(chatKey: chatKey)
         let (text, markup) = await renderPage(.main, chatKey: chatKey, username: username)
         _ = try? await telegram.sendMessage(
@@ -473,8 +482,8 @@ final class BotMenuHandler: @unchecked Sendable {
     /// Posts the personal referral page as a fresh message (`/ref`). The userID
     /// comes from the sender, not from the chat, so it is correct even when the
     /// command is used somewhere unexpected.
-    func sendReferral(chatKey: ChatKey, userID: Int, username: String?) async {
-        let (text, markup) = await renderReferral(chatKey: chatKey, userID: userID, username: username)
+    func sendReferral(chatKey: ChatKey, userID: Int) async {
+        let (text, markup) = await renderReferral(chatKey: chatKey, userID: userID)
         _ = try? await telegram.sendMessage(
             .init(
                 chatID: chatKey.chatID,
@@ -543,7 +552,15 @@ final class BotMenuHandler: @unchecked Sendable {
             default:
                 break
             }
-            try await showPage(menuPage, chatKey: chatKey, callback: callback, message: message)
+            // `nav:pay:<source>` — the optional third token says which surface
+            // sent the person here; anything unknown reads as the plain menu.
+            try await showPage(
+                menuPage,
+                chatKey: chatKey,
+                callback: callback,
+                message: message,
+                purchaseSource: PurchaseSource.parse(parts.count >= 3 ? parts[2] : nil)
+            )
 
         case "role":
             guard parts.count >= 2 else { return }
@@ -959,9 +976,11 @@ final class BotMenuHandler: @unchecked Sendable {
             case "add":
                 await state.setAdminPendingInput(.init(kind: .whitelistAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
                 let promptText = """
-                <b>👤 Добавить в whitelist</b>
+                <b>👤 Добавить гостя</b>
 
-                Отправьте Telegram user ID одним сообщением (целое число).
+                Отправьте его номер в Telegram одним сообщением (целое число).
+
+                <i>Ваш премиум заработает для него в этом чате. Свой номер человек узнаёт командой /chatid в личке с ботом.</i>
                 """
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminwl")]])
                 try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
@@ -1163,6 +1182,89 @@ final class BotMenuHandler: @unchecked Sendable {
             }
             return
 
+        case "funnel":
+            // Period switcher on the analytics page (roadmap step 7).
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            guard parts.count >= 3, parts[1] == "p" else { return }
+            let period = FunnelPeriod(rawValue: parts[2]) ?? .week
+            let (funnelText, funnelMarkup) = await renderSuperFunnel(chatKey: chatKey, period: period)
+            try await editOrAnswer(callback: callback, message: message, text: funnelText, markup: funnelMarkup)
+            return
+
+        case "promo":
+            // Built-in self-promo that fills the free ad slot (roadmap step 5).
+            guard await state.isSuperAdmin(username: callback.from.username) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            guard parts.count >= 2 else { return }
+            switch parts[1] {
+            case "toggle":
+                var promo = await state.selfPromoConfig()
+                promo.enabled.toggle()
+                await state.setSelfPromoConfig(promo)
+                try? await telegram.answerCallback(
+                    callbackQueryID: callback.id,
+                    text: promo.enabled ? "▶️ Само-реклама включена" : "⏸ Само-реклама выключена"
+                )
+                try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
+            case "text":
+                await state.setAdminPendingInput(.init(kind: .selfPromoText, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                let current = await state.selfPromoConfig()
+                let prompt = """
+                <b>📣 Текст само-рекламы</b>
+
+                Показывается в бесплатных чатах, когда нет ни одной активной кампании. Под текстом бот сам добавляет кнопку «⚡ Открыть премиум».
+
+                Сейчас:
+                <blockquote expandable>\(current.text)</blockquote>
+
+                Отправьте новый текст одним сообщением (HTML разрешён, до \(SelfPromoConfig.maxTextLength) символов). Счётчик показов сохранится.
+                """
+                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
+                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            case "every":
+                await state.setAdminPendingInput(.init(kind: .selfPromoEvery, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                let current = await state.selfPromoConfig()
+                let prompt = """
+                <b>📣 Частота само-рекламы</b>
+
+                Сейчас: раз в <b>\(current.everyNReplies)</b> ответов бота в чате.
+
+                Отправьте число от <code>\(SelfPromoConfig.repliesRange.lowerBound)</code> до <code>\(SelfPromoConfig.repliesRange.upperBound)</code>. Пауза между показами настраивается отдельно и действует одновременно с частотой.
+                """
+                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
+                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            case "pause":
+                await state.setAdminPendingInput(.init(kind: .selfPromoPause, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                let current = await state.selfPromoConfig()
+                let prompt = """
+                <b>📣 Пауза между показами</b>
+
+                Сейчас: <b>\(current.minIntervalSeconds / 60)</b> мин минимум между само-рекламой в одном чате.
+
+                Отправьте число минут от <code>0</code> до <code>\(SelfPromoConfig.pauseMinutesRange.upperBound)</code>.
+                """
+                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
+                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            case "reset":
+                await state.resetSelfPromoStats()
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Счётчик показов обнулён")
+                try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
+            case "default":
+                var promo = await state.selfPromoConfig()
+                promo.text = SelfPromoConfig.defaultText
+                await state.setSelfPromoConfig(promo)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "↺ Текст по умолчанию")
+                try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
+            default:
+                try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
+            }
+            return
+
         case "markup":
             guard await state.isSuperAdmin(username: callback.from.username) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
@@ -1213,7 +1315,7 @@ final class BotMenuHandler: @unchecked Sendable {
             // Open to everyone: posts the example buttons as a fresh message so
             // the settings menu stays where it is (roadmap step 9).
             let onboarding = await state.onboardingConfig()
-            let exampleRows = OnboardingPresenter.exampleRows(onboarding)
+            let exampleRows = OnboardingPresenter.exampleRows(onboarding, inGroup: chatKey.chatID < 0)
             guard !exampleRows.isEmpty else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Примеров сейчас нет")
                 return
@@ -1394,10 +1496,18 @@ final class BotMenuHandler: @unchecked Sendable {
         }
     }
 
-    private func showPage(_ page: MenuPage, chatKey: ChatKey, callback: CallbackQuery, message: MaybeInaccessibleMessage) async throws {
-        // Funnel: reaching the purchase page counts as "opened purchase".
-        if page == .pay { await state.bumpFunnel(.openPurchase) }
-        let (text, markup) = await renderPage(page, chatKey: chatKey, username: callback.from.username)
+    private func showPage(
+        _ page: MenuPage,
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage,
+        purchaseSource: PurchaseSource = .menu
+    ) async throws {
+        // Funnel: reaching the purchase page counts as "opened purchase", and
+        // the button that led here is counted separately — that is how the
+        // pain-point upsells get compared with the plain menu (steps 5 and 7).
+        if page == .pay { await state.bumpPurchaseOpen(source: purchaseSource) }
+        let (text, markup) = await renderPage(page, chatKey: chatKey, username: state.userKey(userID: callback.from.id))
         try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
     }
 
@@ -1520,7 +1630,7 @@ final class BotMenuHandler: @unchecked Sendable {
         case .referral:
             // Private chats only (guarded at the nav gate), where chatID == the
             // user's ID — that is whose link and wallet the page is about.
-            return await renderReferral(chatKey: chatKey, userID: chatKey.chatID, username: username)
+            return await renderReferral(chatKey: chatKey, userID: chatKey.chatID)
         case .adminInvite:
             return await renderAdminInvite(chatKey: chatKey, username: username)
         case .close:
@@ -1560,8 +1670,31 @@ final class BotMenuHandler: @unchecked Sendable {
             balanceLine = String(format: "\n💰 Баланс · <b>$%.4f</b>", wallet.balanceUsd) + status
         }
 
+        // Who pays for the smart models here — the sponsor's standing credit
+        // (roadmap step 3) and the answer to "почему у меня платные модели".
+        let access = await state.chatAccessStatus(chatID: chatKey.chatID, username: username)
+        // Free tier: show what is *left* today, not just the cap. A number that
+        // visibly counts down is the whole point of the daily taste (step 6);
+        // a static "5 в день" tells nobody where they stand.
+        let isGroupChat = chatKey.chatID < 0
+        let dailyPremium: (remaining: Int, limit: Int) = access.isCovered
+            ? (0, 0)
+            : await state.remainingDailyPremium(
+                chatID: chatKey.chatID,
+                userID: chatKey.chatID > 0 ? chatKey.chatID : nil,
+                isGroup: isGroupChat
+            )
+        let accessLine = Self.accessStatusLine(
+            access,
+            isGroup: isGroupChat,
+            dailyPremiumLimit: dailyPremium.limit,
+            dailyPremiumLeft: dailyPremium.remaining
+        )
+
         let text = """
         <b>⚙️ Настройки чата</b>
+
+        \(accessLine)
 
         🔌 Сервис ИИ · <b>\(help.provider.commandValue)</b>
         🤖 Модель · <b>\(help.model)</b>
@@ -1587,7 +1720,7 @@ final class BotMenuHandler: @unchecked Sendable {
         }
         // Onboarding (roadmap step 9): a way back to the ready-made prompts
         // after the greeting has scrolled away.
-        if !(await state.onboardingConfig().activeExamples.isEmpty) {
+        if !(await state.onboardingConfig().activeExamples(inGroup: chatKey.chatID < 0).isEmpty) {
             rows.append([menuButton("💡 Примеры-запросы", action: "examples")])
         }
         // Monetization entry point: shown whenever there is something to buy
@@ -1626,6 +1759,40 @@ final class BotMenuHandler: @unchecked Sendable {
         rows.append([menuButton("✕ Закрыть", action: "close")])
 
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    /// One line naming who pays for smart models in this chat. Shown on the
+    /// settings page and the purchase page so the sponsor gets public credit
+    /// (roadmap step 3) and nobody is sold access they already have.
+    static func accessStatusLine(
+        _ access: ChatAccessStatus,
+        isGroup: Bool,
+        dailyPremiumLimit: Int = 0,
+        dailyPremiumLeft: Int = 0
+    ) -> String {
+        switch access {
+        case .ownSubscription(let until):
+            guard let until else { return "⚡ Премиум · <b>бессрочный</b>" }
+            let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+            return "⚡ Премиум · <b>ваш</b>, до \(f.string(from: until))"
+        case .sponsored(let owner):
+            return isGroup
+                ? "⚡ Премиум для чата открыл <b>\(owner)</b> — спасибо!"
+                : "⚡ Премиум · открыт по подписке <b>\(owner)</b>"
+        case .guest(let owner):
+            return "⚡ Премиум · вам открыл доступ <b>\(owner)</b>"
+        case .balance(let usd):
+            return String(format: "💰 Оплата по факту · на балансе <b>$%.4f</b>", usd)
+        case .free:
+            // Only promise a daily taste of the smart models when one is
+            // actually configured (the super-admin can set the cap to 0).
+            let taste = dailyPremiumLimit > 0
+                ? " · умных ответов сегодня осталось · \(dailyPremiumLeft) из \(dailyPremiumLimit)"
+                : ""
+            return isGroup
+                ? "🆓 Бесплатный доступ\(taste) · премиум для всего чата откроет любой участник"
+                : "🆓 Бесплатный доступ\(taste)"
+        }
     }
 
     static func formatPriceM(_ perTokenPrice: Double) -> String {
@@ -2008,15 +2175,30 @@ final class BotMenuHandler: @unchecked Sendable {
                 }
                 lines.append("Управление доступом — /menu → ⚡ Мой премиум.")
             } else {
-                lines.append("""
-                Что открывается:
-                • Умные модели — GPT, Claude, Gemini (точнее и способнее бесплатных)
-                • Без рекламы
-                • Без дневных лимитов
-                • Работает у всех в этом чате — и в вашей личке с ботом
+                // Someone else already opened this chat: credit them and pitch
+                // what a purchase would still add (roadmap step 3) instead of
+                // selling access this person already enjoys here.
+                let access = await state.chatAccessStatus(chatID: chatKey.chatID, username: username)
+                if let payer = access.payerUsername {
+                    lines.append("✅ Здесь премиум уже работает — его открыл <b>\(payer)</b>.")
+                    lines.append("")
+                    lines.append("""
+                    Своя подписка нужна, если хотите то же самое <b>в личке с ботом и в своих чатах</b>:
+                    • Умные модели — GPT, Claude, Gemini (точнее и способнее бесплатных)
+                    • Без рекламы и без дневных лимитов
+                    • Одна оплата — доступ во всех ваших чатах, на <b>\(ChatContextStore.subscriptionDays) дней</b>
+                    """)
+                } else {
+                    lines.append("""
+                    Что открывается:
+                    • Умные модели — GPT, Claude, Gemini (точнее и способнее бесплатных)
+                    • Без рекламы
+                    • Без дневных лимитов
+                    • Работает у всех в этом чате — и в вашей личке с ботом
 
-                Одна оплата — доступ во всех ваших чатах, на <b>\(ChatContextStore.subscriptionDays) дней</b>.
-                """)
+                    Одна оплата — доступ во всех ваших чатах, на <b>\(ChatContextStore.subscriptionDays) дней</b>.
+                    """)
+                }
             }
             if let wallet = await state.balance(username: username) {
                 lines.append("")
@@ -2024,7 +2206,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 lines.append("<i>С баланса списывается стоимость каждого ответа — обычно доли цента. Подписка при этом не нужна. Подробнее — /balance.</i>")
             }
         } else {
-            lines.append("⚠️ Для покупки нужен <b>@username</b> — установите его в настройках Telegram и откройте меню заново.")
+            lines.append("<i>Оплата привяжется к вашему аккаунту Telegram — @username для этого не нужен.</i>")
         }
 
         if !unlimited {
@@ -2061,8 +2243,11 @@ final class BotMenuHandler: @unchecked Sendable {
             }
 
             // Pay-as-you-go credit packs — a lower entry point than a full
-            // subscription. Bought with Stars or crypto (same availability).
-            if username != nil, starsAvailable || cryptoAvailable {
+            // subscription. Their availability is deliberately independent of
+            // the subscription prices: each method only needs its own knob
+            // (Stars rate / crypto addresses / card FX rate).
+            let creditsAvailable = await state.starsCreditsEnabled() || cryptoAvailable || card.creditsEnabled
+            if username != nil, creditsAvailable {
                 lines.append("")
                 lines.append("💰 <b>Не готовы на месяц?</b> Пополните баланс — с него списывается стоимость каждого ответа, обычно доли цента. Доступны любые модели, подписка не нужна.")
                 let packRow = CreditPack.centsOptions.map {
@@ -2100,7 +2285,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             }
             var rows: [[InlineKeyboardButton]] = []
-            if let price = await state.starsPrice(), price > 0 {
+            if await state.starsCreditsEnabled() {
                 let stars = await state.starsForCents(cents)
                 rows.append([menuButton("💫 Stars · \(stars) ⭐", action: "buy:cstars:\(cents)")])
             }
@@ -2109,6 +2294,10 @@ final class BotMenuHandler: @unchecked Sendable {
             if let service = cryptoService { cryptoAssets = await service.availableAssets() } else { cryptoAssets = [] }
             if cryptoCents != nil, !cryptoAssets.isEmpty {
                 rows.append([menuButton("🪙 Криптой", action: "buy:ccrypto:\(cents)")])
+            }
+            let creditCard = await state.cardConfig()
+            if let minorUnits = creditCard.creditMinorUnits(cents: cents), creditCard.creditsEnabled {
+                rows.append([menuButton("💳 Картой · \(creditCard.currency.format(minorUnits: minorUnits))", action: "buy:ccard:\(cents)")])
             }
             rows.append(navButtons())
             let text = """
@@ -2122,18 +2311,37 @@ final class BotMenuHandler: @unchecked Sendable {
             """
             try await editOrAnswer(callback: callback, message: message, text: text, markup: InlineKeyboardMarkup(inline_keyboard: rows))
 
+        case "ccard":
+            // Credit pack on the card. The pack's USD face value is converted
+            // with the super-admin's FX rate (roadmap step 2).
+            guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
+                return
+            }
+            let packCard = await state.cardConfig()
+            guard packCard.creditsEnabled, let token = packCard.providerToken,
+                  let minorUnits = packCard.creditMinorUnits(cents: cents) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пополнение картой отключено")
+                return
+            }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            try await telegram.sendInvoice(.init(
+                chatID: chatKey.chatID,
+                title: "Пополнение баланса · \(CreditPack.label(cents: cents))",
+                description: "Деньги на баланс: с него списывается стоимость каждого ответа, доступны любые модели",
+                payload: "credits_\(cents)",
+                kind: .fiat(currency: packCard.currency.rawValue, amountMinorUnits: minorUnits, providerToken: token)
+            ))
+            await state.bumpFunnel(.invoiceSent)
+
         case "cstars":
             // Credit pack via Stars.
             guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
                 return
             }
-            guard let price = await state.starsPrice(), price > 0 else {
+            guard await state.starsCreditsEnabled() else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Stars-оплата отключена")
-                return
-            }
-            guard callback.from.username != nil else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Требуется @username")
                 return
             }
             let stars = await state.starsForCents(cents)
@@ -2148,18 +2356,16 @@ final class BotMenuHandler: @unchecked Sendable {
             await state.bumpFunnel(.invoiceSent)
 
         case "stars":
-            guard let username = callback.from.username else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Требуется @username")
-                return
-            }
+            // Identity is the userID; a @username is not needed to buy.
+            let starsKey = state.userKey(userID: callback.from.id)
             // Winback discount, when live, is already baked into the price.
-            let starsPricing = await state.subscriptionPricing(username: username)
+            let starsPricing = await state.subscriptionPricing(username: starsKey)
             guard let price = starsPricing.stars, price > 0 else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Stars-оплата отключена")
                 return
             }
             // Unlimited tenants have nothing to buy; expiring ones renew.
-            let starsSub = await state.tenantSubscription(ownerUsername: username)
+            let starsSub = await state.tenantSubscription(ownerUsername: starsKey)
             if starsSub.exists, starsSub.paidUntil == nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас бессрочный доступ")
                 return
@@ -2179,16 +2385,13 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "card":
             let card = await state.cardConfig()
-            guard let cardUsername = callback.from.username else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Требуется @username")
-                return
-            }
-            let cardPricing = await state.subscriptionPricing(username: cardUsername)
+            let cardKey = state.userKey(userID: callback.from.id)
+            let cardPricing = await state.subscriptionPricing(username: cardKey)
             guard card.isEnabled, let token = card.providerToken, let minorUnits = cardPricing.cardMinorUnits else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Оплата картой отключена")
                 return
             }
-            let cardSub = await state.tenantSubscription(ownerUsername: cardUsername)
+            let cardSub = await state.tenantSubscription(ownerUsername: cardKey)
             if cardSub.exists, cardSub.paidUntil == nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас бессрочный доступ")
                 return
@@ -2208,7 +2411,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "crypto":
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
-            await sendCryptoAssetChoice(chatKey: chatKey, username: callback.from.username)
+            await sendCryptoAssetChoice(chatKey: chatKey, username: state.userKey(userID: callback.from.id))
 
         case "ccrypto":
             // Credit pack via crypto → pick asset (cents carried in callback).
@@ -2246,13 +2449,10 @@ final class BotMenuHandler: @unchecked Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Крипто-оплата недоступна")
                 return
             }
-            guard let username = callback.from.username else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Требуется @username")
-                return
-            }
+            let creditKey = state.userKey(userID: callback.from.id)
             do {
                 let invoice = try await service.createOrRefreshInvoice(
-                    username: username,
+                    username: creditKey,
                     userChatID: chatKey.chatID,
                     asset: asset,
                     purpose: .credit(cents: cents)
@@ -2276,18 +2476,15 @@ final class BotMenuHandler: @unchecked Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Крипто-оплата недоступна")
                 return
             }
-            guard let username = callback.from.username else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Требуется @username")
-                return
-            }
-            let cryptoSub = await state.tenantSubscription(ownerUsername: username)
+            let cryptoKey = state.userKey(userID: callback.from.id)
+            let cryptoSub = await state.tenantSubscription(ownerUsername: cryptoKey)
             if cryptoSub.exists, cryptoSub.paidUntil == nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас бессрочный доступ")
                 return
             }
             do {
                 let invoice = try await service.createOrRefreshInvoice(
-                    username: username,
+                    username: cryptoKey,
                     userChatID: chatKey.chatID,
                     asset: asset
                 )
@@ -2445,6 +2642,31 @@ final class BotMenuHandler: @unchecked Sendable {
             ])
             try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
+        case "setrate":
+            // Credit packs carry a USD face value; selling them on a card in
+            // RUB/EUR needs an explicit rate (roadmap step 2).
+            await state.setAdminPendingInput(.init(kind: .cardUsdRate, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let rateCard = await state.cardConfig()
+            var preview = ""
+            for cents in CreditPack.centsOptions {
+                if let minor = rateCard.creditMinorUnits(cents: cents) {
+                    preview += "\n\(CreditPack.label(cents: cents)) → <b>\(rateCard.currency.format(minorUnits: minor))</b>"
+                }
+            }
+            let rateText = """
+            <b>💳 Курс для пополнения баланса</b>
+
+            Сейчас: <b>\(rateCard.usdRateLabel ?? "не задан")</b>\(preview.isEmpty ? "" : "\n" + preview)
+
+            Введите, сколько \(rateCard.currency.rawValue) стоит <b>$1</b> (например <code>95</code>), или <b>0</b> — не продавать пополнения картой.
+
+            <i>Пакеты пополнения имеют номинал в долларах: сколько заплатили — столько и легло на баланс. Курс должен покрывать вашу комиссию эквайринга.</i>
+            """
+            let rateMarkup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("❌ Отмена", action: "nav:supercard")]
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: rateText, markup: rateMarkup)
+
         case "currency":
             guard parts.count >= 3, let currency = CardCurrency(rawValue: parts[2]) else { return }
             await state.setCardCurrency(currency)
@@ -2503,9 +2725,11 @@ final class BotMenuHandler: @unchecked Sendable {
                 .reminderDaysBefore,
                 title: "⏳ За сколько дней напоминать",
                 body: """
-                Сейчас: <b>\(config.daysBeforeExpiry)</b> дн.
+                Сейчас: <b>\(config.expiryReminderDays.isEmpty ? "выкл" : config.expiryReminderDays.map { "за \($0) дн." }.joined(separator: ", "))</b>
 
-                Отправьте число \(SubscriptionReminderConfig.daysBeforeRange.lowerBound)–\(SubscriptionReminderConfig.daysBeforeRange.upperBound). <code>0</code> — не напоминать до истечения (winback останется).
+                Отправьте дни через запятую, например <code>3,1</code> — «за три дня» и «завтра» (до \(SubscriptionReminderConfig.maxExpiryWaves) волн, каждая \(SubscriptionReminderConfig.daysBeforeRange.lowerBound)–\(SubscriptionReminderConfig.daysBeforeRange.upperBound) дн.). <code>0</code> или <code>-</code> — не напоминать до истечения (winback останется).
+
+                <i>Одно напоминание собирает тех, кто и так собирался продлить; второе, в последний день, — тех, кто собирался и забыл.</i>
                 """
             )
 
@@ -2550,6 +2774,19 @@ final class BotMenuHandler: @unchecked Sendable {
                 Сейчас: <b>\(config.sweepIntervalMinutes) мин</b>
 
                 Отправьте число минут \(SubscriptionReminderConfig.sweepIntervalRange.lowerBound)–\(SubscriptionReminderConfig.sweepIntervalRange.upperBound) — как часто бот сверяет подписки. Реже = меньше нагрузки, точность в пределах интервала.
+                """
+            )
+
+        case "wallet":
+            try await prompt(
+                .reminderWalletDays,
+                title: "💰 Возврат по балансу",
+                body: """
+                Сейчас: <b>\(config.walletWinbackDays > 0 ? "после \(config.walletWinbackDays) дн. тишины" : "выключен")</b>
+
+                Отправьте число дней \(SubscriptionReminderConfig.walletWinbackRange.lowerBound)–\(SubscriptionReminderConfig.walletWinbackRange.upperBound). <code>0</code> — не писать.
+
+                <i>Подписка истекает громко и получает winback; баланс просто заканчивается, и человек тихо уходит. Письмо получают только те, кто реально платил деньгами, у кого баланс на нуле и нет активной подписки — и ровно один раз до следующего пополнения.</i>
                 """
             )
 
@@ -2680,6 +2917,15 @@ final class BotMenuHandler: @unchecked Sendable {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: newValue == true ? "🟢 Показывается" : "⚪️ Скрыт")
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
+        case "place":
+            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            let placement = await state.cycleOnboardingExamplePlacement(id: item.id)
+            try? await telegram.answerCallback(
+                callbackQueryID: callback.id,
+                text: placement.map { "📍 Показывать: \($0.shortLabel)" } ?? "Пример не найден"
+            )
+            try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
+
         case "up":
             guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
             let moved = await state.moveOnboardingExampleUp(id: item.id)
@@ -2693,11 +2939,16 @@ final class BotMenuHandler: @unchecked Sendable {
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "preview":
-            // Renders the real buttons; tapping one runs a real generation in
-            // this chat (that is the point — the super-admin sees what users get).
-            let rows = OnboardingPresenter.exampleRows(config)
+            // Renders the real buttons for the room the preview is opened in;
+            // tapping one runs a real generation here (that is the point — the
+            // super-admin sees exactly what users get).
+            let isGroup = chatKey.chatID < 0
+            let rows = OnboardingPresenter.exampleRows(config, inGroup: isGroup)
             guard !rows.isEmpty else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Нет активных примеров")
+                try? await telegram.answerCallback(
+                    callbackQueryID: callback.id,
+                    text: isGroup ? "Для групп активных примеров нет" : "Для лички активных примеров нет"
+                )
                 return
             }
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
@@ -2705,7 +2956,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
-                text: "👁 <i>Так это видит пользователь:</i>\n\n" + OnboardingPresenter.invitation,
+                text: "👁 <i>Так это видит пользователь\(isGroup ? " в группе" : " в личке"):</i>\n\n" + OnboardingPresenter.invitation,
                 replyMarkup: InlineKeyboardMarkup(inline_keyboard: rows)
             ))
 
@@ -2820,7 +3071,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 for inv in sorted.prefix(20) {
                     let amount = CryptoAmountFormatter.format(atomic: inv.exactAmountAtomic, decimals: inv.asset.decimals)
                     let received = CryptoAmountFormatter.format(atomic: inv.accumulatedAtomic, decimals: inv.asset.decimals)
-                    text += "\n• @\(inv.username) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)"
+                    text += "\n• \(await state.displayLabel(forKey: inv.username)) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)"
                 }
             }
             let markup = InlineKeyboardMarkup(inline_keyboard: [
@@ -2841,7 +3092,9 @@ final class BotMenuHandler: @unchecked Sendable {
     ) async throws {
         guard parts.count >= 2 else { return }
         let invokerUsername = callback.from.username
-        let invoker = invokerUsername?.lowercased()
+        // Storage key, not the raw handle: everything below compares against
+        // stored owners, which are keyed by userID.
+        let invoker = await state.userKey(username: invokerUsername)
         let isSuper = await state.isSuperAdmin(username: invokerUsername)
         let isAdmin = await state.isAdmin(username: invokerUsername, chatID: chatKey.chatID)
         guard isAdmin || isSuper else {
@@ -2861,7 +3114,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "release":
             let owner = await state.chatOwner(chatID: chatKey.chatID)
-            if !isSuper, owner?.lowercased() != invoker {
+            if !isSuper, owner != invoker {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш чат")
                 return
             }
@@ -2886,7 +3139,7 @@ final class BotMenuHandler: @unchecked Sendable {
         case "rmchat":
             guard parts.count >= 3, let chatID = Int(parts[2]) else { return }
             let owner = await state.chatOwner(chatID: chatID)
-            if !isSuper, owner?.lowercased() != invoker {
+            if !isSuper, owner != invoker {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш чат")
                 return
             }
@@ -2927,7 +3180,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Не найдено")
                 return
             }
-            _ = await state.removeLicensedUser(ownerUsername: invoker, target: users[index])
+            _ = await state.removeLicensedUser(ownerUsername: invoker, target: users[index].key)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Удалён")
             try await showPage(.adminUsers, chatKey: chatKey, callback: callback, message: message)
 
@@ -3000,7 +3253,7 @@ final class BotMenuHandler: @unchecked Sendable {
              menuButton("💹 Наценка · \(markupPct)%", action: "markup:set")],
             [menuButton("🎁 Премиум-лимит/день · \(dailyLimit)", action: "dailylimit:set")],
             [menuButton("⏳ Напоминания и winback · \(reminders.enabled ? "вкл" : "выкл")", action: "nav:superreminders")],
-            [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.activeExamples.count)" : "выкл")", action: "nav:superonboarding")],
+            [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.enabledExamples.count)" : "выкл")", action: "nav:superonboarding")],
             [menuButton("🎁 Приглашения · \(referral.enabled ? ReferralConfig.formatUsd(cents: referral.inviterRewardCents) : "выкл")", action: "nav:superref")],
             [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
@@ -3020,7 +3273,7 @@ final class BotMenuHandler: @unchecked Sendable {
         💳 Карта · \(cardLabel)
         💹 Наценка · <b>\(markupPct)%</b> · /tenant markup
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
-        💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · активных <b>\(onboarding.activeExamples.count)</b>\(onboarding.showInGroups ? " · и в группах" : "")
+        💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · в личке <b>\(onboarding.activeExamples(inGroup: false).count)</b> · в группах <b>\(onboarding.showInGroups ? onboarding.activeExamples(inGroup: true).count : 0)</b>
         ⏳ Напоминания · <b>\(reminders.enabled ? "вкл" : "выкл")</b> · скоро истекут <b>\(lifecycle.expiringSoon.count)</b> · winback-офферов <b>\(lifecycle.activeDiscounts.count)</b>
         🎁 Приглашения · <b>\(referral.enabled ? "вкл" : "выкл")</b> · выплачено пар <b>\(referralOverview.rewarded)</b> · \(String(format: "$%.2f", referralOverview.paidOutUsd)) · ждут <b>\(referralOverview.pending)</b>
         💰 Балансов · <b>\(balances.count)</b> · остатки \(String(format: "$%.2f", balancesTotal)) · маржа <b>\(String(format: "$%.4f", marginTotal))</b> · /balance list
@@ -3034,45 +3287,79 @@ final class BotMenuHandler: @unchecked Sendable {
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
-    /// Conversion-funnel analytics page (roadmap step 7): each funnel stage with
-    /// step-to-step conversion, plus sponsor tallies (retained vs. churned).
-    private func renderSuperFunnel(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    /// Conversion-funnel analytics page (roadmap step 7): every stage over a
+    /// selectable period (all-time totals in grey next to it), step-to-step
+    /// conversion, where the purchase opens come from, retention and sponsor
+    /// tallies. A total alone says how big something is; only the window says
+    /// whether it is getting better — which is what the numbers are for.
+    private func renderSuperFunnel(
+        chatKey: ChatKey,
+        period: FunnelPeriod = .week
+    ) async -> (String, InlineKeyboardMarkup) {
         let report = await state.funnelReport()
-        func n(_ e: FunnelEvent) -> Int { report.count(e) }
+        func n(_ e: FunnelEvent) -> Int { report.count(e, in: period) }
+        func total(_ e: FunnelEvent) -> Int { report.count(e) }
         func pct(_ num: Int, _ den: Int) -> String {
             guard den > 0 else { return "—" }
             return String(format: "%.0f%%", Double(num) / Double(den) * 100)
         }
+        /// "42 · всего 1203" — the period number leads, the lifetime total
+        /// stays visible so a quiet week doesn't read as an empty product.
+        func value(_ e: FunnelEvent) -> String {
+            period == .all ? "<b>\(total(e))</b>" : "<b>\(n(e))</b> <i>· всего \(total(e))</i>"
+        }
 
         let start = n(.start)
-        let addedToGroup = n(.addedToGroup)
-        let onboardingShown = n(.onboardingShown)
-        let exampleTapped = n(.exampleTapped)
         let firstMsg = n(.firstMessage)
-        let capHit = n(.capHit)
         let openPurchase = n(.openPurchase)
         let invoiceSent = n(.invoiceSent)
         let paid = n(.paid)
-        let renewed = n(.renewed)
-        let creditTopup = n(.creditTopup)
-        let converted = paid + creditTopup
+        let converted = paid + n(.creditTopup)
 
-        let lines: [String] = [
-            "<b>📊 Воронка конверсии</b>",
+        // The timestamp is also what keeps a repeated tap on the active period
+        // (or on «Обновить») from failing as "message is not modified" and
+        // posting the whole page again as a new message.
+        let clock = DateFormatter(); clock.dateFormat = "dd.MM HH:mm:ss"
+        var lines: [String] = [
+            "<b>📊 Воронка конверсии</b> · \(period.label)",
+            "<i>данные на \(clock.string(from: Date()))</i>",
             "",
-            "1️⃣ Старт (/start) · <b>\(start)</b>",
-            "➕ Добавлен в группы · <b>\(addedToGroup)</b> · вирусный рост",
-            "💡 Примеры показаны · <b>\(onboardingShown)</b> · тапов <b>\(exampleTapped)</b> · вовлечение \(pct(exampleTapped, onboardingShown))",
-            "2️⃣ Первое сообщение · <b>\(firstMsg)</b> · активация \(pct(firstMsg, start))",
-            "3️⃣ Упёрлись в лимит · <b>\(capHit)</b>",
-            "4️⃣ Открыли покупку · <b>\(openPurchase)</b>",
-            "5️⃣ Счёт выставлен · <b>\(invoiceSent)</b> · из открывших \(pct(invoiceSent, openPurchase))",
-            "6️⃣ Оплатили · <b>\(paid)</b> · из счетов \(pct(paid, invoiceSent))",
+            "1️⃣ Старт (/start) · \(value(.start))",
+            "➕ Добавлен в группы · \(value(.addedToGroup)) · вирусный рост",
+            "💡 Примеры показаны · \(value(.onboardingShown)) · тапов \(value(.exampleTapped)) · вовлечение \(pct(n(.exampleTapped), n(.onboardingShown)))",
+            "2️⃣ Первое сообщение · \(value(.firstMessage)) · активация \(pct(firstMsg, start))",
+            "3️⃣ Упёрлись в лимит · \(value(.capHit)) · предупреждений \(value(.capWarned))",
+            "📣 Само-реклама показана · \(value(.promoShown)) · 💸 баланс закончился · \(value(.balanceEmpty))",
+            "4️⃣ Открыли покупку · \(value(.openPurchase))",
+            "5️⃣ Счёт выставлен · \(value(.invoiceSent)) · из открывших \(pct(invoiceSent, openPurchase))",
+            "6️⃣ Оплатили · \(value(.paid)) · из счетов \(pct(paid, invoiceSent))",
             "",
-            "🔄 Продлений · <b>\(renewed)</b> · renewal \(pct(renewed, paid))",
-            "💰 Пополнений баланса · <b>\(creditTopup)</b>",
+            "🔄 Продлений · \(value(.renewed)) · renewal \(pct(n(.renewed), paid))",
+            "💰 Пополнений баланса · \(value(.creditTopup))",
             "",
             "🎯 Конверсия в оплату (от активации) · <b>\(pct(converted, firstMsg))</b>",
+        ]
+
+        // Which surface actually sells: the pain-point upsells (лимит,
+        // само-реклама, пустой баланс) against the plain menu button.
+        let sources = PurchaseSource.allCases
+            .map { ($0, report.count(source: $0, in: period)) }
+            .filter { $0.1 > 0 }
+            .sorted { $0.1 > $1.1 }
+        if !sources.isEmpty {
+            lines.append("")
+            lines.append("<b>Откуда открывают покупку</b>")
+            for (source, count) in sources {
+                lines.append("· \(source.label) · <b>\(count)</b> · \(pct(count, openPurchase))")
+            }
+        }
+
+        let retention = report.retention
+        lines.append(contentsOf: [
+            "",
+            "<b>Возвращаемость</b> <i>(по всем, кого бот видел)</i>",
+            "🔁 Вернулись через сутки+ · <b>\(retention.returnedD1)</b> из \(retention.cohortD1) · \(retention.d1Label)",
+            "🔁 Активны через неделю+ · <b>\(retention.returnedD7)</b> из \(retention.cohortD7) · \(retention.d7Label)",
             "",
             "<b>Спонсоры (по подпискам)</b>",
             "✅ Активных · <b>\(report.sponsorsActive)</b> · ⛔ истёкших (отток) · <b>\(report.sponsorsExpired)</b>"
@@ -3080,16 +3367,27 @@ final class BotMenuHandler: @unchecked Sendable {
             "⏳ Скоро истекают · <b>\(report.sponsorsExpiringSoon)</b> · 🎁 живых winback-скидок · <b>\(report.winbackOffersActive)</b>",
             "",
             "<b>Удержание и возврат</b>",
-            "🔔 Напоминаний отправлено · <b>\(n(.expiryReminder))</b>",
-            "🔁 Winback-офферов · <b>\(n(.winbackSent))</b> · вернулись · <b>\(n(.winbackRedeemed))</b> · возврат \(pct(n(.winbackRedeemed), n(.winbackSent)))",
+            "🔔 Напоминаний отправлено · \(value(.expiryReminder))",
+            "🔁 Winback-офферов · \(value(.winbackSent)) · вернулись · \(value(.winbackRedeemed)) · возврат \(pct(n(.winbackRedeemed), n(.winbackSent)))",
             "",
-            "<i>Счётчики событий (не уникальные юзеры), переживают рестарт. Те же числа — в /metrics. Ретеншн D1/D7 — в разработке.</i>",
-        ]
+            "<i>Счётчики событий (не уникальные юзеры), переживают рестарт; по дням хранятся \(FunnelDailyLog.windowDays) суток. Возвращаемость — «видели ли человека спустя сутки/неделю после первой встречи», не когортный D1/D7. Те же числа — в /metrics.</i>",
+        ])
 
+        // Period switcher: the active one is marked, so the buttons double as
+        // the "what am I looking at" indicator.
+        let periodRow = FunnelPeriod.allCases.map { option in
+            menuButton(
+                (option == period ? "· " : "") + option.buttonLabel + (option == period ? " ·" : ""),
+                action: "funnel:p:\(option.rawValue)"
+            )
+        }
         let rows: [[InlineKeyboardButton]] = [
-            [menuButton("🔄 Обновить", action: "nav:superfunnel")],
+            Array(periodRow.prefix(2)),
+            Array(periodRow.suffix(from: 2)),
+            [menuButton("🔄 Обновить", action: "funnel:p:\(period.rawValue)")],
             [menuButton("⏳ Напоминания и winback", action: "nav:superreminders")],
-            [menuButton("💡 Примеры-запросы", action: "nav:superonboarding")],
+            [menuButton("💡 Примеры-запросы", action: "nav:superonboarding"),
+             menuButton("📣 Реклама", action: "nav:superads")],
             navButtons(),
         ]
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
@@ -3109,14 +3407,18 @@ final class BotMenuHandler: @unchecked Sendable {
         let winbackLabel = config.winbackDays.isEmpty
             ? "выкл"
             : config.winbackDays.map { "+\($0)д" }.joined(separator: ", ")
+        let expiryLabel = config.expiryReminderDays.isEmpty
+            ? "выкл"
+            : config.expiryReminderDays.map { "\($0)д" }.joined(separator: ", ")
 
         var rows: [[InlineKeyboardButton]] = [
             [menuButton(config.enabled ? "🟢 Напоминания включены" : "⚪️ Напоминания выключены", action: "rem:toggle")],
-            [menuButton("✏️ За \(config.daysBeforeExpiry) дн. до конца", action: "rem:days"),
+            [menuButton("✏️ До конца · \(expiryLabel)", action: "rem:days"),
              menuButton("✏️ Winback · \(winbackLabel)", action: "rem:winback")],
             [menuButton("✏️ Скидка · \(config.winbackDiscountPercent)%", action: "rem:discount"),
              menuButton("✏️ Срок скидки · \(config.winbackOfferHours) ч", action: "rem:hours")],
             [menuButton("✏️ Проверка каждые \(config.sweepIntervalMinutes) мин", action: "rem:interval")],
+            [menuButton("💰 Возврат по балансу · \(config.walletWinbackDays > 0 ? "\(config.walletWinbackDays) дн." : "выкл")", action: "rem:wallet")],
             [menuButton(config.notifyChats ? "🟢 Уведомлять чаты спонсора" : "⚪️ Только личка спонсора", action: "rem:chats")],
             [menuButton("🔄 Проверить сейчас", action: "rem:run"),
              menuButton("👁 Предпросмотр", action: "rem:preview")],
@@ -3137,7 +3439,7 @@ final class BotMenuHandler: @unchecked Sendable {
             "<b>⏳ Напоминания и winback</b>",
             "",
             "Статус · <b>\(config.enabled ? "включены" : "выключены")</b>",
-            "Напоминание о продлении · за <b>\(config.daysBeforeExpiry)</b> дн. до конца" + (config.daysBeforeExpiry == 0 ? " <i>(выкл)</i>" : ""),
+            "Напоминания о продлении · <b>\(config.expiryReminderDays.isEmpty ? "выключены" : config.expiryReminderDays.map { "за \($0) дн." }.joined(separator: ", "))</b>",
             "Winback после истечения · <b>\(winbackLabel)</b> · скидка <b>\(config.winbackDiscountPercent)%</b> на <b>\(config.winbackOfferHours) ч</b>",
             "Уведомлять чаты спонсора · <b>\(config.notifyChats ? "да" : "нет")</b>",
             "Проверка · каждые <b>\(config.sweepIntervalMinutes)</b> мин",
@@ -3147,13 +3449,20 @@ final class BotMenuHandler: @unchecked Sendable {
             "Спонсоров с подпиской · <b>\(stats.sponsors)</b> · без канала связи · <b>\(stats.unreachable)</b> · отписались · <b>\(stats.optedOut)</b>",
         ]
 
+        let wallets = await state.lapsedWalletStats()
+        lines.append(
+            config.walletWinbackDays > 0
+                ? "💰 Возврат по балансу · после <b>\(config.walletWinbackDays) дн.</b> тишины · платили <b>\(wallets.payers)</b> · готовы к отправке <b>\(wallets.due)</b> · уже написали <b>\(wallets.notified)</b>"
+                : "💰 Возврат по балансу · <b>выключен</b> · платили деньгами · <b>\(wallets.payers)</b>"
+        )
+
         if stats.expiringSoon.isEmpty {
             lines.append("⏳ Скоро истекают · <i>нет</i>")
         } else {
             lines.append("⏳ Скоро истекают · <b>\(stats.expiringSoon.count)</b>")
             for row in stats.expiringSoon.prefix(10) {
                 let flags = (row.reachable ? "" : " · 🚫 нет канала") + (row.optedOut ? " · 🔕" : "")
-                lines.append("• @\(row.username) — \(dateFormatter.string(from: row.paidUntil))\(flags)")
+                lines.append("• \(row.label) — \(dateFormatter.string(from: row.paidUntil))\(flags)")
             }
         }
 
@@ -3161,14 +3470,14 @@ final class BotMenuHandler: @unchecked Sendable {
             lines.append("⛔ Недавно истекли · <b>\(stats.recentlyExpired.count)</b>")
             for row in stats.recentlyExpired.prefix(10) {
                 let flags = (row.reachable ? "" : " · 🚫 нет канала") + (row.optedOut ? " · 🔕" : "")
-                lines.append("• @\(row.username) — \(dateFormatter.string(from: row.paidUntil))\(flags)")
+                lines.append("• \(row.label) — \(dateFormatter.string(from: row.paidUntil))\(flags)")
             }
         }
 
         if !stats.activeDiscounts.isEmpty {
             lines.append("🎁 Живые скидки · <b>\(stats.activeDiscounts.count)</b>")
             for entry in stats.activeDiscounts.prefix(10) {
-                lines.append("• @\(entry.username) — −\(entry.discount.percent)% до \(timeFormatter.string(from: entry.discount.expiresAt))")
+                lines.append("• \(entry.label) — −\(entry.discount.percent)% до \(timeFormatter.string(from: entry.discount.expiresAt))")
             }
         }
 
@@ -3200,6 +3509,7 @@ final class BotMenuHandler: @unchecked Sendable {
         for (index, example) in config.examples.enumerated() {
             rows.append([
                 menuButton("\(example.enabled ? "🟢" : "⚪️") \(example.label)", action: "onb:on:\(index)"),
+                menuButton("📍\(example.placement.shortLabel)", action: "onb:place:\(index)"),
                 menuButton("✏️", action: "onb:edit:\(index)"),
                 menuButton("↑", action: "onb:up:\(index)"),
                 menuButton("❌", action: "onb:del:\(index)"),
@@ -3228,20 +3538,24 @@ final class BotMenuHandler: @unchecked Sendable {
         } else {
             for example in config.examples {
                 let share = totalTaps > 0 ? " · \(pct(example.taps, totalTaps))" : ""
-                lines.append("\(example.enabled ? "🟢" : "⚪️") <b>\(OnboardingPresenter.escape(example.label))</b> · тапов \(example.taps)\(share)")
+                lines.append("\(example.enabled ? "🟢" : "⚪️") <b>\(OnboardingPresenter.escape(example.label))</b> · 📍\(example.placement.shortLabel) · тапов \(example.taps)\(share)")
                 lines.append("<blockquote>\(OnboardingPresenter.escape(example.prompt))</blockquote>")
             }
+            let inPrivate = config.activeExamples(inGroup: false).count
+            let inGroups = config.activeExamples(inGroup: true).count
+            lines.append("")
+            lines.append("Показывается кнопок · в личке <b>\(inPrivate)</b> · в группах <b>\(config.showInGroups ? "\(inGroups)" : "0")</b>")
         }
 
         lines.append("")
-        lines.append("<i>Тап по примеру = обычный запрос: работают лимиты, биллинг и история чата. Тексты и порядок кнопок правятся здесь, без передеплоя. Команда — /examples.</i>")
+        lines.append("<i>Тап по примеру = обычный запрос: работают лимиты, биллинг и история чата. 📍 задаёт, где кнопка видна: личка, группы или везде — в общем чате и в личке нужны разные примеры. Тексты и порядок правятся здесь, без передеплоя. Команда — /examples.</i>")
 
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
     /// Personal referral page (roadmap step 10). Private chats only — the link
     /// identifies its owner by userID and the rewards land on their wallet.
-    private func renderReferral(chatKey: ChatKey, userID: Int, username: String?) async -> (String, InlineKeyboardMarkup) {
+    private func renderReferral(chatKey: ChatKey, userID: Int) async -> (String, InlineKeyboardMarkup) {
         let config = await state.referralConfig()
         let stats = await state.referralUserStats(userID: userID)
         let link = ReferralLink.url(botUsername: botUsername, userID: userID)
@@ -3255,12 +3569,23 @@ final class BotMenuHandler: @unchecked Sendable {
             return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
         }
 
-        if config.paysAnything {
+        if config.paysOnSignup {
             lines.append(String(
                 format: "Друг открывает вашу ссылку и задаёт боту первый вопрос — в этот момент вам приходит <b>$%.2f</b>, а ему <b>$%.2f</b> на баланс.",
                 config.inviterRewardUsd, config.inviteeRewardUsd
             ))
+            if config.payingFriendBonusCents > 0 {
+                lines.append(String(
+                    format: "А если друг потом оформит оплату — вам придёт ещё <b>$%.2f</b>.",
+                    config.payingFriendBonusUsd
+                ))
+            }
             lines.append("<i>Пока баланс не пуст, отвечают любые модели — подписка не нужна. С баланса списывается стоимость каждого ответа, обычно доли цента.</i>")
+        } else if config.payingFriendBonusCents > 0 {
+            lines.append(String(
+                format: "Приведите друга: как только он оформит оплату, вам придёт <b>$%.2f</b> на баланс.",
+                config.payingFriendBonusUsd
+            ))
         } else {
             lines.append("Отправьте ссылку друзьям — бот сразу начнёт им отвечать в личке.")
         }
@@ -3271,30 +3596,42 @@ final class BotMenuHandler: @unchecked Sendable {
         lines.append("Пришло по ссылке · <b>\(stats.invited)</b>")
         lines.append("Уже принесли бонус · <b>\(stats.rewarded)</b>")
         lines.append("Ждут первого вопроса · <b>\(stats.pending)</b>")
+        if stats.paidConversions > 0 {
+            lines.append("Из них оформили оплату · <b>\(stats.paidConversions)</b>")
+        }
         if stats.earnedUsd > 0 {
             lines.append(String(format: "Заработано · <b>$%.2f</b>", stats.earnedUsd))
         }
         if let remaining = stats.capRemaining {
             lines.append("Осталось приглашений с бонусом · <b>\(remaining)</b>")
-        }
-        if username == nil, config.inviterRewardCents > 0 {
-            lines.append("")
-            lines.append("⚠️ Бонус зачисляется на баланс, привязанный к <b>@username</b> — задайте его в настройках Telegram, иначе деньги не придут.")
+            // Say it plainly rather than keep showing an offer that will not
+            // pay — the friend is told the same thing when they open the link.
+            if remaining == 0, config.paysAnything {
+                lines.append("")
+                lines.append("ℹ️ Бонусы за приглашения у вас исчерпаны. Ссылка продолжает работать — друзья по ней придут, но начислений больше не будет.")
+            }
         }
         if let incoming = stats.incoming, incoming.isPending {
             lines.append("")
-            lines.append("ℹ️ Вас пригласил <b>@\(incoming.inviterUsername)</b> — бонус придёт, как только вы зададите боту первый вопрос.")
+            lines.append("ℹ️ Вас пригласил <b>\(incoming.inviterUsername)</b> — бонус придёт, как только вы зададите боту первый вопрос.")
         }
         lines.append("")
         lines.append("<i>Бонус даётся один раз за друга и только за тех, кто раньше боту не писал.</i>")
 
-        let shareText = "Умный ИИ прямо в Telegram — отвечает на текст, фото и голос. Заходи по моей ссылке:"
+        // The share text is what the friend actually reads, so it carries the
+        // reason to tap: a bare "заходи по ссылке" converts far worse than the
+        // same line with the bonus in it.
+        let shareText = config.inviteeRewardCents > 0
+            ? "Умный ИИ прямо в Telegram — отвечает на текст, фото и голос. По моей ссылке тебе сразу зачислят \(ReferralConfig.formatUsd(cents: config.inviteeRewardCents)) на баланс:"
+            : "Умный ИИ прямо в Telegram — отвечает на текст, фото и голос. Заходи по моей ссылке:"
         rows.append([InlineKeyboardButton(
             text: "📤 Поделиться ссылкой",
             url: ReferralLink.shareURL(link: link, text: shareText)
         )])
-        if await state.balance(username: username) != nil {
-            rows.append([menuButton("💰 Мой баланс", action: "nav:pay")])
+        // Wallets are keyed by account, not by nick — resolve through the
+        // userID so someone without a @username still sees their balance.
+        if await state.balance(username: state.userKey(userID: userID)) != nil {
+            rows.append([menuButton("💰 Мой баланс", action: "nav:pay:\(PurchaseSource.referral.rawValue)")])
         }
         rows.append(navButtons())
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
@@ -3318,6 +3655,7 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton(config.enabled ? "🟢 Программа включена" : "⚪️ Программа выключена", action: "sref:toggle")],
             [menuButton("👤 Пригласившему · \(ReferralConfig.formatUsd(cents: config.inviterRewardCents))", action: "sref:inviter"),
              menuButton("🎁 Другу · \(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))", action: "sref:invitee")],
+            [menuButton("💎 За оплату друга · \(config.payingFriendBonusCents > 0 ? ReferralConfig.formatUsd(cents: config.payingFriendBonusCents) : "выкл")", action: "sref:paidbonus")],
             [menuButton(config.maxRewardsPerInviter > 0
                 ? "🛡 Лимит наград · \(config.maxRewardsPerInviter)"
                 : "🛡 Лимит наград · без лимита", action: "sref:cap")],
@@ -3333,28 +3671,42 @@ final class BotMenuHandler: @unchecked Sendable {
             "",
             "Статус · <b>\(config.enabled ? "включена" : "выключена")</b>",
             "Награда · пригласившему <b>\(ReferralConfig.formatUsd(cents: config.inviterRewardCents))</b> · другу <b>\(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))</b>",
-            "Лимит на человека · <b>\(config.maxRewardsPerInviter > 0 ? "\(config.maxRewardsPerInviter) наград" : "без лимита")</b>",
+            "За оплату друга · <b>\(config.payingFriendBonusCents > 0 ? ReferralConfig.formatUsd(cents: config.payingFriendBonusCents) : "выключено")</b>",
+            "Лимит на человека · <b>\(config.maxRewardsPerInviter > 0 ? "\(config.maxRewardsPerInviter) наград" : "без лимита")</b> <i>(на бонус за оплату не действует)</i>",
             "",
             "Привязок · <b>\(overview.bound)</b> · выплачено пар · <b>\(overview.rewarded)</b> · ждут первого сообщения · <b>\(overview.pending)</b>",
             "Отклонено лимитом · <b>\(overview.blocked)</b> · пригласивших · <b>\(overview.inviters)</b>",
             String(format: "Выплачено всего · <b>$%.2f</b>", overview.paidOutUsd),
             "Переходов по ссылке · <b>\(joined)</b> → наград · <b>\(rewarded)</b> · конверсия <b>\(pct(rewarded, joined))</b>",
+            "🔑 <b>Друзья, которые оплатили · \(overview.paidConversions)</b> · из награждённых <b>\(pct(overview.paidConversions, overview.rewarded))</b> — это число решает, окупается ли программа",
         ]
+
+        // Refused opens separate "ссылку никто не открывает" from "открывают, но
+        // правила всех отсеивают" — разные проблемы с разными решениями.
+        if overview.refusedTotal > 0 {
+            lines.append("")
+            lines.append("<b>Переходы, которые не засчитались · \(overview.refusedTotal)</b> из \(overview.opens)")
+            if overview.refusedSelf > 0 { lines.append("• по своей же ссылке · \(overview.refusedSelf)") }
+            if overview.refusedRepeat > 0 { lines.append("• уже был приглашён · \(overview.refusedRepeat)") }
+            if overview.refusedNotNew > 0 { lines.append("• уже пользовался ботом · \(overview.refusedNotNew)") }
+            if overview.refusedUnknown > 0 { lines.append("• автор ссылки боту не писал · \(overview.refusedUnknown)") }
+        }
 
         if !overview.top.isEmpty {
             lines.append("")
             lines.append("<b>Топ пригласивших</b>")
             for (index, entry) in overview.top.enumerated() {
                 lines.append(String(
-                    format: "%d. @%@ · наград <b>%d</b> · $%.2f · привязок %d",
-                    index + 1, entry.tally.username, entry.tally.rewarded, entry.tally.earnedUsd, entry.tally.invited
+                    format: "%d. %@ · оплатили <b>%d</b> · наград %d · $%.2f · привязок %d",
+                    index + 1, entry.tally.username, entry.tally.paidConversions,
+                    entry.tally.rewarded, entry.tally.earnedUsd, entry.tally.invited
                 ))
             }
         }
 
         lines.append("")
         lines.append("""
-            <i>Антифрод: награда только за нового пользователя (кто ещё не писал боту в личке, не имеет кошелька и лицензии), одна привязка на человека навсегда, деньги — лишь после его первого реального ответа в личке, самоприглашение отклоняется, плюс лимит наград на пригласившего. Пригласившему нужен @username — на него зачисляется баланс.</i>
+            <i>Антифрод: награда только за нового пользователя (кто ещё не писал боту в личке, не имеет кошелька и лицензии), одна привязка на человека навсегда, деньги — лишь после его первого реального ответа в личке, самоприглашение отклоняется, плюс лимит наград на пригласившего. Награда привязана к аккаунту Telegram, а не к @username — смена ника её не теряет.</i>
             """)
         lines.append("<i>Команда — /ref (юзерам — своя ссылка, суперадмину — управление).</i>")
 
@@ -3405,7 +3757,18 @@ final class BotMenuHandler: @unchecked Sendable {
 
                 Сейчас · <b>\(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))</b>
 
-                Отправьте сумму в долларах, например <code>1</code>. <code>0</code> — приглашённый ничего не получает (тогда ему не нужен @username).
+                Отправьте сумму в долларах, например <code>1</code>. <code>0</code> — приглашённый ничего не получает.
+                """)
+
+        case "paidbonus":
+            try await ask(kind: .referralPaidBonus, text: """
+                <b>💎 Бонус за оплату друга</b>
+
+                Сейчас · <b>\(config.payingFriendBonusCents > 0 ? ReferralConfig.formatUsd(cents: config.payingFriendBonusCents) : "выключен")</b>
+
+                Отправьте сумму в долларах, например <code>2</code>. <code>0</code> — не платить.
+
+                Пригласивший получает её один раз, когда его друг впервые оплатил подписку или пополнение — любым способом. Награда за регистрацию покупает регистрации, эта — покупает клиентов, поэтому лимит наград на неё не действует.
                 """)
 
         case "cap":
@@ -3424,7 +3787,7 @@ final class BotMenuHandler: @unchecked Sendable {
             let text = """
                 <b>🗑 Очистить журнал приглашений?</b>
 
-                Будет удалено привязок · <b>\(overview.bound)</b> (в т.ч. ждущих награды · \(overview.pending)) и статистика пригласивших.
+                Будет удалено привязок · <b>\(overview.bound)</b> (в т.ч. ждущих награды · \(overview.pending)), статистика пригласивших, счётчики отказов и итог «выплачено всего» (\(String(format: "$%.2f", overview.paidOutUsd))).
 
                 ⚠️ Уже начисленные балансы останутся, но защита «одна привязка на человека» обнулится: ранее приглашённые смогут быть привязаны заново, если ещё не писали боту. Счётчики воронки не меняются.
                 """
@@ -3468,12 +3831,12 @@ final class BotMenuHandler: @unchecked Sendable {
 
         Цена подписки: \(priceLabel)
 
-        <b>Кредиты (пополнение баланса):</b>
-        Курс: <b>\(rate) ⭐ за $1</b>
-        \(packLine)
+        <b>Пополнение баланса:</b>
+        \(rate > 0 ? "Курс: <b>\(rate) ⭐ за $1</b>\n\(packLine)" : "<b>отключено</b>")
 
-        <i>Цена подписки — Stars за единоразовый доступ (0 = откл). \
-        Курс кредитов задаёт, сколько Stars стоит $1 пополнения баланса; \
+        <i>Цена подписки — Stars за месячный доступ (0 = откл). \
+        Курс пополнений задаёт, сколько Stars стоит $1 на балансе, и не зависит \
+        от цены подписки (0 = не продавать пополнения через Stars). \
         Telegram платит ~$0.013/⭐, поэтому 77⭐/$ покрывает себестоимость и маржу.</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
@@ -3570,7 +3933,10 @@ final class BotMenuHandler: @unchecked Sendable {
             tokenRow.append(menuButton("🗑", action: "card:deltoken"))
         }
         rows.append(tokenRow)
-        rows.append([menuButton("✏️ Изменить цену", action: "card:setprice")])
+        rows.append([
+            menuButton("✏️ Цена подписки", action: "card:setprice"),
+            menuButton("💱 Курс пополнений", action: "card:setrate"),
+        ])
 
         var currencyRow: [InlineKeyboardButton] = []
         for currency in CardCurrency.allCases {
@@ -3591,15 +3957,28 @@ final class BotMenuHandler: @unchecked Sendable {
         let statusLine = card.isEnabled
             ? "🟢 Оплата картой <b>включена</b>."
             : "🔴 Оплата картой <b>выключена</b> — нужны токен и цена."
+        // Credit top-ups ride on the same token but need their own FX rate, so
+        // they can be on while subscription sales are off and vice versa.
+        var creditsLine = card.creditsEnabled
+            ? "🟢 Пополнение баланса картой <b>включено</b> · \(card.usdRateLabel ?? "")"
+            : "🔴 Пополнение баланса картой <b>выключено</b>" + (card.providerToken == nil ? " — нужен токен" : " — задайте курс")
+        if card.creditsEnabled {
+            let packs = CreditPack.centsOptions.compactMap { cents -> String? in
+                guard let minor = card.creditMinorUnits(cents: cents) else { return nil }
+                return "\(CreditPack.label(cents: cents)) → \(card.currency.format(minorUnits: minor))"
+            }
+            if !packs.isEmpty { creditsLine += "\n<i>\(packs.joined(separator: " · "))</i>" }
+        }
 
         let text = """
         <b>💳 Оплата картой (эквайринг)</b>
 
         \(statusLine)
+        \(creditsLine)
 
         Токен провайдера: \(tokenLine)
         Валюта: <b>\(card.currency.rawValue)</b>
-        Цена: \(priceLine)
+        Цена подписки: \(priceLine)
 
         <i>Токен выдаёт @BotFather после подключения платёжного провайдера \
         (ЮKassa, Stripe, Smart Glocal…): Bot Settings → Payments. \
@@ -3665,18 +4044,18 @@ final class BotMenuHandler: @unchecked Sendable {
         let globalTemps = await state.tempPresets(chatID: chatKey.chatID).count
         let globalHist = await state.historyLengthPresets(chatID: chatKey.chatID).count
 
-        let invoker = username?.lowercased()
+        let invoker = await state.userKey(username: username)
         let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
-        let isOwnChat = invoker != nil && chatOwner?.lowercased() == invoker
+        let isOwnChat = invoker != nil && chatOwner == invoker
         let chatStatusLine: String
         if let chatOwner {
-            chatStatusLine = isOwnChat ? "🟢 премиум в этом чате открыли вы" : "🔒 премиум в этом чате открыл @\(chatOwner)"
+            chatStatusLine = isOwnChat ? "🟢 премиум в этом чате открыли вы" : "🔒 премиум в этом чате открыл \(await state.displayLabel(forKey: chatOwner))"
         } else {
             chatStatusLine = "⚪ в этом чате премиум ещё никто не открыл"
         }
 
         let licensedChats: [Int]
-        let licensedUsers: [String]
+        let licensedUsers: [(key: String, label: String)]
         let usage: CumulativeUsage
         if let invoker {
             licensedChats = await state.chatsOwnedBy(invoker)
@@ -3712,7 +4091,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         let adminsLine = admins.isEmpty
             ? "<i>только вы</i>"
-            : admins.sorted().map { "@\($0)" }.joined(separator: ", ")
+            : admins.map(\.label).joined(separator: ", ")
 
         let costStr = String(format: "$%.4f", await state.billedCost(of: usage))
         let usageLine = usage.generationCount == 0
@@ -3737,9 +4116,14 @@ final class BotMenuHandler: @unchecked Sendable {
                 let optedOut = await state.remindersOptOut(username: invoker)
                 if optedOut {
                     reminderLine = "🔕 Напоминания о продлении · <b>выключены</b>"
-                } else if reminders.enabled, reminders.daysBeforeExpiry > 0, sub.isActive {
-                    let notifyAt = until.addingTimeInterval(-Double(reminders.daysBeforeExpiry) * 86_400)
-                    reminderLine = "🔔 Напомню о продлении · <b>\(f.string(from: notifyAt))</b>"
+                } else if reminders.enabled, sub.isActive,
+                          // Nearest wave still ahead of us — the widest one has
+                          // usually already gone out by the time this is read.
+                          let nextWave = reminders.expiryReminderDays
+                            .map({ until.addingTimeInterval(-Double($0) * 86_400) })
+                            .filter({ $0 > Date() })
+                            .min() {
+                    reminderLine = "🔔 Напомню о продлении · <b>\(f.string(from: nextWave))</b>"
                 } else if reminders.enabled {
                     reminderLine = "🔔 Напоминания о продлении · <b>включены</b>"
                 }
@@ -3756,7 +4140,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 subscriptionLine = "💳 Премиум · <b>бессрочный</b>"
             }
         } else {
-            subscriptionLine = "💳 Премиум · <i>нужен @username</i>"
+            subscriptionLine = "💳 Премиум · <i>не оплачен — /buy</i>"
         }
 
         let text = """
@@ -3786,9 +4170,10 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func renderAdminChats(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
-        guard let invoker = username?.lowercased() else {
+        guard let invoker = await state.userKey(username: username) else {
             return ("У вас не задан @username.", InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
         }
+        let invokerLabel = await state.displayLabel(forKey: invoker)
         let chats = await state.chatsOwnedBy(invoker).sorted()
 
         var rows: [[InlineKeyboardButton]] = []
@@ -3800,7 +4185,7 @@ final class BotMenuHandler: @unchecked Sendable {
             ])
         }
         let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
-        if chatOwner?.lowercased() != invoker {
+        if chatOwner != invoker {
             rows.append([menuButton("📌 Включить премиум здесь", action: "tenant:claim")])
         }
         rows.append([menuButton("📥 Добавить чат по номеру", action: "tenant:assignprompt")])
@@ -3813,7 +4198,7 @@ final class BotMenuHandler: @unchecked Sendable {
             listText = chats.map { "• <code>\($0)</code>" }.joined(separator: "\n")
         }
         let text = """
-        <b>📋 Чаты с премиумом @\(invoker)</b> (\(chats.count))
+        <b>📋 Чаты с премиумом \(invokerLabel)</b> (\(chats.count))
 
         \(listText)
 
@@ -3871,9 +4256,10 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func renderAdminUsers(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
-        guard let invoker = username?.lowercased() else {
+        guard let invoker = await state.userKey(username: username) else {
             return ("У вас не задан @username.", InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
         }
+        let invokerLabel = await state.displayLabel(forKey: invoker)
         let users = await state.licensedUsers(ownerUsername: invoker)
 
         var rows: [[InlineKeyboardButton]] = [
@@ -3882,7 +4268,7 @@ final class BotMenuHandler: @unchecked Sendable {
         ]
         for (i, user) in users.prefix(40).enumerated() {
             rows.append([
-                menuButton("@\(user)", action: "noop"),
+                menuButton(user.label, action: "noop"),
                 menuButton("🗑 Удалить", action: "tenant:rmuser:\(i)"),
             ])
         }
@@ -3892,10 +4278,10 @@ final class BotMenuHandler: @unchecked Sendable {
         if users.isEmpty {
             listText = "<i>пока никого</i>"
         } else {
-            listText = users.map { "• @\($0)" }.joined(separator: "\n")
+            listText = users.map { "• \($0.label)" }.joined(separator: "\n")
         }
         let text = """
-        <b>👥 Гости премиума @\(invoker)</b> (\(users.count))
+        <b>👥 Гости премиума \(invokerLabel)</b> (\(users.count))
 
         \(listText)
 
@@ -3916,7 +4302,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 let realStr = String(format: "$%.4f", row.usage.totalCost)
                 let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
                 let tokens = Int(row.usage.totalTokens)
-                lines.append("\n\(mark) <b>@\(row.username)</b>")
+                lines.append("\n\(mark) <b>\(row.label)</b>")
                 lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b> · запросов <b>\(row.usage.generationCount)</b> · ток. <b>\(tokens)</b>")
                 lines.append("  💵 реально <b>\(realStr)</b> · клиентам <b>\(billedStr)</b>")
             }
@@ -3928,7 +4314,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         var buttons: [[InlineKeyboardButton]] = [[menuButton("➕ Зарегистрировать tenant", action: "stenant:add")]]
         for row in rows {
-            var btnRow = [menuButton("\(row.isSuperAdmin ? "🛡" : "🛠") @\(row.username)", action: "stenant:info:\(row.username)")]
+            var btnRow = [menuButton("\(row.isSuperAdmin ? "🛡" : "🛠") \(row.label)", action: "stenant:info:\(row.username)")]
             if !row.isSuperAdmin {
                 btnRow.append(menuButton("🗑", action: "stenant:rm:\(row.username)"))
             }
@@ -3962,7 +4348,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
 
         let text = """
-        <b>🏢 Tenant @\(row.username)</b>\(row.isSuperAdmin ? " · 🛡 суперадмин" : "")
+        <b>🏢 Тенант \(row.label)</b>\(row.isSuperAdmin ? " · 🛡 суперадмин" : "")
 
         \(subLine)
         Чатов · <b>\(row.chatCount)</b> · юзеров · <b>\(row.licensedUserCount)</b>
@@ -3997,7 +4383,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 totalBalance += w.balanceUsd
                 totalBilled += w.spentBilledUsd
                 totalReal += w.spentRealUsd
-                lines.append("• <b>@\(entry.username)</b> · остаток <b>\(usd(w.balanceUsd))</b>")
+                lines.append("• <b>\(entry.label)</b> · остаток <b>\(usd(w.balanceUsd))</b>")
                 lines.append("  списано \(usd(w.spentBilledUsd)) · реально \(usd(w.spentRealUsd)) · маржа <b>\(usd(w.spentBilledUsd - w.spentRealUsd))</b>")
             }
             lines.append("")
@@ -4007,8 +4393,8 @@ final class BotMenuHandler: @unchecked Sendable {
         var buttons: [[InlineKeyboardButton]] = [[menuButton("➕ Начислить / списать", action: "sbal:add")]]
         for entry in balances.prefix(30) {
             buttons.append([
-                menuButton("@\(entry.username) · \(usd(entry.wallet.balanceUsd))", action: "noop"),
-                menuButton("🗑", action: "sbal:rm:\(entry.username)"),
+                menuButton("\(entry.label) · \(usd(entry.wallet.balanceUsd))", action: "noop"),
+                menuButton("🗑", action: "sbal:rm:\(entry.key)"),
             ])
         }
         buttons.append([menuButton("💹 Наценка · \(markupPct)%", action: "markup:set")])
@@ -4023,16 +4409,16 @@ final class BotMenuHandler: @unchecked Sendable {
         var rows: [[InlineKeyboardButton]] = []
         if isRoot {
             rows.append([menuButton("➕ Добавить @username", action: "sa:add")])
-            for s in supers {
+            for admin in supers {
                 rows.append([
-                    menuButton("@\(s)", action: "noop"),
-                    menuButton("🗑 Удалить", action: "sa:rm:\(s)"),
+                    menuButton(admin.label, action: "noop"),
+                    menuButton("🗑 Удалить", action: "sa:rm:\(admin.key)"),
                 ])
             }
         }
         rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
 
-        let listText = supers.isEmpty ? "<i>нет</i>" : supers.map { "• @\($0)" }.joined(separator: "\n")
+        let listText = supers.isEmpty ? "<i>нет</i>" : supers.map { "• \($0.label)" }.joined(separator: "\n")
         let footer = isRoot
             ? ""
             : "\n\n<i>Только главный суперадмин может изменять список.</i>"
@@ -4138,11 +4524,11 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderInspect(chatID: Int) async -> (String, InlineKeyboardMarkup) {
         let label = await state.chatDisplayLabel(chatID: chatID)
-        let owner = await state.chatOwner(chatID: chatID)
+        let owner = await state.chatOwnerLabel(chatID: chatID)
         let keys = await state.existingContextKeys(chatID: chatID)
 
         var lines = ["<b>👁 \(label)</b> · <code>\(chatID)</code>"]
-        lines.append(owner.map { "Лицензия · @\($0)" } ?? "Лицензия · <i>нет (бесплатный)</i>")
+        lines.append(owner.map { "Премиум · \($0)" } ?? "Премиум · <i>нет (бесплатный)</i>")
 
         if keys.isEmpty {
             lines.append("\n<i>Контекст ещё не создан.</i>")
@@ -4188,13 +4574,27 @@ final class BotMenuHandler: @unchecked Sendable {
                 lines.append("<blockquote expandable>\(preview)</blockquote>")
             }
         }
-        lines.append("")
+        // The built-in self-promo is a real ad slot occupant, so it gets the
+        // same controls and the same visible numbers as a paid campaign —
+        // otherwise the super-admin is looking at a page that lies by omission.
+        let promo = await state.selfPromoConfig()
         let anyRunning = campaigns.contains { $0.isRunning() }
-        lines.append(anyRunning
-            ? "<i>💡 Когда ни одна кампания не активна, слот занимает встроенная само-реклама премиума (роадмап 5).</i>"
-            : "<i>💡 Сейчас активных кампаний нет — слот занимает встроенная само-реклама премиума: «📣 Надоела реклама и лимиты? Премиум для чата откроет любой участник → /buy» (роадмап 5).</i>")
+        let promoState: String
+        if !promo.enabled {
+            promoState = "⚪ выключена — свободный слот просто не используется"
+        } else if anyRunning {
+            promoState = "🟡 ждёт — сейчас слот занят платной кампанией"
+        } else {
+            promoState = "🟢 показывается — активных кампаний нет"
+        }
         lines.append("")
-        lines.append("<i>Тонкая настройка — команда /ads (частота, лимиты с пейсингом, кнопка-ссылка). Проверить показ: /simulate user и написать боту.</i>")
+        lines.append("<b>📣 Само-реклама премиума</b> (роадмап 5)")
+        lines.append(promoState)
+        lines.append("Частота · раз в <b>\(promo.everyNReplies)</b> ответов · пауза <b>\(promo.minIntervalSeconds / 60)</b> мин · показов <b>\(promo.impressions)</b>")
+        lines.append("<blockquote expandable>\(promo.text)</blockquote>")
+        lines.append("<i>Под текстом бот сам добавляет кнопку «⚡ Открыть премиум» (в личке — ещё и приглашение друга). Тапы по ней видно в «📊 Воронка» → «Откуда открывают покупку».</i>")
+        lines.append("")
+        lines.append("<i>Тонкая настройка кампаний — команда /ads (частота, лимиты с пейсингом, кнопка-ссылка). Проверить показ: /simulate user и написать боту.</i>")
 
         var rows: [[InlineKeyboardButton]] = [[menuButton("➕ Новое объявление", action: "ads:add")]]
         for c in campaigns.prefix(15) {
@@ -4203,7 +4603,20 @@ final class BotMenuHandler: @unchecked Sendable {
                 menuButton("🗑 \(c.id)", action: "ads:rm:\(c.id)"),
             ])
         }
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.append([menuButton(promo.enabled ? "🟢 Само-реклама включена" : "⚪️ Само-реклама выключена", action: "promo:toggle")])
+        rows.append([
+            menuButton("✏️ Текст", action: "promo:text"),
+            menuButton("✏️ Раз в \(promo.everyNReplies) отв.", action: "promo:every"),
+        ])
+        rows.append([
+            menuButton("✏️ Пауза · \(promo.minIntervalSeconds / 60) мин", action: "promo:pause"),
+            menuButton("↺ Текст по умолчанию", action: "promo:default"),
+        ])
+        if promo.impressions > 0 {
+            rows.append([menuButton("🗑 Обнулить показы · \(promo.impressions)", action: "promo:reset")])
+        }
+        rows.append([menuButton("📊 Воронка", action: "nav:superfunnel"),
+                     menuButton("← К супер-админу", action: "nav:superadmin")])
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
@@ -4319,27 +4732,31 @@ UI: «💰 Балансы» в супер-меню — начислить/спи
 
 <b>━━━ 📣 Реклама ━━━</b>
 
-UI: «📣 Реклама» в супер-меню — создать/включить/удалить кампании.
+UI: «📣 Реклама» в супер-меню — создать/включить/удалить кампании + настроить само-рекламу премиума.
 Показы идут только в чатах <b>без активной платной лицензии</b>, после ответа бота.
+
+Когда активных кампаний нет, слот занимает <b>само-реклама</b>: ваш текст плюс кнопка «⚡ Открыть премиум». Её тапы видно в «📊 Воронка» → «Откуда открывают покупку».
 
 <code>/ads</code> — список кампаний и вся справка
 <code>/ads add &lt;текст&gt;</code> — создать
 <code>/ads freq &lt;id&gt; &lt;N&gt; [мин]</code> — каждые N ответов, пауза в минутах
 <code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code> — лимит показов, равномерно на период
 <code>/ads button &lt;id&gt; &lt;текст&gt; | &lt;url&gt;</code> — кнопка-ссылка
+<code>/ads promo</code> — само-реклама: <code>on|off</code> · <code>text &lt;текст&gt;</code> · <code>freq &lt;N&gt; [мин]</code> · <code>reset</code>
 
 <b>━━━ ⏳ Напоминания и winback ━━━</b>
 
 UI: «⏳ Напоминания и winback» в супер-меню — расписание, скидка, ручная проверка, предпросмотр, список подписок под наблюдением.
 
-Бот сам пишет спонсору перед концом подписки, а после истечения делает winback-оффер со скидкой (скидка действует на Stars, крипту и карту и сгорает по времени). Каждое сообщение уходит один раз за срок подписки; продление обнуляет отметки; спонсор может отписаться у себя в админ-панели.
+Бот сам пишет спонсору перед концом подписки (можно несколько волн, например за 3 дня и за 1 день), а после истечения делает winback-оффер со скидкой (скидка действует на Stars, крипту и карту и сгорает по времени). Каждое сообщение уходит один раз за срок подписки; продление обнуляет отметки; спонсор может отписаться у себя в админ-панели. Отдельно есть возврат по балансу: тем, кто платил деньгами, потратил всё и пропал.
 
 <code>/reminders</code> — статус + кто скоро истекает
 <code>/reminders on|off</code> · <code>/reminders chats on|off</code>
-<code>/reminders days 3</code> — за сколько дней напомнить (0 — не напоминать)
+<code>/reminders days 3,1</code> — за сколько дней напомнить (<code>off</code> — не напоминать)
 <code>/reminders winback 1,7</code> — дни winback (<code>off</code> — выключить)
 <code>/reminders discount 30</code> · <code>/reminders hours 48</code>
 <code>/reminders interval 60</code> — как часто проверять, мин
+<code>/reminders wallet 7</code> — вернуть тех, у кого кончился оплаченный баланс (0 — не писать)
 <code>/reminders run</code> — проверить сейчас · <code>/reminders test</code> — предпросмотр
 <code>/reminders clear</code> — снять все активные скидки
 
@@ -4355,15 +4772,24 @@ UI: «💡 Примеры-запросы» в супер-меню — текст
 <code>/examples reset</code> — вернуть стандартный набор
 <code>/examples clearstats</code> — обнулить счётчики
 
+<b>━━━ 📊 Воронка и аналитика ━━━</b>
+
+UI: «📊 Воронка и аналитика» в супер-меню. Период переключается кнопками (сегодня · 7 дней · 30 дней · всё время) — рядом с числом периода видно и общий итог. По дням хранится 35 суток.
+
+Что там есть: путь <code>/start</code> → первое сообщение → упёрлись в лимит → открыли покупку → счёт → оплата, конверсия на каждом шаге, «Откуда открывают покупку» (лимит / само-реклама / меню / пустой баланс / напоминание), возвращаемость (видели ли человека спустя сутки и спустя неделю после первой встречи), спонсоры и winback.
+
+Те же числа в JSON — <code>/metrics</code>: <code>funnel</code> (всё время), <code>funnelToday</code>, <code>funnelWeek</code>.
+
 <b>━━━ 🎁 Приглашения (рефералы) ━━━</b>
 
-UI: «🎁 Приглашения» в супер-меню — награды обеим сторонам, лимит наград на человека, счётчики выплат, топ пригласивших, очистка журнала.
+UI: «🎁 Приглашения» в супер-меню — награды обеим сторонам, бонус за оплату друга, лимит наград на человека, счётчики выплат, топ пригласивших, очистка журнала.
 
-Пользователь берёт свою ссылку в /ref или в меню. Награда начисляется на балансы <b>после первого реального ответа</b> приглашённому, один раз на пару, только если он раньше не пользовался ботом.
+Пользователь берёт свою ссылку в /ref или в меню. Награда начисляется на балансы <b>после первого реального ответа</b> приглашённому, один раз на пару, только если он раньше не пользовался ботом. Отдельно: когда приглашённый <b>впервые оплатил</b> (подписку или пополнение, любым способом), пригласившему приходит бонус — один раз на пару, лимит наград на него не действует.
 
 <code>/ref</code> — своя ссылка (у всех) · <code>/ref stats</code> — цифры программы
 <code>/ref on|off</code> — включить/выключить
-<code>/ref reward 1</code> · <code>/ref friend 1</code> — награды, $
+<code>/ref reward 1</code> · <code>/ref friend 1</code> — награды за регистрацию, $
+<code>/ref bonus 2</code> — бонус за оплату друга, $
 <code>/ref cap 20</code> — лимит оплаченных приглашений на человека (0 — без лимита)
 
 <b>━━━ 💫 Stars ━━━</b>
@@ -4554,7 +4980,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 await state.addToWhitelist(userID: id, chatID: chatKey.chatID)
                 toast = "✓ \(id) добавлен в гости"
             } else {
-                toast = "⚠️ Нужен целочисленный ID"
+                toast = "⚠️ Нужен номер — целое число"
             }
             resumePage = .adminWhitelist
 
@@ -4650,6 +5076,39 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
             toast = "✓ Кампания \(campaign.id) создана. Настройки: /ads"
             resumePage = .superAds
 
+        case .selfPromoText:
+            resumePage = .superAds
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard !trimmed.isEmpty else { toast = "⚠️ Пустой текст"; break }
+            var promoText = await state.selfPromoConfig()
+            promoText.text = trimmed
+            await state.setSelfPromoConfig(promoText)
+            toast = "✓ Текст само-рекламы обновлён"
+
+        case .selfPromoEvery:
+            resumePage = .superAds
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            if let n = Int(trimmed), SelfPromoConfig.repliesRange.contains(n) {
+                var promo = await state.selfPromoConfig()
+                promo.everyNReplies = n
+                await state.setSelfPromoConfig(promo)
+                toast = "✓ Само-реклама · раз в <b>\(n)</b> ответов"
+            } else {
+                toast = "⚠️ Нужно число \(SelfPromoConfig.repliesRange.lowerBound)–\(SelfPromoConfig.repliesRange.upperBound)"
+            }
+
+        case .selfPromoPause:
+            resumePage = .superAds
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            if let n = Int(trimmed), SelfPromoConfig.pauseMinutesRange.contains(n) {
+                var promo = await state.selfPromoConfig()
+                promo.minIntervalSeconds = n * 60
+                await state.setSelfPromoConfig(promo)
+                toast = n == 0 ? "✓ Пауза убрана (только частота)" : "✓ Пауза · <b>\(n)</b> мин"
+            } else {
+                toast = "⚠️ Нужно число 0–\(SelfPromoConfig.pauseMinutesRange.upperBound)"
+            }
+
         case .chatCustomRole:
             resumePage = .role
             if trimmed.isEmpty {
@@ -4720,15 +5179,24 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         case .reminderDaysBefore:
             resumePage = .superReminders
             guard isSuper else { toast = "🔒 Только суперадмин"; break }
-            if let n = Int(trimmed), SubscriptionReminderConfig.daysBeforeRange.contains(n) {
-                var config = await state.reminderConfig()
-                config.daysBeforeExpiry = n
-                await state.setReminderConfig(config)
-                toast = n == 0
-                    ? "✓ Напоминание до истечения выключено"
-                    : "✓ Напоминание · за <b>\(n)</b> дн. до конца подписки"
+            var expiryConfig = await state.reminderConfig()
+            if trimmed == "-" || trimmed == "0" {
+                expiryConfig.expiryReminderDays = []
+                await state.setReminderConfig(expiryConfig)
+                toast = "✓ Напоминания до истечения выключены"
             } else {
-                toast = "⚠️ Нужно число \(SubscriptionReminderConfig.daysBeforeRange.lowerBound)–\(SubscriptionReminderConfig.daysBeforeRange.upperBound)"
+                let parsed = trimmed
+                    .split(whereSeparator: { ",; ".contains($0) })
+                    .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                    .filter { SubscriptionReminderConfig.daysBeforeRange.contains($0) }
+                if parsed.isEmpty {
+                    toast = "⚠️ Формат: <code>3,1</code> (дни \(SubscriptionReminderConfig.daysBeforeRange.lowerBound)–\(SubscriptionReminderConfig.daysBeforeRange.upperBound))"
+                } else {
+                    expiryConfig.expiryReminderDays = parsed
+                    await state.setReminderConfig(expiryConfig)
+                    let applied = await state.reminderConfig().expiryReminderDays
+                    toast = "✓ Напоминания · " + applied.map { "за \($0) дн." }.joined(separator: ", ")
+                }
             }
 
         case .reminderWinbackDays:
@@ -4792,6 +5260,20 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 toast = "⚠️ Нужно число \(SubscriptionReminderConfig.sweepIntervalRange.lowerBound)–\(SubscriptionReminderConfig.sweepIntervalRange.upperBound)"
             }
 
+        case .reminderWalletDays:
+            resumePage = .superReminders
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            if let n = Int(trimmed), SubscriptionReminderConfig.walletWinbackRange.contains(n) {
+                var config = await state.reminderConfig()
+                config.walletWinbackDays = n
+                await state.setReminderConfig(config)
+                toast = n == 0
+                    ? "✓ Возврат по балансу выключен"
+                    : "✓ Возврат по балансу · после <b>\(n) дн.</b> тишины"
+            } else {
+                toast = "⚠️ Нужно число \(SubscriptionReminderConfig.walletWinbackRange.lowerBound)–\(SubscriptionReminderConfig.walletWinbackRange.upperBound)"
+            }
+
         case .onboardingAdd, .onboardingEdit:
             resumePage = .superOnboarding
             guard isSuper else { toast = "🔒 Только суперадмин"; break }
@@ -4815,7 +5297,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 toast = "⚠️ Пример не найден — возможно, он был удалён"
             }
 
-        case .referralInviterReward, .referralInviteeReward:
+        case .referralInviterReward, .referralInviteeReward, .referralPaidBonus:
             resumePage = .superReferrals
             guard isSuper else { toast = "🔒 Только суперадмин"; break }
             let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
@@ -4826,13 +5308,19 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                     break
                 }
                 var config = await state.referralConfig()
-                if pending.kind == .referralInviterReward {
+                let side: String
+                switch pending.kind {
+                case .referralInviterReward:
                     config.inviterRewardCents = cents
-                } else {
+                    side = "пригласившему"
+                case .referralInviteeReward:
                     config.inviteeRewardCents = cents
+                    side = "другу"
+                default:
+                    config.payingFriendBonusCents = cents
+                    side = "за оплату друга"
                 }
                 await state.setReferralConfig(config)
-                let side = pending.kind == .referralInviterReward ? "пригласившему" : "другу"
                 toast = cents == 0
                     ? "✓ Награда \(side) отключена"
                     : "✓ Награда \(side) · <b>\(ReferralConfig.formatUsd(cents: cents))</b>"
@@ -4885,6 +5373,23 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 await state.setCardProviderToken(trimmed)
                 let card = await state.cardConfig()
                 toast = "✓ Токен сохранён" + (card.isTestToken ? " (тестовый режим)" : "")
+            }
+
+        case .cardUsdRate:
+            resumePage = .superCard
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            let rateInput = trimmed.replacingOccurrences(of: ",", with: ".")
+            if let value = Double(rateInput), value >= 0 {
+                if value == 0 {
+                    await state.setCardUsdRateMinorUnits(nil)
+                    toast = "✓ Пополнение баланса картой отключено."
+                } else {
+                    await state.setCardUsdRateMinorUnits(Int((value * 100).rounded()))
+                    let card = await state.cardConfig()
+                    toast = "✓ Курс: <b>\(card.usdRateLabel ?? "—")</b>"
+                }
+            } else {
+                toast = "⚠️ Введите число, например <code>95</code>, или <code>0</code> для отключения."
             }
 
         case .cardPrice:

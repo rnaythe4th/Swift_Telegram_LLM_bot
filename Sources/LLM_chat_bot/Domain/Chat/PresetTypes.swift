@@ -68,6 +68,10 @@ enum AdminPendingInputKind: Sendable {
     case superAdminRemove
     case simulateAs
     case adAddText
+    // Built-in self-promo filling the free-tier ad slot (roadmap step 5).
+    case selfPromoText
+    case selfPromoEvery
+    case selfPromoPause
     // User-level custom value inputs from the settings menu.
     case chatCustomRole
     case chatCustomModel
@@ -79,12 +83,16 @@ enum AdminPendingInputKind: Sendable {
     case balanceTopUp
     case cardProviderToken
     case cardPrice
+    /// FX rate that prices USD credit packs on the card (roadmap step 2).
+    case cardUsdRate
     // Renewal reminders / winback schedule (roadmap step 8).
     case reminderDaysBefore
     case reminderWinbackDays
     case reminderDiscount
     case reminderOfferHours
     case reminderInterval
+    /// Idle days before a lapsed pay-as-you-go wallet gets one offer back.
+    case reminderWalletDays
     // Greeting example prompts (roadmap step 9); edit carries the example id.
     case onboardingAdd
     case onboardingEdit
@@ -92,6 +100,8 @@ enum AdminPendingInputKind: Sendable {
     case referralInviterReward
     case referralInviteeReward
     case referralCap
+    /// Bonus the inviter gets when their friend first pays.
+    case referralPaidBonus
 }
 
 struct AdminPendingInput: Sendable {
