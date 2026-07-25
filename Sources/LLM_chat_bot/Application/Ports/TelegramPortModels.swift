@@ -228,4 +228,44 @@ enum MessageSplitter {
         let hardCut = text.index(text.startIndex, offsetBy: safeLimit)
         return (String(text[..<hardCut]), String(text[hardCut...]))
     }
+
+    /// Splits so the *rendered* prefix stays inside `limit`.
+    ///
+    /// Telegram counts the HTML it receives, and rendering grows the text:
+    /// `&` becomes `&amp;`, a bare `<` becomes `&lt;`. A chunk cut at 3896 raw
+    /// characters of code (`if (a < b && c > d)`) renders past 4096 and comes
+    /// back as 400 "message is too long" — with that part of the answer lost.
+    static func splitRendered(_ text: String, limit: Int = charLimit) -> (done: String, remaining: String) {
+        let rawLimit = rawPrefixLength(of: text, renderedLimit: limit)
+        guard rawLimit < text.count else { return (text, "") }
+        return split(text, limit: max(1, rawLimit))
+    }
+
+    /// Upper bound on the rendered length. Deliberately pessimistic: a real
+    /// `<b>` survives rendering unchanged but is counted as if escaped, so the
+    /// estimate can only ever split earlier than strictly necessary — never
+    /// later, which is the direction that loses text.
+    static func renderedLength(_ text: String) -> Int {
+        text.reduce(0) { $0 + renderedCost($1) }
+    }
+
+    private static func rawPrefixLength(of text: String, renderedLimit: Int) -> Int {
+        var rendered = 0
+        var raw = 0
+        for ch in text {
+            rendered += renderedCost(ch)
+            if rendered > renderedLimit { break }
+            raw += 1
+        }
+        return raw
+    }
+
+    private static func renderedCost(_ ch: Character) -> Int {
+        switch ch {
+        case "&": return 5   // &amp;
+        case "<": return 4   // &lt;
+        case ">": return 4   // &gt;
+        default: return 1
+        }
+    }
 }

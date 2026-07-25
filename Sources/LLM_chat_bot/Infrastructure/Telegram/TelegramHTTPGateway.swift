@@ -153,15 +153,9 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         var lastMessage: TelegramMessage?
         var isFirst = true
         while !remaining.isEmpty {
-            let chunk: String
-            if remaining.count <= MessageSplitter.charLimit {
-                chunk = remaining
-                remaining = ""
-            } else {
-                let (done, rest) = MessageSplitter.split(remaining)
-                chunk = done
-                remaining = rest
-            }
+            let (chunk, rest, chunkHTML) = Self.chunkFittingHTML(remaining)
+            guard !chunk.isEmpty else { break }
+            remaining = rest
             let chunkRequest = SendMessageRequest(
                 chatID: request.chatID,
                 threadID: request.threadID,
@@ -169,13 +163,34 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
                 text: chunk,
                 replyMarkup: isFirst ? request.replyMarkup : nil
             )
-            lastMessage = try await sendSingle(chunkRequest, html: TelegramHTMLFormatter.helper(text: chunk))
+            lastMessage = try await sendSingle(chunkRequest, html: chunkHTML)
             isFirst = false
         }
         guard let lastMessage else {
             return try await sendSingle(request, html: html)
         }
         return lastMessage
+    }
+
+    /// Largest prefix of `text` whose *rendered* HTML fits Telegram's hard
+    /// limit, together with the rest and the rendering itself.
+    ///
+    /// `MessageSplitter.splitRendered` already budgets for escaping, but the
+    /// formatter can also add markup of its own (it closes tags left open by
+    /// the model), so the result is verified against the real rendering and
+    /// the budget halved until it fits. Rendering is the only authority here:
+    /// an over-long message is rejected outright and that piece of the answer
+    /// never reaches the chat.
+    static func chunkFittingHTML(_ text: String) -> (chunk: String, rest: String, html: String) {
+        var limit = MessageSplitter.charLimit
+        var (chunk, rest) = MessageSplitter.splitRendered(text, limit: limit)
+        var html = TelegramHTMLFormatter.helper(text: chunk)
+        while html.count > MessageSplitter.telegramMaxChars, limit > 256 {
+            limit /= 2
+            (chunk, rest) = MessageSplitter.splitRendered(text, limit: limit)
+            html = TelegramHTMLFormatter.helper(text: chunk)
+        }
+        return (chunk, rest, html)
     }
 
     private func sendSingle(_ request: SendMessageRequest, html: String) async throws -> TelegramMessage {
@@ -215,10 +230,16 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     func editMessage(_ request: EditMessageRequest) async throws {
+        // An edit cannot be split across two messages, so an over-long one is
+        // simply rejected (400 "message is too long") and the streamed text
+        // stops updating. Callers budget with `MessageSplitter`, which already
+        // accounts for escaping, so this only trims pathological input — and
+        // trimming shows most of the answer where the alternative shows none.
+        let html = Self.chunkFittingHTML(request.text).html
         let body = TelegramEditMessageTextBody(
             chat_id: request.chatID,
             message_id: request.messageID,
-            text: TelegramHTMLFormatter.helper(text: request.text),
+            text: html,
             parse_mode: "HTML",
             reply_markup: request.replyMarkup
         )

@@ -714,8 +714,10 @@ final class GenerationCoordinator: @unchecked Sendable {
                     fullAccumulator += chunk
                     messageAccumulator += chunk
 
-                    if messageAccumulator.count >= MessageSplitter.charLimit {
-                        let (done, remaining) = MessageSplitter.split(messageAccumulator)
+                    // Budget in *rendered* characters: escaping (`&` → `&amp;`)
+                    // is what actually counts against Telegram's 4096.
+                    if MessageSplitter.renderedLength(messageAccumulator) >= MessageSplitter.charLimit {
+                        let (done, remaining) = MessageSplitter.splitRendered(messageAccumulator)
                         let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
                         _ = await persist(prefix + done + "\n\n<i>↓ продолжение ниже</i>")
                         messageAccumulator = remaining
@@ -851,7 +853,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         }
 
         func splitAndContinue() async throws {
-            let (done, remaining) = MessageSplitter.split(messageAccumulator)
+            let (done, remaining) = MessageSplitter.splitRendered(messageAccumulator)
             try? await telegram.editMessage(
                 .init(
                     chatID: chatKey.chatID,
@@ -885,7 +887,9 @@ final class GenerationCoordinator: @unchecked Sendable {
                     fullAccumulator += chunk
                     messageAccumulator += chunk
 
-                    if messageAccumulator.count >= MessageSplitter.charLimit {
+                    // Rendered length, not raw: the escaped text is what
+                    // Telegram measures (see `MessageSplitter.splitRendered`).
+                    if MessageSplitter.renderedLength(messageAccumulator) >= MessageSplitter.charLimit {
                         try await splitAndContinue()
                         continue
                     }
