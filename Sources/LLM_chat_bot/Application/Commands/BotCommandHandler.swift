@@ -541,8 +541,8 @@ final class BotCommandHandler: @unchecked Sendable {
     private func handleInviteRedemption(token: String, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         guard let owner = await state.redeemInvite(token: token) else {
             try await sendUserFeedback(chatKey: chatKey, text: """
-                ⚠️ Пригласительная ссылка недействительна или её лицензия неактивна.
-                Попросите у администратора новую ссылку.
+                ⚠️ Ссылка не работает — она устарела или премиум-доступ пригласившего уже закончился.
+                Попросите у него новую.
                 """)
             try await sendStartGreeting(chatKey: chatKey)
             return
@@ -567,7 +567,8 @@ final class BotCommandHandler: @unchecked Sendable {
 
         guard !grantedLines.isEmpty else {
             try await sendUserFeedback(chatKey: chatKey, text: """
-                ⚠️ Не удалось активировать приглашение: у вас нет @username, а этот чат уже привязан к другой лицензии.
+                ⚠️ Приглашение не сработало: у вас нет @username, а у этого чата премиум уже открыт другим спонсором.
+                Задайте @username в настройках Telegram и откройте ссылку заново.
                 """)
             return
         }
@@ -1341,7 +1342,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 <code>/defaults role &lt;текст&gt;</code>
                 <code>/defaults historylength &lt;1–50&gt;</code>
 
-                <i>Управление пресетами меню — /presets</i>
+                <i>Заготовки для кнопок меню — /presets</i>
                 """)
         }
     }
