@@ -26,6 +26,7 @@ final class BotOrchestrator: @unchecked Sendable {
     private let modelPriceMonitor: ModelPriceMonitor?
     private let cryptoMonitor: CryptoPaymentMonitor?
     private let reminderService: SubscriptionReminderService
+    private let botUsername: String
 
     private let backgroundTasks = LockedValue<[Task<Void, Never>]>([])
     private let shutdownStarted = LockedValue(false)
@@ -58,6 +59,7 @@ final class BotOrchestrator: @unchecked Sendable {
         self.flags = flags
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoMonitor = cryptoMonitor
+        self.botUsername = botUsername
 
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
         let reminderService = SubscriptionReminderService(
@@ -640,10 +642,14 @@ final class BotOrchestrator: @unchecked Sendable {
             return
         }
 
-        // /buy and /start are allowed before the access gate
+        // /buy and /start are allowed before the access gate. Parsed, not
+        // prefix-matched: `hasPrefix("/buy")` also let `/buying` (and any
+        // `/start…`) skip the gate, while the parser is the thing that knows
+        // about `/buy@botname` and the test-mode suffix.
         if let text = message.text {
-            let isBuyOrStart = text.hasPrefix("/buy") || text.hasPrefix("/start")
-            if isBuyOrStart {
+            let suffix = isPrivate ? nil : await state.suffix(chatKey: chatKey)
+            let parsed = ParsedBotCommand.parse(from: text, botUsername: botUsername, suffix: suffix)
+            if parsed.name == .buy || parsed.name == .start {
                 _ = try? await commandHandler.handleIfCommand(text: text, chatKey: chatKey, fromUser: message.from, isPrivate: isPrivate)
                 return
             }

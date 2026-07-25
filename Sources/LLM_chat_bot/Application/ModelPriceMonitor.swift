@@ -104,7 +104,7 @@ actor ModelPriceMonitor {
                             chatID: chatKey.chatID,
                             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                             replyTo: nil,
-                            text: "⚠️ <b>Модель стала платной</b>\n\n<code>\(modelID)</code> теперь требует оплату на OpenRouter.\n\nПри следующем сообщении будет автоматически выбрана бесплатная модель.",
+                            text: "⚠️ <b>Модель стала платной</b>\n\n<code>\(modelID)</code> теперь требует оплату на OpenRouter.\n\nЕсли у чата есть премиум или баланс — ничего не меняется, ответы идут на ней. Без них она доступна в пределах дневной порции умных ответов, а когда порция закончится, бот переключится на бесплатную модель.",
                             replyMarkup: nil
                         ))
                     }

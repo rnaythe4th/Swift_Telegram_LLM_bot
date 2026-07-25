@@ -2300,8 +2300,18 @@ actor ChatContextStore {
         _explorerCursors = snapshot?.explorerCursors ?? [:]
     }
 
+    /// DMs of the actual super-admins — the channel for owner-only notices.
+    ///
+    /// Resolved from the super-admin list through `privateChatID`, not from
+    /// chat ownership: a DM is only ever assigned to a tenant by
+    /// `autoAssignIfNeeded`, so an owner who never triggered that (or who is a
+    /// super-admin without being the root tenant) received nothing at all,
+    /// while any chat someone had pointed at the root tenant got mail meant for
+    /// the owner. Blocked DMs drop out, like everywhere else.
     func superAdminPrivateChats() -> [ChatKey] {
-        contexts.keys.filter { $0.chatID > 0 && chatOwnership[$0.chatID] == defaultOwnerKey }.map { $0 }
+        superAdminUsernames
+            .compactMap { privateChatID(forKey: $0) }
+            .map { ChatKey(chatID: $0, threadID: 0) }
     }
 
     /// Why this chat does (or doesn't) have smart models right now. Same order

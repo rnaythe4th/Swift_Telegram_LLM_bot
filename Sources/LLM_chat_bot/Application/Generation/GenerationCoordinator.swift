@@ -6,6 +6,12 @@ private enum ReplyContentResolution {
     case content(UserInputContent)
 }
 
+/// The answer outgrew one message and the continuation message could not be
+/// sent, so there is nowhere left to stream. Its own type because the only
+/// alternative on hand — `CancellationError` — makes the bot report «⏹
+/// Остановлено» to a user who stopped nothing.
+private struct ContinuationUnavailable: Error {}
+
 /// Everything a turn needs to know about who asked and where. A real Telegram
 /// message yields one; so does a synthetic turn started from a button (an
 /// onboarding example, roadmap step 9), which has no message of its own.
@@ -463,6 +469,11 @@ final class GenerationCoordinator: @unchecked Sendable {
 
         let generationID = await sessionRegistry.register(chatKey: chatKey)
 
+        // Typing runs while the answer has nowhere to appear yet: waiting for a
+        // slot on the global limiter and for the first placeholder. Once the
+        // stream starts the visible progress is the draft animation or the
+        // placeholder being edited, so `defer` stops it as soon as
+        // `streamReply` has handed the work to its task.
         let typingTask = Task {
             while !Task.isCancelled {
                 try? await self.telegram.sendChatAction(
@@ -839,6 +850,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         var lastEdit = clock.now
         var isCancelled = false
         var isFirstMessage = true
+        var continuationFailed = false
 
         func sendContinuationPlaceholder() async -> TelegramMessage? {
             try? await telegram.sendMessage(
@@ -863,7 +875,9 @@ final class GenerationCoordinator: @unchecked Sendable {
                 )
             )
             guard let next = await sendContinuationPlaceholder() else {
-                throw CancellationError()
+                // Nowhere to put the rest of the answer. Not a cancellation:
+                // reporting it as one would tell the user they pressed Stop.
+                throw ContinuationUnavailable()
             }
             currentPlaceholder = next
             messageAccumulator = remaining
@@ -920,6 +934,11 @@ final class GenerationCoordinator: @unchecked Sendable {
                     streamMeta = meta
                 }
             }
+        } catch is ContinuationUnavailable {
+            // Keep what has already been streamed and say what happened — the
+            // alternative (an error message replacing the placeholder) throws
+            // away the part of the answer the user can already read.
+            continuationFailed = true
         } catch is CancellationError {
             isCancelled = true
         } catch {
@@ -943,7 +962,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             isCancelled = true
         }
 
-        let finalText: String
+        var finalText: String
         if isCancelled {
             let stopNotice = await self.cancellationNotice(for: generationID)
             finalText = messageAccumulator.isEmpty
@@ -963,6 +982,9 @@ final class GenerationCoordinator: @unchecked Sendable {
             finalText = messageAccumulator.isEmpty
                 ? "<i>Пустой ответ.</i>\(footer)"
                 : prefix + messageAccumulator + footer
+        }
+        if continuationFailed {
+            finalText += "\n\n⚠️ <i>Ответ пришлось оборвать: не удалось отправить продолжение. Повторите запрос.</i>"
         }
 
         try? await self.telegram.editMessage(

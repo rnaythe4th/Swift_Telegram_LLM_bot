@@ -1,6 +1,7 @@
 import Foundation
 
-/// Pay-as-you-go wallet of one user (keyed by lowercased @username).
+/// Pay-as-you-go wallet of one user (keyed by `UserKey`, so it survives a
+/// rename — see `UserDirectory`).
 ///
 /// The balance lives in the *billed* (marked-up) price world: deposits and
 /// deductions are what the user sees. `spentRealUsd` keeps the provider's

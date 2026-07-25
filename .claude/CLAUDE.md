@@ -214,7 +214,7 @@ BotOrchestrator.dispatch(update:)
                           BotOrchestrator.route(message:)
                             1. recordChatMeta (title/@username для админ-тулинга)
                             2. successful_payment? → handleSuccessfulPayment (идемпотентно)
-                            3. /buy или /start? → пропустить до access-gate
+                            3. /buy или /start (через `CommandParser`, не по префиксу)? → пропустить до access-gate
                                (`/start ref_<userID>` → привязка реферала, §7)
                             4. autoAssignIfNeeded (привязать чат к тенанту отправителя)
                             5. BotCommandHandler.handleIfCommand → true? стоп
@@ -812,6 +812,9 @@ Gemini 3.1 Flash Lite, DeepSeek V4 Pro/Flash, Grok 4.3. Дефолтная мо�
    пополнения (событие `balanceEmpty`). Повторов не будет: без положительного
    баланса `billingKey` больше не адресует кошелёк.
 3. Регистрирует `GenerationID` в `SessionRegistry`, запускает **typing**-индикатор.
+   Typing живёт ровно до старта стрима (ожидание слота лимитера и первого
+   плейсхолдера) — дальше прогресс видно по draft-анимации или по правкам
+   плейсхолдера, поэтому `defer` его гасит.
 4. `generationLimiter.acquire()` — глобальный кап одновременных стримов.
 5. Оборачивает текст: `"Тебе пишет @username: <text>"`. Вложения не пишутся в
    историю (только текст) — экономия хранилища; в запрос идут с медиа.
@@ -994,7 +997,9 @@ memory-only режим, запись отключена**, чтобы не за�
 ## 12. Команды (`BotCommandName` / `BotCommandHandler`)
 
 Парсинг: `/cmd`, `/cmd@botusername`, суффикс тест-режима (`/model3` при
-`suffix=3`). До access-gate разрешены только `/start` и `/buy`.
+`suffix=3`). До access-gate разрешены только `/start` и `/buy` — распознаются тем
+же `CommandParser`, а не по префиксу строки (иначе `/buying` и `/startsomething`
+проходили бы гейт).
 
 **Пользовательские / настройки чата**: `/setrole`, `/clear_history`, `/settemp`,
 `/model`, `/historylength`, `/show_model`, `/show_cost`, `/show_tokens`,
@@ -1075,7 +1080,13 @@ crypto/…), `/inspect`, `/ads` (+ `/ads promo` — само-реклама, §7
 - **`ModelPriceMonitor`** (каждые 5 мин + initial): тянет `openrouter.ai/api/v1/models`,
   кэширует цены (`openRouterModelPrices`) и множество бесплатных моделей
   (`openRouterFreeModelIDs`). Если модель, используемая в системе, стала платной —
-  уведомляет затронутые чаты (или суперадмина, если модель «закреплена» в free).
+  уведомляет затронутые чаты (или суперадминов, если модель «закреплена» в free).
+  Адреса суперадминов — `superAdminPrivateChats()`, то есть личка **каждого**
+  суперадмина через `privateChatID` (а не чаты, привязанные к root-тенанту:
+  личка попадает в `chatOwnership` только через `autoAssignIfNeeded`, поэтому
+  часть владельцев не получала ничего). Текст для чатов не обещает автоматической
+  подмены модели: она случится, только когда у чата кончится дневная порция
+  премиума (§9).
 - **`CryptoPaymentMonitor`** (каждые 30с): поллит эксплореры, матчит входящие
   переводы к открытым инвойсам, засчитывает частичные оплаты, экспайрит
   просроченные. Позицию сканирования держит **стор**, а не актор монитора (§7,
