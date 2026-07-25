@@ -233,7 +233,10 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             validStatusCodes: 100..<600
         )
 
-        await rateLimiter?.waitForMessageSlot(chatID: request.chatID)
+        // Edits go through the bot-wide budget only: the per-chat group bucket
+        // counts sends (20/min), and the streaming edit loop would eat all of
+        // it, stalling the reply mid-generation.
+        await rateLimiter?.waitForEditSlot()
         try await with429Retry {
             let raw = try await network.perform(spec)
             try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)

@@ -32,8 +32,10 @@ struct DeepSeekStreamChoice: Decodable {
 }
 
 struct DeepSeekStreamChunk: Decodable {
-    let choices: [DeepSeekStreamChoice]
+    let choices: [DeepSeekStreamChoice]?
     let usage: DeepSeekUsage?
+    /// An OpenAI-compatible API can report the failure inside a 200 OK stream.
+    let error: ProviderStreamErrorPayload?
 }
 
 struct DeepSeekUsage: Decodable {

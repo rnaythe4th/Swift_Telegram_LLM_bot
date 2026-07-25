@@ -337,12 +337,15 @@ actor CryptoPaymentService {
             copy.status = .paid
             await state.upsertCryptoInvoice(copy)
             var activation: SubscriptionActivation? = nil
+            var claim: ChatContextStore.ChatClaimOutcome = .unknownTenant
             var creditedCents: Int? = nil
             var creditedBalanceUsd: Double = 0
             switch copy.resolvedPurpose {
             case .subscription:
                 let result = await state.activatePaidSubscription(username: copy.username)
-                await state.assignChat(chatID: copy.userChatID, to: copy.username)
+                // Same rule as the Stars/card path: a group that someone else's
+                // live subscription pays for stays with them.
+                claim = await state.claimChatForPayment(chatID: copy.userChatID, payerKey: copy.username)
                 // Same post-payment bookkeeping as the Stars/card path: a
                 // winback offer is one-shot, and the funnel counts the sale.
                 if await state.consumeWinbackDiscount(username: copy.username) != nil {
@@ -368,7 +371,7 @@ actor CryptoPaymentService {
             // path does (CLAUDE.md §17).
             await persistence?.flushNow()
             if let activation {
-                await notifyFullPayment(copy, activation: activation)
+                await notifyFullPayment(copy, activation: activation, claim: claim)
             }
             if let cents = creditedCents {
                 await notifyCreditPayment(copy, cents: cents, balanceUsd: creditedBalanceUsd)
@@ -412,7 +415,11 @@ actor CryptoPaymentService {
         logger.info("crypto: referral conversion bonus \(bonus.inviterLabel) +$\(bonus.amountUsd)")
     }
 
-    private func notifyFullPayment(_ invoice: CryptoInvoice, activation: SubscriptionActivation) async {
+    private func notifyFullPayment(
+        _ invoice: CryptoInvoice,
+        activation: SubscriptionActivation,
+        claim: ChatContextStore.ChatClaimOutcome
+    ) async {
         // The invoice carries the payer's storage key; the notice names them.
         let payerLabel = await state.displayLabel(forKey: invoice.username)
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
@@ -421,6 +428,27 @@ actor CryptoPaymentService {
         // Telegram convention: negative chat IDs are groups/supergroups.
         let isGroup = invoice.userChatID < 0
         let subscriptionLine: String
+        // The group is still paid for by someone else — say so instead of
+        // crediting the payer with access they did not open here.
+        if case .keptSponsor(let sponsor) = claim {
+            let text = """
+            ✅ <b>Оплата получена!</b>
+
+            Принято: <b>\(amount) \(invoice.asset.symbol)</b> (\(invoice.asset.displayLabel))
+
+            \(payerLabel), премиум-доступ активирован для вас — в личке с ботом и в ваших чатах.
+            Здесь премиум уже открыл \(sponsor) — этот чат остаётся за ним.
+            """
+            _ = try? await telegram.sendMessage(.init(
+                chatID: invoice.userChatID,
+                threadID: nil,
+                replyTo: nil,
+                text: text,
+                replyMarkup: nil
+            ))
+            logger.info("crypto: invoice \(invoice.id) paid by \(payerLabel); chat \(invoice.userChatID) kept by sponsor \(sponsor)")
+            return
+        }
         switch activation {
         case .started(let until):
             subscriptionLine = isGroup

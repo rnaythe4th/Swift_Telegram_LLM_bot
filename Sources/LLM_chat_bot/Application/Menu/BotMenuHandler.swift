@@ -36,6 +36,30 @@ private enum MenuPage: String {
     case referral = "ref"
     case adminInvite = "admininvite"
     case close
+
+    /// Pages whose body belongs to one person: their invite link (anyone who
+    /// reads it gets paid access at the owner's expense), their referral link,
+    /// everyone's wallets. In a group the menu is a single shared message —
+    /// whoever taps, all members read the result — so these are DM-only.
+    var isPersonal: Bool {
+        switch self {
+        case .referral, .adminInvite, .superBalances: return true
+        default: return false
+        }
+    }
+
+    var privateOnlyNotice: String {
+        switch self {
+        case .referral:
+            return "🎁 Ссылка-приглашение личная — откройте её в личке с ботом: /ref"
+        case .adminInvite:
+            return "🔗 Ссылка-приглашение личная: по ней доступ выдаётся за ваш счёт. Откройте /menu в личке с ботом."
+        case .superBalances:
+            return "💰 Балансы — личные данные людей. Откройте /menu в личке с ботом."
+        default:
+            return "Эта страница доступна только в личке с ботом: /menu"
+        }
+    }
 }
 
 final class BotMenuHandler: @unchecked Sendable {
@@ -580,16 +604,6 @@ final class BotMenuHandler: @unchecked Sendable {
             case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superReferrals:
                 guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                    return
-                }
-            case .referral:
-                // The link belongs to a person, not to a group: in a group the
-                // menu is shared, so there is no single owner to render it for.
-                guard chatKey.chatID > 0 else {
-                    try? await telegram.answerCallback(
-                        callbackQueryID: callback.id,
-                        text: "🎁 Ссылка-приглашение личная — откройте её в личке с ботом: /ref"
-                    )
                     return
                 }
             case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults, .adminInvite:
@@ -1554,6 +1568,12 @@ final class BotMenuHandler: @unchecked Sendable {
         message: MaybeInaccessibleMessage,
         purchaseSource: PurchaseSource = .menu
     ) async throws {
+        // A shared menu message must never render a personal page: the answer
+        // would be visible to everyone in the group, not just to whoever tapped.
+        if page.isPersonal, chatKey.chatID < 0 {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: page.privateOnlyNotice)
+            return
+        }
         // Funnel: reaching the purchase page counts as "opened purchase", and
         // the button that led here is counted separately — that is how the
         // pain-point upsells get compared with the plain menu (steps 5 and 7).
@@ -1613,6 +1633,17 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func renderPage(_ page: MenuPage, chatKey: ChatKey, username: String? = nil) async -> (String, InlineKeyboardMarkup) {
+        // Second line of defence for the paths that render without a callback
+        // (a menu refreshed after text input): a personal page never draws its
+        // contents into a group message.
+        if page.isPersonal, chatKey.chatID < 0 {
+            var rows: [[InlineKeyboardButton]] = []
+            if !botUsername.isEmpty {
+                rows.append([InlineKeyboardButton(text: "💬 Открыть бота", url: "https://t.me/\(botUsername)")])
+            }
+            rows.append(navButtons())
+            return (page.privateOnlyNotice, InlineKeyboardMarkup(inline_keyboard: rows))
+        }
         switch page {
         case .main:
             return await renderMain(chatKey: chatKey, username: username)
@@ -2201,9 +2232,16 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func renderPay(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+        // The purchase page itself makes sense in a group (anyone can open
+        // premium for the chat), but the menu message there is shared: balance,
+        // subscription dates and a personal winback discount would become public
+        // (CLAUDE.md §17). In a group we quote the price list and keep every
+        // personal number for the DM.
+        let isGroup = chatKey.chatID < 0
+        let personalKey: String? = isGroup ? nil : username
         // Prices come from one place so a winback discount (roadmap step 8) is
         // quoted here exactly as it will be charged.
-        let pricing = await state.subscriptionPricing(username: username)
+        let pricing = await state.subscriptionPricing(username: personalKey)
         let starsPrice = pricing.stars
         let cryptoCents = pricing.cryptoCents
         let cryptoAssets: [CryptoAsset] = await {
@@ -2218,7 +2256,31 @@ final class BotMenuHandler: @unchecked Sendable {
         var rows: [[InlineKeyboardButton]] = []
         var unlimited = false
 
-        if let username {
+        if isGroup {
+            // Public facts only: who (if anyone) already pays for this chat.
+            if let sponsor = await state.chatSponsor(chatID: chatKey.chatID, askerUsername: nil) {
+                lines.append("✅ Здесь премиум уже работает — его открыл <b>\(sponsor)</b>.")
+                lines.append("")
+                lines.append("""
+                Своя подписка нужна, если хотите то же самое <b>в личке с ботом и в своих чатах</b>:
+                • Умные модели — GPT, Claude, Gemini (точнее и способнее бесплатных)
+                • Без рекламы и без дневных лимитов
+                • Одна оплата — доступ во всех ваших чатах, на <b>\(ChatContextStore.subscriptionDays) дней</b>
+                """)
+            } else {
+                lines.append("""
+                Что открывается:
+                • Умные модели — GPT, Claude, Gemini (точнее и способнее бесплатных)
+                • Без рекламы
+                • Без дневных лимитов
+                • Работает у всех в этом чате — и в вашей личке с ботом
+
+                Одна оплата — доступ во всех ваших чатах, на <b>\(ChatContextStore.subscriptionDays) дней</b>.
+                """)
+            }
+            lines.append("")
+            lines.append("<i>Цены — общие. Ваш баланс, срок вашей подписки и личные скидки видны только в личке с ботом: /menu.</i>")
+        } else if let username = personalKey {
             if await state.isTenant(username: username) {
                 let sub = await state.tenantSubscription(ownerUsername: username)
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"

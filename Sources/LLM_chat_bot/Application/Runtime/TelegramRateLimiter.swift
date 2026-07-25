@@ -95,6 +95,18 @@ actor TelegramRateLimiter {
         }
     }
 
+    /// Waits for the global budget only — used for message *edits*.
+    ///
+    /// Telegram's "20 messages per minute per group" applies to sending, not to
+    /// `editMessageText`. Charging the streaming edit loop (one edit every ~3s)
+    /// to the group bucket spends the chat's entire minute budget on one reply:
+    /// every later call then sleeps ~3s *inside* the `for try await` over the
+    /// SSE stream, so the answer visibly stalls and the unread provider output
+    /// piles up in memory. Edits still queue behind the bot-wide budget.
+    func waitForEditSlot() async {
+        await waitForGlobalSlot()
+    }
+
     /// Waits for the global message budget only (callback answers, deletes).
     func waitForGlobalSlot() async {
         while true {

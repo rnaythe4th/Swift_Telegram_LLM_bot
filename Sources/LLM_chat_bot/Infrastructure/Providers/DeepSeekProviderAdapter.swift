@@ -88,6 +88,18 @@ final class DeepSeekProviderAdapter: ProviderGatewayPort, @unchecked Sendable {
                         }
                         
                         guard let json = payload.data(using: .utf8) else { continue }
+                        // Same as OpenRouter: an in-stream error payload must
+                        // end the generation, not fall through as empty text.
+                        if let failure = parseError(jsonData: json) {
+                            continuation.finish(
+                                throwing: ProviderAdapterError.upstream(
+                                    provider: .deepseek,
+                                    code: failure.code,
+                                    message: failure.message
+                                )
+                            )
+                            return
+                        }
                         if let usage = parseUsage(jsonData: json) {
                             capturedUsage = usage
                         }
@@ -116,7 +128,11 @@ final class DeepSeekProviderAdapter: ProviderGatewayPort, @unchecked Sendable {
         (try? JSONDecoder().decode(DeepSeekStreamChunk.self, from: jsonData))?.usage
     }
     
+    private func parseError(jsonData: Data) -> ProviderStreamErrorPayload? {
+        (try? JSONDecoder().decode(DeepSeekStreamChunk.self, from: jsonData))?.error
+    }
+
     private func parseDelta(jsonData: Data) -> String? {
-        (try? JSONDecoder().decode(DeepSeekStreamChunk.self, from: jsonData))?.choices.first?.delta?.content
+        (try? JSONDecoder().decode(DeepSeekStreamChunk.self, from: jsonData))?.choices?.first?.delta?.content
     }
 }

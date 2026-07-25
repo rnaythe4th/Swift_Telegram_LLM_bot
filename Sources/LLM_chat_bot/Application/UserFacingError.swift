@@ -53,6 +53,14 @@ enum UserFacingError {
             switch adapter {
             case .invalidRequestType(let provider):
                 return "Сбой при обращении к сервису \(provider.commandValue). Попробуйте ещё раз или смените сервис в /menu."
+            case .upstream(_, let code, _):
+                // The provider's own wording is English (and often internal):
+                // the code is what carries actionable meaning, and it already
+                // has a Russian phrasing here. The raw detail stays in the logs.
+                if let code {
+                    return httpStatusReason(code)
+                }
+                return "Сервис ИИ прервал ответ. Попробуйте ещё раз или выберите другую модель в /menu → 🤖 Модель."
             }
         }
 

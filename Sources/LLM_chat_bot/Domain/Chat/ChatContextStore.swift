@@ -955,6 +955,39 @@ actor ChatContextStore {
         return true
     }
 
+    /// What a payment did with the chat it was made in.
+    enum ChatClaimOutcome: Sendable {
+        case assigned
+        /// The payer has no tenant record (should not happen after activation).
+        case unknownTenant
+        /// A live subscription of someone else already pays for this group, so
+        /// the chat stays with them.
+        case keptSponsor(label: String)
+    }
+
+    /// Attaches the chat a payment was made in to the payer — but never takes a
+    /// group away from a sponsor whose subscription is still running.
+    ///
+    /// Buying premium inside someone else's group used to overwrite ownership
+    /// silently: the sponsor lost the chat from their list, from `ownedGroupChatIDs`
+    /// (so renewal reminders stopped mentioning it) and from the "premium opened
+    /// by @X" credit — while still paying for it. Private chats are unaffected:
+    /// the payer's own DM always follows the payer.
+    func claimChatForPayment(chatID: Int, payerKey: String) -> ChatClaimOutcome {
+        let key = userKeyOrRaw(payerKey)
+        guard tenants[key] != nil else { return .unknownTenant }
+        if chatID < 0,
+           let current = chatOwnership[chatID],
+           current != key,
+           tenants[current]?.isActive == true {
+            return .keptSponsor(label: displayLabel(forKey: current))
+        }
+        chatOwnership[chatID] = key
+        dirtyOwnership.insert(chatID)
+        deletedOwnership.remove(chatID)
+        return .assigned
+    }
+
     @discardableResult
     func unassignChat(chatID: Int) -> String? {
         let removed = chatOwnership.removeValue(forKey: chatID)

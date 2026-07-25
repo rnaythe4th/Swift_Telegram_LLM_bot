@@ -71,11 +71,20 @@ enum ProviderStreamEvent: Sendable {
 
 enum ProviderAdapterError: Error, LocalizedError {
     case invalidRequestType(ServiceProvider)
-    
+    /// The provider ended the generation from inside the SSE stream (HTTP 200
+    /// with an `error` payload): rate limit, exhausted credit, moderation.
+    /// Carries the upstream detail for the logs; the user-facing wording is
+    /// built by `UserFacingError`.
+    case upstream(provider: ServiceProvider, code: Int?, message: String?)
+
     var errorDescription: String? {
         switch self {
         case .invalidRequestType(let provider):
             return "Invalid request type for \(provider.commandValue) adapter"
+        case .upstream(let provider, let code, let message):
+            let codePart = code.map { " \($0)" } ?? ""
+            let detail = message.map { ": \($0)" } ?? ""
+            return "Upstream error from \(provider.commandValue)\(codePart)\(detail)"
         }
     }
 }

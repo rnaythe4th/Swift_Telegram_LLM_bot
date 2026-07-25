@@ -258,6 +258,15 @@ dirtyConfigs.insert(.userDirectory)
 
 ### B8. Оплата в чужой группе перехватывает её у активного спонсора
 
+> ✅ **Исправлено** (вариант 2). `ChatContextStore.claimChatForPayment(chatID:payerKey:)`
+> → `ChatClaimOutcome` (`assigned` / `unknownTenant` / `keptSponsor(label:)`):
+> группу с активной чужой подпиской платёж не забирает, личка покупателя
+> (`chatID > 0`) всегда следует за ним. Оба платёжных пути (Stars/карта в
+> `BotOrchestrator`, крипта в `CryptoPaymentService.notifyFullPayment`) при
+> `.keptSponsor` шлют другой текст: «премиум активирован для вас — в личке и
+> ваших чатах; здесь премиум уже открыл @A». `assignChat` остался для ручной
+> привязки. CLAUDE.md §7/§17.
+
 **Где:** `Application/BotOrchestrator.swift:700`
 (`await state.assignChat(chatID: message.chat.id, to: payerKey)`) и
 `Application/Payments/CryptoPaymentService.swift:322` (то же самое).
@@ -282,6 +291,15 @@ dirtyConfigs.insert(.userDirectory)
 ---
 
 ### B9. Личные данные утекают в общий чат через меню
+
+> ✅ **Исправлено** (вариант 1 для страниц-персоналок + вариант 2 для покупки).
+> `MenuPage.isPersonal` (`ref`, `admininvite`, `superbal`) + `privateOnlyNotice`:
+> `showPage` в группе отвечает тостом «откройте в личке» и ничего не рендерит,
+> `renderPage` держит тот же гейт для пути «меню после текстового ввода» (там нет
+> callback). Отдельный `nav`-гейт для `ref` больше не нужен и убран. `renderPay`
+> в группе берёт цены `subscriptionPricing(username: nil)` и печатает только
+> публичное (спонсор чата + общий оффер): ни баланса, ни срока своей подписки, ни
+> персональной winback-скидки. CLAUDE.md §13/§17.
 
 **Где:** `Application/Menu/BotMenuHandler.swift:1509-1511` (`showPage` рендерит
 страницу под тапнувшего и **редактирует общее сообщение**), плюс конкретные
@@ -379,6 +397,15 @@ slot = picked            // ← если все слоты заняты, тих�
 
 ### B12. Ошибки провайдера в SSE-потоке превращаются в «Пустой ответ»
 
+> ✅ **Исправлено.** Общий DTO `ProviderStreamErrorPayload` (код читается и
+> числом, и строкой; подхватывает `metadata.raw`/`reasons`), поле `error` в
+> `OpenRouterStreamChunk` и `DeepSeekStreamChunk`, оба адаптера завершают поток
+> `ProviderAdapterError.upstream(provider:code:message:)`. `UserFacingError`
+> переводит код через существующий `httpStatusReason` (402 «у бота закончились
+> средства», 429 «слишком много запросов» и т.д.), английский оригинал остаётся
+> в логах `stream failed: …`. Ход не списывается — работает штатный
+> `cancelPendingTurn` + `refundDailyPremium`. CLAUDE.md §8/§17.
+
 **Где:** `Infrastructure/Providers/OpenRouterProviderAdapter.swift:102-109`.
 
 ```swift
@@ -407,6 +434,16 @@ found» и т.п.) с HTTP 200. Этот payload не парсится ни ка
 ---
 
 ### B13. Групповой стриминг упирается в лимит 20 сообщений/мин
+
+> ✅ **Исправлено** (вариант 1). `TelegramRateLimiter.waitForEditSlot()` —
+> только глобальное ведро; `editMessage` больше не занимает per-chat бюджет
+> группы (20/мин относится к отправке, не к `editMessageText`). Суммарный
+> бюджет не вырос: правки делят те же ~18/с с обычными сообщениями.
+> **Пункт 3 (`bufferingPolicy`) сознательно не сделан**: `.bufferingNewest(N)`
+> у `AsyncThrowingStream` не тормозит продюсера, а **выбрасывает** элементы —
+> для потока текста это молча испорченный ответ. С устранённым залипанием
+> консьюмер не отстаёт, а буфер и так ограничен размером одного ответа, который
+> всё равно целиком лежит в `fullAccumulator`.
 
 **Где:** `Infrastructure/Telegram/TelegramHTTPGateway.swift:222`
 (`editMessage` → `waitForMessageSlot(chatID:)`),

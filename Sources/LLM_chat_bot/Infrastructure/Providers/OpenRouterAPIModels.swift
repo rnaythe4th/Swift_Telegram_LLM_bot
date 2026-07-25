@@ -99,9 +99,9 @@ struct OpenRouterModelPricing: Decodable {
     let completion: String
 }
 
-struct OpenRouterStreamChunk: Codable {
-    struct Choice: Codable {
-        struct Delta: Codable {
+struct OpenRouterStreamChunk: Decodable {
+    struct Choice: Decodable {
+        struct Delta: Decodable {
             let content: String?
             let role: String?
             let reasoning: String?
@@ -114,4 +114,6 @@ struct OpenRouterStreamChunk: Codable {
 
     let choices: [Choice]?
     let usage: OpenRouterResponseUsage?
+    /// OpenRouter reports upstream failures inside the stream, with HTTP 200.
+    let error: ProviderStreamErrorPayload?
 }

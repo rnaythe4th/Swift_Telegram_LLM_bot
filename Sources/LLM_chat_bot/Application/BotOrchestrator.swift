@@ -701,7 +701,8 @@ final class BotOrchestrator: @unchecked Sendable {
         }
 
         let activation = await state.activatePaidSubscription(username: payerKey)
-        await state.assignChat(chatID: message.chat.id, to: payerKey)
+        // Never move a group away from a sponsor who is still paying for it.
+        let claim = await state.claimChatForPayment(chatID: message.chat.id, payerKey: payerKey)
         await state.markPaymentProcessed(chargeID: chargeID)
         // A winback offer is one-shot: consume it whether or not it was still
         // valid, and count the ones that actually brought the payment back.
@@ -724,6 +725,26 @@ final class BotOrchestrator: @unchecked Sendable {
         let isPrivate = message.chat.type == "private"
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy"
+        // Someone else's subscription still covers this group: congratulating
+        // the payer on "opening premium here" would be a lie, and the sponsor
+        // keeps the chat.
+        if case .keptSponsor(let sponsor) = claim {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: message.chat.id,
+                threadID: message.message_thread_id,
+                replyTo: nil,
+                text: """
+                ✅ <b>Оплата получена!</b>
+
+                \(payerLabel), премиум-доступ активирован для вас — в личке с ботом и в ваших чатах.
+
+                Здесь премиум уже открыл \(sponsor) — этот чат остаётся за ним.
+                """,
+                replyMarkup: nil
+            ))
+            logger.info("payment processed for \(payerLabel): chat \(message.chat.id) kept by sponsor \(sponsor)")
+            return
+        }
         let text: String
         switch activation {
         case .started(let until):

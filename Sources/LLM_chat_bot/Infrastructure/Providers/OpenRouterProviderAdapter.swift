@@ -100,6 +100,20 @@ final class OpenRouterProviderAdapter: ProviderGatewayPort, @unchecked Sendable 
                         }
                         
                         guard let json = payload.data(using: .utf8) else { continue }
+                        // OpenRouter reports rate limits, exhausted credit,
+                        // moderation and "no endpoints" inside the stream with
+                        // HTTP 200. Ignoring that payload turns a real failure
+                        // into "Пустой ответ." with nothing in the logs.
+                        if let failure = parseError(jsonData: json) {
+                            continuation.finish(
+                                throwing: ProviderAdapterError.upstream(
+                                    provider: .openrouter,
+                                    code: failure.code,
+                                    message: failure.message
+                                )
+                            )
+                            return
+                        }
                         if let usage = parseUsage(jsonData: json) {
                             capturedUsage = usage
                         }
@@ -126,6 +140,10 @@ final class OpenRouterProviderAdapter: ProviderGatewayPort, @unchecked Sendable 
     
     private func parseUsage(jsonData: Data) -> OpenRouterResponseUsage? {
         (try? JSONDecoder().decode(OpenRouterStreamChunk.self, from: jsonData))?.usage
+    }
+
+    private func parseError(jsonData: Data) -> ProviderStreamErrorPayload? {
+        (try? JSONDecoder().decode(OpenRouterStreamChunk.self, from: jsonData))?.error
     }
     
     private func parseDelta(jsonData: Data) -> String? {
