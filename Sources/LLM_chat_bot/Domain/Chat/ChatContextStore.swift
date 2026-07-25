@@ -256,6 +256,11 @@ actor ChatContextStore {
 
     private var _pendingAdminInputs: [ChatKey: AdminPendingInput] = [:]
 
+    /// Who armed the chat's current "waiting for a value" state. The waits
+    /// themselves are keyed by chat (the menu message they belong to lives
+    /// there), but in a group the next message can come from anyone.
+    private var _pendingInputOwners: [ChatKey: String] = [:]
+
     init(
         ownerUsername: String,
         model: String,
@@ -2115,6 +2120,42 @@ actor ChatContextStore {
                 && $0.asset == asset
                 && $0.receivingAddress.lowercased() == target
         }
+    }
+
+    // MARK: - Pending input ownership
+
+    /// Is this chat waiting for a typed value of any kind?
+    func hasAnyPendingInput(chatKey: ChatKey) -> Bool {
+        _pendingInputs[chatKey] != nil
+            || _pendingStarsPriceInputs[chatKey] != nil
+            || _pendingStarsPerUsdInputs[chatKey] != nil
+            || _pendingFreeModelInputs[chatKey] != nil
+            || _pendingCryptoPriceInputs[chatKey] != nil
+            || _pendingCryptoAddressInputs[chatKey] != nil
+            || _pendingCryptoPoolAddInputs[chatKey] != nil
+            || _pendingAdminInputs[chatKey] != nil
+    }
+
+    /// Remembers who a live wait belongs to; forgets it once nothing is pending.
+    /// Called after every menu action, so a new wait always carries its owner
+    /// and a consumed one leaves nothing behind.
+    func notePendingInputOwner(_ userKey: String?, chatKey: ChatKey) {
+        guard hasAnyPendingInput(chatKey: chatKey) else {
+            _pendingInputOwners.removeValue(forKey: chatKey)
+            return
+        }
+        guard let userKey else { return }
+        _pendingInputOwners[chatKey] = userKey
+    }
+
+    /// Owner of the chat's live wait, or nil when nothing is pending (a stale
+    /// entry left by a consumed wait is dropped here rather than lingering).
+    func pendingInputOwner(chatKey: ChatKey) -> String? {
+        guard hasAnyPendingInput(chatKey: chatKey) else {
+            _pendingInputOwners.removeValue(forKey: chatKey)
+            return nil
+        }
+        return _pendingInputOwners[chatKey]
     }
 
     func setAdminPendingInput(_ input: AdminPendingInput, chatKey: ChatKey) {

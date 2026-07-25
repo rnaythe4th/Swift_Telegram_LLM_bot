@@ -71,6 +71,18 @@ final class BotMenuHandler: @unchecked Sendable {
         self.reminderService = reminderService
     }
 
+    /// Plain chat message, no keyboard — used for the short confirmations and
+    /// refusals that follow a typed value.
+    private func sendPlain(chatKey: ChatKey, text: String) async {
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: text,
+            replyMarkup: nil
+        ))
+    }
+
     /// Storage key of whoever tapped the button, always resolvable: a callback
     /// always carries a userID, while a @username is optional and rentable. Role
     /// gates keyed off the raw handle locked out anyone without one — including
@@ -97,6 +109,9 @@ final class BotMenuHandler: @unchecked Sendable {
             let alertText = UserFacingError.shortMessage(error, context: "Ошибка")
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: alertText)
         }
+        // Whatever the action armed (if anything) belongs to whoever tapped:
+        // in a group the next message can come from someone else entirely.
+        await state.notePendingInputOwner(invokerKey(callback), chatKey: chatKey)
     }
 
     /// `username` here — and everywhere it is threaded onward — is the
@@ -106,6 +121,15 @@ final class BotMenuHandler: @unchecked Sendable {
     func processTextInput(text: String, chatKey: ChatKey, userID: Int?, username: String?) async -> Bool {
         let username = userID.map { self.state.userKey(userID: $0) } ?? username
         if text.hasPrefix("/") { return false }
+
+        // A wait belongs to the person who armed it. Without this check a
+        // super-admin who tapped "✏️ Изменить цену" in a group swallows the
+        // next message from *any* member: no LLM answer, an out-of-nowhere
+        // "🔒 Только суперадмин…", and the wait is spent — which reads as the
+        // bot being broken. Their message goes on to be answered normally.
+        if let owner = await state.pendingInputOwner(chatKey: chatKey), owner != username {
+            return false
+        }
 
         if await state.hasPendingStarsPriceInput(chatKey: chatKey) {
             guard let menuMessageID = await state.consumePendingStarsPriceInput(chatKey: chatKey) else { return true }
@@ -248,7 +272,12 @@ final class BotMenuHandler: @unchecked Sendable {
 
         if await state.hasPendingCryptoPoolAddInput(chatKey: chatKey) {
             guard let pending = await state.consumePendingCryptoPoolAddInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else { return true }
+            guard await state.isSuperAdmin(username: username) else {
+                // Swallowing the message without a word is what makes a lost
+                // right look like a broken bot.
+                await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
+                return true
+            }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             let toast: String
             if trimmed.isEmpty {
@@ -273,7 +302,12 @@ final class BotMenuHandler: @unchecked Sendable {
 
         if await state.hasPendingCryptoAddressInput(chatKey: chatKey) {
             guard let pending = await state.consumePendingCryptoAddressInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else { return true }
+            guard await state.isSuperAdmin(username: username) else {
+                // Swallowing the message without a word is what makes a lost
+                // right look like a broken bot.
+                await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
+                return true
+            }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed == "-" || trimmed.isEmpty {
                 await state.setCryptoAddress(pending.chain, address: nil)
@@ -296,7 +330,12 @@ final class BotMenuHandler: @unchecked Sendable {
 
         if await state.hasPendingFreeModelInput(chatKey: chatKey) {
             guard let menuMessageID = await state.consumePendingFreeModelInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else { return true }
+            guard await state.isSuperAdmin(username: username) else {
+                // Swallowing the message without a word is what makes a lost
+                // right look like a broken bot.
+                await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
+                return true
+            }
             let modelID = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !modelID.isEmpty {
                 let added = await state.addFreeModel(modelID)
