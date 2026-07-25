@@ -19,8 +19,8 @@ enum PresetCategory: String, Sendable {
     var displayName: String {
         switch self {
         case .model: return "Модель"
-        case .temp: return "Температура"
-        case .history: return "Длина истории"
+        case .temp: return "Стиль ответа"
+        case .history: return "Память"
         case .role: return "Роль"
         }
     }

@@ -51,7 +51,7 @@ enum ResponseFooterFormatter {
 
     private static func tokenLines(usage: StreamUsageSummary?) -> [String] {
         guard let usage else {
-            return ["📊 Токены · —"]
+            return ["📊 Объём текста · —"]
         }
 
         let prompt = usage.promptTokens
@@ -65,7 +65,7 @@ enum ResponseFooterFormatter {
         if let total { primaryParts.append("всего <b>\(formatTokenValue(total))</b>") }
 
         if primaryParts.isEmpty {
-            return ["📊 Токены · —"]
+            return ["📊 Объём текста · —"]
         }
 
         primary += " " + primaryParts.joined(separator: " · ")
@@ -74,13 +74,13 @@ enum ResponseFooterFormatter {
 
         var detailParts: [String] = []
         if let hit = usage.cacheHitTokens, hit > 0 {
-            detailParts.append("cache hit \(formatTokenValue(hit))")
+            detailParts.append("из памяти \(formatTokenValue(hit))")
         }
         if let write = usage.cacheWriteTokens, write > 0 {
-            detailParts.append("cache write \(formatTokenValue(write))")
+            detailParts.append("в память \(formatTokenValue(write))")
         }
         if let reasoning = usage.reasoningTokens, reasoning > 0 {
-            detailParts.append("reasoning \(formatTokenValue(reasoning))")
+            detailParts.append("обдумывание \(formatTokenValue(reasoning))")
         }
         if !detailParts.isEmpty {
             lines.append("   <i>\(detailParts.joined(separator: " · "))</i>")

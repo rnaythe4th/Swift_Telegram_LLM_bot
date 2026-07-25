@@ -31,29 +31,32 @@ enum UserFacingError {
         if let registry = error as? ProviderGatewayRegistryError {
             switch registry {
             case .missingAdapter(let provider):
-                return "Провайдер \(provider.commandValue) не настроен. Выберите другой через /menu."
+                return "Сервис \(provider.commandValue) не настроен. Выберите другой в /menu → 🔌 Сервис ИИ."
             }
         }
 
         if let media = error as? TelegramMediaResolverError {
             switch media {
             case .missingFilePath:
-                return "Telegram не отдал файл. Попробуйте отправить медиа ещё раз."
+                return "Telegram не отдал файл. Попробуйте отправить его ещё раз."
             }
         }
 
         if let adapter = error as? ProviderAdapterError {
             switch adapter {
             case .invalidRequestType(let provider):
-                return "Внутренний сбой адаптера \(provider.commandValue). Сообщите администратору."
+                return "Сбой при обращении к сервису \(provider.commandValue). Попробуйте ещё раз или смените сервис в /menu."
             }
         }
 
+        // Anything we don't recognise would leak an English provider/runtime
+        // description straight into a Russian chat — wrap it so the user still
+        // gets an actionable sentence, with the raw detail kept for support.
         if let localized = (error as? LocalizedError)?.errorDescription, !localized.isEmpty {
-            return localized
+            return "Что-то пошло не так — попробуйте ещё раз. Подробности: \(truncate(localized, limit: bodyPreviewLimit))"
         }
 
-        return "\(error)"
+        return "Что-то пошло не так — попробуйте ещё раз. Подробности: \(truncate("\(error)", limit: bodyPreviewLimit))"
     }
 
     private static func describeTransport(_ error: NetworkTransportError) -> String {
@@ -74,10 +77,10 @@ enum UserFacingError {
             return "\(statusReason). \(truncate(trimmed, limit: bodyPreviewLimit))"
 
         case .decodeFailure:
-            return "Не удалось разобрать ответ сервера. Попробуйте ещё раз."
+            return "Сервис ИИ ответил непонятно. Попробуйте ещё раз."
 
         case .encodeFailure:
-            return "Не удалось подготовить запрос. Попробуйте ещё раз."
+            return "Не удалось отправить запрос. Попробуйте ещё раз."
         }
     }
 
@@ -91,18 +94,18 @@ enum UserFacingError {
 
     private static func httpStatusReason(_ code: Int) -> String {
         switch code {
-        case 400: return "Некорректный запрос (HTTP 400)"
-        case 401: return "Неверный или отсутствующий API-ключ (HTTP 401)"
-        case 402: return "Недостаточно средств на счёте провайдера (HTTP 402)"
-        case 403: return "Доступ запрещён (HTTP 403)"
-        case 404: return "Ресурс не найден, возможно неверная модель (HTTP 404)"
-        case 408: return "Таймаут на стороне провайдера (HTTP 408)"
-        case 413: return "Запрос слишком большой (HTTP 413)"
-        case 415: return "Формат вложения не поддерживается (HTTP 415)"
-        case 422: return "Запрос отклонён валидацией (HTTP 422)"
-        case 429: return "Превышен лимит запросов (HTTP 429)"
-        case 500...599: return "Провайдер временно недоступен (HTTP \(code))"
-        default: return "Ошибка сервера HTTP \(code)"
+        case 400: return "Сервис ИИ не принял запрос (400)"
+        case 401: return "Сервис ИИ отклонил запрос — напишите администратору бота (401)"
+        case 402: return "У бота закончились средства у сервиса ИИ — сообщите администратору (402)"
+        case 403: return "Сервис ИИ закрыл доступ — напишите администратору бота (403)"
+        case 404: return "Такой модели нет — выберите другую в /menu → 🤖 Модель (404)"
+        case 408: return "Сервис ИИ не ответил вовремя — попробуйте ещё раз (408)"
+        case 413: return "Слишком большой запрос — сократите текст или вложение (413)"
+        case 415: return "Такой файл не поддерживается (415)"
+        case 422: return "Сервис ИИ не принял запрос — попробуйте переформулировать (422)"
+        case 429: return "Слишком много запросов подряд — попробуйте через минуту (429)"
+        case 500...599: return "Сервис ИИ временно недоступен — попробуйте позже (\(code))"
+        default: return "Сбой на стороне сервиса ИИ (\(code))"
         }
     }
 

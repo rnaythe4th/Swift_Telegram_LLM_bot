@@ -314,7 +314,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                     replyTo: nil,
-                    text: "🔒 Только администратор может редактировать глобальные пресеты.",
+                    text: "🔒 Общие заготовки может менять только администратор.",
                     replyMarkup: nil
                 )
             )
@@ -327,7 +327,7 @@ final class BotMenuHandler: @unchecked Sendable {
         guard (2...(maxParts + 1)).contains(components.count), components.allSatisfy({ !$0.isEmpty }) else {
             await state.setPendingInput(pending, chatKey: chatKey)
             let format = pending.category == .model
-                ? "<code>Название | Значение | Провайдер</code> (провайдер опционален)"
+                ? "<code>Название | Значение | Сервис</code> (сервис можно не указывать)"
                 : "<code>Название | Значение</code>"
             _ = try? await telegram.sendMessage(
                 .init(
@@ -354,16 +354,16 @@ final class BotMenuHandler: @unchecked Sendable {
         switch (pending.scope, pending.kind) {
         case (.global, .add):
             _ = await state.addPreset(category: pending.category, display: display, value: value, provider: provider, chatID: chatKey.chatID)
-            toastText = "✓ Глобальный пресет добавлен: \(display)\(providerSuffix)"
+            toastText = "✓ Общая заготовка добавлена: \(display)\(providerSuffix)"
         case (.global, .edit(let index)):
             let ok = await state.editPreset(category: pending.category, index: index, display: display, value: value, provider: provider, chatID: chatKey.chatID)
-            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Пресет не найден"
+            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Заготовка не найдена"
         case (.chat, .add):
             _ = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value, provider: provider)
-            toastText = "✓ Пресет чата добавлен: \(display)\(providerSuffix)"
+            toastText = "✓ Заготовка чата добавлена: \(display)\(providerSuffix)"
         case (.chat, .edit(let index)):
             let ok = await state.editChatPreset(category: pending.category, chatKey: chatKey, index: index, display: display, value: value, provider: provider)
-            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Пресет не найден"
+            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Заготовка не найдена"
         }
 
         let (menuText, markup) = await renderPresetManagement(category: pending.category, chatKey: chatKey, canManageGlobal: canManageGlobal)
@@ -531,7 +531,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 guard chatKey.chatID > 0 else {
                     try? await telegram.answerCallback(
                         callbackQueryID: callback.id,
-                        text: "🎁 Реферальная ссылка личная — откройте её в личке с ботом: /ref"
+                        text: "🎁 Ссылка-приглашение личная — откройте её в личке с ботом: /ref"
                     )
                     return
                 }
@@ -555,7 +555,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 Отправьте текст роли одним сообщением.
                 <i>Пример:</i> <code>Ты — эксперт по математике, отвечай кратко.</code>
 
-                ⚠️ История чата будет очищена.
+                ⚠️ Переписка в этом чате будет очищена.
                 """
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:role")]])
                 try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
@@ -569,7 +569,7 @@ final class BotMenuHandler: @unchecked Sendable {
             } else if parts[1] == "gsel", parts.count >= 3, let index = Int(parts[2]) {
                 let presets = await state.rolePresets(chatID: chatKey.chatID)
                 guard index >= 0, index < presets.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
                     return
                 }
                 let roleValue = presets[index].value + formatOptions
@@ -580,7 +580,7 @@ final class BotMenuHandler: @unchecked Sendable {
             } else if parts[1] == "csel", parts.count >= 3, let index = Int(parts[2]) {
                 let presets = await state.chatPresets(category: .role, chatKey: chatKey)
                 guard index >= 0, index < presets.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
                     return
                 }
                 let roleValue = presets[index].value + formatOptions
@@ -592,7 +592,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 // Legacy: treat as global
                 let presets = await state.rolePresets(chatID: chatKey.chatID)
                 guard index >= 0, index < presets.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
                     return
                 }
                 let roleValue = presets[index].value + formatOptions
@@ -609,13 +609,13 @@ final class BotMenuHandler: @unchecked Sendable {
                 let prompt = """
                 <b>🤖 Своя модель</b>
 
-                Отправьте ID модели одним сообщением:
+                Отправьте название модели одним сообщением:
                 <code>openai/gpt-4o</code>
 
-                С провайдером (роутинг OpenRouter):
+                Через конкретный сервис:
                 <code>deepseek/deepseek-v4-pro | deepseek</code>
 
-                <i>ID моделей — на openrouter.ai. Смена модели очистит историю.</i>
+                <i>Названия моделей — на openrouter.ai. При смене модели переписка очищается.</i>
                 """
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:model")]])
                 try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
@@ -692,7 +692,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 if !hasAccess, let eff = effectiveFree, !eff.contains(modelValue) {
                     let price = await state.starsPrice()
                     let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Эта модель требует полного доступа\(hint)")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Это платная модель\(hint)")
                     return
                 }
                 _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
@@ -711,7 +711,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 if !hasAccess, let eff = effectiveFree, !eff.contains(modelValue) {
                     let price = await state.starsPrice()
                     let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Эта модель требует полного доступа\(hint)")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Это платная модель\(hint)")
                     return
                 }
                 _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
@@ -737,7 +737,7 @@ final class BotMenuHandler: @unchecked Sendable {
             }
             guard let temp = Float(parts[1]), (0.0...2.0).contains(temp) else { return }
             await state.setTemperature(chatKey: chatKey, value: temp)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Темп: \(Self.formatTemp(temp))")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Стиль ответа: \(Self.tempBucket(temp))")
             try await showPage(.temp, chatKey: chatKey, callback: callback, message: message)
             return
 
@@ -754,7 +754,7 @@ final class BotMenuHandler: @unchecked Sendable {
             switch parts[2] {
             case "tokens":
                 let on = await state.toggleShowStats(chatKey: chatKey)
-                toastText = on ? "🟢 Токены включены" : "⚪️ Токены выключены"
+                toastText = on ? "🟢 Объём текста показываю" : "⚪️ Объём текста не показываю"
             case "cost":
                 let on = await state.toggleShowCost(chatKey: chatKey)
                 toastText = on ? "🟢 Стоимость включена" : "⚪️ Стоимость выключена"
@@ -763,7 +763,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 toastText = on ? "🟢 Модель включена" : "⚪️ Модель выключена"
             case "backup":
                 let on = await state.toggleBackupNotify(chatKey: chatKey)
-                toastText = on ? "🟢 Уведомления включены" : "⚪️ Уведомления выключены"
+                toastText = on ? "🟢 Отчёты о сохранении включены" : "⚪️ Отчёты о сохранении выключены"
             case "testmode":
                 let suffix = await state.toggleTestMode(chatKey: chatKey)
                 if let suffix {
@@ -782,7 +782,7 @@ final class BotMenuHandler: @unchecked Sendable {
             guard parts.count >= 2 else { return }
             if parts[1] == "clear" {
                 await state.clearHistory(chatKey: chatKey)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "История очищена")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Переписка очищена")
                 try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
                 return
             } else if parts[1] == "dump" {
@@ -792,16 +792,16 @@ final class BotMenuHandler: @unchecked Sendable {
             } else if parts[1] == "custom" {
                 await state.setAdminPendingInput(.init(kind: .chatCustomHistory, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
                 let prompt = """
-                <b>📝 Своя длина истории</b>
+                <b>📝 Своё значение памяти</b>
 
-                Отправьте число от <code>1</code> до <code>50</code> одним сообщением — сколько последних сообщений бот держит в памяти.
+                Отправьте число от <code>1</code> до <code>50</code> одним сообщением — сколько последних сообщений бот держит в голове.
                 """
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:history")]])
                 try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
                 return
             } else if parts.count >= 3, parts[1] == "length", let length = Int(parts[2]), (1...50).contains(length) {
                 await state.setMaxHistory(chatKey: chatKey, newMax: length)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Длина истории: \(length)")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Память: \(length) сообщ.")
                 try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
                 return
             }
@@ -815,10 +815,10 @@ final class BotMenuHandler: @unchecked Sendable {
                      await state.setReasoningEffort(chatKey: chatKey, effort: nil)
                     try? await telegram.answerCallback(
                         callbackQueryID: callback.id,
-                        text: "Провайдер сменён. Reasoning отключён — не поддерживается."
+                        text: "Сервис ИИ сменён. Обдумывание выключено — он его не умеет."
                     )
                 } else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Провайдер: \(provider.commandValue)")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Сервис ИИ: \(provider.commandValue)")
                 }
             }
             try await showPage(.provider, chatKey: chatKey, callback: callback, message: message)
@@ -831,15 +831,15 @@ final class BotMenuHandler: @unchecked Sendable {
             if gateway.capabilities.supportsReasoning {
                 if parts[2] == "off" {
                     await state.setReasoningEffort(chatKey: chatKey, effort: nil)
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Reasoning отключён")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Обдумывание выключено")
                 } else if let effort = ReasoningEffort(rawValue: parts[2]) {
                     await state.setReasoningEffort(chatKey: chatKey, effort: effort)
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Reasoning: \(effort.rawValue)")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Обдумывание: \(effort.displayName)")
                 }
             } else {
                 try? await telegram.answerCallback(
                     callbackQueryID: callback.id,
-                    text: "Провайдер \(provider.commandValue) не поддерживает reasoning"
+                    text: "Сервис \(provider.commandValue) не умеет обдумывать ответ"
                 )
             }
             try await showPage(.reasoning, chatKey: chatKey, callback: callback, message: message)
@@ -1316,7 +1316,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 guard parts.count >= 4, let index = Int(parts[3]) else { return }
                 let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
                 guard index >= 0, index < chatPresets.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
                     return
                 }
                 let pending = PendingInput(category: category, scope: .chat, kind: .edit(index: index), menuMessageID: message.message_id)
@@ -1326,7 +1326,7 @@ final class BotMenuHandler: @unchecked Sendable {
             case "del":
                 guard parts.count >= 4, let index = Int(parts[3]) else { return }
                 let removed = await state.removeChatPresetByIndex(category: category, chatKey: chatKey, index: index)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Пресет удалён" : "Пресет не найден")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : "Заготовка не найдена")
                 let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
@@ -1339,7 +1339,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
                     return
                 }
-                let scopeText = "<b>➕ Добавить пресет · \(category.displayName)</b>\n\nКуда добавить?"
+                let scopeText = "<b>➕ Добавить заготовку · \(category.displayName)</b>\n\nКуда добавить?"
                 let scopeMarkup = InlineKeyboardMarkup(inline_keyboard: [
                     [menuButton("🌐 Глобальный (для всех чатов)", action: "pm:\(category.rawValue):gadd")],
                     [menuButton("💬 Только этот чат", action: "pm:\(category.rawValue):add")],
@@ -1366,7 +1366,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 guard parts.count >= 4, let index = Int(parts[3]) else { return }
                 let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
                 guard index >= 0, index < globalPresets.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пресет не найден")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
                     return
                 }
                 let pending = PendingInput(category: category, scope: .global, kind: .edit(index: index), menuMessageID: message.message_id)
@@ -1380,7 +1380,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 }
                 guard parts.count >= 4, let index = Int(parts[3]) else { return }
                 let removed = await state.removePresetByIndex(category: category, index: index, chatID: chatKey.chatID)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Пресет удалён" : "Пресет не найден")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : "Заготовка не найдена")
                 let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
@@ -1535,7 +1535,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let provider = await state.provider(chatKey: chatKey)
         let gateway = try? gateways.gateway(for: provider)
         let reasoningSupported = gateway?.capabilities.supportsReasoning ?? false
-        let reasoningLabel = help.reasoningEffort?.rawValue ?? "выкл"
+        let reasoningLabel = help.reasoningEffort?.displayName ?? "выключено"
         let usage = help.cumulativeUsage
         let usageLine: String
         if usage.generationCount == 0 {
@@ -1543,7 +1543,7 @@ final class BotMenuHandler: @unchecked Sendable {
         } else {
             var parts: [String] = ["запросов <b>\(usage.generationCount)</b>"]
             if usage.totalTokens > 0 {
-                parts.append("токенов <b>\(ResponseFooterFormatter.formatTokenValue(usage.totalTokens))</b>")
+                parts.append("текста <b>\(ResponseFooterFormatter.formatTokenValue(usage.totalTokens))</b>")
             }
             let billedTotal = await state.billedCost(of: usage)
             if billedTotal > 0 {
@@ -1563,11 +1563,11 @@ final class BotMenuHandler: @unchecked Sendable {
         let text = """
         <b>⚙️ Настройки чата</b>
 
-        🔌 Провайдер · <b>\(help.provider.commandValue)</b>
+        🔌 Сервис ИИ · <b>\(help.provider.commandValue)</b>
         🤖 Модель · <b>\(help.model)</b>
-        🌡 Темп · <b>\(Self.formatTemp(help.temp))</b>
-        📝 История · <b>\(help.maxHistory) сообщ.</b>\
-        \(reasoningSupported ? "\n🧠 Reasoning · <b>\(reasoningLabel)</b>" : "")
+        🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
+        📝 Память · <b>\(help.maxHistory) сообщ.</b>\
+        \(reasoningSupported ? "\n🧠 Обдумывание · <b>\(reasoningLabel)</b>" : "")
 
         \(usageLine)\(balanceLine)
         🆔 <code>\(chatKey.chatID)</code>
@@ -1575,11 +1575,11 @@ final class BotMenuHandler: @unchecked Sendable {
 
         var rows: [[InlineKeyboardButton]] = [
             [menuButton("🤖 Модель", action: "nav:model"), menuButton("🎭 Роль", action: "nav:role")],
-            [menuButton("🌡 Температура", action: "nav:temp"), menuButton("📝 История", action: "nav:history")],
-            [menuButton("🔌 Провайдер", action: "nav:provider")],
+            [menuButton("🌡 Стиль ответа", action: "nav:temp"), menuButton("📝 Память", action: "nav:history")],
+            [menuButton("🔌 Сервис ИИ", action: "nav:provider")],
         ]
         if reasoningSupported {
-            rows[2].append(menuButton("🧠 Reasoning", action: "nav:reasoning"))
+            rows[2].append(menuButton("🧠 Обдумывание", action: "nav:reasoning"))
         }
         rows.append([menuButton("📊 Что показывать в ответе", action: "nav:stats")])
         if usage.generationCount > 0 {
@@ -1617,11 +1617,11 @@ final class BotMenuHandler: @unchecked Sendable {
         rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сбросить", action: "reset")])
         if await state.isSuperAdmin(username: username) {
             rows.append([
-                menuButton("🛠 Админ-панель", action: "nav:admin"),
+                menuButton("⚡ Мой премиум", action: "nav:admin"),
                 menuButton("🛡 Супер-админ", action: "nav:superadmin"),
             ])
         } else if await state.isAdmin(username: username, chatID: chatKey.chatID) {
-            rows.append([menuButton("🛠 Админ-панель", action: "nav:admin")])
+            rows.append([menuButton("⚡ Мой премиум", action: "nav:admin")])
         }
         rows.append([menuButton("✕ Закрыть", action: "close")])
 
@@ -1674,7 +1674,7 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         rows.append([menuButton("✏️ Своя роль", action: "role:custom"), menuButton("↺ Стандартная", action: "role:default")])
-        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:role")])
+        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:role")])
         rows.append(navButtons())
 
         let text = """
@@ -1731,7 +1731,7 @@ final class BotMenuHandler: @unchecked Sendable {
             rows.append([menuButton("🆓 Бесплатные модели OpenRouter", action: "model:freemodels")])
         }
         rows.append([menuButton("✏️ Ввести ID модели", action: "model:custom")])
-        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:model")])
+        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:model")])
         rows.append(navButtons())
 
         var legendLine = ""
@@ -1758,16 +1758,16 @@ final class BotMenuHandler: @unchecked Sendable {
             }
         }
 
-        let routingLine = help.modelProviderRouting.map { "\nПровайдер · 📡 <code>\($0)</code>" } ?? ""
+        let routingLine = help.modelProviderRouting.map { "\nСервис · 📡 <code>\($0)</code>" } ?? ""
         let text = """
         <b>🤖 Модель</b>
 
-        Текущая · <code>\(help.model)</code>\(routingLine)\(legendLine)\(priceSection)
+        Сейчас · <code>\(help.model)</code>\(routingLine)\(legendLine)\(priceSection)
 
-        <i>Смена модели очистит историю.</i>
+        <i>При смене модели переписка очищается.</i>
         Своя модель — /model &lt;id&gt;
-        <i>С провайдером — /model &lt;id&gt; | &lt;провайдер&gt;</i>
-        <i>ID моделей можно найти на openrouter.ai</i>\(accessLine)
+        <i>С конкретным сервисом — /model &lt;id&gt; | &lt;сервис&gt;</i>
+        <i>Названия моделей — на openrouter.ai</i>\(accessLine)
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -1801,17 +1801,17 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         rows.append([menuButton("✏️ Своё значение", action: "temp:custom")])
-        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:temp")])
+        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:temp")])
         rows.append(navButtons())
 
         let bucket = Self.tempBucket(help.temp)
         let text = """
-        <b>🌡 Температура</b>
+        <b>🌡 Стиль ответа</b>
 
-        Текущая · <b>\(Self.formatTemp(help.temp))</b> — \(bucket)
+        Сейчас · <b>\(bucket)</b> (\(Self.formatTemp(help.temp)))
 
-        <i>0.0 — точно и предсказуемо · 2.0 — креативно и хаотично</i>
-        ✏️ — своё значение (или /settemp &lt;0.0–2.0&gt;)
+        <i>Насколько свободно бот отвечает: 0.0 — строго по фактам и предсказуемо, 2.0 — творчески и непредсказуемо.</i>
+        ✏️ — задать своё число (или /settemp &lt;0.0–2.0&gt;)
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -1821,29 +1821,29 @@ final class BotMenuHandler: @unchecked Sendable {
         let testModeOn = help.testModeSuffix != nil
         let testLabel: String = {
             if let s = help.testModeSuffix {
-                return "🟢 Тест-режим (суффикс \(s))"
+                return "🟢 Тест-режим (добавка \(s))"
             }
             return "⚪️ Тест-режим"
         }()
         let rows: [[InlineKeyboardButton]] = [
-            [menuButton("\(toggleMark(help.showTokens)) Токены", action: "stats:toggle:tokens"),
+            [menuButton("\(toggleMark(help.showTokens)) Объём текста", action: "stats:toggle:tokens"),
              menuButton("\(toggleMark(help.showCost)) Стоимость", action: "stats:toggle:cost")],
             [menuButton("\(toggleMark(help.showModel)) Модель", action: "stats:toggle:model")],
-            [menuButton("\(toggleMark(help.backupNotify)) Уведомления о бэкапе", action: "stats:toggle:backup")],
+            [menuButton("\(toggleMark(help.backupNotify)) Отчёты о сохранении", action: "stats:toggle:backup")],
             [menuButton(testLabel, action: "stats:toggle:testmode")],
             navButtons(),
         ]
         let testHint = testModeOn
-            ? "\n\n<i>🧪 Тест-режим включён — добавляйте суффикс <code>\(help.testModeSuffix!)</code> к командам, чтобы их выполнял именно этот экземпляр бота.</i>"
+            ? "\n\n<i>🧪 Тест-режим включён — дописывайте <code>\(help.testModeSuffix!)</code> к командам, чтобы их выполнял именно этот бот.</i>"
             : ""
         let text = """
-        <b>📊 Что показывать в ответе</b>
+        <b>📊 Что показывать под ответом</b>
 
-        🟢 — включено · ⚪️ — выключено
+        🟢 — показывать · ⚪️ — не показывать
 
-        <i>Токены — сколько слов обработано
-        Стоимость — цена одного запроса в $
-        Модель — какая модель ответила</i>
+        <i>Объём текста — сколько текста обработано на этот ответ
+        Стоимость — сколько списалось за этот ответ
+        Модель — какая модель отвечала</i>
 
         Нажмите, чтобы переключить.\(testHint)
         """
@@ -1879,11 +1879,11 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         rows.append([
-            menuButton("📜 Показать историю", action: "history:dump"),
+            menuButton("📜 Что бот помнит", action: "history:dump"),
             menuButton("🧹 Очистить", action: "history:clear"),
         ])
-        rows.append([menuButton("✏️ Своя длина", action: "history:custom")])
-        rows.append([menuButton("⚙️ Управление пресетами", action: "pm:history")])
+        rows.append([menuButton("✏️ Своё значение", action: "history:custom")])
+        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:history")])
         rows.append(navButtons())
 
         let text = """
@@ -1891,8 +1891,8 @@ final class BotMenuHandler: @unchecked Sendable {
 
         Помнит последние · <b>\(help.maxHistory) сообщ.</b>
 
-        <i>Чем больше, тем лучше контекст, но дороже и медленнее.</i>
-        ✏️ — своё значение (или /historylength &lt;1–50&gt;)
+        <i>Сколько прошлых сообщений бот держит в голове. Чем больше — тем лучше он понимает, о чём речь, но ответ медленнее и дороже.</i>
+        ✏️ — задать своё число (или /historylength &lt;1–50&gt;)
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -1915,9 +1915,11 @@ final class BotMenuHandler: @unchecked Sendable {
         }
         rows.append(navButtons())
         let text = """
-        <b>🔌 Провайдер AI</b>
+        <b>🔌 Сервис ИИ</b>
 
-        Текущий · <b>\(help.provider.commandValue)</b>
+        Сейчас · <b>\(help.provider.commandValue)</b>
+
+        <i>Через кого бот ходит к моделям. Обычно менять не нужно — если не знаете, что выбрать, оставьте как есть.</i>
 
         <i>OpenRouter — тысячи моделей (GPT, Claude, Gemini, DeepSeek…)
         DeepSeek — только модели DeepSeek, напрямую
@@ -1936,10 +1938,10 @@ final class BotMenuHandler: @unchecked Sendable {
         if !supported {
             let rows = [navButtons()]
             let text = """
-            <b>🧠 Reasoning</b>
+            <b>🧠 Обдумывание</b>
 
-            Провайдер <b>\(provider.commandValue)</b> не поддерживает reasoning.
-            Смените провайдера, чтобы включить.
+            Сервис <b>\(provider.commandValue)</b> этого не умеет.
+            Смените сервис ИИ, чтобы включить.
             """
             return (text, InlineKeyboardMarkup(inline_keyboard: rows))
         }
@@ -1950,19 +1952,19 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         let rows: [[InlineKeyboardButton]] = [
-            [btn("low", label: "Low"), btn("medium", label: "Medium"), btn("high", label: "High")],
+            [btn("low", label: "Быстро"), btn("medium", label: "Средне"), btn("high", label: "Глубоко")],
             [btn("off", label: "Выключить")],
             navButtons(),
         ]
         let text = """
-        <b>🧠 Reasoning — глубина рассуждений</b>
+        <b>🧠 Обдумывание</b>
 
-        Текущий · <b>\(current ?? "выкл")</b>
+        Сейчас · <b>\(help.reasoningEffort?.displayName ?? "выключено")</b>
 
-        <i>Модель «думает» перед ответом — результат точнее.
-        Low — быстро и дёшево
-        Medium — баланс скорости и качества
-        High — максимальная точность, медленнее</i>
+        <i>Модель думает перед тем, как ответить: получается точнее, но медленнее и дороже.
+        Быстро — почти без задержки, дёшево
+        Средне — разумный компромисс
+        Глубоко — самый точный ответ, но ждать дольше</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -2004,7 +2006,7 @@ final class BotMenuHandler: @unchecked Sendable {
                     lines.append("⛔ Подписка истекла <b>\(f.string(from: until))</b>.")
                     lines.append("<i>Оплата ниже возобновит доступ на \(ChatContextStore.subscriptionDays) дней — чаты и настройки сохранены.</i>")
                 }
-                lines.append("Управление доступом — /menu → 🛠 Админ-панель.")
+                lines.append("Управление доступом — /menu → ⚡ Мой премиум.")
             } else {
                 lines.append("""
                 Что открывается:
@@ -2019,7 +2021,7 @@ final class BotMenuHandler: @unchecked Sendable {
             if let wallet = await state.balance(username: username) {
                 lines.append("")
                 lines.append(String(format: "💰 Баланс · <b>$%.4f</b>", wallet.balanceUsd) + (wallet.balanceUsd > 0 ? "" : " <i>(исчерпан)</i>"))
-                lines.append("<i>Баланс — альтернатива подписке: оплата каждого ответа по факту. Детали — /balance.</i>")
+                lines.append("<i>С баланса списывается стоимость каждого ответа — обычно доли цента. Подписка при этом не нужна. Подробнее — /balance.</i>")
             }
         } else {
             lines.append("⚠️ Для покупки нужен <b>@username</b> — установите его в настройках Telegram и откройте меню заново.")
@@ -2062,7 +2064,7 @@ final class BotMenuHandler: @unchecked Sendable {
             // subscription. Bought with Stars or crypto (same availability).
             if username != nil, starsAvailable || cryptoAvailable {
                 lines.append("")
-                lines.append("💰 <b>Не готов на месяц?</b> Пополни баланс — платишь по факту за каждый ответ, доступны любые модели.")
+                lines.append("💰 <b>Не готовы на месяц?</b> Пополните баланс — с него списывается стоимость каждого ответа, обычно доли цента. Доступны любые модели, подписка не нужна.")
                 let packRow = CreditPack.centsOptions.map {
                     menuButton(CreditPack.label(cents: $0), action: "buy:credits:\($0)")
                 }
@@ -2073,7 +2075,7 @@ final class BotMenuHandler: @unchecked Sendable {
             let referral = await state.referralConfig()
             if referral.enabled, referral.inviterRewardCents > 0, !botUsername.isEmpty, chatKey.chatID > 0 {
                 lines.append("")
-                lines.append("🎁 <b>Не хотите платить?</b> Пригласите друга — вам обоим упадёт на баланс (\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents)) вам, \(ReferralConfig.formatUsd(cents: referral.inviteeRewardCents)) ему).")
+                lines.append("🎁 <b>Не хотите платить?</b> Пригласите друга — как только он задаст боту первый вопрос, вы оба получите на баланс (\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents)) вам, \(ReferralConfig.formatUsd(cents: referral.inviteeRewardCents)) ему).")
                 rows.append([menuButton("🎁 Пригласить друга", action: "nav:ref")])
             }
         }
@@ -2112,9 +2114,11 @@ final class BotMenuHandler: @unchecked Sendable {
             let text = """
             💰 <b>Пополнить баланс на \(CreditPack.label(cents: cents))</b>
 
-            Баланс тратится по факту за каждый ответ — доступны любые модели, остаток виден в футере (включи /show_cost).
+            Баланс — как счёт на телефоне: с него списывается стоимость каждого ответа бота. Обычно это доли цента, так что \(CreditPack.label(cents: cents)) хватает надолго. Доступны любые модели, подписка не нужна.
 
-            Выбери способ оплаты:
+            Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).
+
+            Выберите способ оплаты:
             """
             try await editOrAnswer(callback: callback, message: message, text: text, markup: InlineKeyboardMarkup(inline_keyboard: rows))
 
@@ -2137,7 +2141,7 @@ final class BotMenuHandler: @unchecked Sendable {
             try await telegram.sendInvoice(.init(
                 chatID: chatKey.chatID,
                 title: "Пополнение баланса · \(CreditPack.label(cents: cents))",
-                description: "Кредиты на баланс: оплата каждого ответа по факту, любые модели",
+                description: "Деньги на баланс: с него списывается стоимость каждого ответа, доступны любые модели",
                 payload: "credits_\(cents)",
                 starsAmount: stars
             ))
@@ -2228,14 +2232,14 @@ final class BotMenuHandler: @unchecked Sendable {
             let assetText = """
             🪙 <b>Пополнение баланса на \(CreditPack.label(cents: cents))</b>
 
-            Выбери сеть/актив для оплаты:
+            Выберите монету и сеть для оплаты:
             """
             try await editOrAnswer(callback: callback, message: message, text: assetText, markup: InlineKeyboardMarkup(inline_keyboard: assetRows))
 
         case "casset":
             guard parts.count >= 4, let asset = CryptoAsset(rawValue: parts[2]),
                   let cents = Int(parts[3]), CreditPack.isValid(cents: cents) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный актив")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестная монета")
                 return
             }
             guard let service = cryptoService else {
@@ -2265,7 +2269,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
         case "asset":
             guard parts.count >= 3, let asset = CryptoAsset(rawValue: parts[2]) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный актив")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестная монета")
                 return
             }
             guard let service = cryptoService else {
@@ -2375,7 +2379,7 @@ final class BotMenuHandler: @unchecked Sendable {
         lines.append("Адрес:")
         lines.append("<code>\(invoice.receivingAddress)</code>")
         lines.append("")
-        lines.append("⚠️ <b>Отправьте РОВНО эту сумму</b> — иначе зачисление потребует ручного разбора.")
+        lines.append("⚠️ <b>Отправьте РОВНО эту сумму.</b> Она уникальна — именно по ней бот узнаёт ваш платёж. Если сумма другая, зачислять придётся вручную.")
         lines.append("")
         lines.append("Срок: <b>\(expiresMin) мин</b>")
         lines.append(statusLine)
@@ -2852,7 +2856,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             }
             let ok = await state.assignChat(chatID: chatKey.chatID, to: username)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Чат привязан" : "Лицензия не активна")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Чат привязан" : "Премиум неактивен")
             try await showPage(.adminPanel, chatKey: chatKey, callback: callback, message: message)
 
         case "release":
@@ -2911,7 +2915,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             }
             await state.setAdminPendingInput(.init(kind: .tenantAddUser, menuMessageID: message.message_id, payload: invoker), chatKey: chatKey)
-            let prompt = "<b>➕ Добавить пользователя в лицензию</b>\n\nОтправьте @username одним сообщением."
+            let prompt = "<b>➕ Добавить гостя премиума</b>\n\nОтправьте @username одним сообщением — этот человек будет пользоваться умными моделями за ваш счёт."
             let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminusers")]])
             try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
             return
@@ -2935,7 +2939,7 @@ final class BotMenuHandler: @unchecked Sendable {
             if await state.regenerateInviteToken(owner: invoker) != nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Новая ссылка создана")
             } else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Лицензия не активна — /buy")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Премиум неактивен — /buy")
             }
             try await showPage(.adminInvite, chatKey: chatKey, callback: callback, message: message)
 
@@ -3242,7 +3246,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let stats = await state.referralUserStats(userID: userID)
         let link = ReferralLink.url(botUsername: botUsername, userID: userID)
 
-        var lines: [String] = ["<b>🎁 Приведи друга</b>", ""]
+        var lines: [String] = ["<b>🎁 Пригласите друга</b>", ""]
         var rows: [[InlineKeyboardButton]] = []
 
         guard config.enabled, !botUsername.isEmpty else {
@@ -3253,34 +3257,36 @@ final class BotMenuHandler: @unchecked Sendable {
 
         if config.paysAnything {
             lines.append(String(
-                format: "Друг переходит по вашей ссылке и пишет боту первый вопрос — вам <b>$%.2f</b>, ему <b>$%.2f</b> на баланс.",
+                format: "Друг открывает вашу ссылку и задаёт боту первый вопрос — в этот момент вам приходит <b>$%.2f</b>, а ему <b>$%.2f</b> на баланс.",
                 config.inviterRewardUsd, config.inviteeRewardUsd
             ))
-            lines.append("<i>Баланс — оплата по факту: пока он есть, отвечают любые модели, без подписки.</i>")
+            lines.append("<i>Пока баланс не пуст, отвечают любые модели — подписка не нужна. С баланса списывается стоимость каждого ответа, обычно доли цента.</i>")
         } else {
-            lines.append("Отправьте ссылку друзьям — бот сразу заработает у них в личке.")
+            lines.append("Отправьте ссылку друзьям — бот сразу начнёт им отвечать в личке.")
         }
         lines.append("")
         lines.append("Ваша ссылка:")
         lines.append("<code>\(link)</code>")
         lines.append("")
-        lines.append("Приглашено · <b>\(stats.invited)</b> · с наградой · <b>\(stats.rewarded)</b> · ждут первого сообщения · <b>\(stats.pending)</b>")
+        lines.append("Пришло по ссылке · <b>\(stats.invited)</b>")
+        lines.append("Уже принесли бонус · <b>\(stats.rewarded)</b>")
+        lines.append("Ждут первого вопроса · <b>\(stats.pending)</b>")
         if stats.earnedUsd > 0 {
             lines.append(String(format: "Заработано · <b>$%.2f</b>", stats.earnedUsd))
         }
         if let remaining = stats.capRemaining {
-            lines.append("Осталось награждаемых приглашений · <b>\(remaining)</b>")
+            lines.append("Осталось приглашений с бонусом · <b>\(remaining)</b>")
         }
         if username == nil, config.inviterRewardCents > 0 {
             lines.append("")
-            lines.append("⚠️ Награда приходит на кошелёк, привязанный к <b>@username</b> — задайте его в настройках Telegram.")
+            lines.append("⚠️ Бонус зачисляется на баланс, привязанный к <b>@username</b> — задайте его в настройках Telegram, иначе деньги не придут.")
         }
         if let incoming = stats.incoming, incoming.isPending {
             lines.append("")
-            lines.append("ℹ️ Вас пригласил <b>@\(incoming.inviterUsername)</b> — награда придёт после вашего первого вопроса боту.")
+            lines.append("ℹ️ Вас пригласил <b>@\(incoming.inviterUsername)</b> — бонус придёт, как только вы зададите боту первый вопрос.")
         }
         lines.append("")
-        lines.append("<i>Награда — один раз за друга, и только за тех, кто ещё не писал боту в личке.</i>")
+        lines.append("<i>Бонус даётся один раз за друга и только за тех, кто раньше боту не писал.</i>")
 
         let shareText = "Умный ИИ прямо в Telegram — отвечает на текст, фото и голос. Заходи по моей ссылке:"
         rows.append([InlineKeyboardButton(
@@ -3664,9 +3670,9 @@ final class BotMenuHandler: @unchecked Sendable {
         let isOwnChat = invoker != nil && chatOwner?.lowercased() == invoker
         let chatStatusLine: String
         if let chatOwner {
-            chatStatusLine = isOwnChat ? "🟢 этот чат привязан к вам" : "🔒 чат принадлежит @\(chatOwner)"
+            chatStatusLine = isOwnChat ? "🟢 премиум в этом чате открыли вы" : "🔒 премиум в этом чате открыл @\(chatOwner)"
         } else {
-            chatStatusLine = "⚪ чат свободен"
+            chatStatusLine = "⚪ в этом чате премиум ещё никто не открыл"
         }
 
         let licensedChats: [Int]
@@ -3684,34 +3690,34 @@ final class BotMenuHandler: @unchecked Sendable {
 
         var rows: [[InlineKeyboardButton]] = []
         if isOwnChat {
-            rows.append([menuButton("📌 Отвязать этот чат", action: "tenant:release")])
+            rows.append([menuButton("📌 Выключить премиум в этом чате", action: "tenant:release")])
         } else if chatOwner == nil {
-            rows.append([menuButton("📌 Привязать этот чат к моей лицензии", action: "tenant:claim")])
+            rows.append([menuButton("📌 Включить премиум в этом чате", action: "tenant:claim")])
         }
-        rows.append([menuButton("🔗 Пригласительная ссылка", action: "nav:admininvite")])
+        rows.append([menuButton("🔗 Ссылка-приглашение", action: "nav:admininvite")])
         rows.append([
-            menuButton("📋 Чаты лицензии · \(licensedChats.count)", action: "nav:adminchats"),
-            menuButton("👥 Пользователи · \(licensedUsers.count)", action: "nav:adminusers"),
+            menuButton("📋 Чаты с премиумом · \(licensedChats.count)", action: "nav:adminchats"),
+            menuButton("👥 Гости премиума · \(licensedUsers.count)", action: "nav:adminusers"),
         ])
         rows.append([
-            menuButton("⚙️ Дефолты", action: "nav:admindef"),
-            menuButton("👤 Whitelist · \(whitelist.count)", action: "nav:adminwl"),
+            menuButton("⚙️ Новые чаты", action: "nav:admindef"),
+            menuButton("👤 Гости этого чата · \(whitelist.count)", action: "nav:adminwl"),
         ])
-        rows.append([menuButton("🤖 Пресеты моделей · \(globalModels)", action: "pm:model"),
+        rows.append([menuButton("🤖 Заготовки моделей · \(globalModels)", action: "pm:model"),
                      menuButton("🎭 Ролей · \(globalRoles)", action: "pm:role")])
-        rows.append([menuButton("🌡 Темп. · \(globalTemps)", action: "pm:temp"),
-                     menuButton("📝 Истории · \(globalHist)", action: "pm:history")])
-        rows.append([menuButton("ℹ️ Справка по командам", action: "nav:adminhelp")])
+        rows.append([menuButton("🌡 Стилей · \(globalTemps)", action: "pm:temp"),
+                     menuButton("📝 Памяти · \(globalHist)", action: "pm:history")])
+        rows.append([menuButton("ℹ️ Справка", action: "nav:adminhelp")])
         rows.append(navButtons())
 
         let adminsLine = admins.isEmpty
-            ? "<i>только владелец</i>"
+            ? "<i>только вы</i>"
             : admins.sorted().map { "@\($0)" }.joined(separator: ", ")
 
         let costStr = String(format: "$%.4f", await state.billedCost(of: usage))
         let usageLine = usage.generationCount == 0
             ? "📈 Запросов пока нет"
-            : "📈 запросов <b>\(usage.generationCount)</b> · токенов <b>\(Int(usage.totalTokens))</b> · итого <b>\(costStr)</b>"
+            : "📈 запросов <b>\(usage.generationCount)</b> · итого <b>\(costStr)</b>"
 
         var subscriptionLine: String
         // Reminder line + opt-out: the sponsor sees when the renewal nudge will
@@ -3720,12 +3726,12 @@ final class BotMenuHandler: @unchecked Sendable {
         if let invoker {
             let sub = await state.tenantSubscription(ownerUsername: invoker)
             if !sub.exists {
-                subscriptionLine = "💳 Подписка · <i>нет — /buy</i>"
+                subscriptionLine = "💳 Премиум · <i>не оплачен — /buy</i>"
             } else if let until = sub.paidUntil {
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 subscriptionLine = sub.isActive
-                    ? "💳 Подписка · до <b>\(f.string(from: until))</b> · продлить /buy"
-                    : "💳 Подписка · <b>⛔ истекла \(f.string(from: until))</b> · продлить /buy"
+                    ? "💳 Премиум · оплачен до <b>\(f.string(from: until))</b> · продлить /buy"
+                    : "💳 Премиум · <b>⛔ закончился \(f.string(from: until))</b> · продлить /buy"
 
                 let reminders = await state.reminderConfig()
                 let optedOut = await state.remindersOptOut(username: invoker)
@@ -3747,34 +3753,34 @@ final class BotMenuHandler: @unchecked Sendable {
                     action: "tenant:remtoggle"
                 )], at: max(0, rows.count - 1))
             } else {
-                subscriptionLine = "💳 Подписка · <b>бессрочная</b>"
+                subscriptionLine = "💳 Премиум · <b>бессрочный</b>"
             }
         } else {
-            subscriptionLine = "💳 Подписка · <i>нужен @username</i>"
+            subscriptionLine = "💳 Премиум · <i>нужен @username</i>"
         }
 
         let text = """
-        <b>🛠 Админ-панель</b>
+        <b>⚡ Мой премиум</b>
 
-        <b>📌 Лицензия</b>
+        <b>📌 Где он работает</b>
         \(chatStatusLine)
-        🆔 Этот чат · <code>\(chatKey.chatID)</code>
+        🆔 Номер этого чата · <code>\(chatKey.chatID)</code>
         \(subscriptionLine)\(reminderLine.map { "\n" + $0 } ?? "")
-        Чатов · <b>\(licensedChats.count)</b> · юзеров · <b>\(licensedUsers.count)</b>
+        Чатов · <b>\(licensedChats.count)</b> · гостей · <b>\(licensedUsers.count)</b>
         \(usageLine)
 
-        <b>По умолчанию для новых чатов</b>
+        <b>Что включается в новых чатах</b>
         🤖 Модель · <code>\(defaults.model)</code>
-        📝 История · <b>\(defaults.historyLength) сообщ.</b>
+        📝 Память · <b>\(defaults.historyLength) сообщ.</b>
         🎭 Роль:
         <blockquote expandable>\(defaults.role)</blockquote>
 
-        <b>👥 Доступ</b>
-        Whitelist · <b>\(whitelist.count) ID</b>
-        Админы · \(adminsLine)
+        <b>👥 Кому открыт доступ</b>
+        Гости этого чата · <b>\(whitelist.count)</b>
+        Помогают управлять · \(adminsLine)
 
-        <b>📋 Глобальные пресеты</b>
-        Кнопки ниже — управление пресетами для всех чатов.
+        <b>📋 Общие заготовки</b>
+        Кнопки ниже задают готовые варианты для всех ваших чатов.
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3790,29 +3796,29 @@ final class BotMenuHandler: @unchecked Sendable {
             let kind = chatID < 0 ? "👥" : "👤"
             rows.append([
                 menuButton("\(kind) \(chatID)", action: "noop"),
-                menuButton("🗑 Отвязать", action: "tenant:rmchat:\(chatID)"),
+                menuButton("🗑 Выключить", action: "tenant:rmchat:\(chatID)"),
             ])
         }
         let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
         if chatOwner?.lowercased() != invoker {
-            rows.append([menuButton("📌 Привязать этот чат", action: "tenant:claim")])
+            rows.append([menuButton("📌 Включить премиум здесь", action: "tenant:claim")])
         }
-        rows.append([menuButton("📥 Привязать чат по ID", action: "tenant:assignprompt")])
-        rows.append([menuButton("← К админ-панели", action: "nav:admin")])
+        rows.append([menuButton("📥 Добавить чат по номеру", action: "tenant:assignprompt")])
+        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
 
         let listText: String
         if chats.isEmpty {
-            listText = "<i>нет привязанных чатов</i>"
+            listText = "<i>пока ни одного</i>"
         } else {
             listText = chats.map { "• <code>\($0)</code>" }.joined(separator: "\n")
         }
         let text = """
-        <b>📋 Чаты лицензии @\(invoker)</b> (\(chats.count))
+        <b>📋 Чаты с премиумом @\(invoker)</b> (\(chats.count))
 
         \(listText)
 
-        <i>Чтобы привязать ещё один чат — добавьте бота туда (он привяжется автоматически), \
-        либо откройте этот чат и нажмите «Привязать этот чат». Также можно ввести chatID кнопкой ниже.</i>
+        <i>Чтобы премиум заработал ещё в одном чате — просто добавьте туда бота, он подхватит доступ сам. \
+        Или откройте нужный чат и нажмите «Включить премиум здесь». Ещё можно ввести номер чата кнопкой ниже.</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3820,7 +3826,7 @@ final class BotMenuHandler: @unchecked Sendable {
     private func renderAdminWhitelist(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let ids = await state.listWhitelisted(chatID: chatKey.chatID).sorted()
         var rows: [[InlineKeyboardButton]] = [
-            [menuButton("➕ Добавить ID", action: "wl:add")],
+            [menuButton("➕ Добавить гостя", action: "wl:add")],
         ]
         for id in ids.prefix(40) {
             rows.append([
@@ -3828,17 +3834,17 @@ final class BotMenuHandler: @unchecked Sendable {
                 menuButton("🗑 Убрать", action: "wl:remove:\(id)"),
             ])
         }
-        rows.append([menuButton("← К админ-панели", action: "nav:admin")])
+        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
 
         let listText = ids.isEmpty
             ? "<i>пусто</i>"
             : ids.map { "• <code>\($0)</code>" }.joined(separator: "\n")
         let text = """
-        <b>👤 Whitelist</b> (\(ids.count))
+        <b>👤 Гости этого чата</b> (\(ids.count))
 
         \(listText)
 
-        <i>ID пользователей с разрешённым доступом без оплаты в этом чате.</i>
+        <i>Люди, которым вы открыли умные модели в этом чате бесплатно. Добавляются по номеру пользователя в Telegram — его можно узнать, переслав сюда его сообщение любому ID-боту.</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3847,19 +3853,19 @@ final class BotMenuHandler: @unchecked Sendable {
         let defs = await state.getDefaults(chatID: chatKey.chatID)
         let rows: [[InlineKeyboardButton]] = [
             [menuButton("✏️ Модель", action: "def:model")],
-            [menuButton("✏️ Длина истории", action: "def:hist")],
+            [menuButton("✏️ Память", action: "def:hist")],
             [menuButton("✏️ Роль", action: "def:role")],
-            [menuButton("← К админ-панели", action: "nav:admin")],
+            [menuButton("← К моему премиуму", action: "nav:admin")],
         ]
         let text = """
-        <b>⚙️ Значения по умолчанию для новых чатов</b>
+        <b>⚙️ Что включается в новых чатах</b>
 
         🤖 Модель · <code>\(defs.model)</code>
-        📝 История · <b>\(defs.historyLength) сообщ.</b>
+        📝 Память · <b>\(defs.historyLength) сообщ.</b>
         🎭 Роль:
         <blockquote expandable>\(defs.role)</blockquote>
 
-        <i>Применяются к новым чатам и при /reset.</i>
+        <i>С этими настройками бот стартует в каждом новом чате. Они же возвращаются по команде /reset.</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3871,8 +3877,8 @@ final class BotMenuHandler: @unchecked Sendable {
         let users = await state.licensedUsers(ownerUsername: invoker)
 
         var rows: [[InlineKeyboardButton]] = [
-            [menuButton("🔗 Пригласительная ссылка", action: "nav:admininvite")],
-            [menuButton("➕ Добавить @username", action: "tenant:adduserprompt")],
+            [menuButton("🔗 Ссылка-приглашение", action: "nav:admininvite")],
+            [menuButton("➕ Добавить по @username", action: "tenant:adduserprompt")],
         ]
         for (i, user) in users.prefix(40).enumerated() {
             rows.append([
@@ -3880,20 +3886,20 @@ final class BotMenuHandler: @unchecked Sendable {
                 menuButton("🗑 Удалить", action: "tenant:rmuser:\(i)"),
             ])
         }
-        rows.append([menuButton("← К админ-панели", action: "nav:admin")])
+        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
 
         let listText: String
         if users.isEmpty {
-            listText = "<i>нет добавленных пользователей</i>"
+            listText = "<i>пока никого</i>"
         } else {
             listText = users.map { "• @\($0)" }.joined(separator: "\n")
         }
         let text = """
-        <b>👥 Лицензированные пользователи @\(invoker)</b> (\(users.count))
+        <b>👥 Гости премиума @\(invoker)</b> (\(users.count))
 
         \(listText)
 
-        <i>Кнопка выше — добавить @username. Команда — <code>/tenant adduser @username</code>.</i>
+        <i>Этим людям умные модели доступны за ваш счёт в любом чате с ботом. Проще всего — дать им ссылку-приглашение (кнопка выше). Командой: <code>/tenant adduser @username</code>.</i>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -4071,8 +4077,8 @@ final class BotMenuHandler: @unchecked Sendable {
         }
         guard await state.isTenant(username: invoker) else {
             return (
-                "Лицензия не активна — оформите доступ: /buy",
-                InlineKeyboardMarkup(inline_keyboard: [[menuButton("← К админ-панели", action: "nav:admin")]])
+                "Премиум неактивен — оформить: /buy",
+                InlineKeyboardMarkup(inline_keyboard: [[menuButton("← К моему премиуму", action: "nav:admin")]])
             )
         }
 
@@ -4084,21 +4090,21 @@ final class BotMenuHandler: @unchecked Sendable {
             rows.append([InlineKeyboardButton(text: "📨 Открыть ссылку", url: link)])
             rows.append([menuButton("♻️ Перевыпустить (старая сгорит)", action: "tenant:newinvite")])
             text = """
-            <b>🔗 Пригласительная ссылка</b>
+            <b>🔗 Ссылка-приглашение</b>
 
             <code>\(link)</code>
 
-            Отправьте её любому пользователю: открыв её и нажав Start, он получит доступ к платным моделям за счёт вашей лицензии и появится в списке «Пользователи».
+            Отправьте её кому угодно: он откроет ссылку, нажмёт «Начать» — и умные модели заработают у него за ваш счёт. Появится в списке «Гости премиума».
             """
         } else {
             rows.append([menuButton("➕ Создать ссылку", action: "tenant:newinvite")])
             text = """
-            <b>🔗 Пригласительная ссылка</b>
+            <b>🔗 Ссылка-приглашение</b>
 
-            Ссылка ещё не создана. Нажмите кнопку ниже — бот сгенерирует персональную ссылку-приглашение вашей лицензии.
+            Ссылки пока нет. Нажмите кнопку ниже — бот создаст вашу личную ссылку, по которой друзья и коллеги получат умные модели за ваш счёт.
             """
         }
-        rows.append([menuButton("← К админ-панели", action: "nav:admin")])
+        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
@@ -4203,7 +4209,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderAdminHelp() -> (String, InlineKeyboardMarkup) {
         let rows: [[InlineKeyboardButton]] = [
-            [menuButton("← К админ-панели", action: "nav:admin")],
+            [menuButton("← К моему премиуму", action: "nav:admin")],
         ]
         return (Self.adminHelpText, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -4216,63 +4222,51 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     static let adminHelpText: String = """
-<b>🛠 Справка администратора</b>
+<b>⚡ Как пользоваться премиумом</b>
 
-Все админ-задачи доступны кнопками в этой панели <b>и</b> командами. Кнопки — для удобства, команды — для скорости.
+Всё, что тут описано, есть и кнопками в панели, и командами. Кнопки удобнее, команды быстрее.
 
-<b>━━━ 📌 Лицензия ━━━</b>
+<b>━━━ 📌 Где работает премиум ━━━</b>
 
-UI: «📌 Привязать/Отвязать», «🔗 Пригласительная ссылка», «📋 Чаты лицензии» → «📥 Привязать чат по ID», «👥 Пользователи» → «➕ Добавить @username».
+Ваш премиум действует в личке с ботом и в тех чатах, которые вы отметили. В таком чате умные модели доступны <b>всем участникам</b> — платите только вы.
 
-<b>Самый простой способ дать доступ</b> — пригласительная ссылка: <code>/tenant invite</code>. Кто откроет её — получает платные модели за ваш счёт, без всяких ID.
+Чтобы включить премиум в чате, достаточно добавить туда бота: он подхватит доступ сам. Либо откройте нужный чат и нажмите «📌 Включить премиум здесь».
 
-<code>/tenant claim</code> — привязать этот чат к вашей лицензии
-<code>/tenant release</code> — отвязать этот чат
-<code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат вручную
-<code>/tenant unassign &lt;chatID&gt;</code> — отвязать чат
-<code>/tenant chats</code> — чаты лицензии
-<code>/tenant adduser @username</code> — дать @пользователю доступ
-<code>/tenant removeuser @username</code> — отозвать доступ
-<code>/tenant users</code> — лицензированные пользователи
-<code>/chatid</code> — ID и статус текущего чата (работает у всех)
+<b>Проще всего поделиться доступом</b> — ссылка-приглашение (<code>/tenant invite</code>). Кто по ней придёт, получит умные модели за ваш счёт — никаких номеров вводить не нужно.
 
-<b>━━━ 💳 Подписка ━━━</b>
+Команды: <code>/tenant claim</code> — включить премиум здесь · <code>/tenant release</code> — выключить · <code>/tenant chats</code> — список чатов · <code>/tenant adduser @username</code> и <code>/tenant removeuser @username</code> — добавить или убрать гостя · <code>/tenant users</code> — список гостей · <code>/chatid</code> — номер и статус текущего чата.
 
-Подписка действует \(ChatContextStore.subscriptionDays) дней с момента оплаты, продление — снова /buy (срок прибавляется к текущему). Статус виден в шапке админ-панели. Когда подписка истекает, ваши чаты и пользователи временно теряют платные модели — настройки и списки сохраняются, после продления всё возвращается.
+<b>━━━ 💳 Оплата и продление ━━━</b>
 
-Перед концом подписки бот напомнит о продлении (и, если включено владельцем бота, предупредит ваши чаты — продлить сможет любой участник). Кнопка «🔔 Напоминания о продлении» в панели выключает эти сообщения лично для вас.
+Премиум действует \(ChatContextStore.subscriptionDays) дней. Продление — снова /buy: новый срок прибавляется к текущему, ничего не сгорает.
 
-<b>━━━ 👥 Whitelist ━━━</b>
+Если премиум закончился, ваши чаты и гости временно возвращаются к бесплатным моделям. Все настройки и списки при этом сохраняются — после оплаты всё включается обратно.
 
-UI: «👤 Whitelist» в админ-панели — ➕ добавить ID / 🗑 убрать.
+За несколько дней до конца бот напомнит. Кнопка «🔔 Напоминания о продлении» выключает эти сообщения лично для вас.
 
-<code>/whitelist add &lt;ID&gt;</code>
-<code>/whitelist remove &lt;ID&gt;</code>
-<code>/whitelist list</code>
+<b>━━━ 👤 Гости этого чата ━━━</b>
 
-<b>━━━ ⚙️ Дефолты для новых чатов ━━━</b>
+Отдельным людям можно открыть умные модели в конкретном чате — по их номеру в Telegram.
+<code>/whitelist add &lt;номер&gt;</code> · <code>/whitelist remove &lt;номер&gt;</code> · <code>/whitelist list</code>
 
-UI: «⚙️ Дефолты» в админ-панели — кнопки правят модель, длину истории и роль.
+<b>━━━ ⚙️ Что включается в новых чатах ━━━</b>
 
-<code>/defaults</code> — показать текущие
-<code>/defaults model &lt;id&gt;</code>
-<code>/defaults role &lt;текст&gt;</code>
-<code>/defaults historylength &lt;1–50&gt;</code>
+Задайте модель, память и роль, с которыми бот стартует в каждом новом вашем чате.
+<code>/defaults</code> — посмотреть · <code>/defaults model &lt;название&gt;</code> · <code>/defaults role &lt;текст&gt;</code> · <code>/defaults historylength &lt;1–50&gt;</code>
 
-<b>━━━ 📋 Пресеты меню ━━━</b>
+<b>━━━ 📋 Общие заготовки ━━━</b>
 
-UI: «🤖 Пресеты моделей», «🎭 Ролей», «🌡 Темп.», «📝 Истории» — кнопки в админ-панели или в самих разделах меню.
+Готовые варианты модели, роли, стиля ответа и памяти — появятся кнопками во всех ваших чатах.
 
-Типы: <code>model</code>, <code>temp</code>, <code>history</code>, <code>role</code>.
-<code>/presets &lt;тип&gt; add &lt;label&gt; | &lt;value&gt;</code>
-<code>/presets &lt;тип&gt; remove &lt;value&gt;</code>
+Типы: <code>model</code>, <code>temp</code>, <code>history</code>, <code>role</code>
+<code>/presets &lt;тип&gt; add &lt;название&gt; | &lt;значение&gt;</code>
+<code>/presets &lt;тип&gt; remove &lt;значение&gt;</code>
 <code>/presets &lt;тип&gt; list</code>
 <blockquote>/presets model add GPT-4o | openai/gpt-4o</blockquote>
 
-<b>━━━ 📋 Просмотр ━━━</b>
+<b>━━━ 📋 Посмотреть ━━━</b>
 
-<code>/chats</code> — все чаты бота
-<code>/users</code> — пользователи в личке
+<code>/chats</code> — все чаты бота · <code>/users</code> — кто пишет в личке
 """
 
     static let superAdminHelpText: String = """
@@ -4429,12 +4423,12 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         let modelPrices = category == .model ? await state.openRouterModelPrices() : [:]
         let priceMultiplier = await state.priceMultiplier()
 
-        var text = "<b>📋 Управление пресетами · \(category.displayName)</b>\n\n"
+        var text = "<b>📋 Мои заготовки · \(category.displayName)</b>\n\n"
 
         if globalPresets.isEmpty {
-            text += "🌐 <b>Глобальные</b> — <i>нет</i>\n"
+            text += "🌐 <b>Общие — во всех чатах</b> — <i>нет</i>\n"
         } else {
-            text += "🌐 <b>Глобальные</b> (только администратор)\n"
+            text += "🌐 <b>Общие — во всех чатах</b> (меняет администратор)\n"
             for (i, preset) in globalPresets.enumerated() {
                 if category == .role {
                     text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
@@ -4454,9 +4448,9 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         text += "\n"
 
         if chatPresets.isEmpty {
-            text += "💬 <b>Пресеты чата</b> — <i>нет</i>"
+            text += "💬 <b>Заготовки этого чата</b> — <i>нет</i>"
         } else {
-            text += "💬 <b>Пресеты чата</b>\n"
+            text += "💬 <b>Заготовки этого чата</b>\n"
             for (i, preset) in chatPresets.enumerated() {
                 if category == .role {
                     text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
@@ -4492,7 +4486,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         }
 
         let addAction = canManageGlobal ? "pm:\(category.rawValue):scopesel" : "pm:\(category.rawValue):add"
-        rows.append([menuButton("➕ Добавить пресет", action: addAction)])
+        rows.append([menuButton("➕ Добавить заготовку", action: addAction)])
 
         rows.append([
             menuButton("← К выбору", action: "nav:\(category.rawValue)"),
@@ -4503,15 +4497,15 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
     }
 
     private func renderAwaitingInput(category: PresetCategory, scope: PendingInput.Scope, kind: PendingInput.Kind, preset: Preset?) -> (String, InlineKeyboardMarkup) {
-        let scopeLabel = scope == .global ? "🌐 Глобальный" : "💬 Пресет чата"
+        let scopeLabel = scope == .global ? "🌐 Общая" : "💬 Только этот чат"
         let text: String
         let formatLine = category == .model
-            ? "<code>Название | Значение | Провайдер</code>\n<i>Провайдер (роутинг OpenRouter) — опционален.</i>"
+            ? "<code>Название | Значение | Сервис</code>\n<i>Сервис можно не указывать.</i>"
             : "<code>Название | Значение</code>"
         switch kind {
         case .add:
             text = """
-            <b>➕ Новый пресет · \(scopeLabel) · \(category.displayName)</b>
+            <b>➕ Новая заготовка · \(scopeLabel) · \(category.displayName)</b>
 
             Отправьте сообщение в формате:
             \(formatLine)
@@ -4558,7 +4552,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
             guard isAdmin else { toast = "🔒 Только администратор"; resumePage = .adminPanel; break }
             if let id = Int(trimmed) {
                 await state.addToWhitelist(userID: id, chatID: chatKey.chatID)
-                toast = "✓ \(id) в whitelist"
+                toast = "✓ \(id) добавлен в гости"
             } else {
                 toast = "⚠️ Нужен целочисленный ID"
             }
@@ -4586,28 +4580,28 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
             resumePage = .adminDefaults
 
         case .tenantAssignChat:
-            guard let owner = pending.payload else { toast = "Нет владельца"; resumePage = .adminChats; break }
+            guard let owner = pending.payload else { toast = "Не удалось определить владельца"; resumePage = .adminChats; break }
             if !isSuper, owner.lowercased() != username?.lowercased() {
-                toast = "🔒 Можно привязать только к своей лицензии"
+                toast = "🔒 Включить премиум можно только за свой счёт"
             } else if let chatID = Int(trimmed) {
                 let ok = await state.assignChat(chatID: chatID, to: owner)
-                toast = ok ? "✓ Чат \(chatID) привязан" : "Tenant не найден"
+                toast = ok ? "✓ Премиум включён в чате \(chatID)" : "Премиум не найден"
             } else {
-                toast = "⚠️ Нужен целочисленный chatID"
+                toast = "⚠️ Номер чата — целое число"
             }
             resumePage = .adminChats
 
         case .tenantAddUser:
-            guard let owner = pending.payload else { toast = "Нет владельца"; resumePage = .adminUsers; break }
+            guard let owner = pending.payload else { toast = "Не удалось определить владельца"; resumePage = .adminUsers; break }
             if !isSuper, owner.lowercased() != username?.lowercased() {
-                toast = "🔒 Можно добавлять только в свою лицензию"
+                toast = "🔒 Добавлять гостей можно только к своему премиуму"
             } else {
                 let target = normalizeUsername(trimmed)
                 if target.isEmpty {
                     toast = "⚠️ Нужен @username"
                 } else {
                     let ok = await state.addLicensedUser(ownerUsername: owner, target: target)
-                    toast = ok ? "✓ @\(target) лицензирован" : "Уже в списке или нет лицензии"
+                    toast = ok ? "✓ @\(target) добавлен в гости премиума" : "Уже в списке или премиум неактивен"
                 }
             }
             resumePage = .adminUsers
@@ -4662,7 +4656,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 toast = "⚠️ Текст роли пуст"
             } else {
                 _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: trimmed + formatOptions)
-                toast = "✓ Роль обновлена. История очищена."
+                toast = "✓ Роль обновлена. Переписка очищена."
             }
 
         case .chatCustomModel:
@@ -4675,11 +4669,11 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
             } else {
                 let hasAccess = await state.hasFullModelAccess(username: username, chatID: chatKey.chatID)
                 if !hasAccess, let eff = await state.effectiveFreeModelIDs(), !eff.contains(modelID) {
-                    toast = "⭐ <b>\(modelID)</b> — модель с полным доступом. Купить: /buy"
+                    toast = "⭐ <b>\(modelID)</b> — платная модель. Открыть премиум — /buy, или пополнить баланс — /balance"
                 } else {
                     _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelID, providerRouting: providerRouting)
                     await modelPriceMonitor?.refreshPricesIfNeeded(for: modelID)
-                    toast = "✓ Модель: <code>\(modelID)</code>" + (providerRouting.map { " · \($0)" } ?? "") + ". История очищена."
+                    toast = "✓ Модель: <code>\(modelID)</code>" + (providerRouting.map { " · \($0)" } ?? "") + ". Переписка очищена."
                 }
             }
 
@@ -4687,7 +4681,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
             resumePage = .temp
             if let temp = Float(trimmed.replacingOccurrences(of: ",", with: ".")), (0.0...2.0).contains(temp) {
                 await state.setTemperature(chatKey: chatKey, value: temp)
-                toast = "✓ Темп: <b>\(Self.formatTemp(temp))</b> — \(Self.tempBucket(temp))"
+                toast = "✓ Стиль ответа: <b>\(Self.tempBucket(temp))</b> (\(Self.formatTemp(temp)))"
             } else {
                 toast = "⚠️ Нужно число от 0.0 до 2.0"
             }
@@ -4696,7 +4690,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
             resumePage = .history
             if let n = Int(trimmed), (1...50).contains(n) {
                 await state.setMaxHistory(chatKey: chatKey, newMax: n)
-                toast = "✓ Длина истории: <b>\(n) сообщ.</b>"
+                toast = "✓ Память: <b>\(n) сообщ.</b>"
             } else {
                 toast = "⚠️ Нужно число от 1 до 50"
             }
@@ -4937,9 +4931,9 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         let messages = await state.history(chatKey: chatKey)
         let text: String
         if messages.isEmpty {
-            text = "📝 История пуста."
+            text = "📝 Бот пока ничего не помнит — переписки нет."
         } else {
-            var lines: [String] = ["<b>📝 История</b> (\(messages.count))"]
+            var lines: [String] = ["<b>📝 Что бот помнит</b> (\(messages.count))"]
             for msg in messages {
                 let roleLabel: String
                 switch msg.role {

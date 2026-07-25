@@ -292,7 +292,7 @@ actor SubscriptionReminderService {
             lines.append(priceLine)
         }
         lines.append("")
-        lines.append("<i>Не хотите такие сообщения — /menu → 🛠 Админ-панель → кнопка «Напоминания о продлении».</i>")
+        lines.append("<i>Не хотите такие сообщения — /menu → ⚡ Мой премиум → кнопка «Напоминания о продлении».</i>")
         return lines.joined(separator: "\n")
     }
 

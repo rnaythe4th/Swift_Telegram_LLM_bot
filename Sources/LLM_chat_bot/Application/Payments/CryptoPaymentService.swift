@@ -10,12 +10,12 @@ enum CryptoPaymentError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .priceNotSet: return "Цена в USDT не настроена."
-        case .addressNotSet(let chain): return "Адрес для \(chain.displayName) не настроен."
-        case .poolExhausted(let chain): return "Все адреса \(chain.displayName) заняты. Попробуйте позже или выберите другую сеть."
-        case .rateUnavailable(let symbol): return "Не удалось получить курс для \(symbol)."
-        case .unknownInvoice: return "Счёт не найден."
-        case .invoiceExpired: return "Счёт истёк."
+        case .priceNotSet: return "Оплата криптой пока не настроена — выберите другой способ."
+        case .addressNotSet(let chain): return "Оплата через \(chain.displayName) пока недоступна — выберите другую сеть."
+        case .poolExhausted(let chain): return "Все адреса \(chain.displayName) сейчас заняты. Попробуйте через несколько минут или выберите другую сеть."
+        case .rateUnavailable(let symbol): return "Не удалось узнать текущий курс \(symbol). Попробуйте ещё раз или выберите другую монету."
+        case .unknownInvoice: return "Счёт не найден — создайте новый: /buy"
+        case .invoiceExpired: return "Срок счёта истёк — создайте новый: /buy"
         }
     }
 }
@@ -390,7 +390,7 @@ actor CryptoPaymentService {
         Принято: <b>\(amount) \(invoice.asset.symbol)</b> (\(invoice.asset.displayLabel))
         Текущий баланс: <b>$\(String(format: "%.2f", balanceUsd))</b>
 
-        Теперь доступны любые модели — плата за каждый ответ по факту, остаток видно в футере (включите /show_cost).
+        Теперь вам доступны любые модели: с баланса списывается стоимость каждого ответа, обычно доли цента. Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).
         """
         _ = try? await telegram.sendMessage(.init(
             chatID: invoice.userChatID,

@@ -103,22 +103,22 @@ final class GenerationCoordinator: @unchecked Sendable {
         let text: String
         let markup: InlineKeyboardMarkup
         if isGroup {
-            text = "🚦 Умные ответы у этого чата на сегодня закончились (\(limit)/\(limit)). Отвечаю на бесплатной — <code>\(freeModel)</code>. Снять лимит для всех — <b>Премиум</b>."
+            text = "🚦 Ответы умных моделей у этого чата на сегодня закончились (\(limit) из \(limit)). Завтра будут снова — счётчик обнуляется каждый день.\n\nПока отвечаю на бесплатной модели — <code>\(freeModel)</code>. Убрать лимит совсем, сразу для всех участников:"
             markup = InlineKeyboardMarkup(inline_keyboard: [[
                 InlineKeyboardButton(text: "⚡ Премиум для чата", callback_data: payAction)
             ]])
         } else {
-            text = "🚦 Премиум на сегодня закончился (\(limit)/\(limit)). Продолжаю бесплатно — <code>\(freeModel)</code>. Или сними лимит навсегда:"
+            text = "🚦 Ответы умных моделей на сегодня закончились (\(limit) из \(limit)). Завтра будут снова — счётчик обнуляется каждый день.\n\nПока отвечаю на бесплатной модели — <code>\(freeModel)</code>. Или уберите лимит совсем:"
             var rows: [[InlineKeyboardButton]] = [[
-                InlineKeyboardButton(text: "⚡ Открыть безлимит", callback_data: payAction),
-                InlineKeyboardButton(text: "💰 Баланс", callback_data: payAction)
+                InlineKeyboardButton(text: "⚡ Премиум на месяц", callback_data: payAction),
+                InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction)
             ]]
             // Free way out of the cap right at the pain point: bring a friend
             // and both wallets grow (roadmap step 10).
             let referral = await state.referralConfig()
             if referral.enabled, referral.inviterRewardCents > 0 {
                 rows.append([InlineKeyboardButton(
-                    text: "🎁 Позвать друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))",
+                    text: "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))",
                     callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
                 )])
             }
@@ -150,7 +150,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
                 text: String(
-                    format: "🎁 <b>Бонус за приглашение: $%.2f на баланс</b> — спасибо @%@!\n\nБаланс тратится по факту: пока он есть, доступны любые модели (остаток видно в футере, включите /show_cost). Своя ссылка для друзей — /ref.",
+                    format: "🎁 <b>Бонус за приглашение: $%.2f на баланс</b> — спасибо @%@!\n\nПока баланс не пуст, вам доступны любые модели: с него списывается стоимость каждого ответа, обычно доли цента. Сколько списалось — видно под самим ответом (включите показ: /show_cost).\n\nВаша ссылка для друзей — /ref.",
                     payout.inviteeRewardUsd, payout.inviterUsername
                 ),
                 replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
@@ -158,13 +158,13 @@ final class GenerationCoordinator: @unchecked Sendable {
         }
 
         if payout.inviterRewardUsd > 0 {
-            let friend = payout.invitedUsername.map { "@\($0)" } ?? "Ваш друг"
+            let friend = payout.invitedUsername.map { "@\($0)" } ?? "ваш друг"
             _ = try? await telegram.sendMessage(.init(
                 chatID: payout.inviterUserID,
                 threadID: nil,
                 replyTo: nil,
                 text: String(
-                    format: "🎉 <b>%@ пришёл по вашей ссылке и уже пишет боту.</b>\n\nВам начислено <b>$%.2f</b> на баланс · приглашений с наградой: <b>%d</b>.",
+                    format: "🎉 <b>Ваше приглашение сработало: %@ уже пишет боту.</b>\n\nВам начислено <b>$%.2f</b> на баланс · приглашений с наградой: <b>%d</b>.",
                     friend, payout.inviterRewardUsd, payout.inviterRewardedTotal
                 ),
                 replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
@@ -258,7 +258,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             if !unsupportedKinds.isEmpty {
                 let kinds = unsupportedKinds.map(\.displayName).joined(separator: ", ")
                 return .unsupported(
-                    "⚠️ Провайдер <b>\(provider.commandValue)</b> не поддерживает: \(kinds).\nСмените провайдера через /menu или отправьте только текст."
+                    "⚠️ Этот сервис ИИ не понимает: \(kinds).\nВыберите другой в /menu → 🔌 Сервис ИИ или отправьте только текст."
                 )
             }
         }
@@ -291,7 +291,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             let currentModel = await state.model(chatKey: chatKey)
             if !effectiveFree.contains(currentModel) {
                 guard let firstFree = effectiveFree.first else {
-                    try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Бесплатные модели не настроены. Обратитесь к администратору.")
+                    try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Бесплатные модели сейчас недоступны. Напишите администратору бота.")
                     return
                 }
                 let isGroup = !origin.isPrivate
@@ -588,7 +588,7 @@ final class GenerationCoordinator: @unchecked Sendable {
         } catch {
             logger.error("stream failed: \(error)")
             await draft.finish()
-            _ = await persist("⚠️ <b>Ошибка генерации</b>\n" + UserFacingError.message(error))
+            _ = await persist("⚠️ <b>Не получилось ответить</b>\n" + UserFacingError.message(error))
             await removeControlMessage()
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             await finishGeneration(generationID)
@@ -763,7 +763,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             isCancelled = true
         } catch {
             logger.error("stream failed: \(error)")
-            let userText = "⚠️ <b>Ошибка генерации</b>\n" + UserFacingError.message(error)
+            let userText = "⚠️ <b>Не получилось ответить</b>\n" + UserFacingError.message(error)
             try? await self.telegram.editMessage(
                 .init(
                     chatID: chatKey.chatID,

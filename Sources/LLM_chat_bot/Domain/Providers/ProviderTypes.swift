@@ -91,4 +91,29 @@ enum ReasoningEffort: String, Codable, Sendable, CaseIterable {
     case low = "low"
     case medium = "medium"
     case high = "high"
+
+    /// Label shown to users. The raw value stays the API wire format.
+    var displayName: String {
+        switch self {
+        case .low: return "быстро"
+        case .medium: return "средне"
+        case .high: return "глубоко"
+        }
+    }
+
+    /// Accepts both the API value and the Russian label users see in the menu,
+    /// so `/reasoning глубоко` works as well as `/reasoning high`.
+    init?(userInput: String) {
+        let normalized = userInput.trimmingCharacters(in: .whitespaces).lowercased()
+        if let effort = ReasoningEffort(rawValue: normalized) {
+            self = effort
+            return
+        }
+        switch normalized {
+        case "быстро": self = .low
+        case "средне", "средний": self = .medium
+        case "глубоко": self = .high
+        default: return nil
+        }
+    }
 }

@@ -19,7 +19,7 @@ enum AppBootstrapError: LocalizedError {
 struct BlueprintBotApp {
     static let ownerUsername = "maythe4th"
     static let companyMembers = ""
-    static let systemPrompt = "Ты физик, тебя зовут Анатолий."
+    static let systemPrompt = "Ты — полезный ИИ-ассистент в Telegram. Отвечай по делу, кратко и понятно, без воды и канцелярита. Если вопрос неясен — уточни."
     static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api). При упоминании или обращении к участникам никогда не ставь @ перед их именами, чтобы не тегать их."
 
     // Keeps signal sources alive for the process lifetime.

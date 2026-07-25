@@ -347,7 +347,7 @@ final class BotOrchestrator: @unchecked Sendable {
                             chatID: chatKey.chatID,
                             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                             replyTo: nil,
-                            text: "⏳ Слишком много сообщений подряд — часть пропущена. Дождитесь ответа на предыдущие.",
+                            text: "⏳ Слишком много сообщений подряд — часть я пропустил. Дождитесь ответа на предыдущие.",
                             replyMarkup: nil
                         )
                     )
@@ -361,14 +361,14 @@ final class BotOrchestrator: @unchecked Sendable {
     /// normal turn — free-tier gate, billing and history all apply.
     private func handleOnboardingExample(id: String, callback: CallbackQuery) async {
         guard let message = callback.message else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Сообщение недоступно")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Кнопка устарела — откройте меню заново: /menu")
             return
         }
         let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
 
         // Counts the tap (per-example stat + funnel) and resolves the prompt.
         guard let example = await state.recordOnboardingTap(id: id) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пример больше недоступен — напишите свой вопрос")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Этого примера больше нет — просто напишите свой вопрос")
             return
         }
         try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
@@ -431,7 +431,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
-                text: "⏳ Слишком много запросов подряд — попробуйте ещё раз через минуту.",
+                text: "⏳ Слишком много запросов подряд. Дождитесь ответа и попробуйте снова.",
                 replyMarkup: nil
             ))
         }
@@ -470,11 +470,11 @@ final class BotOrchestrator: @unchecked Sendable {
             if valid {
                 try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: true, errorMessage: nil)
             } else {
-                try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Цена изменилась. Попробуйте снова с командой /buy.")
+                try await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Цена изменилась — начните покупку заново: /buy")
             }
         } catch {
             logger.error("answerPreCheckoutQuery failed: \(error)")
-            try? await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Внутренняя ошибка. Попробуйте позже.")
+            try? await telegram.answerPreCheckoutQuery(queryID: query.id, ok: false, errorMessage: "Что-то пошло не так. Попробуйте позже.")
         }
     }
 
@@ -601,7 +601,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 chatID: message.chat.id,
                 threadID: message.message_thread_id,
                 replyTo: nil,
-                text: "✅ Оплата получена! Но у вас нет @username в Telegram — обратитесь к администратору для активации доступа.",
+                text: "✅ Оплата получена! Но у вас не задан @username в Telegram, поэтому доступ пока не включён. Задайте его в настройках Telegram и напишите администратору бота.",
                 replyMarkup: nil
             ))
             return
@@ -622,7 +622,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 threadID: message.message_thread_id,
                 replyTo: nil,
                 text: String(
-                    format: "✅ <b>Баланс пополнен на %@.</b>\n\nТекущий баланс: <b>$%.2f</b>. Теперь доступны любые модели — плата за каждый ответ по факту, остаток видно в футере (включите /show_cost).",
+                    format: "✅ <b>Баланс пополнен на %@.</b>\n\nТекущий баланс: <b>$%.2f</b>. Теперь вам доступны любые модели: с баланса списывается стоимость каждого ответа, обычно доли цента. Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).",
                     CreditPack.label(cents: cents), wallet.balanceUsd
                 ),
                 replyMarkup: nil

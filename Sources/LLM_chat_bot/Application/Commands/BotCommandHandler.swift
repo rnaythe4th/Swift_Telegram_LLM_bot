@@ -159,36 +159,36 @@ final class BotCommandHandler: @unchecked Sendable {
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: """
-                    🎭 Укажите текст роли.
+                    🎭 Опишите, кем должен быть бот.
                     <i>Пример:</i> <code>/setrole Ты — эксперт по математике, отвечай кратко.</code>
                     """)
                 return
             }
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: trimmed + formatOptions)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль обновлена. История очищена.")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль обновлена. Переписка очищена.")
 
         case .clearHistory:
             await state.clearHistory(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "🧹 История очищена.")
+            try await sendUserFeedback(chatKey: chatKey, text: "🧹 Переписка очищена — бот забыл, о чём был разговор.")
 
         case .setTemp:
             guard let temp = Float(parsed.argument), (0.0...2.0).contains(temp) else {
-                let hint = "<i>Нужно число от 0.0 до 2.0.</i>\n<i>Пример:</i> <code>/settemp 1.0</code>"
+                let hint = "<i>Нужно число от 0.0 (строго по фактам) до 2.0 (творчески).</i>\n<i>Пример:</i> <code>/settemp 1.0</code>"
                 try await sendUserFeedback(chatKey: chatKey, text: hint)
                 return
             }
             await state.setTemperature(chatKey: chatKey, value: temp)
             let bucket = BotMenuHandler.tempBucket(temp)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Темп: <b>\(BotMenuHandler.formatTemp(temp))</b> — \(bucket)")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Стиль ответа: <b>\(bucket)</b> (\(BotMenuHandler.formatTemp(temp)))")
 
         case .model:
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: """
-                    🤖 Укажите модель.
+                    🤖 Укажите название модели.
                     <i>Пример:</i> <code>/model openai/gpt-4o</code>
-                    <i>С провайдером (роутинг OpenRouter):</i> <code>/model deepseek/deepseek-v4-pro | deepseek</code>
-                    Готовые варианты — /menu → Модель
+                    <i>Через конкретный сервис:</i> <code>/model deepseek/deepseek-v4-pro | deepseek</code>
+                    Готовые варианты — /menu → 🤖 Модель
                     """)
                 return
             }
@@ -204,8 +204,8 @@ final class BotCommandHandler: @unchecked Sendable {
             let effectiveFree = await state.effectiveFreeModelIDs()
             if !hasAccess, let eff = effectiveFree, !eff.contains(modelID) {
                 let price = await state.starsPrice()
-                let buyHint = price.map { "\n\nКупить полный доступ (\($0) ⭐): /buy" } ?? "\n\nОформите полный доступ: /buy"
-                try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(modelID)</b> — модель с полным доступом.\(buyHint)")
+                let buyHint = price.map { "\n\nОткрыть премиум для этого чата (\($0) ⭐) — /buy, или пополните баланс и платите за ответы — /balance" } ?? "\n\nОткрыть премиум для этого чата — /buy, или пополните баланс и платите за ответы — /balance"
+                try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(modelID)</b> — платная модель.\(buyHint)")
                 return
             }
             let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelID, providerRouting: providerRouting)
@@ -219,28 +219,28 @@ final class BotCommandHandler: @unchecked Sendable {
                 let outP = BotMenuHandler.formatPriceM(price.outputPerToken * multiplier)
                 priceNote = "\n⬇️$\(inP)/M · ⬆️$\(outP)/M"
             }
-            let providerNote = providerRouting.map { "\nПровайдер: <code>\($0)</code>" } ?? ""
+            let providerNote = providerRouting.map { "\nСервис: <code>\($0)</code>" } ?? ""
             try await sendUserFeedback(chatKey: chatKey, text: """
                 ✓ Модель: <code>\(changed.new)</code>\(providerNote)
                 <i>Была:</i> <code>\(changed.old)</code>
-                История очищена.\(priceNote)
+                Переписка очищена.\(priceNote)
                 """)
 
         case .showTokens:
             let new = await state.toggleShowStats(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "📊 Показ токенов · <b>\(onOff(new))</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "📊 Объём текста под ответом · <b>\(onOff(new))</b>")
 
         case .showCost:
             let new = await state.toggleShowCost(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "💵 Показ стоимости · <b>\(onOff(new))</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "💵 Стоимость под ответом · <b>\(onOff(new))</b>")
 
         case .showModel:
             let new = await state.toggleShowModel(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "🤖 Показ модели · <b>\(onOff(new))</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "🤖 Название модели под ответом · <b>\(onOff(new))</b>")
 
         case .backupNotify:
             let new = await state.toggleBackupNotify(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "💾 Уведомления о бэкапе · <b>\(onOff(new))</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "💾 Отчёты о сохранении · <b>\(onOff(new))</b>")
 
         case .help:
             let markup = InlineKeyboardMarkup(inline_keyboard: [
@@ -257,20 +257,20 @@ final class BotCommandHandler: @unchecked Sendable {
         case .defaultRole:
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: defaultRole)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль сброшена к стандартной. История очищена.")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль сброшена к стандартной. Переписка очищена.")
 
         case .historyLength:
             guard let newMax = Int(parsed.argument), (1...50).contains(newMax) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50.</i>\n<i>Пример:</i> <code>/historylength 11</code>")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50 — сколько прошлых сообщений бот держит в голове.</i>\n<i>Пример:</i> <code>/historylength 11</code>")
                 return
             }
             await state.setMaxHistory(chatKey: chatKey, newMax: newMax)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Длина истории: <b>\(newMax) сообщ.</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Память: <b>\(newMax) сообщ.</b>")
 
         case .provider:
             if let provider = ServiceProvider.parse(parsed.argument) {
                 let old = await state.changeProvider(chatKey: chatKey, newProvider: provider)
-                var lines = ["✓ Провайдер: <b>\(provider.commandValue)</b>"]
+                var lines = ["✓ Сервис ИИ: <b>\(provider.commandValue)</b>"]
                 if old != provider {
                     lines.append("<i>Был:</i> <b>\(old.commandValue)</b>")
                 }
@@ -279,11 +279,11 @@ final class BotCommandHandler: @unchecked Sendable {
                 let reasoningEnabled = await state.reasoningEnabled(chatKey: chatKey)
                 if reasoningEnabled, !gateway.capabilities.supportsReasoning {
                     await state.setReasoningEffort(chatKey: chatKey, effort: nil)
-                    lines.append("<i>Reasoning отключён — провайдер не поддерживает.</i>")
+                    lines.append("<i>Обдумывание выключено — этот сервис его не умеет.</i>")
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Неизвестный провайдер. Доступны: <code>deepseek</code>, <code>openrouter</code>, <code>yandex</code>.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Неизвестный сервис. Доступны: <code>deepseek</code>, <code>openrouter</code>, <code>yandex</code>.")
             }
 
         case .testMode:
@@ -308,24 +308,24 @@ final class BotCommandHandler: @unchecked Sendable {
             guard gateway.capabilities.supportsReasoning else {
                 try await sendUserFeedback(
                     chatKey: chatKey,
-                    text: "🧠 Провайдер <b>\(provider.commandValue)</b> не поддерживает reasoning."
+                    text: "🧠 Сервис <b>\(provider.commandValue)</b> не умеет обдумывать ответ. Смените его в /menu → 🔌 Сервис ИИ."
                 )
                 return
             }
 
             let arg = parsed.argument.trimmingCharacters(in: .whitespaces).lowercased()
-            if let effort = ReasoningEffort(rawValue: arg) {
+            if let effort = ReasoningEffort(userInput: arg) {
                 await state.setReasoningEffort(chatKey: chatKey, effort: effort)
             } else if arg == "off" || arg == "выкл" {
                 await state.setReasoningEffort(chatKey: chatKey, effort: nil)
             } else if arg.isEmpty {
                 _ = await state.toggleReasoning(chatKey: chatKey)
             } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/reasoning low|medium|high|off</code>")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/reasoning быстро|средне|глубоко|выкл</code>")
                 return
             }
             let current = await state.reasoningEffort(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "🧠 Reasoning · <b>\(current?.rawValue ?? "выкл")</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "🧠 Обдумывание · <b>\(current?.displayName ?? "выключено")</b>")
 
         case .menu:
             await menuHandler.sendMenu(chatKey: chatKey, username: fromUser?.username)
@@ -387,28 +387,28 @@ final class BotCommandHandler: @unchecked Sendable {
             var text: String
             if config.paysAnything {
                 text = String(
-                    format: "🎁 <b>Вас пригласил @%@.</b>\n\nНапишите первый вопрос — и на ваш баланс упадёт <b>$%.2f</b> (пригласившему — $%.2f). Баланс = платные модели без подписки, списание по факту за ответ.",
+                    format: "🎁 <b>Вас пригласил @%@.</b>\n\nЗадайте первый вопрос — и на ваш баланс придёт <b>$%.2f</b> (пригласившему — $%.2f).\n\nПока баланс не пуст, вам доступны любые модели без подписки: с него списывается стоимость каждого ответа, обычно доли цента.",
                     inviter, inviteeReward, config.inviterRewardUsd
                 )
             } else {
                 text = "🎁 Вы пришли по приглашению <b>@\(inviter)</b>. Просто напишите вопрос — отвечу."
             }
             if needsUsername {
-                text += "\n\n⚠️ Чтобы получить свою часть, задайте <b>@username</b> в настройках Telegram — награда придёт после этого."
+                text += "\n\n⚠️ Чтобы получить бонус, задайте <b>@username</b> в настройках Telegram — без него зачислить деньги некуда."
             }
             note = text
 
         case .alreadyBound(let inviter):
-            note = "ℹ️ Вы уже отмечены как приглашённый <b>@\(inviter)</b> — награда за приглашение начисляется один раз."
+            note = "ℹ️ Вас уже пригласил <b>@\(inviter)</b> — бонус за приглашение даётся только один раз."
 
         case .selfInvite:
-            note = "🙂 Это ваша собственная ссылка — пригласить себя нельзя. Отправьте её друзьям: /ref"
+            note = "🙂 Это ваша собственная ссылка — себя пригласить нельзя. Отправьте её друзьям: /ref"
 
         case .notNewUser:
-            note = "ℹ️ Награда за приглашение — только для тех, кто ещё не писал боту в личке. Зато вы можете приглашать сами: /ref"
+            note = "ℹ️ Бонус за приглашение получают только те, кто раньше боту не писал. Зато приглашать можете вы сами: /ref"
 
         case .unknownInviter:
-            note = "⚠️ Ссылка не сработала: у пригласившего нет <b>@username</b> или он ещё не писал боту в личке."
+            note = "⚠️ Ссылка не сработала: у пригласившего не задан <b>@username</b> либо он ещё ни разу не писал боту."
 
         case .disabled:
             note = nil
@@ -530,7 +530,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
-                text: "🎁 Ссылка для приглашений личная — откройте бота в личке и отправьте /ref.",
+                text: "🎁 Ссылка-приглашение личная — откройте бота в личке и отправьте там /ref.",
                 replyMarkup: rows.isEmpty ? nil : InlineKeyboardMarkup(inline_keyboard: rows)
             ))
             return
@@ -562,7 +562,7 @@ final class BotCommandHandler: @unchecked Sendable {
         // even without a @username.
         if chatKey.chatID > 0, await state.chatOwner(chatID: chatKey.chatID) == nil {
             _ = await state.assignChat(chatID: chatKey.chatID, to: owner)
-            grantedLines.append("• этот чат подключён к лицензии @\(owner)")
+            grantedLines.append("• в этом чате премиум работает за счёт @\(owner)")
         }
 
         guard !grantedLines.isEmpty else {
@@ -587,14 +587,14 @@ final class BotCommandHandler: @unchecked Sendable {
         var lines = ["<b>🆔 Этот чат</b>", ""]
         lines.append("ID · <code>\(chatKey.chatID)</code>")
         if chatKey.threadID != 0 {
-            lines.append("Топик (thread) · <code>\(chatKey.threadID)</code>")
+            lines.append("Тема · <code>\(chatKey.threadID)</code>")
         }
         if let meta {
             lines.append("Тип · \(meta.type)" + (meta.title.map { " · «\($0)»" } ?? ""))
         }
-        lines.append(owner.map { "Лицензия · @\($0)" } ?? "Лицензия · <i>не привязан</i>")
+        lines.append(owner.map { "Премиум · открыл @\($0)" } ?? "Премиум · <i>здесь не открыт</i>")
         lines.append("")
-        lines.append("<i>Привязать чат к своей лицензии: /tenant claim (для админов)</i>")
+        lines.append("<i>Если премиум есть у вас — включить его в этом чате: /tenant claim</i>")
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
     }
 
@@ -850,11 +850,18 @@ final class BotCommandHandler: @unchecked Sendable {
 
         // Personal view (everyone, incl. superadmin without subcommand)
         guard let username = fromUser?.username else {
-            try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Для баланса нужен @username в Telegram.")
+            try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Чтобы завести баланс, задайте @username в настройках Telegram.")
             return
         }
         guard let wallet = await state.balance(username: username) else {
-            var lines = ["💰 У вас нет кошелька. Баланс — способ платить за платные модели по факту использования, без подписки."]
+            var lines = [
+                "<b>💰 Баланс</b>",
+                "",
+                "У вас пока нет баланса.",
+                "",
+                "Баланс — как счёт на телефоне: вы его пополняете, а с него списывается стоимость каждого ответа бота. Обычно это доли цента, так что $2 хватает надолго. Подписка при этом не нужна — платите только за то, чем пользуетесь.",
+                ""
+            ]
             if isSuper {
                 lines.append("\n<i>Суперадмин:</i> <code>/balance add @\(username) 5</code> — начислить себе, <code>/balance list</code> — все кошельки.")
             } else {
@@ -865,14 +872,15 @@ final class BotCommandHandler: @unchecked Sendable {
         }
 
         let status = wallet.balanceUsd > 0
-            ? "🟢 активен — платные модели доступны"
-            : "⛔ исчерпан — доступны только бесплатные модели"
+            ? "🟢 Пока баланс не пуст, вам доступны любые модели"
+            : "⛔ Баланс пуст — отвечают только бесплатные модели"
         var lines = ["<b>💰 Ваш баланс</b>", ""]
         lines.append("Остаток · <b>\(formatUsd(wallet.balanceUsd))</b>")
         lines.append("Потрачено всего · \(formatUsd(wallet.spentBilledUsd))")
         lines.append(status)
         lines.append("")
-        lines.append("<i>Списание за каждый ответ видно в футере сообщений (включите /show_cost). Пополнить — /buy, бесплатно — пригласить друга: /ref.</i>")
+        lines.append("<i>С баланса списывается стоимость каждого ответа — обычно доли цента. Сколько списалось, видно под самим ответом (включите показ: /show_cost).</i>")
+        lines.append("<i>Пополнить — /buy. Бесплатно — пригласить друга: /ref.</i>")
         if isSuper {
             lines.append("<i>Реально потрачено (суперадмин): \(formatUsd(wallet.spentRealUsd)) · маржа \(formatUsd(wallet.spentBilledUsd - wallet.spentRealUsd))</i>")
         }
@@ -1247,7 +1255,7 @@ final class BotCommandHandler: @unchecked Sendable {
         switch subcommand.lowercased() {
         case "add":
             guard let userID = Int(value) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/whitelist add &lt;ID&gt;</code>")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/whitelist add &lt;номер пользователя&gt;</code>")
                 return
             }
             await state.addToWhitelist(userID: userID, chatID: chatKey.chatID)
@@ -1255,7 +1263,7 @@ final class BotCommandHandler: @unchecked Sendable {
 
         case "remove":
             guard let userID = Int(value) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/whitelist remove &lt;ID&gt;</code>")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/whitelist remove &lt;номер пользователя&gt;</code>")
                 return
             }
             await state.removeFromWhitelist(userID: userID, chatID: chatKey.chatID)
@@ -1458,9 +1466,9 @@ final class BotCommandHandler: @unchecked Sendable {
 
         default:
             try await sendUserFeedback(chatKey: chatKey, text: """
-                <b>🎛 Пресеты меню</b>
+                <b>🎛 Заготовки для меню</b>
 
-                <code>/presets &lt;тип&gt; add &lt;label&gt; | &lt;value&gt;</code>
+                <code>/presets &lt;тип&gt; add &lt;название&gt; | &lt;значение&gt;</code>
                 <code>/presets &lt;тип&gt; remove &lt;value&gt;</code>
                 <code>/presets &lt;тип&gt; list</code>
 
@@ -1494,9 +1502,9 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(
                     chatKey: chatKey,
                     text: """
-                    <i>Использование:</i> <code>/presets \(typeKey) add &lt;label&gt; | &lt;value&gt;</code>
+                    <i>Как пользоваться:</i> <code>/presets \(typeKey) add &lt;название&gt; | &lt;значение&gt;</code>
                     <i>Пример:</i> <code>/presets model add Gemini 3 Flash | google/gemini-3-flash-preview</code>
-                    <i>Модель с провайдером:</i> <code>/presets model add DeepSeek V4 | deepseek/deepseek-v4-pro | deepseek</code>
+                    <i>Модель через конкретный сервис:</i> <code>/presets model add DeepSeek V4 | deepseek/deepseek-v4-pro | deepseek</code>
                     """
                 )
                 return
@@ -1517,28 +1525,28 @@ final class BotCommandHandler: @unchecked Sendable {
             let providerNote = preset.provider.map { " · <code>\($0)</code>" } ?? ""
             try await sendUserFeedback(
                 chatKey: chatKey,
-                text: "✓ Пресет \(typeName): <b>\(preset.display)</b> → <code>\(preset.value)</code>\(providerNote)"
+                text: "✓ Заготовка \(typeName): <b>\(preset.display)</b> → <code>\(preset.value)</code>\(providerNote)"
             )
 
         case "remove":
             guard !value.isEmpty else {
-                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/presets \(typeKey) remove &lt;value&gt;</code>")
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/presets \(typeKey) remove &lt;значение&gt;</code>")
                 return
             }
             let removed = await remove(value)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: removed
-                    ? "✓ Пресет \(typeName) <code>\(value)</code> удалён."
-                    : "Пресет \(typeName) <code>\(value)</code> не найден."
+                    ? "✓ Заготовка \(typeName) <code>\(value)</code> удалена."
+                    : "Заготовка \(typeName) <code>\(value)</code> не найдена."
             )
 
         case "list":
             let presets = await list()
             if presets.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "Пресеты \(typeName): пусто.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Заготовки \(typeName): пусто.")
             } else {
-                var lines = ["<b>Пресеты \(typeName)</b> (\(presets.count))"]
+                var lines = ["<b>Заготовки \(typeName)</b> (\(presets.count))"]
                 for (i, p) in presets.enumerated() {
                     let providerNote = p.provider.map { " · <code>\($0)</code>" } ?? ""
                     lines.append("\(i). <b>\(p.display)</b> → <code>\(p.value)</code>\(providerNote)")
@@ -1606,17 +1614,17 @@ final class BotCommandHandler: @unchecked Sendable {
         case "list":
             let tenants = await state.listTenants()
             if tenants.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "Tenants: пусто.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Спонсоров пока нет.")
             } else {
                 let list = tenants.map { "• @\($0)" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "<b>🏢 Tenants</b> (\(tenants.count))\n\(list)")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>🏢 Спонсоры</b> (\(tenants.count))\n\(list)")
             }
 
         case "assign":
             let username = normalizeUsername(arg1)
             // Admins may only assign chats to themselves; super may assign to anyone.
             if !invokerIsSuper, username.lowercased() != invokerUsername {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Можно привязать чат только к своей лицензии.")
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Включить премиум в чате можно только за свой счёт.")
                 return
             }
             guard !username.isEmpty, let chatID = Int(arg2) else {
@@ -1625,8 +1633,8 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             let ok = await state.assignChat(chatID: chatID, to: username)
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ Chat <code>\(chatID)</code> назначен @\(username)."
-                : "Tenant @\(username) не найден.")
+                ? "✓ В чате <code>\(chatID)</code> включён премиум @\(username)."
+                : "У @\(username) нет премиума.")
 
         case "unassign":
             guard let chatID = Int(arg1) else {
@@ -1635,7 +1643,7 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             let owner = await state.chatOwner(chatID: chatID)
             if !invokerIsSuper, owner?.lowercased() != invokerUsername {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Этот чат не привязан к вашей лицензии.")
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 В этом чате премиум открыли не вы.")
                 return
             }
             let removed = await state.unassignChat(chatID: chatID)
@@ -1652,13 +1660,13 @@ final class BotCommandHandler: @unchecked Sendable {
             let ok = await state.assignChat(chatID: chatKey.chatID, to: username)
             try await sendUserFeedback(chatKey: chatKey, text: ok
                 ? "✓ Этот чат привязан к @\(username)."
-                : "Tenant @\(username) не найден — оплатите доступ через /buy.")
+                : "У @\(username) нет премиума — оформить: /buy")
 
         case "release":
             // Admin detaches the current chat from their licence.
             let owner = await state.chatOwner(chatID: chatKey.chatID)
             if !invokerIsSuper, owner?.lowercased() != invokerUsername {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Этот чат не привязан к вашей лицензии.")
+                try await sendUserFeedback(chatKey: chatKey, text: "🔒 В этом чате премиум открыли не вы.")
                 return
             }
             let removed = await state.unassignChat(chatID: chatKey.chatID)
@@ -1674,10 +1682,10 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             let chats = await state.chatsOwnedBy(username)
             if chats.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "У вашей лицензии нет привязанных чатов.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Ваш премиум пока не включён ни в одном чате.")
             } else {
                 let list = chats.sorted().map { "• <code>\($0)</code>" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты лицензии @\(username)</b> (\(chats.count))\n\(list)")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты с премиумом @\(username)</b> (\(chats.count))\n\(list)")
             }
 
         case "adduser":
@@ -1692,8 +1700,8 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             let added = await state.addLicensedUser(ownerUsername: username, target: target)
             try await sendUserFeedback(chatKey: chatKey, text: added
-                ? "✓ @\(target) получил доступ к платным моделям по вашей лицензии."
-                : "@\(target) уже в списке или ваша лицензия не активна.")
+                ? "✓ @\(target) теперь пользуется умными моделями за ваш счёт."
+                : "@\(target) уже в списке, либо ваш премиум неактивен.")
 
         case "removeuser":
             guard let username = invokerUsername else {
@@ -1707,8 +1715,8 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             let removed = await state.removeLicensedUser(ownerUsername: username, target: target)
             try await sendUserFeedback(chatKey: chatKey, text: removed
-                ? "✓ @\(target) удалён из списка лицензированных."
-                : "@\(target) не найден в списке лицензированных.")
+                ? "✓ @\(target) больше не гость вашего премиума."
+                : "@\(target) не найден среди гостей вашего премиума.")
 
         case "users":
             guard let username = invokerUsername else {
@@ -1717,10 +1725,10 @@ final class BotCommandHandler: @unchecked Sendable {
             }
             let users = await state.licensedUsers(ownerUsername: username)
             if users.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "В вашей лицензии нет добавленных пользователей.\n\n<i>Удобнее всего — пригласительная ссылка: /tenant invite</i>")
+                try await sendUserFeedback(chatKey: chatKey, text: "Гостей премиума пока нет.\n\n<i>Проще всего пригласить ссылкой: /tenant invite</i>")
             } else {
                 let list = users.map { "• @\($0)" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Лицензированные пользователи @\(username)</b> (\(users.count))\n\(list)")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Гости премиума @\(username)</b> (\(users.count))\n\(list)")
             }
 
         case "invite":
@@ -1729,7 +1737,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 return
             }
             guard await state.isTenant(username: username) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Лицензия не активна — оформите доступ: /buy")
+                try await sendUserFeedback(chatKey: chatKey, text: "Премиум неактивен — оформить: /buy")
                 return
             }
             let wantsNew = arg1.lowercased() == "new"
@@ -1741,17 +1749,17 @@ final class BotCommandHandler: @unchecked Sendable {
                 token = existing
             }
             guard let token else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Не удалось создать ссылку — лицензия не найдена.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Не удалось создать ссылку — премиум не найден.")
                 return
             }
             let link = "https://t.me/\(botUsername)?start=inv_\(token)"
             let renewedNote = wantsNew ? "\n<i>Старая ссылка больше не действует.</i>" : ""
             try await sendUserFeedback(chatKey: chatKey, text: """
-                🔗 <b>Пригласительная ссылка вашей лицензии</b>
+                🔗 <b>Ваша ссылка-приглашение</b>
 
                 \(link)
 
-                Любой, кто откроет её и нажмёт Start, получит доступ к платным моделям за ваш счёт (и попадёт в список /tenant users).\(renewedNote)
+                Любой, кто откроет её и нажмёт «Начать», получит умные модели за ваш счёт и попадёт в список гостей (/tenant users).\(renewedNote)
 
                 <code>/tenant invite new</code> — перевыпустить (старая перестанет работать)
                 """)
@@ -1811,7 +1819,7 @@ final class BotCommandHandler: @unchecked Sendable {
         case "stats":
             let rows = await state.tenantStats()
             if rows.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "Tenants: пусто.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Спонсоров пока нет.")
             } else {
                 var lines = ["<b>📊 Статистика tenants</b>"]
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
@@ -1889,19 +1897,19 @@ final class BotCommandHandler: @unchecked Sendable {
 
         default:
             let adminHelp = """
-                <b>🏢 Управление лицензией</b>
+                <b>⚡ Управление премиумом</b>
 
-                <code>/tenant invite</code> — 🔗 пригласительная ссылка (самый простой способ дать доступ)
-                <code>/tenant claim</code> — привязать этот чат к вашей лицензии
-                <code>/tenant release</code> — отвязать этот чат
-                <code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат вручную
-                <code>/tenant unassign &lt;chatID&gt;</code> — отвязать чат
-                <code>/tenant chats</code> — чаты вашей лицензии
-                <code>/tenant adduser @username</code> — дать пользователю доступ
-                <code>/tenant removeuser @username</code> — отозвать доступ
-                <code>/tenant users</code> — лицензированные пользователи
-                <code>/chatid</code> — ID текущего чата
-                <code>/buy</code> — статус и продление подписки
+                <code>/tenant invite</code> — 🔗 ссылка-приглашение (проще всего поделиться доступом)
+                <code>/tenant claim</code> — включить премиум в этом чате
+                <code>/tenant release</code> — выключить в этом чате
+                <code>/tenant assign @username &lt;номер чата&gt;</code> — включить в другом чате
+                <code>/tenant unassign &lt;номер чата&gt;</code> — выключить в другом чате
+                <code>/tenant chats</code> — чаты, где работает ваш премиум
+                <code>/tenant adduser @username</code> — добавить гостя
+                <code>/tenant removeuser @username</code> — убрать гостя
+                <code>/tenant users</code> — список гостей
+                <code>/chatid</code> — номер этого чата
+                <code>/buy</code> — статус и продление премиума
                 """
             let superHelp = """
 
@@ -2294,8 +2302,8 @@ final class BotCommandHandler: @unchecked Sendable {
             if let starsAmount = pricing.stars, starsAmount > 0 {
                 try await telegram.sendInvoice(.init(
                     chatID: chatKey.chatID,
-                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней\(discountNote)",
-                    description: "Персональная копия ИИ-бота: платные модели, свои чаты и пользователи",
+                    title: "Премиум-доступ · \(ChatContextStore.subscriptionDays) дней\(discountNote)",
+                    description: "Умные модели (GPT, Claude, Gemini), без рекламы и лимитов — для этого чата и вашей лички",
                     payload: "buy_access",
                     starsAmount: starsAmount
                 ))
@@ -2309,8 +2317,8 @@ final class BotCommandHandler: @unchecked Sendable {
             if cardAvailable, let token = card.providerToken, let minorUnits = pricing.cardMinorUnits {
                 try await telegram.sendInvoice(.init(
                     chatID: chatKey.chatID,
-                    title: "Подписка на бота · \(ChatContextStore.subscriptionDays) дней\(discountNote)",
-                    description: "Персональная копия ИИ-бота: платные модели, свои чаты и пользователи",
+                    title: "Премиум-доступ · \(ChatContextStore.subscriptionDays) дней\(discountNote)",
+                    description: "Умные модели (GPT, Claude, Gemini), без рекламы и лимитов — для этого чата и вашей лички",
                     payload: "buy_access_card",
                     kind: .fiat(currency: card.currency.rawValue, amountMinorUnits: minorUnits, providerToken: token)
                 ))
@@ -2348,7 +2356,7 @@ final class BotCommandHandler: @unchecked Sendable {
             text: """
             <b>💳 Выберите способ оплаты</b>
 
-            После оплаты бот активирует персональную копию автоматически.
+            Доступ включится автоматически сразу после оплаты.
             """,
             replyMarkup: markup
         ))
@@ -2357,11 +2365,11 @@ final class BotCommandHandler: @unchecked Sendable {
     private func handleHistory(chatKey: ChatKey) async throws {
         let messages = await state.history(chatKey: chatKey)
         guard !messages.isEmpty else {
-            try await sendUserFeedback(chatKey: chatKey, text: "📝 История пуста.")
+            try await sendUserFeedback(chatKey: chatKey, text: "📝 Бот пока ничего не помнит — переписки нет.")
             return
         }
 
-        var lines: [String] = ["<b>📝 История</b> (\(messages.count))"]
+        var lines: [String] = ["<b>📝 Что бот помнит</b> (\(messages.count))"]
         for msg in messages {
             let roleLabel: String
             switch msg.role {
