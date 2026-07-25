@@ -418,6 +418,18 @@ actor ChatContextStore {
         for record in referralLedgerValue.records.values {
             keys.insert(UserKey.forUserID(record.inviterUserID))
         }
+        // Tallies outlive the records they were built from (records are pruned,
+        // aggregates are not), so an inviter with no live record still holds
+        // state — their reward cap and client count hang off this key.
+        for tally in referralLedgerValue.tallies.keys {
+            guard let userID = Int(tally) else { continue }
+            keys.insert(UserKey.forUserID(userID))
+        }
+        // An open crypto invoice is money in flight: lose the identity and
+        // `openCryptoInvoiceForUser` stops finding it.
+        keys.formUnion(_cryptoInvoices.values.map(\.username))
+        keys.formUnion(_simulatedRoles.keys)
+        keys.formUnion(userTenantMap.values)
         return keys
     }
 
@@ -443,6 +455,13 @@ actor ChatContextStore {
                 existing.balanceUsd += wallet.balanceUsd
                 existing.spentBilledUsd += wallet.spentBilledUsd
                 existing.spentRealUsd += wallet.spentRealUsd
+                // `toppedUpUsd` is the only proof this person ever paid real
+                // money (§7 «Возврат по балансу»); dropping it on a merge would
+                // quietly turn a client back into a stranger. `lapsedNoticeAt`
+                // must survive too, or the lapsed-wallet offer is sent twice.
+                existing.toppedUpUsd += wallet.toppedUpUsd
+                existing.lapsedNoticeAt = [existing.lapsedNoticeAt, wallet.lapsedNoticeAt].compactMap { $0 }.max()
+                existing.updatedAt = [existing.updatedAt, wallet.updatedAt].compactMap { $0 }.max()
                 userBalances[key] = existing
             } else {
                 userBalances[key] = wallet

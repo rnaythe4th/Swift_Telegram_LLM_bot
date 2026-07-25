@@ -513,6 +513,10 @@ placeholder раз в 3 секунды (`GenerationCoordinator.swift:881`) — �
 
 ### B15. Кошелёк «доказанного плательщика» теряется при опознании человека
 
+> ✅ **Исправлено.** Слияние в `adoptRecords` складывает `toppedUpUsd` и берёт
+> **максимум** из `lapsedNoticeAt` и `updatedAt` (макс, а не `??`: отметка о
+> доставке оффера не должна откатываться назад и дать второй оффер).
+
 **Где:** `Domain/Chat/ChatContextStore.swift:426-438` (`adoptRecords`).
 
 ```swift
@@ -540,6 +544,10 @@ existing.updatedAt = [existing.updatedAt, wallet.updatedAt].compactMap { $0 }.ma
 ---
 
 ### B16. `keysHoldingState` не защищает всех, за кем что-то числится
+
+> ✅ **Исправлено.** Дописаны владельцы открытых крипто-инвойсов, `_simulatedRoles`,
+> `userTenantMap.values` и ключи `referralLedger.tallies` (агрегаты живут дольше
+> записей, поэтому пригласивший без живой записи всё равно держит состояние).
 
 **Где:** `Domain/Chat/ChatContextStore.swift:395-409`.
 
