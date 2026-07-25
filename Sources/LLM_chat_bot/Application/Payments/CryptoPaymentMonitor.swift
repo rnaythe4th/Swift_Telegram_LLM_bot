@@ -10,13 +10,13 @@ actor CryptoPaymentMonitor {
     private let ethExplorer: EvmExplorer?
     private let tronExplorer: TronExplorer?
 
-    private struct CursorKey: Hashable {
-        let asset: CryptoAsset
-        let address: String
-    }
-    private var cursors: [CursorKey: ExplorerCursor] = [:]
-
     private static let pollIntervalNanos: UInt64 = 30 * 1_000_000_000
+
+    /// How far back to scan an address the store has no cursor for. One invoice
+    /// lifetime (30 min) plus slack: a first-ever poll may still be catching up
+    /// on a transfer sent moments before the address was configured, and a
+    /// re-scan costs nothing — every credit is deduplicated by tx hash.
+    private static let coldStartLookbackSeconds = 45 * 60
 
     init(
         state: ChatContextStore,
@@ -46,15 +46,20 @@ actor CryptoPaymentMonitor {
     }
 
     private func pollOnce() async {
-        let nowSeed = Int(Date().timeIntervalSince1970)
+        // Cursors live in the store, not in this actor: a redeploy must not
+        // reset the scan position to "now" and swallow whatever arrived while
+        // the process was down.
+        let stored = await state.explorerCursors()
+        let coldSeed = Int(Date().timeIntervalSince1970) - Self.coldStartLookbackSeconds
+        var liveKeys: Set<String> = []
         for asset in CryptoAsset.allCases {
             let addresses = await state.pollableCryptoAddresses(asset.chain)
             for address in addresses {
-                let key = CursorKey(asset: asset, address: address.lowercased())
-                let cursor = cursors[key] ?? ExplorerCursor(lastSeenUnix: nowSeed)
+                let key = ChatContextStore.explorerCursorKey(asset: asset, address: address)
+                liveKeys.insert(key)
+                let cursor = ExplorerCursor(lastSeenUnix: stored[key] ?? coldSeed)
                 do {
                     let (transfers, newCursor) = try await fetchTransfers(asset: asset, address: address, cursor: cursor)
-                    cursors[key] = newCursor
                     for transfer in transfers {
                         let result = await service.applyIncomingTransfer(
                             asset: transfer.asset,
@@ -75,11 +80,17 @@ actor CryptoPaymentMonitor {
                             logger.info("crypto monitor: unmatched \(asset.rawValue) addr=\(address) tx=\(transfer.txHash) amount=\(transfer.amountAtomic)")
                         }
                     }
+                    // Only after every transfer of this batch was applied (and
+                    // flushed by the payment path): a cursor moved first would
+                    // mark the range scanned while a crash in between leaves the
+                    // money uncredited and outside all future scans.
+                    await state.advanceExplorerCursor(asset: asset, address: address, unix: newCursor.lastSeenUnix)
                 } catch {
                     logger.error("crypto monitor: \(asset.rawValue) addr=\(address) fetch failed: \(error)")
                 }
             }
         }
+        await state.pruneExplorerCursors(keeping: liveKeys)
     }
 
     private func fetchTransfers(asset: CryptoAsset, address: String, cursor: ExplorerCursor) async throws -> ([IncomingCryptoTransfer], ExplorerCursor) {

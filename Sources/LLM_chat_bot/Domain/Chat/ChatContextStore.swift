@@ -246,6 +246,8 @@ actor ChatContextStore {
     private var _cryptoSlotCounters: [CryptoAsset: Int] = [:]
     private var _cryptoMatchMode: CryptoMatchMode = .amountDelta
     private var _cryptoAddressPools: [CryptoChain: [String]] = [:]
+    /// Explorer scan positions, `"<asset>:<address>"` → unix seconds.
+    private var _explorerCursors: [String: Int] = [:]
     private var _pendingCryptoPriceInputs: [ChatKey: Int] = [:]
     private var _pendingCryptoAddressInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
     private var _pendingCryptoPoolAddInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
@@ -1826,8 +1828,14 @@ actor ChatContextStore {
         return effective.contains(id)
     }
 
+    /// The fallback model, deterministically. `Set.first` is arbitrary and
+    /// changes between runs and even between mutations — a chat dropped to the
+    /// free tier would land on a different model every time, so answer quality
+    /// would swing for no visible reason and the super-admin could not choose
+    /// the backup. Pinned models win in the order they were pinned.
     func firstFreeModel() -> String? {
-        effectiveFreeModelIDs()?.first
+        if let pinned = _freeModelIDs.first { return pinned }
+        return effectiveFreeModelIDs()?.sorted().first
     }
 
     func openRouterFreeModelIDs() -> Set<String>? { _openRouterFreeModelIDs }
@@ -1961,6 +1969,36 @@ actor ChatContextStore {
                 .filter { ($0.status == .open || $0.status == .partial) && $0.asset == asset }
                 .map { $0.slotOffset }
         )
+    }
+
+    // MARK: - Explorer cursors
+
+    static func explorerCursorKey(asset: CryptoAsset, address: String) -> String {
+        "\(asset.rawValue):\(address.lowercased())"
+    }
+
+    /// Where the blockchain scan stopped last time, per asset+address. Survives
+    /// restarts on purpose: seeded at "now", every transfer that arrived during
+    /// a redeploy would fall outside every future scan — the money lands, the
+    /// invoice expires, and nothing in the logs says why.
+    func explorerCursors() -> [String: Int] { _explorerCursors }
+
+    /// Only ever moves forward — an out-of-order or stale write must not reopen
+    /// an already scanned range (harmless but wasteful) or, worse, rewind past
+    /// transfers that were already credited.
+    func advanceExplorerCursor(asset: CryptoAsset, address: String, unix: Int) {
+        let key = Self.explorerCursorKey(asset: asset, address: address)
+        guard unix > (_explorerCursors[key] ?? 0) else { return }
+        _explorerCursors[key] = unix
+        dirtyConfigs.insert(.crypto)
+    }
+
+    /// Drops cursors for addresses that are no longer polled (address changed,
+    /// pool entry removed), so the row does not accumulate dead keys forever.
+    func pruneExplorerCursors(keeping keys: Set<String>) {
+        guard _explorerCursors.contains(where: { !keys.contains($0.key) }) else { return }
+        _explorerCursors = _explorerCursors.filter { keys.contains($0.key) }
+        dirtyConfigs.insert(.crypto)
     }
 
     func setPendingCryptoPriceInput(menuMessageID: Int, chatKey: ChatKey) {
@@ -2124,7 +2162,8 @@ actor ChatContextStore {
             slotCounters: counters,
             invoices: Array(_cryptoInvoices.values),
             matchMode: _cryptoMatchMode.rawValue,
-            addressPools: pools.isEmpty ? nil : pools
+            addressPools: pools.isEmpty ? nil : pools,
+            explorerCursors: _explorerCursors.isEmpty ? nil : _explorerCursors
         )
     }
 
@@ -2153,6 +2192,7 @@ actor ChatContextStore {
                 _cryptoAddressPools[chain] = list
             }
         }
+        _explorerCursors = snapshot?.explorerCursors ?? [:]
     }
 
     func superAdminPrivateChats() -> [ChatKey] {

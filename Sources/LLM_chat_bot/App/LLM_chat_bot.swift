@@ -118,7 +118,8 @@ struct BlueprintBotApp {
             state: state,
             network: network,
             telegram: telegram,
-            logger: logger
+            logger: logger,
+            persistence: persistenceCoordinator
         )
 
         let tonExplorer = TonExplorer(network: network, apiKey: config.tonapiKey)

@@ -4,6 +4,7 @@ enum CryptoPaymentError: LocalizedError {
     case priceNotSet
     case addressNotSet(CryptoChain)
     case poolExhausted(CryptoChain)
+    case slotsExhausted(CryptoAsset)
     case rateUnavailable(String)
     case unknownInvoice
     case invoiceExpired
@@ -13,6 +14,7 @@ enum CryptoPaymentError: LocalizedError {
         case .priceNotSet: return "Оплата криптой пока не настроена — выберите другой способ."
         case .addressNotSet(let chain): return "Оплата через \(chain.displayName) пока недоступна — выберите другую сеть."
         case .poolExhausted(let chain): return "Все адреса \(chain.displayName) сейчас заняты. Попробуйте через несколько минут или выберите другую сеть."
+        case .slotsExhausted(let asset): return "Все счета в \(asset.symbol) сейчас заняты. Попробуйте через несколько минут или выберите другую монету."
         case .rateUnavailable(let symbol): return "Не удалось узнать текущий курс \(symbol). Попробуйте ещё раз или выберите другую монету."
         case .unknownInvoice: return "Счёт не найден — создайте новый: /buy"
         case .invoiceExpired: return "Срок счёта истёк — создайте новый: /buy"
@@ -32,17 +34,28 @@ actor CryptoPaymentService {
     private let network: NetworkClient
     private let logger: LoggerPort
     private let telegram: TelegramGatewayPort
+    /// Payments are written through immediately, never on the 2s debounce: the
+    /// chain has already moved the money, so a SIGTERM in that window would
+    /// leave a paid invoice with no subscription and no credited tx hash.
+    private let persistence: PersistenceCoordinator?
 
     private var tonUsdRate: Double? = nil
     private var tonRateFetchedAt: Date? = nil
     private static let rateTTLSeconds: TimeInterval = 300
     private static let invoiceExpirySeconds: TimeInterval = 30 * 60
 
-    init(state: ChatContextStore, network: NetworkClient, telegram: TelegramGatewayPort, logger: LoggerPort) {
+    init(
+        state: ChatContextStore,
+        network: NetworkClient,
+        telegram: TelegramGatewayPort,
+        logger: LoggerPort,
+        persistence: PersistenceCoordinator? = nil
+    ) {
         self.state = state
         self.network = network
         self.telegram = telegram
         self.logger = logger
+        self.persistence = persistence
     }
 
     // MARK: - Configuration helpers
@@ -111,7 +124,7 @@ actor CryptoPaymentService {
             receivingAddress = address
 
             let usedSlots = await state.usedSlots(asset: asset)
-            var picked: Int = 0
+            var picked: Int? = nil
             var attempts = 0
             let maxSlots = asset.maxConcurrentSlots
             while attempts < maxSlots {
@@ -122,7 +135,14 @@ actor CryptoPaymentService {
                 }
                 attempts += 1
             }
-            slot = picked
+            // Falling back to slot 0 here would hand two open invoices the same
+            // exact amount, and the exact-match branch would credit whichever
+            // was created first — one person's money closing another person's
+            // invoice, with nothing in the logs. Refuse instead.
+            guard let freeSlot = picked else {
+                throw CryptoPaymentError.slotsExhausted(asset)
+            }
+            slot = freeSlot
             exactAmount = baseAmount + Int64(slot) * asset.atomicSlotStep
 
         case .uniqueAddress:
@@ -316,33 +336,53 @@ actor CryptoPaymentService {
         if copy.accumulatedAtomic >= copy.exactAmountAtomic {
             copy.status = .paid
             await state.upsertCryptoInvoice(copy)
+            var activation: SubscriptionActivation? = nil
+            var creditedCents: Int? = nil
+            var creditedBalanceUsd: Double = 0
             switch copy.resolvedPurpose {
             case .subscription:
-                let activation = await state.activatePaidSubscription(username: copy.username)
+                let result = await state.activatePaidSubscription(username: copy.username)
                 await state.assignChat(chatID: copy.userChatID, to: copy.username)
                 // Same post-payment bookkeeping as the Stars/card path: a
                 // winback offer is one-shot, and the funnel counts the sale.
                 if await state.consumeWinbackDiscount(username: copy.username) != nil {
                     await state.bumpFunnel(.winbackRedeemed)
                 }
-                switch activation {
+                switch result {
                 case .started: await state.bumpFunnel(.paid)
                 case .extended: await state.bumpFunnel(.renewed)
                 case .alreadyUnlimited: break
                 }
-                await notifyFullPayment(copy, activation: activation)
+                activation = result
             case .credit(let cents):
                 let wallet = await state.creditPurchasedBalance(username: copy.username, amountUsd: Double(cents) / 100.0)
-                await notifyCreditPayment(copy, cents: cents, balanceUsd: wallet.balanceUsd)
+                creditedCents = cents
+                creditedBalanceUsd = wallet.balanceUsd
             }
             // Referral (step 10): the same conversion bonus the Telegram
             // payment path pays, so the reward does not depend on how the
             // friend happened to pay.
-            await payReferralConversionBonus(payerKey: copy.username)
+            let referralBonus = await redeemReferralConversionBonus(payerKey: copy.username)
+            // The chain has already moved the money — everything it bought goes
+            // to disk before anyone is told about it, exactly as the Stars/card
+            // path does (CLAUDE.md §17).
+            await persistence?.flushNow()
+            if let activation {
+                await notifyFullPayment(copy, activation: activation)
+            }
+            if let cents = creditedCents {
+                await notifyCreditPayment(copy, cents: cents, balanceUsd: creditedBalanceUsd)
+            }
+            if let referralBonus {
+                await announceReferralConversionBonus(referralBonus)
+            }
             return .fullyPaid(copy)
         } else {
             copy.status = .partial
             await state.upsertCryptoInvoice(copy)
+            // A partial payment is received money too: losing the accumulator
+            // means asking the payer for the full amount a second time.
+            await persistence?.flushNow()
             let remaining = copy.exactAmountAtomic - copy.accumulatedAtomic
             await notifyPartialPayment(copy, addedAtomic: addedAtomic, remainingAtomic: remaining)
             return .partial(invoice: copy, addedAtomic: addedAtomic, remainingAtomic: remaining)
@@ -351,13 +391,17 @@ actor CryptoPaymentService {
 
     // MARK: - Notifications
 
-    /// Credits and announces the inviter's conversion bonus. The invoice stores
-    /// the payer's `UserKey`; a pending record (a person the bot has only been
-    /// told about) carries no userID, and referral attributions are keyed by
-    /// userID — so there is simply nothing to look up in that case.
-    private func payReferralConversionBonus(payerKey: String) async {
-        guard let payerUserID = UserKey.userID(from: payerKey),
-              let bonus = await state.redeemReferralPaymentBonus(payerUserID: payerUserID) else { return }
+    /// Credits the inviter's conversion bonus. The invoice stores the payer's
+    /// `UserKey`; a pending record (a person the bot has only been told about)
+    /// carries no userID, and referral attributions are keyed by userID — so
+    /// there is simply nothing to look up in that case. Announcing is a separate
+    /// step so the credit can be flushed before anyone hears about it.
+    private func redeemReferralConversionBonus(payerKey: String) async -> ReferralPaymentBonus? {
+        guard let payerUserID = UserKey.userID(from: payerKey) else { return nil }
+        return await state.redeemReferralPaymentBonus(payerUserID: payerUserID)
+    }
+
+    private func announceReferralConversionBonus(_ bonus: ReferralPaymentBonus) async {
         _ = try? await telegram.sendMessage(.init(
             chatID: bonus.inviterUserID,
             threadID: nil,

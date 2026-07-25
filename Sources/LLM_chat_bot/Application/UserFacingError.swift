@@ -42,6 +42,13 @@ enum UserFacingError {
             }
         }
 
+        // Payment errors are already written for the payer ("все счета заняты,
+        // выберите другую монету") — wrapping them in "Что-то пошло не так,
+        // подробности:" buries the one sentence that says what to do next.
+        if let crypto = error as? CryptoPaymentError, let text = crypto.errorDescription {
+            return text
+        }
+
         if let adapter = error as? ProviderAdapterError {
             switch adapter {
             case .invalidRequestType(let provider):

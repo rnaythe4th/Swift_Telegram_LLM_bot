@@ -416,7 +416,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             }
             let currentModel = await state.model(chatKey: chatKey)
             if !effectiveFree.contains(currentModel) {
-                guard let firstFree = effectiveFree.first else {
+                guard let firstFree = await state.firstFreeModel() else {
                     try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Бесплатные модели сейчас недоступны. Напишите администратору бота.")
                     return
                 }

@@ -146,6 +146,11 @@ struct CryptoConfigSnapshot: Codable, Sendable {
     var invoices: [CryptoInvoice]
     var matchMode: String?
     var addressPools: [String: [String]]?
+    /// Explorer scan position per `"<asset>:<address>"`, in unix seconds.
+    /// Persisted on purpose: a cursor seeded at process start skips every
+    /// transfer that landed while the bot was down (redeploys are frequent) —
+    /// and crypto, unlike Telegram, has no delivery retry to fall back on.
+    var explorerCursors: [String: Int]?
 }
 
 enum CryptoAmountFormatter {

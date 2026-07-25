@@ -64,6 +64,12 @@
 
 ### B2. Крипто-платежи не переживают рестарт: курсор эксплорера только в памяти
 
+> ✅ **Исправлено** (вариант 3: оба). Курсоры живут в сторе
+> (`CryptoConfigSnapshot.explorerCursors`, `advanceExplorerCursor` — только
+> вперёд, `pruneExplorerCursors` чистит мёртвые адреса), холодный старт
+> сканирует на 45 мин назад. Курсор двигается **после** зачисления пачки, иначе
+> краш между записью курсора и кредитом теряет платёж. CLAUDE.md §7/§10/§14/§17.
+
 **Где:** `Application/Payments/CryptoPaymentMonitor.swift:17, 53-54`.
 
 ```swift
@@ -94,6 +100,11 @@ let cursor = cursors[key] ?? ExplorerCursor(lastSeenUnix: nowSeed)   // nowSeed 
 ---
 
 ### B3. Крипто-платёж не делает `flushNow()`
+
+> ✅ **Исправлено.** `PersistenceCoordinator?` прокинут в `CryptoPaymentService`;
+> `applyMatch` флашит после всех мутаций и до уведомлений — и в ветке полной
+> оплаты, и в частичной. Реферальный бонус разделён на `redeem` (до флаша) и
+> `announce` (после).
 
 **Где:** `Application/Payments/CryptoPaymentService.swift:301-350` (`applyMatch`),
 `CryptoPaymentMonitor.swift` — ни у сервиса, ни у монитора нет ссылки на
@@ -313,6 +324,10 @@ winback-скидка), `renderAdminInvite:4460` (инвайт-токен).
 
 ### B11. Коллизия слотов крипто-инвойсов приводит к зачислению не тому человеку
 
+> ✅ **Исправлено.** Нет свободного слота → `CryptoPaymentError.slotsExhausted(asset)`
+> вместо тихого слота 0. Заодно `UserFacingError` отдаёт тексты
+> `CryptoPaymentError` как есть, не заворачивая в «Что-то пошло не так».
+
 **Где:** `Application/Payments/CryptoPaymentService.swift:113-126`.
 
 ```swift
@@ -502,6 +517,10 @@ existing.updatedAt = [existing.updatedAt, wallet.updatedAt].compactMap { $0 }.ma
 ---
 
 ### B18. `firstFreeModel` недетерминирован — берётся `.first` у `Set`
+
+> ✅ **Исправлено.** `firstFreeModel()` = первая закреплённая суперадмином,
+> иначе `sorted().first`; `GenerationCoordinator` зовёт её вместо
+> `effectiveFree.first`.
 
 **Где:** `Domain/Chat/ChatContextStore.swift:1829-1831` (`firstFreeModel`),
 `Application/Generation/GenerationCoordinator.swift:409` (`effectiveFree.first`).
