@@ -129,6 +129,12 @@ debounce. Правило CLAUDE.md §17 («Платежи — `flushNow()`») з
 
 ### B4. В polling-режиме `my_chat_member` не приходит вообще
 
+> ✅ **Исправлено.** Список вынесен в `TelegramUpdateSubscription.allowedUpdates`
+> (`Application/Ports/TelegramGatewayPort.swift`) — его используют и `setWebhook`,
+> и `getUpdates` (percent-encoded JSON, `TelegramHTTPGateway.encodedAllowedUpdates`).
+> Заодно закрыт B27.4: при падении `setWebhook` перед polling зовётся
+> `deleteWebhook()`.
+
 **Где:** `Infrastructure/Telegram/TelegramHTTPGateway.swift:116-118` —
 `getUpdates` вызывается без `allowed_updates`.
 
@@ -711,9 +717,8 @@ SIGTERM просто исчезает.
 3. **`BotOrchestrator.route:628`** — `text.hasPrefix("/buy") || text.hasPrefix("/start")`
    ловит и `/buying`, и `/startsomething`, пропуская их мимо access-gate. Стоит
    использовать уже готовый `CommandParser` вместо префикса.
-4. **`BotOrchestrator.run:193-196`** — при неудачном `setWebhook` уходим в polling,
-   но `deleteWebhook()` не зовём. Telegram продолжит долбиться в URL, а `getUpdates`
-   будет возвращать ошибку «terminated by other getUpdates request / webhook is active».
+4. ✅ **Исправлено вместе с B4.** ~~При неудачном `setWebhook` уходим в polling,
+   но `deleteWebhook()` не зовём.~~
 5. **`GenerationCoordinator.processContent:454-464`** — typing-индикатор гасится
    `defer` сразу после `streamReply` (то есть после старта таска), так что реально
    он работает только пока ждём слот лимитера. Не баг, но комментарий §9 создаёт

@@ -36,6 +36,17 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         self.metrics = metrics
     }
 
+    /// `allowed_updates` as a percent-encoded JSON array, ready for a query
+    /// string. Built once: the list never changes at runtime.
+    private static let encodedAllowedUpdates: String = {
+        let json = "[" + TelegramUpdateSubscription.allowedUpdates.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+        // Only unreserved characters survive — brackets, quotes and commas all
+        // have to be escaped for Telegram to parse the array.
+        var unreserved = CharacterSet.alphanumerics
+        unreserved.insert(charactersIn: "-._~")
+        return json.addingPercentEncoding(withAllowedCharacters: unreserved) ?? json
+    }()
+
     /// Retries a Telegram call that failed with 429, honoring `retry_after`.
     /// Centralizes what used to be scattered per-call-site retry loops.
     private func with429Retry<T>(attempts: Int = 3, _ op: () async throws -> T) async throws -> T {
@@ -114,7 +125,10 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     func getUpdates(offset: Int?) async throws -> [TelegramUpdate] {
-        let url = "\(telegramURL)/getUpdates?timeout=30&offset=\(offset ?? 0)"
+        // Same subscription the webhook registers: without an explicit list
+        // Telegram drops `my_chat_member` from long polling entirely.
+        let allowed = Self.encodedAllowedUpdates
+        let url = "\(telegramURL)/getUpdates?timeout=30&offset=\(offset ?? 0)&allowed_updates=\(allowed)"
         let spec = HTTPRequestSpec(url: url, method: .get, timeoutSeconds: 35, validStatusCodes: 100..<600)
         let raw = try await network.perform(spec)
         

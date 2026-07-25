@@ -914,6 +914,14 @@ memory-only режим, запись отключена**, чтобы не за�
     `retention_*`), плюс `funnelToday` и `funnelWeek`.
 - **Режим апдейтов** (`UpdateMode`): `auto` (webhook если есть публичный URL —
   Railway; иначе polling), `webhook`, `polling`. Webhook защищён secret-заголовком.
+  **Подписка на типы апдейтов — одна на оба транспорта**:
+  `TelegramUpdateSubscription.allowedUpdates` (`message`, `callback_query`,
+  `pre_checkout_query`, `my_chat_member`) уходит и в `setWebhook`, и в
+  `getUpdates` (percent-encoded JSON). Без явного списка `getUpdates` **молча
+  выкидывает** `my_chat_member`, и в polling-режиме пропадают приветствие группы,
+  событие `addedToGroup`, детект блокировки и флаг `botRemoved`. Если `setWebhook`
+  упал и мы уходим в polling — сначала `deleteWebhook()`, иначе каждый
+  `getUpdates` отвечает «webhook is active».
 
 ---
 

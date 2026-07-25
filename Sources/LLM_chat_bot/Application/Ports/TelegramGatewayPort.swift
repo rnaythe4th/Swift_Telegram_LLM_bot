@@ -22,6 +22,15 @@ struct SendMessageDraftRequest: Sendable {
     let text: String
 }
 
+/// The update kinds the bot subscribes to. One list for both transports:
+/// `getUpdates` **omits** `my_chat_member` unless it is named explicitly, so a
+/// polling run (local dev, and the fallback when `setWebhook` fails) silently
+/// loses group welcomes, the `addedToGroup` funnel event, block detection and
+/// the `botRemoved` flag that keeps reminders off dead chats.
+enum TelegramUpdateSubscription {
+    static let allowedUpdates = ["message", "callback_query", "pre_checkout_query", "my_chat_member"]
+}
+
 protocol TelegramGatewayPort: Sendable {
     func deleteWebhook() async throws
     func setWebhook(url: String, secretToken: String, allowedUpdates: [String]) async throws

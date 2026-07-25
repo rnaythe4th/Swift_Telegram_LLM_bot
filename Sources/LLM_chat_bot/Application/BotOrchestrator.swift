@@ -183,7 +183,7 @@ final class BotOrchestrator: @unchecked Sendable {
                 try await telegram.setWebhook(
                     url: url,
                     secretToken: secret,
-                    allowedUpdates: ["message", "callback_query", "pre_checkout_query", "my_chat_member"]
+                    allowedUpdates: TelegramUpdateSubscription.allowedUpdates
                 )
                 logger.info("webhook registered: \(url)")
                 // Updates now arrive via AppHTTPServer → intake; park until drain.
@@ -192,6 +192,10 @@ final class BotOrchestrator: @unchecked Sendable {
                 }
             } catch {
                 logger.error("setWebhook failed, falling back to polling: \(error)")
+                // A half-registered webhook (or one left by a previous deploy)
+                // makes every getUpdates fail with "webhook is active" — the
+                // fallback would spin on errors instead of serving anyone.
+                try? await telegram.deleteWebhook()
                 await runPollingLoop(intake: intake)
             }
         case .polling:
