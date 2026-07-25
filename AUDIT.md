@@ -757,6 +757,13 @@ if await state.userKey(username: fromUser?.username) == owner {
 
 ### B25. Апдейты, принятые webhook'ом, теряются при выключении
 
+> ✅ **Исправлено.** `shutdown()` после `draining=true` зовёт `intake.shutdown()`
+> (теперь он не гасит буфер альбомов, а сливает его — `TelegramPhotoAlbumBuffer.flushAll`)
+> и ждёт до 8 с, пока обнулятся **и** `updateDispatcher.totalQueuedOperations`,
+> **и** `sessionRegistry.activeCount`. Оркестратор держит ссылку на интейк
+> (`activeIntake`, ставится в `run`). Доккомментарий и CLAUDE.md §4/§11 приведены
+> к реальным числам holdback'а (750 мс, тик таймера 300 мс).
+
 **Где:** `App/LLM_chat_bot.swift:223-224` — `await intake.enqueue([update])` и
 сразу `return .ok("")`; `BotOrchestrator.shutdown():266-269` ждёт только
 `sessionRegistry.activeCount`, но не очередь `ChatUpdateDispatcher`.
@@ -779,6 +786,10 @@ SIGTERM просто исчезает.
 ---
 
 ### B26. `activeCount` падает до нуля до завершения отменённой генерации
+
+> ✅ **Исправлено.** `cancel` помечает сессию отменённой (`cancellationReasons`) и
+> оставляет её в реестре до `finish`; повторный тап по «Стоп» видит уже отменённую
+> сессию и получает `nil` — второго «⏹ Остановлено» в чат не уходит.
 
 **Где:** `Application/SessionRegistry.swift:36-45` — `cancel` удаляет сессию сразу,
 не дожидаясь, пока стрим-таск домотает `finishGeneration`.

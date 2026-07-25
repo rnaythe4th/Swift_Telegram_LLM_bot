@@ -29,6 +29,8 @@ final class BotOrchestrator: @unchecked Sendable {
 
     private let backgroundTasks = LockedValue<[Task<Void, Never>]>([])
     private let shutdownStarted = LockedValue(false)
+    /// Set once `run` starts, so shutdown can drain the intake it feeds.
+    private let activeIntake = LockedValue<UpdateIntake?>(nil)
 
     init(
         telegram: TelegramGatewayPort,
@@ -148,6 +150,7 @@ final class BotOrchestrator: @unchecked Sendable {
     // MARK: - Run
 
     func run(mode: IntakeRunMode, intake: UpdateIntake, persistenceHealthy: Bool) async {
+        activeIntake.value = intake
         if persistenceHealthy {
             await persistence?.start()
         }
@@ -267,8 +270,18 @@ final class BotOrchestrator: @unchecked Sendable {
         flags.draining.value = true
         flags.ready.value = false
 
+        // Everything the webhook answered 200 for is ours to finish: Telegram
+        // will not redeliver it. Release the album buffer first, then wait for
+        // the per-chat queues as well as the in-flight streams — an update
+        // sitting in a queue is a message the user sent and never got an answer
+        // to, and it leaves no trace anywhere.
+        if let intake = activeIntake.value { await intake.shutdown() }
+
         let deadline = ContinuousClock().now + .seconds(8)
-        while await sessionRegistry.activeCount > 0, ContinuousClock().now < deadline {
+        while ContinuousClock().now < deadline {
+            let queued = await updateDispatcher.totalQueuedOperations
+            let streaming = await sessionRegistry.activeCount
+            if queued == 0, streaming == 0 { break }
             try? await Task.sleep(for: .milliseconds(250))
         }
 

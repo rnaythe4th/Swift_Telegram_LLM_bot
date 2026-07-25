@@ -33,15 +33,17 @@ actor SessionRegistry {
         sessions[generationID] = nil
     }
     
+    /// Cancels a generation and hands back its chat. The session stays
+    /// registered until the stream task actually unwinds through `finish` —
+    /// dropping it here would make `activeCount` read zero while the answer is
+    /// still being written to history, and graceful shutdown waits on that
+    /// count. A second tap on «Стоп» finds the session already cancelled and
+    /// gets nil, so the chat is not told twice.
     func cancel(generationID: GenerationID, reason: CancellationReason = .userRequested) -> ChatKey? {
-        if let session = sessions[generationID] {
-            cancellationReasons[generationID] = reason
-            session.task?.cancel()
-            sessions[generationID] = nil
-            return session.chatKey
-        }
-        
-        return nil
+        guard let session = sessions[generationID], cancellationReasons[generationID] == nil else { return nil }
+        cancellationReasons[generationID] = reason
+        session.task?.cancel()
+        return session.chatKey
     }
     
     func cancellationReason(for generationID: GenerationID) -> CancellationReason? {

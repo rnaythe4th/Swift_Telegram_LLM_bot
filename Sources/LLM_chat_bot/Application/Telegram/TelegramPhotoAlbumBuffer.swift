@@ -56,6 +56,24 @@ struct TelegramPhotoAlbumBuffer {
         return released.sorted { $0.update_id < $1.update_id }
     }
     
+    /// Releases everything held back right now, holdback window or not.
+    ///
+    /// Used by graceful shutdown: these updates were already acknowledged to
+    /// Telegram with a 200, so they will never be redelivered — dropping them
+    /// loses the user's message without a trace. An album cut short here is
+    /// still better than no album at all.
+    mutating func flushAll() -> [TelegramUpdate] {
+        var released: [TelegramUpdate] = []
+        for (key, album) in pendingAlbums {
+            pendingAlbums.removeValue(forKey: key)
+            if let merged = Self.mergeAlbum(album.orderedUpdates) { released.append(merged) }
+        }
+        for updates in blockedUpdates.values { released.append(contentsOf: updates) }
+        blockedUpdates.removeAll()
+        pendingAlbumCountsByChat.removeAll()
+        return released.sorted { $0.update_id < $1.update_id }
+    }
+
     static func selectPrimaryPhoto(from photos: [PhotoSize]) -> PhotoSize? {
         photos.max {
             let lhsSize = $0.file_size ?? ($0.width * $0.height)

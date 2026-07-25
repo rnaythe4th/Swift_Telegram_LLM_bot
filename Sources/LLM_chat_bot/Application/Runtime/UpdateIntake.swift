@@ -78,8 +78,15 @@ actor UpdateIntake {
         scheduleAlbumFlushIfNeeded()
     }
 
-    func shutdown() {
+    /// Stops the flush timer and hands on whatever is still buffered. Telegram
+    /// considers an update delivered the moment the webhook answered 200, so a
+    /// half-collected album left in the buffer at shutdown is a message lost
+    /// for good.
+    func shutdown() async {
         albumFlushTask?.cancel()
         albumFlushTask = nil
+        for update in albumBuffer.flushAll() {
+            await deliver(update)
+        }
     }
 }
