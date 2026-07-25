@@ -624,6 +624,8 @@ func firstFreeModel() -> String? {
 
 ### B19. Обещание бонуса при переходе по реф-ссылке использует не тот флаг
 
+> ✅ **Исправлено.** `config.paysOnSignup` в `handleReferralStart`.
+
 **Где:** `Application/Commands/BotCommandHandler.swift:400` — `config.paysAnything`.
 
 `ReferralConfig` (`Domain/Chat/Referral.swift:68-73`) специально различает:
@@ -640,6 +642,8 @@ func firstFreeModel() -> String? {
 ---
 
 ### B20. `/help` обещает, что для покупки нужен @username
+
+> ✅ **Исправлено.** Фраза убрана; `faqText` — 3761 символ при лимите 3896.
 
 **Где:** `Application/Callbacks/BotCallbackHandler.swift:131`.
 
@@ -660,6 +664,11 @@ func firstFreeModel() -> String? {
 ---
 
 ### B21. Пополнение баланса криптой отключается вместе с ценой подписки
+
+> ✅ **Исправлено.** Доступность крипто-пакетов = только наличие адресов
+> (`availableAssets()`), цена подписки не при чём — в трёх местах: страница
+> покупки, выбор способа для пакета и `/buy` (там `creditsAvailable` тоже брал
+> `cryptoAvailable`).
 
 **Где:** `Application/Menu/BotMenuHandler.swift:2249` и `:2292-2297`.
 

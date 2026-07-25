@@ -2367,7 +2367,9 @@ final class BotMenuHandler: @unchecked Sendable {
             // subscription. Their availability is deliberately independent of
             // the subscription prices: each method only needs its own knob
             // (Stars rate / crypto addresses / card FX rate).
-            let creditsAvailable = await state.starsCreditsEnabled() || cryptoAvailable || card.creditsEnabled
+            // Crypto packs need an address, not a subscription price: a pack
+            // costs its own face value.
+            let creditsAvailable = await state.starsCreditsEnabled() || !cryptoAssets.isEmpty || card.creditsEnabled
             if username != nil, creditsAvailable {
                 lines.append("")
                 lines.append("💰 <b>Не готовы на месяц?</b> Пополните баланс — с него списывается стоимость каждого ответа, обычно доли цента. Доступны любые модели, подписка не нужна.")
@@ -2410,10 +2412,11 @@ final class BotMenuHandler: @unchecked Sendable {
                 let stars = await state.starsForCents(cents)
                 rows.append([menuButton("💫 Stars · \(stars) ⭐", action: "buy:cstars:\(cents)")])
             }
-            let cryptoCents = await state.cryptoPriceUsdCents()
             let cryptoAssets: [CryptoAsset]
             if let service = cryptoService { cryptoAssets = await service.availableAssets() } else { cryptoAssets = [] }
-            if cryptoCents != nil, !cryptoAssets.isEmpty {
+            // Only addresses are needed here — the pack is invoiced at its own
+            // face value, so the subscription price has no say.
+            if !cryptoAssets.isEmpty {
                 rows.append([menuButton("🪙 Криптой", action: "buy:ccrypto:\(cents)")])
             }
             let creditCard = await state.cardConfig()

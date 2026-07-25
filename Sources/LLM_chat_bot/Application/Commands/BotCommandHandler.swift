@@ -422,7 +422,11 @@ final class BotCommandHandler: @unchecked Sendable {
         var note: String?
         switch outcome {
         case .bound(let inviter, let inviteeReward):
-            if config.paysAnything {
+            // `paysOnSignup`, not `paysAnything`: the bonus for a friend who
+            // pays lands much later and does not belong in the copy that
+            // promises money for the first question — otherwise a config with
+            // only that bonus prints «на ваш баланс придёт $0.00».
+            if config.paysOnSignup {
                 note = String(
                     format: "🎁 <b>Вас пригласил %@.</b>\n\nЗадайте первый вопрос — и на ваш баланс придёт <b>$%.2f</b> (пригласившему — $%.2f).\n\nПока баланс не пуст, вам доступны любые модели без подписки: с него списывается стоимость каждого ответа, обычно доли цента.",
                     inviter, inviteeReward, config.inviterRewardUsd
@@ -2432,13 +2436,16 @@ final class BotCommandHandler: @unchecked Sendable {
             return await service.availableAssets()
         }()
         let cryptoAvailable = cryptoPriceCents != nil && !cryptoAssets.isEmpty
+        // A credit pack costs its own face value, so paying for one in crypto
+        // needs an address and nothing else — not the subscription price.
+        let cryptoCreditsAvailable = !cryptoAssets.isEmpty
         let card = await state.cardConfig()
         let cardAvailable = card.isEnabled
 
         // Credit packs are sold through their own switches (Stars rate / crypto
         // addresses / card FX rate), so /buy stays useful even when monthly
         // subscriptions are switched off (roadmap step 2).
-        let creditsAvailable = await state.starsCreditsEnabled() || cryptoAvailable || card.creditsEnabled
+        let creditsAvailable = await state.starsCreditsEnabled() || cryptoCreditsAvailable || card.creditsEnabled
         guard (starsPrice ?? 0) > 0 || cryptoAvailable || cardAvailable || creditsAvailable else {
             try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Продажа доступа сейчас недоступна.")
             return
