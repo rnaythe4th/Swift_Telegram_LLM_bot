@@ -402,6 +402,18 @@ final class GenerationCoordinator: @unchecked Sendable {
                 )
             }
         } else if let effectiveFree = await state.effectiveFreeModelIDs() {
+            // A fresh daily allowance gives the parked paid model back — quietly.
+            // The gate below only fires while the chat model *is* paid, so a chat
+            // sitting on the cap fallback would never reach `consumeDailyPremium`
+            // again and the whole daily taste would die after its first day. The
+            // purchase path above announces the restore; a new day is routine.
+            if await state.remainingDailyPremium(
+                chatID: chatKey.chatID,
+                userID: origin.user?.id,
+                isGroup: !origin.isPrivate
+            ).remaining > 0 {
+                await state.restoreDowngradedModel(chatKey: chatKey)
+            }
             let currentModel = await state.model(chatKey: chatKey)
             if !effectiveFree.contains(currentModel) {
                 guard let firstFree = effectiveFree.first else {

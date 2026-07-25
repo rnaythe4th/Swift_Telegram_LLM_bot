@@ -705,8 +705,9 @@ final class BotMenuHandler: @unchecked Sendable {
                     return
                 }
                 let effectiveFree = await state.effectiveFreeModelIDs()
-                let hasAccess = await state.hasFullModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
-                if !hasAccess, let eff = effectiveFree, !eff.contains(modelValue) {
+                let isPaidModel = effectiveFree.map { !$0.contains(modelValue) } ?? false
+                let access = await state.paidModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
+                if isPaidModel, case .none = access {
                     let price = await state.starsPrice()
                     let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Это платная модель\(hint)")
@@ -714,6 +715,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 }
                 _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
                 let toast = "Модель: \(preset.display)" + (preset.provider.map { " · \($0)" } ?? "")
+                    + Self.dailyTasteToastSuffix(access, isPaidModel: isPaidModel)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: toast)
                 try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
                 return
@@ -724,8 +726,9 @@ final class BotMenuHandler: @unchecked Sendable {
                     return
                 }
                 let effectiveFree = await state.effectiveFreeModelIDs()
-                let hasAccess = await state.hasFullModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
-                if !hasAccess, let eff = effectiveFree, !eff.contains(modelValue) {
+                let isPaidModel = effectiveFree.map { !$0.contains(modelValue) } ?? false
+                let access = await state.paidModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
+                if isPaidModel, case .none = access {
                     let price = await state.starsPrice()
                     let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Это платная модель\(hint)")
@@ -733,6 +736,7 @@ final class BotMenuHandler: @unchecked Sendable {
                 }
                 _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
                 let toast = "Модель: \(preset.display)" + (preset.provider.map { " · \($0)" } ?? "")
+                    + Self.dailyTasteToastSuffix(access, isPaidModel: isPaidModel)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: toast)
                 try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
                 return
@@ -1793,6 +1797,14 @@ final class BotMenuHandler: @unchecked Sendable {
                 ? "🆓 Бесплатный доступ\(taste) · премиум для всего чата откроет любой участник"
                 : "🆓 Бесплатный доступ\(taste)"
         }
+    }
+
+    /// Toast tail for a free-tier user who picked a paid model on today's
+    /// allowance: without the number the model silently falls back mid-day and
+    /// reads as a bug rather than as the cap doing its job (roadmap step 6).
+    static func dailyTasteToastSuffix(_ access: ChatContextStore.PaidModelAccess, isPaidModel: Bool) -> String {
+        guard isPaidModel, case .dailyTaste(let remaining, let limit) = access else { return "" }
+        return " · умных ответов сегодня: \(remaining) из \(limit)"
     }
 
     static func formatPriceM(_ perTokenPrice: Double) -> String {

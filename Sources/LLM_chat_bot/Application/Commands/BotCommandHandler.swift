@@ -200,9 +200,12 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Укажите модель перед <code>|</code>.")
                 return
             }
-            let hasAccess = await state.hasFullModelAccess(username: fromUser?.username, userID: fromUser?.id, chatID: chatKey.chatID)
+            // A free-tier chat may still pick a paid model while today's premium
+            // taste has units left — the cap enforces itself at generation time.
+            let access = await state.paidModelAccess(username: fromUser?.username, userID: fromUser?.id, chatID: chatKey.chatID)
             let effectiveFree = await state.effectiveFreeModelIDs()
-            if !hasAccess, let eff = effectiveFree, !eff.contains(modelID) {
+            let isPaidModel = effectiveFree.map { !$0.contains(modelID) } ?? false
+            if isPaidModel, case .none = access {
                 let price = await state.starsPrice()
                 let buyHint = price.map { "\n\nОткрыть премиум для этого чата (\($0) ⭐) — /buy, или пополните баланс и платите за ответы — /balance" } ?? "\n\nОткрыть премиум для этого чата — /buy, или пополните баланс и платите за ответы — /balance"
                 try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(modelID)</b> — платная модель.\(buyHint)")
@@ -220,10 +223,16 @@ final class BotCommandHandler: @unchecked Sendable {
                 priceNote = "\n⬇️$\(inP)/M · ⬆️$\(outP)/M"
             }
             let providerNote = providerRouting.map { "\nСервис: <code>\($0)</code>" } ?? ""
+            // Say the daily ceiling out loud: on a free tier this model answers
+            // N times today and then falls back on its own.
+            var tasteNote = ""
+            if isPaidModel, case .dailyTaste(let remaining, let limit) = access {
+                tasteNote = "\n🚦 Умных ответов сегодня: <b>\(remaining) из \(limit)</b>, дальше отвечаю на бесплатной."
+            }
             try await sendUserFeedback(chatKey: chatKey, text: """
                 ✓ Модель: <code>\(changed.new)</code>\(providerNote)
                 <i>Была:</i> <code>\(changed.old)</code>
-                Переписка очищена.\(priceNote)
+                Переписка очищена.\(priceNote)\(tasteNote)
                 """)
 
         case .showTokens:

@@ -2337,6 +2337,26 @@ actor ChatContextStore {
         return (max(0, limit - used), limit)
     }
 
+    /// May this person point the chat at a paid model right now?
+    enum PaidModelAccess: Sendable {
+        /// Subscription, sponsor or a positive balance — no daily ceiling.
+        case full
+        /// Free tier with today's premium taste still unspent.
+        case dailyTaste(remaining: Int, limit: Int)
+        /// Free tier, allowance spent (or switched off) — only free models.
+        case none
+    }
+
+    /// Paid-model gate for the pickers (`/model`, menu). Full access aside, a
+    /// free-tier chat with units left today must be able to *choose* a smart
+    /// model: otherwise the daily taste is reachable only by chats that happened
+    /// to have a paid model set before the cap parked it, and nobody can opt in.
+    func paidModelAccess(username: String?, userID: Int?, chatID: Int) -> PaidModelAccess {
+        if hasFullModelAccess(username: username, userID: userID, chatID: chatID) { return .full }
+        let left = remainingDailyPremium(chatID: chatID, userID: userID, isGroup: chatID < 0)
+        return left.remaining > 0 ? .dailyTaste(remaining: left.remaining, limit: left.limit) : .none
+    }
+
     // MARK: - Funnel analytics (roadmap step 7)
 
     /// Records one funnel event. Persisted (dirties GlobalConfigKey.funnel) both
