@@ -1333,7 +1333,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 <b>⚙️ Значения по умолчанию</b>
 
                 🤖 Модель · <code>\(defs.model)</code>
-                📝 История · <b>\(defs.historyLength) сообщ.</b>
+                📝 Память · <b>\(defs.historyLength) сообщ.</b>
                 🎭 Роль:
                 <blockquote expandable>\(defs.role)</blockquote>
 
