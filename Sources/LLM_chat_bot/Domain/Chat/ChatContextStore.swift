@@ -777,6 +777,12 @@ actor ChatContextStore {
     func grantWinbackDiscount(username: String, percent: Int, hours: Int, now: Date = Date()) -> SubscriptionDiscount? {
         let u = userKeyOrRaw(username)
         guard tenants[u] != nil, percent > 0, hours > 0 else { return nil }
+        // A live offer is never re-issued. The sweep grants the discount before
+        // sending, so a transient Telegram error (notice left unmarked, retried
+        // next sweep) would otherwise push the deadline forward every hour: an
+        // "истекает через 48 часов" that never actually expires. A percent
+        // changed mid-window takes effect on the next offer, not this one.
+        if let existing = tenants[u]?.winbackDiscount, existing.isActive(now: now) { return existing }
         let discount = SubscriptionDiscount(
             percent: percent,
             expiresAt: now.addingTimeInterval(Double(hours) * 3600)

@@ -569,6 +569,13 @@ existing.updatedAt = [existing.updatedAt, wallet.updatedAt].compactMap { $0 }.ma
 
 ### B17. Winback-скидка перевыдаётся при каждой неудачной попытке доставки
 
+> ✅ **Исправлено.** `grantWinbackDiscount` не перевыдаёт живую скидку — возвращает
+> уже существующую, поэтому transient-ошибка доставки больше не двигает дедлайн
+> вперёд каждый свип. Обратный случай тоже закрыт: если все каналы оказались
+> мёртвыми (`.noChannel` после попыток), скидка снимается
+> (`consumeWinbackDiscount`) — оффер, которого человек не видел, не должен ждать
+> его на кассе.
+
 **Где:** `Application/Lifecycle/SubscriptionReminderService.swift:243-249`.
 
 **Что происходит.** `grantWinbackDiscount` вызывается **до** отправки. Если все

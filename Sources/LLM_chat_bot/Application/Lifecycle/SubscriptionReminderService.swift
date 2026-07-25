@@ -281,7 +281,12 @@ actor SubscriptionReminderService {
         // Every channel is gone for good (blocked DM, kicked from every chat):
         // retrying next hour would burn the same 403s. The store now knows they
         // are dead, so the next cycle will not even list them.
-        return deadChannels == attempted ? .noChannel : .failed
+        guard deadChannels == attempted else { return .failed }
+        // The notice is about to be marked handled, and nobody saw the offer —
+        // so the discount it granted is withdrawn too. Otherwise a price cut
+        // nobody was ever told about waits for them at checkout.
+        if discount != nil { await state.consumeWinbackDiscount(username: target.username) }
+        return .noChannel
     }
 
     private enum SendOutcome {
