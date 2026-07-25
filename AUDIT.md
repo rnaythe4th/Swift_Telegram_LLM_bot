@@ -219,6 +219,12 @@ guard invoice.username == state.userKey(userID: callback.from.id) else { ... }
 
 ### B7. `seenAt` пользователя почти никогда не персистится
 
+> ✅ **Исправлено** (вариант 2). `UserDirectory.record` возвращает третий флаг
+> `seenAtAdvanced` (троттлинг `seenAtPersistInterval` = 15 мин, новый человек —
+> всегда), `identifyUser` помечает `.userDirectory` грязным и по нему тоже.
+> Строка пишется не чаще раза в 15 минут на человека, но «молчит ≥ N дней» и
+> D1/D7 больше не откатываются на рестарте.
+
 **Где:** `Domain/Chat/ChatContextStore.swift:369-372`.
 
 ```swift

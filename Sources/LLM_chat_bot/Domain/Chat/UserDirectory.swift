@@ -142,16 +142,27 @@ struct UserDirectory: Codable, Sendable {
         return byUsername[name]
     }
 
+    /// How far `seenAt` has to move before the row is worth rewriting. The
+    /// directory is a single JSON row holding up to `maxIdentities` records, so
+    /// it cannot be persisted on every message — but if it is persisted *only*
+    /// on a new person or a rename, `seenAt` never reaches the database on a
+    /// quiet bot and rolls back on restart. Both consumers care about days
+    /// (wallet win-back idleness, the retention proxy), so quarter-hour
+    /// granularity costs them nothing.
+    static let seenAtPersistInterval: TimeInterval = 15 * 60
+
     /// Records a sighting. Returns the username this person used to hold when
     /// it differs from the new one — the caller re-files anything still stored
-    /// under the old label.
+    /// under the old label — and whether `seenAt` moved far enough to be worth
+    /// writing out.
     @discardableResult
-    mutating func record(userID: Int, username: String?, firstName: String?, now: Date = Date()) -> (changed: Bool, previousUsername: String?) {
+    mutating func record(userID: Int, username: String?, firstName: String?, now: Date = Date()) -> (changed: Bool, previousUsername: String?, seenAtAdvanced: Bool) {
         let normalized = UserKey.pending(username)
         var identity = identities[userID]
             ?? UserIdentity(userID: userID, username: nil, firstName: nil, seenAt: now, firstSeenAt: now)
         let previous = identity.username
         let isNew = identities[userID] == nil
+        let seenAtAdvanced = isNew || now.timeIntervalSince(identity.seenAt) >= Self.seenAtPersistInterval
         identity.username = normalized
         if let firstName, !firstName.isEmpty { identity.firstName = firstName }
         // Backfill for rows written before the field existed: the earliest
@@ -172,7 +183,7 @@ struct UserDirectory: Codable, Sendable {
             }
             byUsername[normalized] = userID
         }
-        return (isNew || previous != normalized, previous)
+        return (isNew || previous != normalized, previous, seenAtAdvanced)
     }
 
     /// Label for a stored key, for the interface. Identified people are shown

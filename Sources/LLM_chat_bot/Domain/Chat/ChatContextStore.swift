@@ -375,6 +375,12 @@ actor ChatContextStore {
     /// person's username can change freely — no state is attached to it.
     func identifyUser(userID: Int, username: String?, firstName: String? = nil) {
         let outcome = userDirectoryValue.record(userID: userID, username: username, firstName: firstName)
+        // A moved `seenAt` is worth persisting on its own (throttled inside the
+        // directory): the wallet win-back sweep and the retention proxy both
+        // read it, and if it only ever reached the database as a side effect of
+        // somebody else's rename it would roll back to a stale value on restart
+        // — and an active person would be told «давно вас не было».
+        if outcome.seenAtAdvanced { dirtyConfigs.insert(.userDirectory) }
         guard outcome.changed else { return }
         dirtyConfigs.insert(.userDirectory)
 
