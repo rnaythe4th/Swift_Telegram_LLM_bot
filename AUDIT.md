@@ -724,6 +724,10 @@ if await state.userKey(username: fromUser?.username) == owner {
 
 ### B24. Суперадмины не исключены из рассылки «Возврат по балансу»
 
+> ✅ **Исправлено.** `dueWalletWinbacks` пропускает ключи из `superAdminUsernames`
+> — как и `dueSubscriptionNotices`. Счётчик «платили» на странице мониторинга
+> остаётся полным (он про факт оплаты, а не про рассылку).
+
 **Где:** `Domain/Chat/ChatContextStore.swift:3141-3170` (`dueWalletWinbacks`).
 
 `dueSubscriptionNotices` (строка 706) и `subscriptionLifecycleStats` (строка 867)

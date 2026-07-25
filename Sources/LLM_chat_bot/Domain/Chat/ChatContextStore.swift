@@ -3305,6 +3305,9 @@ actor ChatContextStore {
 
         for (key, wallet) in userBalances {
             guard wallet.toppedUpUsd > 0, wallet.lapsedNoticeAt == nil else { continue }
+            // The bot's owners are not sold the bot's own product — same rule
+            // the subscription sweep follows.
+            guard !superAdminUsernames.contains(key) else { continue }
             // Still has money, or is covered by a subscription: not lapsed.
             guard wallet.balanceUsd <= Self.lapsedWalletThresholdUsd else { continue }
             if let tenant = tenants[key] {
