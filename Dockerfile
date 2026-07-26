@@ -3,7 +3,10 @@
 FROM swift:6.2-bookworm AS build
 WORKDIR /app
 
-COPY Package.swift ./
+# Package.resolved is copied too, so the image builds the exact dependency
+# versions that were tested locally. Without it every remote build re-resolves
+# and can silently pick up a newer minor release of a transitive package.
+COPY Package.swift Package.resolved ./
 RUN swift package resolve
 
 COPY Sources ./Sources
