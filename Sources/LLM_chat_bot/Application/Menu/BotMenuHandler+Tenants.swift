@@ -338,4 +338,237 @@ extension BotMenuHandler {
         ]
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
     }
+
+    // MARK: - Actions behind the buttons on those pages
+
+    /// `sa:*` — the super-admin roster. Only root adds or removes.
+    func handleSuperAdminRosterAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        guard parts.count >= 2 else { return }
+        switch parts[1] {
+        case "add":
+            guard await state.isRootSuperAdmin(username: invokerKey(callback)) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
+                return
+            }
+            await state.setAdminPendingInput(.init(kind: .superAdminAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let prompt = "<b>🛡 Добавить суперадмина</b>\n\nОтправьте @username одним сообщением."
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superadmins")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+        case "rm":
+            guard await state.isRootSuperAdmin(username: invokerKey(callback)) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
+                return
+            }
+            guard parts.count >= 3 else { return }
+            let target = parts[2]
+            let ok = await state.removeSuperAdmin(target: target)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Удалён" : "Не удалось")
+            try await showPage(.superAdmins, chatKey: chatKey, callback: callback, message: message)
+        default:
+            try await showPage(.superAdmins, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
+
+    /// `stenant:*` — tenant list, one tenant's card and its subscription.
+    func handleSuperTenantAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        guard parts.count >= 2 else { return }
+        switch parts[1] {
+        case "add":
+            await state.setAdminPendingInput(.init(kind: .tenantRegister, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let prompt = "<b>🏢 Зарегистрировать тенанта</b>\n\nОтправьте @username одним сообщением."
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:supertenants")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+        case "rm":
+            // Deleting a tenant throws away a paid subscription, their
+            // chats and their guest list — a mis-tap in a list of names
+            // must not be able to do that silently.
+            guard parts.count >= 3 else { return }
+            let target = parts[2]
+            let label = await state.displayLabel(forKey: target)
+            let row = await state.tenantStats().first { $0.username == target }
+            let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+            let subLine: String
+            if let row {
+                subLine = row.paidUntil.map { "Подписка до <b>\(f.string(from: $0))</b> · чатов <b>\(row.chatCount)</b> · гостей <b>\(row.licensedUserCount)</b>" }
+                    ?? "Подписка <b>бессрочная</b> · чатов <b>\(row.chatCount)</b> · гостей <b>\(row.licensedUserCount)</b>"
+            } else {
+                subLine = "<i>данных нет</i>"
+            }
+            let confirmText = """
+            <b>🗑 Удалить тенанта \(label)?</b>
+
+            \(subLine)
+
+            ⚠️ Подписка, привязанные чаты и список гостей пропадут. Их чаты вернутся на бесплатные модели. Отменить нельзя — только оформить заново.
+            """
+            let confirmMarkup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("🗑 Да, удалить", action: "stenant:rmyes:\(target)")],
+                [menuButton("❌ Отмена", action: "nav:supertenants")],
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: confirmText, markup: confirmMarkup)
+        case "rmyes":
+            guard parts.count >= 3 else { return }
+            let removed = await state.removeTenant(username: parts[2])
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалён" : "Нельзя удалить")
+            try await showPage(.superTenants, chatKey: chatKey, callback: callback, message: message)
+        case "info":
+            guard parts.count >= 3 else { return }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        case "ext":
+            guard parts.count >= 3 else { return }
+            if let until = await state.extendTenantSubscription(username: parts[2], days: ChatContextStore.subscriptionDays) {
+                let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продлена до \(f.string(from: until))")
+            } else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Тенант не найден")
+            }
+            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        case "unlim":
+            guard parts.count >= 3 else { return }
+            let ok = await state.setTenantUnlimited(username: parts[2])
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Подписка бессрочная" : "Тенант не найден")
+            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        case "exp":
+            guard parts.count >= 3 else { return }
+            let ok = await state.expireTenantSubscription(username: parts[2])
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "⛔ Подписка завершена" : "Тенант не найден")
+            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        default:
+            try await showPage(.superTenants, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
+
+    /// `sim:*` — pretend to be an admin or a regular user (CLAUDE.md §6).
+    func handleSimulationAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isActuallySuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        guard parts.count >= 2 else { return }
+        // Simulation is filed under the same key as the role it shadows.
+        let username = invokerKey(callback)
+        switch parts[1] {
+        case "admin":
+            _ = await state.setSimulatedRole(username: username, role: .admin)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Симуляция: админ")
+        case "user":
+            _ = await state.setSimulatedRole(username: username, role: .regularUser)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Симуляция: юзер")
+        case "off":
+            _ = await state.setSimulatedRole(username: username, role: nil)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Симуляция выкл")
+        case "buy":
+            let activation = await state.activatePaidSubscription(username: username)
+            await state.assignChat(chatID: chatKey.chatID, to: username.lowercased())
+            let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+            let note: String
+            switch activation {
+            case .started(let until): note = "🧪 Tenant создан, подписка до \(f.string(from: until))"
+            case .extended(let until): note = "🧪 Подписка продлена до \(f.string(from: until))"
+            case .alreadyUnlimited: note = "🧪 У вас бессрочный доступ"
+            }
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: note)
+        default:
+            break
+        }
+        try await showPage(.superSimulate, chatKey: chatKey, callback: callback, message: message)
+    }
+
+    /// `sinspect:<chatID>` — one chat's settings and usage.
+    func handleInspectChatAction(
+        parts: [String],
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        guard parts.count >= 2, let targetChatID = Int(parts[1]) else { return }
+        let (text, markup) = await renderInspect(chatID: targetChatID)
+        try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+    }
+
+    /// `sbal:*` — wallets: top-up prompt and deletion (with confirmation).
+    func handleWalletAdminAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        guard parts.count >= 2 else { return }
+        switch parts[1] {
+        case "add":
+            await state.setAdminPendingInput(.init(kind: .balanceTopUp, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let prompt = """
+            <b>💰 Начислить / списать баланс</b>
+
+            Отправьте одним сообщением: <code>@username сумма</code>
+
+            <i>Пример:</i> <code>@user 5</code> — начислить $5
+            Отрицательная сумма — списать. Кошелёк создаётся автоматически.
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superbal")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+        case "rm":
+            // The wallet holds money the person paid for: confirm before
+            // it disappears from a one-tap row in a list.
+            guard parts.count >= 3 else { return }
+            let target = parts[2]
+            let label = await state.displayLabel(forKey: target)
+            let wallet = await state.balance(username: target)
+            let amount = wallet.map { String(format: "$%.4f", $0.balanceUsd) } ?? "—"
+            let confirmText = """
+            <b>🗑 Удалить кошелёк \(label)?</b>
+
+            Остаток · <b>\(amount)</b>
+
+            ⚠️ Остаток пропадёт вместе с историей списаний. Если человек пополнял баланс деньгами, это его деньги. Отменить нельзя.
+            """
+            let confirmMarkup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("🗑 Да, удалить", action: "sbal:rmyes:\(target)")],
+                [menuButton("❌ Отмена", action: "nav:superbal")],
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: confirmText, markup: confirmMarkup)
+        case "rmyes":
+            guard parts.count >= 3 else { return }
+            let removed = await state.removeBalance(username: parts[2])
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Кошелёк удалён" : "Кошелёк не найден")
+            try await showPage(.superBalances, chatKey: chatKey, callback: callback, message: message)
+        default:
+            try await showPage(.superBalances, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
 }

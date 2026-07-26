@@ -66,10 +66,15 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
 ```
 
 ### App/
-- `LLM_chat_bot.swift` — `@main`. Собирает **весь граф зависимостей** вручную
-  (composition root), запускает HTTP-сервер, восстанавливает состояние,
-  ставит обработчики SIGTERM/SIGINT, запускает оркестратор. Константы: владелец
-  по умолчанию `maythe4th`, дефолтный system prompt, `formatOptions`.
+- `LLM_chat_bot.swift` — `@main`. Только **последовательность старта**: собрать
+  граф (`AppAssembly.build`), поднять HTTP-сервер, восстановить состояние,
+  поставить обработчики SIGTERM/SIGINT, запустить оркестратор.
+- `AppAssembly.swift` — **composition root**: весь граф зависимостей собирается
+  здесь вручную, фабриками (`makeTelegram`, `makeStore` + сев пресетов,
+  `makePersistence`, `makeOrchestrator`, `makeCryptoMonitor`, `resolveMode`,
+  `makeHTTPServer`), плюс `registerSecrets` (редакция секретов до первой строки
+  лога, §15). Константы бота: владелец по умолчанию `maythe4th`, дефолтный
+  system prompt, `formatOptions`.
 - `AppConfig.swift` — загрузка и валидация переменных окружения (см. §15).
 
 ### Application/
@@ -99,13 +104,16 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   Вход в пайплайн — `GenerationOrigin` (кто спросил, личка ли, на что отвечать):
   строится из `TelegramMessage` либо синтезируется для тапа по примеру
   (`runReadyPrompt`). Рядом — `+Streaming.swift` (draft/edit-раннеры, разбивка
-  длинных ответов) и `+Monetization.swift` (реклама, офферы при лимите и пустом
-  балансе, реферальная выплата, футер).
+  длинных ответов) и `+Monetization.swift` (гейт дневного премиума
+  `resolveDailyPremium` и выбор режима биллинга `resolveBillingMode`, реклама,
+  офферы при лимите и пустом балансе, реферальная выплата, футер).
 - `Generation/DraftStreamer.swift` — «печатающая машинка» через `sendMessageDraft`.
 - `Commands/` — `CommandParser.swift` (парсинг `/cmd@bot`+suffix) и
   `BotCommandHandler.swift` — обвязка, гейты ролей, `handleIfCommand`. Тела
-  команд разнесены по `BotCommandHandler+*.swift`: `Dispatch` (switch
-  команда → обработчик), `Start` (`/start`, диплинки, приветствия), `Referral`,
+  команд разнесены по `BotCommandHandler+*.swift`: `Dispatch` (**только** switch
+  команда → обработчик), `ChatSettings` (тела команд настроек чата: роль, модель,
+  стиль, память, тумблеры под ответом, сервис ИИ, обдумывание), `Start`
+  (`/start`, диплинки, приветствия), `Referral`,
   `Info` (`/chatid`, `/inspect`, `/history`), `Onboarding`, `Balance`,
   `Reminders`, `Ads`, `Admin` (whitelist/defaults/chats/users/presets),
   `Tenant`, `SuperAdmin` (`/superadmin`, `/simulate`, крипта, free-модели),
@@ -117,10 +125,14 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   `SuperHelpSection.swift` — справка суперадмина по разделам,
   `BotMenuHandler.swift` — обвязка, диспетчер callback'ов
   (`processAction` → восемь групповых обработчиков), `showPage`/`renderPage`.
-  Страницы и действия — по `BotMenuHandler+*.swift`: `MainPage`, `ChatSettings`,
-  `Purchase`, `Presets`, `Admin`, `Tenants`, `SuperAdmin`, `PaymentSettings`
-  (Stars/карта/крипта/free-модели), `Retention`, `Onboarding`, `Referral`,
-  `Growth` (воронка, реклама, источники), `Help`, `TextInput`, `AdminInput`.
+  Страницы и действия — по `BotMenuHandler+*.swift`: `MainPage`, `ChatSettings`
+  (действия) + `ChatSettingsPages` (их рендеры), `Purchase`, `Presets`, `Admin`,
+  `Tenants` (тенанты, кошельки, суперадмины, симуляция, inspect — страницы и
+  кнопки), `SuperAdmin` (диспетчер `super*`-действий + наценка, премиум-лимит,
+  сама панель), `PaymentSettings` (Stars/карта/крипта/free-модели), `Retention`,
+  `Onboarding`, `Referral`, `Growth` (воронка, реклама, источники), `Help`,
+  `TextInput` (значения, набранные после кнопки), `AdminInput`
+  (`AdminPendingInputKind` → семь групп по теме).
 - `Formatting/ResponseFooterFormatter.swift` — футер под ответом (токены, стоимость
   ×markup, модель, остаток баланса).
 - `Payments/` — `CryptoPaymentService.swift` (инвойсы, курсы, матчинг),
@@ -1298,6 +1310,15 @@ OpenRouter кэшируется в памяти и на старте может 
   пора делить: чтобы прочитать одну ветку логики, не должен грузиться весь тип.
   Члены, к которым обращается соседний `+файл`, — `internal` без `private`;
   за пределами файлов одного типа их всё равно никто не трогает.
+- **Switch — это диспетчер, а не место для тел.** Функция длиннее ~120 строк
+  режется тем же приёмом, которым разобраны `processAction`,
+  `processSuperAdminAction`, `handleTenant`, `handleBuyAction` и
+  `processAdminPendingInput`: внешний `switch` оставляет по одной строке на
+  ветку, тело уезжает в метод **со своим** `switch` (+ `default: break`) —
+  тогда голый `break`/`return` внутри тела значит ровно то же, что значил.
+  Новая ветка дописывается в метод своей темы, а не в диспетчер. Если у ветки
+  есть своя страница меню, её обработчик живёт в файле этой страницы
+  (`sbal:*` — в `+Tenants.swift`, `stars:*` — в `+PaymentSettings.swift`).
 - **Всё состояние — через актор `ChatContextStore`**. Новая изменяемая сущность
   обязана: (а) помечать dirty-set при мутации, (б) экспортироваться/импортироваться
   в `ChatContextStore+Persistence.swift`, (в) при необходимости получить

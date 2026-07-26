@@ -38,6 +38,28 @@ extension BotCommandHandler {
         let rest = parts.count > 1 ? parts[1] : ""
 
         switch subcommand {
+        case "add", "remove", "rm", "on", "off":
+            try await handleAdCampaignCommand(subcommand: subcommand, rest: rest, chatKey: chatKey)
+
+        case "freq", "limit", "button", "text":
+            try await handleAdCampaignTuning(subcommand: subcommand, rest: rest, chatKey: chatKey)
+
+        // Built-in self-promo (roadmap step 5) — same knobs as the menu page,
+        // nothing about the pitch is hardcoded.
+        case "promo":
+            try await handleSelfPromoCommand(rest: rest, chatKey: chatKey)
+
+        case "list", "stats", "":
+            try await sendAdsOverview(chatKey: chatKey)
+
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: "<i>Неизвестная подкоманда.</i> Список: <code>/ads</code>")
+        }
+    }
+
+    /// Create, delete, switch a campaign on or off.
+    private func handleAdCampaignCommand(subcommand: String, rest: String, chatKey: ChatKey) async throws {
+        switch subcommand {
         case "add":
             let text = rest.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
@@ -68,6 +90,14 @@ extension BotCommandHandler {
                 ? "✓ Кампания \(id) · \(subcommand == "on" ? "включена" : "выключена")."
                 : "Кампания \(id) не найдена.")
 
+        default:
+            break
+        }
+    }
+
+    /// Frequency, impression pacing, the link button and the text itself.
+    private func handleAdCampaignTuning(subcommand: String, rest: String, chatKey: ChatKey) async throws {
+        switch subcommand {
         case "freq":
             let args = rest.split(separator: " ").map(String.init)
             guard args.count >= 2, let everyN = Int(args[1]), everyN >= 1,
@@ -149,86 +179,88 @@ extension BotCommandHandler {
             await state.upsertAdCampaign(campaign)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): текст обновлён.")
 
-        // Built-in self-promo (roadmap step 5) — same knobs as the menu page,
-        // nothing about the pitch is hardcoded.
-        case "promo":
-            let args = rest.split(separator: " ", maxSplits: 1).map(String.init)
-            let action = (args.first ?? "").lowercased()
-            let value = args.count > 1 ? args[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-            var promo = await state.selfPromoConfig()
-            switch action {
-            case "on", "off":
-                promo.enabled = action == "on"
-                await state.setSelfPromoConfig(promo)
-                try await sendUserFeedback(chatKey: chatKey, text: promo.enabled
-                    ? "✓ Само-реклама включена — займёт свободный рекламный слот."
-                    : "✓ Само-реклама выключена — свободный слот останется пустым.")
-            case "text":
-                guard !value.isEmpty else {
-                    try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads promo text &lt;новый текст&gt;</code>")
-                    return
-                }
-                promo.text = value
-                await state.setSelfPromoConfig(promo)
-                try await sendUserFeedback(chatKey: chatKey, text: "✓ Текст само-рекламы обновлён (показы сохранены).")
-            case "freq":
-                let nums = value.split(separator: " ").map(String.init)
-                guard let everyN = nums.first.flatMap(Int.init), SelfPromoConfig.repliesRange.contains(everyN) else {
-                    try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads promo freq &lt;каждые_N_ответов&gt; [пауза_минут]</code>")
-                    return
-                }
-                promo.everyNReplies = everyN
-                if nums.count >= 2, let minutes = Int(nums[1]), SelfPromoConfig.pauseMinutesRange.contains(minutes) {
-                    promo.minIntervalSeconds = minutes * 60
-                }
-                await state.setSelfPromoConfig(promo)
-                let saved = await state.selfPromoConfig()
-                try await sendUserFeedback(chatKey: chatKey, text: "✓ Само-реклама: каждые <b>\(saved.everyNReplies)</b> ответов · пауза <b>\(saved.minIntervalSeconds / 60) мин</b>.")
-            case "reset":
-                await state.resetSelfPromoStats()
-                try await sendUserFeedback(chatKey: chatKey, text: "✓ Счётчик показов само-рекламы обнулён.")
-            default:
-                try await sendUserFeedback(chatKey: chatKey, text: """
-                    <b>📣 Само-реклама премиума</b> · \(promo.enabled ? "включена" : "выключена")
-                    Каждые <b>\(promo.everyNReplies)</b> ответов · пауза <b>\(promo.minIntervalSeconds / 60)</b> мин · показов <b>\(promo.impressions)</b>
-                    <blockquote expandable>\(promo.text)</blockquote>
-                    Занимает рекламный слот в бесплатных чатах, когда нет активной кампании. Кнопку «⚡ Открыть премиум» бот добавляет сам.
-
-                    <code>/ads promo on|off</code> · <code>/ads promo text &lt;текст&gt;</code>
-                    <code>/ads promo freq &lt;N&gt; [мин]</code> · <code>/ads promo reset</code>
-                    """)
-            }
-
-        case "list", "stats", "":
-            let campaigns = await state.adCampaigns()
-            var lines = ["<b>📣 Рекламные кампании</b> (\(campaigns.count))"]
-            if campaigns.isEmpty {
-                lines.append("<i>нет</i>")
-            } else {
-                for c in campaigns {
-                    lines.append("")
-                    lines.append(contentsOf: adSummaryLines(c))
-                }
-            }
-            let promo = await state.selfPromoConfig()
-            lines.append("")
-            lines.append("<b>Само-реклама премиума</b> · \(promo.enabled ? "вкл" : "выкл") · каждые \(promo.everyNReplies) отв. · пауза \(promo.minIntervalSeconds / 60) мин · показов \(promo.impressions)")
-            lines.append("<i>Занимает слот, когда активных кампаний нет. Настройка — /ads promo</i>")
-            lines.append("")
-            lines.append("""
-                <code>/ads add &lt;текст&gt;</code> — создать
-                <code>/ads freq &lt;id&gt; &lt;N&gt; [мин]</code> — частота: каждые N ответов, пауза
-                <code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code> — лимит с равномерным пейсингом
-                <code>/ads button &lt;id&gt; &lt;текст&gt; | &lt;url&gt;</code> — кнопка-ссылка
-                <code>/ads text &lt;id&gt; &lt;текст&gt;</code> · <code>on|off|remove &lt;id&gt;</code>
-                <code>/ads promo</code> — само-реклама премиума
-
-                <i>Показы — только в чатах без активной платной лицензии, после ответа бота. Проверить самому: /simulate user, затем написать боту.</i>
-                """)
-            try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
-
         default:
-            try await sendUserFeedback(chatKey: chatKey, text: "<i>Неизвестная подкоманда.</i> Список: <code>/ads</code>")
+            break
         }
+    }
+
+    /// `/ads promo …` — the self-offer that fills a free ad slot.
+    private func handleSelfPromoCommand(rest: String, chatKey: ChatKey) async throws {
+        let args = rest.split(separator: " ", maxSplits: 1).map(String.init)
+        let action = (args.first ?? "").lowercased()
+        let value = args.count > 1 ? args[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        var promo = await state.selfPromoConfig()
+        switch action {
+        case "on", "off":
+            promo.enabled = action == "on"
+            await state.setSelfPromoConfig(promo)
+            try await sendUserFeedback(chatKey: chatKey, text: promo.enabled
+                ? "✓ Само-реклама включена — займёт свободный рекламный слот."
+                : "✓ Само-реклама выключена — свободный слот останется пустым.")
+        case "text":
+            guard !value.isEmpty else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads promo text &lt;новый текст&gt;</code>")
+                return
+            }
+            promo.text = value
+            await state.setSelfPromoConfig(promo)
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Текст само-рекламы обновлён (показы сохранены).")
+        case "freq":
+            let nums = value.split(separator: " ").map(String.init)
+            guard let everyN = nums.first.flatMap(Int.init), SelfPromoConfig.repliesRange.contains(everyN) else {
+                try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads promo freq &lt;каждые_N_ответов&gt; [пауза_минут]</code>")
+                return
+            }
+            promo.everyNReplies = everyN
+            if nums.count >= 2, let minutes = Int(nums[1]), SelfPromoConfig.pauseMinutesRange.contains(minutes) {
+                promo.minIntervalSeconds = minutes * 60
+            }
+            await state.setSelfPromoConfig(promo)
+            let saved = await state.selfPromoConfig()
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Само-реклама: каждые <b>\(saved.everyNReplies)</b> ответов · пауза <b>\(saved.minIntervalSeconds / 60) мин</b>.")
+        case "reset":
+            await state.resetSelfPromoStats()
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Счётчик показов само-рекламы обнулён.")
+        default:
+            try await sendUserFeedback(chatKey: chatKey, text: """
+                <b>📣 Само-реклама премиума</b> · \(promo.enabled ? "включена" : "выключена")
+                Каждые <b>\(promo.everyNReplies)</b> ответов · пауза <b>\(promo.minIntervalSeconds / 60)</b> мин · показов <b>\(promo.impressions)</b>
+                <blockquote expandable>\(promo.text)</blockquote>
+                Занимает рекламный слот в бесплатных чатах, когда нет активной кампании. Кнопку «⚡ Открыть премиум» бот добавляет сам.
+
+                <code>/ads promo on|off</code> · <code>/ads promo text &lt;текст&gt;</code>
+                <code>/ads promo freq &lt;N&gt; [мин]</code> · <code>/ads promo reset</code>
+                """)
+        }
+    }
+
+    /// `/ads` with no arguments: every campaign, the promo slot and the help.
+    private func sendAdsOverview(chatKey: ChatKey) async throws {
+        let campaigns = await state.adCampaigns()
+        var lines = ["<b>📣 Рекламные кампании</b> (\(campaigns.count))"]
+        if campaigns.isEmpty {
+            lines.append("<i>нет</i>")
+        } else {
+            for c in campaigns {
+                lines.append("")
+                lines.append(contentsOf: adSummaryLines(c))
+            }
+        }
+        let promo = await state.selfPromoConfig()
+        lines.append("")
+        lines.append("<b>Само-реклама премиума</b> · \(promo.enabled ? "вкл" : "выкл") · каждые \(promo.everyNReplies) отв. · пауза \(promo.minIntervalSeconds / 60) мин · показов \(promo.impressions)")
+        lines.append("<i>Занимает слот, когда активных кампаний нет. Настройка — /ads promo</i>")
+        lines.append("")
+        lines.append("""
+            <code>/ads add &lt;текст&gt;</code> — создать
+            <code>/ads freq &lt;id&gt; &lt;N&gt; [мин]</code> — частота: каждые N ответов, пауза
+            <code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code> — лимит с равномерным пейсингом
+            <code>/ads button &lt;id&gt; &lt;текст&gt; | &lt;url&gt;</code> — кнопка-ссылка
+            <code>/ads text &lt;id&gt; &lt;текст&gt;</code> · <code>on|off|remove &lt;id&gt;</code>
+            <code>/ads promo</code> — само-реклама премиума
+
+            <i>Показы — только в чатах без активной платной лицензии, после ответа бота. Проверить самому: /simulate user, затем написать боту.</i>
+            """)
+        try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
     }
 }

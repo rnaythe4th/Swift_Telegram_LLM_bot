@@ -1,7 +1,8 @@
 import Foundation
 
 // Typed values that follow a menu button: preset editing and the plain
-// per-chat settings.
+// per-chat settings. One `has*` check per waiting kind picks the applier;
+// the kinds behind `AdminPendingInput` live in +AdminInput.swift.
 
 extension BotMenuHandler {
     /// `username` here — and everywhere it is threaded onward — is the
@@ -22,227 +23,27 @@ extension BotMenuHandler {
         }
 
         if await state.hasPendingStarsPriceInput(chatKey: chatKey) {
-            guard let menuMessageID = await state.consumePendingStarsPriceInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else {
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: "🔒 Только суперадмин может изменить цену.",
-                    replyMarkup: nil
-                ))
-                return true
-            }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let value = Int(trimmed), value >= 0 {
-                await state.setStarsPrice(value > 0 ? value : nil)
-                let confirmText = value > 0 ? "✓ Цена доступа: <b>\(value) ⭐</b>" : "✓ Продажи отключены."
-                let (menuText, markup) = await renderSuperStars(chatKey: chatKey)
-                try? await telegram.editMessage(.init(
-                    chatID: chatKey.chatID,
-                    messageID: menuMessageID,
-                    text: menuText,
-                    replyMarkup: markup
-                ))
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: confirmText,
-                    replyMarkup: nil
-                ))
-            } else {
-                await state.setPendingStarsPriceInput(menuMessageID: menuMessageID, chatKey: chatKey)
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: "⚠️ Введите целое число (например <code>50</code>) или <code>0</code> для отключения.",
-                    replyMarkup: nil
-                ))
-            }
-            return true
+            return await applyStarsPriceInput(text: text, chatKey: chatKey, username: username)
         }
 
         if await state.hasPendingStarsPerUsdInput(chatKey: chatKey) {
-            guard let menuMessageID = await state.consumePendingStarsPerUsdInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else {
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: "🔒 Только суперадмин может изменить курс.",
-                    replyMarkup: nil
-                ))
-                return true
-            }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            // 0 turns Stars top-ups off without touching the subscription price.
-            if let value = Int(trimmed), value >= 0 {
-                await state.setStarsPerUsd(value)
-                let (menuText, markup) = await renderSuperStars(chatKey: chatKey)
-                try? await telegram.editMessage(.init(
-                    chatID: chatKey.chatID,
-                    messageID: menuMessageID,
-                    text: menuText,
-                    replyMarkup: markup
-                ))
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: value == 0
-                        ? "✓ Пополнение баланса через Stars отключено."
-                        : "✓ Курс пополнений: <b>\(value) ⭐ за $1</b>",
-                    replyMarkup: nil
-                ))
-            } else {
-                await state.setPendingStarsPerUsdInput(menuMessageID: menuMessageID, chatKey: chatKey)
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: "⚠️ Введите целое число (например <code>77</code>) или <code>0</code>, чтобы отключить пополнения через Stars.",
-                    replyMarkup: nil
-                ))
-            }
-            return true
+            return await applyStarsRateInput(text: text, chatKey: chatKey, username: username)
         }
 
         if await state.hasPendingCryptoPriceInput(chatKey: chatKey) {
-            guard let menuMessageID = await state.consumePendingCryptoPriceInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else {
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: "🔒 Только суперадмин может изменить цену.",
-                    replyMarkup: nil
-                ))
-                return true
-            }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: ".")
-            if trimmed == "0" || trimmed.lowercased() == "off" {
-                await state.setCryptoPriceUsdCents(nil)
-                let confirm = "✓ Крипто-оплата отключена."
-                let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
-                try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: confirm,
-                    replyMarkup: nil
-                ))
-            } else if let usd = Double(trimmed), usd > 0 {
-                let cents = Int((usd * 100.0).rounded())
-                await state.setCryptoPriceUsdCents(cents)
-                let confirm = String(format: "✓ Цена в крипто: <b>$%.2f</b>", Double(cents) / 100.0)
-                let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
-                try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: confirm,
-                    replyMarkup: nil
-                ))
-            } else {
-                await state.setPendingCryptoPriceInput(menuMessageID: menuMessageID, chatKey: chatKey)
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: "⚠️ Введите сумму в долларах (например <code>9.99</code>) или <code>0</code>.",
-                    replyMarkup: nil
-                ))
-            }
-            return true
+            return await applyCryptoPriceInput(text: text, chatKey: chatKey, username: username)
         }
 
         if await state.hasPendingCryptoPoolAddInput(chatKey: chatKey) {
-            guard let pending = await state.consumePendingCryptoPoolAddInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else {
-                // Swallowing the message without a word is what makes a lost
-                // right look like a broken bot.
-                await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
-                return true
-            }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let toast: String
-            if trimmed.isEmpty {
-                toast = "⚠️ Адрес пустой."
-            } else {
-                let added = await state.addCryptoPoolAddress(pending.chain, address: trimmed)
-                toast = added
-                    ? "✓ В пул \(pending.chain.displayName) добавлен: \(trimmed)"
-                    : "Адрес уже в пуле: \(trimmed)"
-            }
-            let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
-            try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
-            _ = try? await telegram.sendMessage(.init(
-                chatID: chatKey.chatID,
-                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                replyTo: nil,
-                text: toast,
-                replyMarkup: nil
-            ))
-            return true
+            return await applyCryptoPoolInput(text: text, chatKey: chatKey, username: username)
         }
 
         if await state.hasPendingCryptoAddressInput(chatKey: chatKey) {
-            guard let pending = await state.consumePendingCryptoAddressInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else {
-                // Swallowing the message without a word is what makes a lost
-                // right look like a broken bot.
-                await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
-                return true
-            }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed == "-" || trimmed.isEmpty {
-                await state.setCryptoAddress(pending.chain, address: nil)
-            } else {
-                await state.setCryptoAddress(pending.chain, address: trimmed)
-            }
-            let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
-            try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
-            _ = try? await telegram.sendMessage(.init(
-                chatID: chatKey.chatID,
-                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                replyTo: nil,
-                text: trimmed == "-" || trimmed.isEmpty
-                    ? "✓ Адрес для \(pending.chain.displayName) удалён."
-                    : "✓ Адрес для \(pending.chain.displayName): <code>\(trimmed)</code>",
-                replyMarkup: nil
-            ))
-            return true
+            return await applyCryptoAddressInput(text: text, chatKey: chatKey, username: username)
         }
 
         if await state.hasPendingFreeModelInput(chatKey: chatKey) {
-            guard let menuMessageID = await state.consumePendingFreeModelInput(chatKey: chatKey) else { return true }
-            guard await state.isSuperAdmin(username: username) else {
-                // Swallowing the message without a word is what makes a lost
-                // right look like a broken bot.
-                await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
-                return true
-            }
-            let modelID = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !modelID.isEmpty {
-                let added = await state.addFreeModel(modelID)
-                let toast = added ? "✓ Добавлено: \(modelID)" : "Уже в списке: \(modelID)"
-                let (menuText, markup) = await renderSuperFreeModels(chatKey: chatKey)
-                try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
-                _ = try? await telegram.sendMessage(.init(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: nil,
-                    text: toast,
-                    replyMarkup: nil
-                ))
-            } else {
-                await state.setPendingFreeModelInput(menuMessageID: menuMessageID, chatKey: chatKey)
-            }
-            return true
+            return await applyFreeModelInput(text: text, chatKey: chatKey, username: username)
         }
 
         if await state.hasAdminPendingInput(chatKey: chatKey) {
@@ -252,6 +53,243 @@ extension BotMenuHandler {
         guard await state.hasPendingInput(chatKey: chatKey) else { return false }
         guard let pending = await state.consumePendingInput(chatKey: chatKey) else { return false }
 
+        return await applyPresetInput(pending: pending, text: text, chatKey: chatKey, username: username)
+    }
+
+    // MARK: - Prices and payment addresses
+
+    private func applyStarsPriceInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard let menuMessageID = await state.consumePendingStarsPriceInput(chatKey: chatKey) else { return true }
+        guard await state.isSuperAdmin(username: username) else {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "🔒 Только суперадмин может изменить цену.",
+                replyMarkup: nil
+            ))
+            return true
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let value = Int(trimmed), value >= 0 {
+            await state.setStarsPrice(value > 0 ? value : nil)
+            let confirmText = value > 0 ? "✓ Цена доступа: <b>\(value) ⭐</b>" : "✓ Продажи отключены."
+            let (menuText, markup) = await renderSuperStars(chatKey: chatKey)
+            try? await telegram.editMessage(.init(
+                chatID: chatKey.chatID,
+                messageID: menuMessageID,
+                text: menuText,
+                replyMarkup: markup
+            ))
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: confirmText,
+                replyMarkup: nil
+            ))
+        } else {
+            await state.setPendingStarsPriceInput(menuMessageID: menuMessageID, chatKey: chatKey)
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "⚠️ Введите целое число (например <code>50</code>) или <code>0</code> для отключения.",
+                replyMarkup: nil
+            ))
+        }
+        return true
+    }
+
+    private func applyStarsRateInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard let menuMessageID = await state.consumePendingStarsPerUsdInput(chatKey: chatKey) else { return true }
+        guard await state.isSuperAdmin(username: username) else {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "🔒 Только суперадмин может изменить курс.",
+                replyMarkup: nil
+            ))
+            return true
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 0 turns Stars top-ups off without touching the subscription price.
+        if let value = Int(trimmed), value >= 0 {
+            await state.setStarsPerUsd(value)
+            let (menuText, markup) = await renderSuperStars(chatKey: chatKey)
+            try? await telegram.editMessage(.init(
+                chatID: chatKey.chatID,
+                messageID: menuMessageID,
+                text: menuText,
+                replyMarkup: markup
+            ))
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: value == 0
+                    ? "✓ Пополнение баланса через Stars отключено."
+                    : "✓ Курс пополнений: <b>\(value) ⭐ за $1</b>",
+                replyMarkup: nil
+            ))
+        } else {
+            await state.setPendingStarsPerUsdInput(menuMessageID: menuMessageID, chatKey: chatKey)
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "⚠️ Введите целое число (например <code>77</code>) или <code>0</code>, чтобы отключить пополнения через Stars.",
+                replyMarkup: nil
+            ))
+        }
+        return true
+    }
+
+    private func applyCryptoPriceInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard let menuMessageID = await state.consumePendingCryptoPriceInput(chatKey: chatKey) else { return true }
+        guard await state.isSuperAdmin(username: username) else {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "🔒 Только суперадмин может изменить цену.",
+                replyMarkup: nil
+            ))
+            return true
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: ",", with: ".")
+        if trimmed == "0" || trimmed.lowercased() == "off" {
+            await state.setCryptoPriceUsdCents(nil)
+            let confirm = "✓ Крипто-оплата отключена."
+            let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
+            try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: confirm,
+                replyMarkup: nil
+            ))
+        } else if let usd = Double(trimmed), usd > 0 {
+            let cents = Int((usd * 100.0).rounded())
+            await state.setCryptoPriceUsdCents(cents)
+            let confirm = String(format: "✓ Цена в крипто: <b>$%.2f</b>", Double(cents) / 100.0)
+            let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
+            try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: confirm,
+                replyMarkup: nil
+            ))
+        } else {
+            await state.setPendingCryptoPriceInput(menuMessageID: menuMessageID, chatKey: chatKey)
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: "⚠️ Введите сумму в долларах (например <code>9.99</code>) или <code>0</code>.",
+                replyMarkup: nil
+            ))
+        }
+        return true
+    }
+
+    private func applyCryptoPoolInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard let pending = await state.consumePendingCryptoPoolAddInput(chatKey: chatKey) else { return true }
+        guard await state.isSuperAdmin(username: username) else {
+            // Swallowing the message without a word is what makes a lost
+            // right look like a broken bot.
+            await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
+            return true
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toast: String
+        if trimmed.isEmpty {
+            toast = "⚠️ Адрес пустой."
+        } else {
+            let added = await state.addCryptoPoolAddress(pending.chain, address: trimmed)
+            toast = added
+                ? "✓ В пул \(pending.chain.displayName) добавлен: \(trimmed)"
+                : "Адрес уже в пуле: \(trimmed)"
+        }
+        let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
+        try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: toast,
+            replyMarkup: nil
+        ))
+        return true
+    }
+
+    private func applyCryptoAddressInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard let pending = await state.consumePendingCryptoAddressInput(chatKey: chatKey) else { return true }
+        guard await state.isSuperAdmin(username: username) else {
+            // Swallowing the message without a word is what makes a lost
+            // right look like a broken bot.
+            await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
+            return true
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "-" || trimmed.isEmpty {
+            await state.setCryptoAddress(pending.chain, address: nil)
+        } else {
+            await state.setCryptoAddress(pending.chain, address: trimmed)
+        }
+        let (menuText, markup) = await renderSuperCrypto(chatKey: chatKey)
+        try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
+        _ = try? await telegram.sendMessage(.init(
+            chatID: chatKey.chatID,
+            threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+            replyTo: nil,
+            text: trimmed == "-" || trimmed.isEmpty
+                ? "✓ Адрес для \(pending.chain.displayName) удалён."
+                : "✓ Адрес для \(pending.chain.displayName): <code>\(trimmed)</code>",
+            replyMarkup: nil
+        ))
+        return true
+    }
+
+    private func applyFreeModelInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
+        guard let menuMessageID = await state.consumePendingFreeModelInput(chatKey: chatKey) else { return true }
+        guard await state.isSuperAdmin(username: username) else {
+            // Swallowing the message without a word is what makes a lost
+            // right look like a broken bot.
+            await sendPlain(chatKey: chatKey, text: "🔒 Это может изменить только суперадмин.")
+            return true
+        }
+        let modelID = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !modelID.isEmpty {
+            let added = await state.addFreeModel(modelID)
+            let toast = added ? "✓ Добавлено: \(modelID)" : "Уже в списке: \(modelID)"
+            let (menuText, markup) = await renderSuperFreeModels(chatKey: chatKey)
+            try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: menuMessageID, text: menuText, replyMarkup: markup))
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: toast,
+                replyMarkup: nil
+            ))
+        } else {
+            await state.setPendingFreeModelInput(menuMessageID: menuMessageID, chatKey: chatKey)
+        }
+        return true
+    }
+
+    // MARK: - Presets ("Название | Значение [| Сервис]")
+
+    private func applyPresetInput(
+        pending: PendingInput,
+        text: String,
+        chatKey: ChatKey,
+        username: String?
+    ) async -> Bool {
         let canManageGlobal = await state.isAdmin(username: username, chatID: chatKey.chatID)
 
         if pending.scope == .global, !canManageGlobal {

@@ -152,131 +152,22 @@ final class GenerationCoordinator: @unchecked Sendable {
             await state.markTrafficSourceActivation(userID: userID)
         }
 
-        // Free-tier gate with a daily premium "taste": a sender without full
-        // access who selected a paid model gets N smart-model answers per day
-        // (group = shared per chat, private = per user). Once the daily
-        // allowance is spent, the chat falls back to the first free model and an
-        // upgrade is pitched at the pain point. Free models are unlimited
-        // (retention); sponsored chats never reach here (hasFullModelAccess).
-        let hasAccess = await state.hasFullModelAccess(
-            username: username,
-            userID: origin.user?.id,
-            chatID: chatKey.chatID
-        )
-        /// Set when this turn spent a daily-premium unit — refunded if the turn
-        /// produces no answer; `lastPremiumCall` carries the limit when this was
-        /// the last unit of the day (scarcity notice after the answer lands).
-        var premiumTicket: DailyPremiumTicket?
-        var lastPremiumCall: Int?
-        if hasAccess {
-            // Access is back (subscription, sponsor, referral or a top-up): give
-            // back the paid model the cap had parked, otherwise the purchase
-            // silently changes nothing and the chat keeps answering on the
-            // fallback (roadmap steps 2 and 6).
-            if let restored = await state.restoreDowngradedModel(chatKey: chatKey) {
-                try? await sendUserFeedback(
-                    chatKey: chatKey,
-                    text: "⚡ Дневной лимит вам больше не мешает — вернул умную модель <code>\(restored)</code>. Сменить: /menu → 🤖 Модель"
-                )
-            }
-        } else {
-            // Which models are free comes from OpenRouter's catalogue plus the
-            // super-admin's pins. When neither is available the set is unknown —
-            // and an unknown set must not mean "everything is free": that is the
-            // one failure mode that hands every paid model to every user at the
-            // owner's expense, silently, for as long as the catalogue is
-            // unreachable. Unknown is therefore treated as "assume paid": the
-            // daily allowance still applies, and only the fallback is missing.
-            let effectiveFree = await state.effectiveFreeModelIDs()
-            if effectiveFree == nil {
-                logger.warning("free-model set unknown (OpenRouter catalogue unavailable) — treating paid models as capped")
-            }
-            // A fresh daily allowance gives the parked paid model back — quietly.
-            // The gate below only fires while the chat model *is* paid, so a chat
-            // sitting on the cap fallback would never reach `consumeDailyPremium`
-            // again and the whole daily taste would die after its first day. The
-            // purchase path above announces the restore; a new day is routine.
-            if await state.remainingDailyPremium(
-                chatID: chatKey.chatID,
-                userID: origin.user?.id,
-                isGroup: !origin.isPrivate
-            ).remaining > 0 {
-                await state.restoreDowngradedModel(chatKey: chatKey)
-            }
-            let currentModel = await state.model(chatKey: chatKey)
-            if !(effectiveFree?.contains(currentModel) ?? false) {
-                let isGroup = !origin.isPrivate
-                let decision = await state.consumeDailyPremium(
-                    chatID: chatKey.chatID,
-                    userID: origin.user?.id,
-                    isGroup: isGroup
-                )
-                switch decision {
-                case .allowed(let remaining, let limit):
-                    // Daily premium taste: let the paid model answer this turn.
-                    // The unit is booked now and given back if the turn ends
-                    // without an answer (see `refundPremium`).
-                    premiumTicket = DailyPremiumTicket(
-                        chatID: chatKey.chatID,
-                        userID: origin.user?.id,
-                        isGroup: isGroup
-                    )
-                    lastPremiumCall = remaining == 0 ? limit : nil
-                case .exhausted(let limit):
-                    await state.bumpFunnel(.capHit)
-                    // The fallback is resolved here rather than before the
-                    // allowance is spent: a turn that stays inside the daily
-                    // quota needs no fallback at all, so an unreachable
-                    // catalogue must not cost the user a unit for nothing.
-                    guard let firstFree = await state.firstFreeModel() else {
-                        // Nothing free to fall back to. Refusing is the only
-                        // honest option — the alternative is answering on a paid
-                        // model, for free, to someone who has spent their quota.
-                        try await sendUserFeedback(
-                            chatKey: chatKey,
-                            text: "ℹ️ Умные ответы на сегодня закончились, а бесплатные модели сейчас недоступны. Попробуйте позже или откройте премиум: /buy"
-                        )
-                        return
-                    }
-                    await state.downgradeModelToFree(chatKey: chatKey, freeModel: firstFree)
-                    try? await sendDailyLimitOffer(chatKey: chatKey, isGroup: isGroup, limit: limit, freeModel: firstFree)
-                }
-            }
-        }
+        // Free-tier gate with a daily premium "taste" (see the gate itself in
+        // +Monetization.swift). A nil verdict means the turn cannot be answered
+        // at all — the user has been told why.
+        guard let premium = try await resolveDailyPremium(origin: origin, chatKey: chatKey) else { return }
+        let premiumTicket = premium.ticket
+        let lastPremiumCall = premium.lastCall
 
-        // Billing: a chat covered by a tenant subscription costs the sender
-        // nothing; otherwise a sender with a positive balance pays per message
-        // (marked-up). Everyone else is free-tier → sees ads.
-        let covered = await state.hasSubscriptionCoverage(
-            username: username,
-            userID: origin.user?.id,
-            chatID: chatKey.chatID
-        )
-        // Wallet key, not a handle: charges follow the person through a rename
-        // and work for someone who never set a @username.
-        var billedTo: String? = nil
-        if !covered {
-            billedTo = await state.billingKey(username: username, userID: origin.user?.id)
-        }
-        let adEligible = !covered && billedTo == nil
+        // Billing: covered by a subscription, charged to a wallet, or free-tier
+        // (which is what makes it ad-eligible).
+        let billing = await resolveBillingMode(origin: origin, chatKey: chatKey)
+        let billedTo = billing.billedTo
+        let adEligible = billing.adEligible
 
         let generationID = await sessionRegistry.register(chatKey: chatKey)
 
-        // Typing runs while the answer has nowhere to appear yet: waiting for a
-        // slot on the global limiter and for the first placeholder. Once the
-        // stream starts the visible progress is the draft animation or the
-        // placeholder being edited, so `defer` stops it as soon as
-        // `streamReply` has handed the work to its task.
-        let typingTask = Task {
-            while !Task.isCancelled {
-                try? await self.telegram.sendChatAction(
-                    chatID: chatKey.chatID,
-                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    action: "typing"
-                )
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
-            }
-        }
+        let typingTask = startTypingIndicator(chatKey: chatKey)
         defer { typingTask.cancel() }
 
         // Global concurrency cap: with hundreds of chats firing at once the
@@ -353,7 +244,27 @@ final class GenerationCoordinator: @unchecked Sendable {
         }
     }
 
-    private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
+    /// Typing runs while the answer has nowhere to appear yet: waiting for a
+    /// slot on the global limiter and for the first placeholder. Once the
+    /// stream starts the visible progress is the draft animation or the
+    /// placeholder being edited, so the caller's `defer` stops it as soon as
+    /// `streamReply` has handed the work to its task.
+    private func startTypingIndicator(chatKey: ChatKey) -> Task<Void, Never> {
+        Task {
+            while !Task.isCancelled {
+                try? await self.telegram.sendChatAction(
+                    chatID: chatKey.chatID,
+                    threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                    action: "typing"
+                )
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+            }
+        }
+    }
+
+    /// Internal, not private: the gate and the offers in +Monetization.swift
+    /// speak to the user through it too.
+    func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
         _ = try await telegram.sendMessage(
             .init(
                 chatID: chatKey.chatID,

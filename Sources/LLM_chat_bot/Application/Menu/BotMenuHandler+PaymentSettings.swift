@@ -433,4 +433,104 @@ extension BotMenuHandler {
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
+
+    // MARK: - Actions behind the Stars and free-model buttons
+
+    /// `stars:*` — subscription price and the credit-pack rate.
+    func handleStarsAdminAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "setprice":
+                await state.setPendingStarsPriceInput(menuMessageID: message.message_id, chatKey: chatKey)
+                let currentPrice = await state.starsPrice()
+                let currentLabel = currentPrice.map { "\($0) ⭐" } ?? "отключена"
+                let promptText = """
+                <b>💫 Установка цены доступа</b>
+
+                Текущая цена: <b>\(currentLabel)</b>
+
+                Введите количество Stars (целое число ≥ 1) или <b>0</b> для отключения продаж.
+                """
+                let markup = InlineKeyboardMarkup(inline_keyboard: [
+                    [menuButton("❌ Отмена", action: "nav:superstars")]
+                ])
+                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+            case "setrate":
+                await state.setPendingStarsPerUsdInput(menuMessageID: message.message_id, chatKey: chatKey)
+                let currentRate = await state.starsPerUsd()
+                let promptText = """
+                <b>💫 Курс кредитов — Stars за $1</b>
+
+                Текущий: <b>\(currentRate) ⭐ за $1</b>
+
+                Введите целое число ≥ 1. Ориентир <b>77</b>: Telegram платит разработчику ~$0.013/⭐, \
+                поэтому 77⭐/$ покрывает себестоимость ответа и оставляет маржу (30% сверху берётся при списании). \
+                Меньше — дешевле для покупателя, но режет маржу.
+                """
+                let markup = InlineKeyboardMarkup(inline_keyboard: [
+                    [menuButton("❌ Отмена", action: "nav:superstars")]
+                ])
+                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+            case "disable":
+                await state.setStarsPrice(nil)
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продажи отключены")
+                try await showPage(.superStars, chatKey: chatKey, callback: callback, message: message)
+            default:
+                try await showPage(.superStars, chatKey: chatKey, callback: callback, message: message)
+            }
+        } else {
+            try await showPage(.superStars, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
+
+    /// `freemodels:*` — the models pinned as free regardless of the catalogue.
+    func handleFreeModelsAdminAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "add":
+                await state.setPendingFreeModelInput(menuMessageID: message.message_id, chatKey: chatKey)
+                let promptText = """
+                <b>🆓 Добавить бесплатную модель</b>
+
+                Введите ID модели (например: <code>openai/gpt-4o-mini</code>)
+                """
+                let markup = InlineKeyboardMarkup(inline_keyboard: [
+                    [menuButton("❌ Отмена", action: "nav:superfreemodels")]
+                ])
+                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+            case "remove":
+                guard parts.count >= 3, let index = Int(parts[2]) else { return }
+                let ids = await state.freeModelIDs()
+                guard index >= 0, index < ids.count else {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
+                    return
+                }
+                await state.removeFreeModel(ids[index])
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Удалено")
+                try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
+            default:
+                try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
+            }
+        } else {
+            try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
 }

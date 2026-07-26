@@ -1,6 +1,9 @@
 import Foundation
 
 // /tenant: licences, chat ownership and per-tenant configuration.
+//
+// The subcommand switch is a dispatcher; each group keeps its own switch, so a
+// bare `return` inside a branch still means "done with this command".
 
 extension BotCommandHandler {
     func handleTenant(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
@@ -8,10 +11,6 @@ extension BotCommandHandler {
         let subcommand = parts.first ?? ""
         let arg1 = parts.count > 1 ? parts[1] : ""
         let arg2 = parts.count > 2 ? parts[2] : ""
-
-        func normalizeUsername(_ raw: String) -> String {
-            raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
-        }
 
         // Storage key: stored owners are keyed by userID, so comparisons must
         // use the key rather than the rentable handle.
@@ -28,6 +27,77 @@ extension BotCommandHandler {
         }
 
         switch subcommand.lowercased() {
+        case "add", "remove", "list", "stats":
+            try await handleTenantRegistry(
+                sub: subcommand.lowercased(),
+                chatKey: chatKey,
+                arg1: arg1,
+                invokerIsSuper: invokerIsSuper
+            )
+
+        case "assign", "unassign", "claim", "release", "chats":
+            try await handleTenantChats(
+                sub: subcommand.lowercased(),
+                chatKey: chatKey,
+                arg1: arg1,
+                arg2: arg2,
+                invokerUsername: invokerUsername,
+                invokerIsSuper: invokerIsSuper
+            )
+
+        case "adduser", "removeuser", "users", "invite":
+            try await handleTenantGuests(
+                sub: subcommand.lowercased(),
+                chatKey: chatKey,
+                arg1: arg1,
+                invokerUsername: invokerUsername
+            )
+
+        case "extend", "unlimited", "expire":
+            try await handleTenantSubscription(
+                sub: subcommand.lowercased(),
+                chatKey: chatKey,
+                arg1: arg1,
+                arg2: arg2
+            )
+
+        case "markup", "price", "cryptoprice":
+            try await handleTenantPricing(sub: subcommand.lowercased(), chatKey: chatKey, arg1: arg1)
+
+        case "freemodels":
+            try await handleFreeModels(chatKey: chatKey, subcommand: arg1, value: arg2)
+
+        case "cryptoaddr":
+            try await handleCryptoAddr(chatKey: chatKey, subArg: arg1, value: arg2)
+
+        case "cryptomode":
+            try await handleCryptoMode(chatKey: chatKey, value: arg1)
+
+        case "cryptopool":
+            try await handleCryptoPool(chatKey: chatKey, subArg: arg1, value: arg2)
+
+        case "cryptoinvoices":
+            try await handleCryptoInvoices(chatKey: chatKey)
+
+        default:
+            try await sendTenantHelp(chatKey: chatKey, invokerIsSuper: invokerIsSuper)
+        }
+    }
+
+    /// `@user` → `user`. The store resolves the storage key itself.
+    private func normalizeUsername(_ raw: String) -> String {
+        raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+    }
+
+    // MARK: - Who is a tenant at all
+
+    private func handleTenantRegistry(
+        sub: String,
+        chatKey: ChatKey,
+        arg1: String,
+        invokerIsSuper: Bool
+    ) async throws {
+        switch sub {
         case "add":
             guard invokerIsSuper else {
                 try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
@@ -61,6 +131,48 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<b>🏢 Спонсоры</b> (\(tenants.count))\n\(list)")
             }
 
+        case "stats":
+            let rows = await state.tenantStats()
+            if rows.isEmpty {
+                try await sendUserFeedback(chatKey: chatKey, text: "Спонсоров пока нет.")
+            } else {
+                var lines = ["<b>📊 Статистика tenants</b>"]
+                let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+                for row in rows {
+                    let mark = row.isSuperAdmin ? "🛡" : "🛠"
+                    let realStr = String(format: "$%.4f", row.usage.totalCost)
+                    let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
+                    let tokens = Int(row.usage.totalTokens)
+                    let subscription: String
+                    if let until = row.paidUntil {
+                        subscription = row.isActive ? "до \(f.string(from: until))" : "⛔ истекла \(f.string(from: until))"
+                    } else {
+                        subscription = "бессрочно"
+                    }
+                    lines.append("\n\(mark) <b>@\(row.username)</b> · \(subscription)")
+                    lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b>")
+                    lines.append("  запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(tokens)</b>")
+                    lines.append("  💵 реально <b>\(realStr)</b> · клиентская цена <b>\(billedStr)</b>")
+                }
+                try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
+            }
+
+        default:
+            break
+        }
+    }
+
+    // MARK: - Which chats a licence covers
+
+    private func handleTenantChats(
+        sub: String,
+        chatKey: ChatKey,
+        arg1: String,
+        arg2: String,
+        invokerUsername: String?,
+        invokerIsSuper: Bool
+    ) async throws {
+        switch sub {
         case "assign":
             let username = normalizeUsername(arg1)
             // Admins may only assign chats to themselves; super may assign to anyone.
@@ -130,6 +242,20 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты с премиумом \(await state.displayLabel(forKey: username))</b> (\(chats.count))\n\(list)")
             }
 
+        default:
+            break
+        }
+    }
+
+    // MARK: - Guests of a licence
+
+    private func handleTenantGuests(
+        sub: String,
+        chatKey: ChatKey,
+        arg1: String,
+        invokerUsername: String?
+    ) async throws {
+        switch sub {
         case "adduser":
             guard let username = invokerUsername else {
                 try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
@@ -206,6 +332,20 @@ extension BotCommandHandler {
                 <code>/tenant invite new</code> — перевыпустить (старая перестанет работать)
                 """)
 
+        default:
+            break
+        }
+    }
+
+    // MARK: - Subscription term (super-admin only)
+
+    private func handleTenantSubscription(
+        sub: String,
+        chatKey: ChatKey,
+        arg1: String,
+        arg2: String
+    ) async throws {
+        switch sub {
         case "extend":
             let username = normalizeUsername(arg1)
             guard !username.isEmpty, let days = Int(arg2), days > 0 else {
@@ -241,6 +381,15 @@ extension BotCommandHandler {
                 ? "✓ Подписка @\(username) немедленно завершена (лицензия и настройки сохранены)."
                 : "Tenant @\(username) не найден или это владелец бота.")
 
+        default:
+            break
+        }
+    }
+
+    // MARK: - Prices and markup (super-admin only)
+
+    private func handleTenantPricing(sub: String, chatKey: ChatKey, arg1: String) async throws {
+        switch sub {
         case "markup":
             if arg1.isEmpty {
                 let pct = await state.markupPercent()
@@ -256,36 +405,6 @@ extension BotCommandHandler {
             } else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant markup &lt;0–500&gt;</code>")
             }
-
-
-        case "stats":
-            let rows = await state.tenantStats()
-            if rows.isEmpty {
-                try await sendUserFeedback(chatKey: chatKey, text: "Спонсоров пока нет.")
-            } else {
-                var lines = ["<b>📊 Статистика tenants</b>"]
-                let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
-                for row in rows {
-                    let mark = row.isSuperAdmin ? "🛡" : "🛠"
-                    let realStr = String(format: "$%.4f", row.usage.totalCost)
-                    let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
-                    let tokens = Int(row.usage.totalTokens)
-                    let subscription: String
-                    if let until = row.paidUntil {
-                        subscription = row.isActive ? "до \(f.string(from: until))" : "⛔ истекла \(f.string(from: until))"
-                    } else {
-                        subscription = "бессрочно"
-                    }
-                    lines.append("\n\(mark) <b>@\(row.username)</b> · \(subscription)")
-                    lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b>")
-                    lines.append("  запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(tokens)</b>")
-                    lines.append("  💵 реально <b>\(realStr)</b> · клиентская цена <b>\(billedStr)</b>")
-                }
-                try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
-            }
-
-        case "freemodels":
-            try await handleFreeModels(chatKey: chatKey, subcommand: arg1, value: arg2)
 
         case "cryptoprice":
             if arg1.isEmpty {
@@ -307,18 +426,6 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant cryptoprice 9.99</code> или <code>/tenant cryptoprice 0</code>")
             }
 
-        case "cryptoaddr":
-            try await handleCryptoAddr(chatKey: chatKey, subArg: arg1, value: arg2)
-
-        case "cryptomode":
-            try await handleCryptoMode(chatKey: chatKey, value: arg1)
-
-        case "cryptopool":
-            try await handleCryptoPool(chatKey: chatKey, subArg: arg1, value: arg2)
-
-        case "cryptoinvoices":
-            try await handleCryptoInvoices(chatKey: chatKey)
-
         case "price":
             if arg1.isEmpty {
                 let price = await state.starsPrice()
@@ -338,40 +445,46 @@ extension BotCommandHandler {
             }
 
         default:
-            let adminHelp = """
-                <b>⚡ Управление премиумом</b>
-
-                <code>/tenant invite</code> — 🔗 ссылка-приглашение (проще всего поделиться доступом)
-                <code>/tenant claim</code> — включить премиум в этом чате
-                <code>/tenant release</code> — выключить в этом чате
-                <code>/tenant assign @username &lt;номер чата&gt;</code> — включить в другом чате
-                <code>/tenant unassign &lt;номер чата&gt;</code> — выключить в другом чате
-                <code>/tenant chats</code> — чаты, где работает ваш премиум
-                <code>/tenant adduser @username</code> — добавить гостя
-                <code>/tenant removeuser @username</code> — убрать гостя
-                <code>/tenant users</code> — список гостей
-                <code>/chatid</code> — номер этого чата
-                <code>/buy</code> — статус и продление премиума
-                """
-            let superHelp = """
-
-                <b>🛡 Только суперадмин</b>
-                <code>/tenant add @username</code> — зарегистрировать (бессрочно)
-                <code>/tenant remove @username</code> — удалить
-                <code>/tenant extend @username &lt;дней&gt;</code> — продлить подписку
-                <code>/tenant unlimited @username</code> · <code>/tenant expire @username</code>
-                <code>/tenant list</code> — все tenants
-                <code>/tenant stats</code> — статистика и подписки
-                <code>/tenant price &lt;число&gt;</code> — цена в Stars (0 = отключить)
-                <code>/tenant freemodels add|remove|list|available &lt;id&gt;</code>
-                <code>/tenant cryptoprice &lt;USD&gt;</code> — цена крипто-доступа
-                <code>/tenant cryptoaddr &lt;chain&gt; &lt;addr&gt;|list</code>
-                <code>/tenant cryptomode delta|unique</code>
-                <code>/tenant cryptopool add|remove|list &lt;chain&gt; …</code>
-                <code>/tenant cryptoinvoices</code> — открытые счета
-                """
-            let text = invokerIsSuper ? adminHelp + superHelp : adminHelp
-            try await sendUserFeedback(chatKey: chatKey, text: text)
+            break
         }
+    }
+
+    // MARK: - Help
+
+    private func sendTenantHelp(chatKey: ChatKey, invokerIsSuper: Bool) async throws {
+        let adminHelp = """
+            <b>⚡ Управление премиумом</b>
+
+            <code>/tenant invite</code> — 🔗 ссылка-приглашение (проще всего поделиться доступом)
+            <code>/tenant claim</code> — включить премиум в этом чате
+            <code>/tenant release</code> — выключить в этом чате
+            <code>/tenant assign @username &lt;номер чата&gt;</code> — включить в другом чате
+            <code>/tenant unassign &lt;номер чата&gt;</code> — выключить в другом чате
+            <code>/tenant chats</code> — чаты, где работает ваш премиум
+            <code>/tenant adduser @username</code> — добавить гостя
+            <code>/tenant removeuser @username</code> — убрать гостя
+            <code>/tenant users</code> — список гостей
+            <code>/chatid</code> — номер этого чата
+            <code>/buy</code> — статус и продление премиума
+            """
+        let superHelp = """
+
+            <b>🛡 Только суперадмин</b>
+            <code>/tenant add @username</code> — зарегистрировать (бессрочно)
+            <code>/tenant remove @username</code> — удалить
+            <code>/tenant extend @username &lt;дней&gt;</code> — продлить подписку
+            <code>/tenant unlimited @username</code> · <code>/tenant expire @username</code>
+            <code>/tenant list</code> — все tenants
+            <code>/tenant stats</code> — статистика и подписки
+            <code>/tenant price &lt;число&gt;</code> — цена в Stars (0 = отключить)
+            <code>/tenant freemodels add|remove|list|available &lt;id&gt;</code>
+            <code>/tenant cryptoprice &lt;USD&gt;</code> — цена крипто-доступа
+            <code>/tenant cryptoaddr &lt;chain&gt; &lt;addr&gt;|list</code>
+            <code>/tenant cryptomode delta|unique</code>
+            <code>/tenant cryptopool add|remove|list &lt;chain&gt; …</code>
+            <code>/tenant cryptoinvoices</code> — открытые счета
+            """
+        let text = invokerIsSuper ? adminHelp + superHelp : adminHelp
+        try await sendUserFeedback(chatKey: chatKey, text: text)
     }
 }

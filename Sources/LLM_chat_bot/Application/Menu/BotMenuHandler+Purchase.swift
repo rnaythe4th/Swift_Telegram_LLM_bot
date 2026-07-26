@@ -249,39 +249,73 @@ extension BotMenuHandler {
         guard parts.count >= 2 else { return }
         switch parts[1] {
         case "credits":
-            // Pack chosen → offer the payment methods available for credits.
-            guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
-                return
-            }
-            var rows: [[InlineKeyboardButton]] = []
-            if await state.starsCreditsEnabled() {
-                let stars = await state.starsForCents(cents)
-                rows.append([menuButton("💫 Stars · \(stars) ⭐", action: "buy:cstars:\(cents)")])
-            }
-            let cryptoAssets: [CryptoAsset]
-            if let service = cryptoService { cryptoAssets = await service.availableAssets() } else { cryptoAssets = [] }
-            // Only addresses are needed here — the pack is invoiced at its own
-            // face value, so the subscription price has no say.
-            if !cryptoAssets.isEmpty {
-                rows.append([menuButton("🪙 Криптой", action: "buy:ccrypto:\(cents)")])
-            }
-            let creditCard = await state.cardConfig()
-            if let minorUnits = creditCard.creditMinorUnits(cents: cents), creditCard.creditsEnabled {
-                rows.append([menuButton("💳 Картой · \(creditCard.currency.format(minorUnits: minorUnits))", action: "buy:ccard:\(cents)")])
-            }
-            rows.append(navButtons())
-            let text = """
-            💰 <b>Пополнить баланс на \(CreditPack.label(cents: cents))</b>
+            try await showCreditPackMethods(parts: parts, chatKey: chatKey, callback: callback, message: message)
 
-            Баланс — как счёт на телефоне: с него списывается стоимость каждого ответа бота. Обычно это доли цента, так что \(CreditPack.label(cents: cents)) хватает надолго. Доступны любые модели, подписка не нужна.
+        case "cstars", "ccard":
+            try await sendCreditPackInvoice(parts: parts, chatKey: chatKey, callback: callback)
 
-            Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).
+        case "stars", "card":
+            try await sendSubscriptionInvoice(parts: parts, chatKey: chatKey, callback: callback)
 
-            Выберите способ оплаты:
-            """
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: InlineKeyboardMarkup(inline_keyboard: rows))
+        case "crypto", "ccrypto", "asset", "casset":
+            try await handleCryptoPurchase(parts: parts, chatKey: chatKey, callback: callback, message: message)
 
+        case "refresh", "cancel":
+            try await handleInvoiceControl(parts: parts, callback: callback, message: message)
+
+        default:
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+        }
+    }
+
+    /// A pack was chosen → offer the payment methods that can top up a balance.
+    private func showCreditPackMethods(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        // Pack chosen → offer the payment methods available for credits.
+        guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
+            return
+        }
+        var rows: [[InlineKeyboardButton]] = []
+        if await state.starsCreditsEnabled() {
+            let stars = await state.starsForCents(cents)
+            rows.append([menuButton("💫 Stars · \(stars) ⭐", action: "buy:cstars:\(cents)")])
+        }
+        let cryptoAssets: [CryptoAsset]
+        if let service = cryptoService { cryptoAssets = await service.availableAssets() } else { cryptoAssets = [] }
+        // Only addresses are needed here — the pack is invoiced at its own
+        // face value, so the subscription price has no say.
+        if !cryptoAssets.isEmpty {
+            rows.append([menuButton("🪙 Криптой", action: "buy:ccrypto:\(cents)")])
+        }
+        let creditCard = await state.cardConfig()
+        if let minorUnits = creditCard.creditMinorUnits(cents: cents), creditCard.creditsEnabled {
+            rows.append([menuButton("💳 Картой · \(creditCard.currency.format(minorUnits: minorUnits))", action: "buy:ccard:\(cents)")])
+        }
+        rows.append(navButtons())
+        let text = """
+        💰 <b>Пополнить баланс на \(CreditPack.label(cents: cents))</b>
+
+        Баланс — как счёт на телефоне: с него списывается стоимость каждого ответа бота. Обычно это доли цента, так что \(CreditPack.label(cents: cents)) хватает надолго. Доступны любые модели, подписка не нужна.
+
+        Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).
+
+        Выберите способ оплаты:
+        """
+        try await editOrAnswer(callback: callback, message: message, text: text, markup: InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    /// Invoice for a credit pack: Stars or card, priced by its own knob.
+    private func sendCreditPackInvoice(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery
+    ) async throws {
+        switch parts[1] {
         case "ccard":
             // Credit pack on the card. The pack's USD face value is converted
             // with the super-admin's FX rate (roadmap step 2).
@@ -326,6 +360,19 @@ extension BotMenuHandler {
             ))
             await state.bumpFunnel(.invoiceSent)
 
+        default:
+            break
+        }
+    }
+
+    /// Invoice for the 30-day subscription. Prices come from
+    /// `subscriptionPricing`, so a winback discount is charged as quoted.
+    private func sendSubscriptionInvoice(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery
+    ) async throws {
+        switch parts[1] {
         case "stars":
             // Identity is the userID; a @username is not needed to buy.
             let starsKey = state.userKey(userID: callback.from.id)
@@ -380,6 +427,19 @@ extension BotMenuHandler {
             ))
             await state.bumpFunnel(.invoiceSent)
 
+        default:
+            break
+        }
+    }
+
+    /// Crypto: pick the asset, then create (or refresh) the invoice.
+    private func handleCryptoPurchase(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        switch parts[1] {
         case "crypto":
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             await sendCryptoAssetChoice(chatKey: chatKey, username: state.userKey(userID: callback.from.id))
@@ -469,6 +529,18 @@ extension BotMenuHandler {
                 )
             }
 
+        default:
+            break
+        }
+    }
+
+    /// An open invoice belongs to one person: refresh and cancel check that.
+    private func handleInvoiceControl(
+        parts: [String],
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        switch parts[1] {
         case "refresh":
             guard parts.count >= 3 else { return }
             let invoiceID = parts[2]
@@ -509,7 +581,7 @@ extension BotMenuHandler {
             ))
 
         default:
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+            break
         }
     }
 

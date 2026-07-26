@@ -358,6 +358,46 @@ extension BotMenuHandler {
         }
     }
 
+    /// `ads:*` — paid campaigns (the self-promo knobs sit under `promo:*`).
+    func handleAdCampaignAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            return
+        }
+        guard parts.count >= 2 else { return }
+        switch parts[1] {
+        case "add":
+            await state.setAdminPendingInput(.init(kind: .adAddText, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            let prompt = """
+            <b>📣 Новое объявление</b>
+
+            Отправьте текст объявления одним сообщением (HTML разрешён).
+            Частота по умолчанию: каждые 10 ответов, пауза 60 минут. Настроить точнее — /ads.
+            """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
+            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+        case "toggle":
+            guard parts.count >= 3 else { return }
+            let id = parts[2]
+            let enabled = await state.adCampaign(id: id)?.enabled ?? false
+            _ = await state.setAdCampaignEnabled(id: id, enabled: !enabled)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: enabled ? "⏸ Выключена" : "▶️ Включена")
+            try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
+        case "rm":
+            guard parts.count >= 3 else { return }
+            _ = await state.removeAdCampaign(id: parts[2])
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Удалена")
+            try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
+        default:
+            try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
+
     func renderSuperAds(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let campaigns = await state.adCampaigns()
 

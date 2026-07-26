@@ -2,6 +2,12 @@ import Foundation
 
 // Typed values behind admin and super-admin buttons: prices, addresses,
 // wallet top-ups, reminder schedule, referral rewards.
+//
+// One dispatcher picks the group by `AdminPendingInputKind`; each group keeps
+// its own `switch` so a bare `break` still means "stop, keep what was set".
+
+/// Everything a typed value produces: the toast to send and the page to redraw.
+private typealias AdminInputOutcome = (toast: String, page: MenuPage)
 
 extension BotMenuHandler {
     func processAdminPendingInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
@@ -11,10 +17,86 @@ extension BotMenuHandler {
         let isSuper = await state.isSuperAdmin(username: username)
         let isRoot = await state.isRootSuperAdmin(username: username)
 
-        func normalizeUsername(_ raw: String) -> String {
-            raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        let outcome: AdminInputOutcome
+        switch pending.kind {
+        case .whitelistAdd, .defaultsModel, .defaultsRole, .defaultsHistory,
+             .tenantAssignChat, .tenantAddUser:
+            outcome = await applyLicenceInput(
+                pending: pending,
+                trimmed: trimmed,
+                chatKey: chatKey,
+                username: username,
+                isAdmin: isAdmin,
+                isSuper: isSuper
+            )
+
+        case .tenantRegister, .tenantRemove, .superAdminAdd, .superAdminRemove:
+            outcome = await applyRegistryInput(
+                pending: pending,
+                trimmed: trimmed,
+                isSuper: isSuper,
+                isRoot: isRoot
+            )
+
+        case .adAddText, .selfPromoText, .selfPromoEvery, .selfPromoPause:
+            outcome = await applyAdsInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
+
+        case .chatCustomRole, .chatCustomModel, .chatCustomTemp, .chatCustomHistory:
+            outcome = await applyChatValueInput(
+                pending: pending,
+                trimmed: trimmed,
+                chatKey: chatKey,
+                username: username
+            )
+
+        case .markupPercent, .dailyPremiumLimit, .balanceTopUp:
+            outcome = await applyEconomyInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
+
+        case .cardProviderToken, .cardUsdRate, .cardPrice:
+            outcome = await applyCardInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
+
+        case .reminderDaysBefore, .reminderWinbackDays, .reminderDiscount,
+             .reminderOfferHours, .reminderInterval, .reminderWalletDays:
+            outcome = await applyReminderInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
+
+        case .onboardingAdd, .onboardingEdit, .referralInviterReward,
+             .referralInviteeReward, .referralPaidBonus, .referralCap:
+            outcome = await applyGrowthInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
+
+        case .simulateAs:
+            // The simulation page acts on buttons only — nothing to apply.
+            outcome = (toast: "", page: .adminPanel)
         }
 
+        let (menuText, markup) = await renderPage(outcome.page, chatKey: chatKey, username: username)
+        try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
+        if !outcome.toast.isEmpty {
+            _ = try? await telegram.sendMessage(.init(
+                chatID: chatKey.chatID,
+                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
+                replyTo: nil,
+                text: outcome.toast,
+                replyMarkup: nil
+            ))
+        }
+        return true
+    }
+
+    /// `@user` → `user`. The store resolves the storage key itself.
+    private func normalizeUsername(_ raw: String) -> String {
+        raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+    }
+
+    // MARK: - Admin panel: guests, defaults for new chats, own licence
+
+    private func applyLicenceInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        chatKey: ChatKey,
+        username: String?,
+        isAdmin: Bool,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
         var toast: String = ""
         var resumePage: MenuPage = .adminPanel
 
@@ -77,6 +159,25 @@ extension BotMenuHandler {
             }
             resumePage = .adminUsers
 
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Tenants and super-admins
+
+    private func applyRegistryInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool,
+        isRoot: Bool
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
         case .tenantRegister:
             guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superTenants; break }
             let target = normalizeUsername(trimmed)
@@ -113,6 +214,24 @@ extension BotMenuHandler {
             toast = ok ? "✓ @\(target) больше не суперадмин" : "Нельзя удалить"
             resumePage = .superAdmins
 
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Ads and the built-in self-promo
+
+    private func applyAdsInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
         case .adAddText:
             guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superAdmin; break }
             guard !trimmed.isEmpty else { toast = "⚠️ Пустой текст"; resumePage = .superAds; break }
@@ -154,6 +273,25 @@ extension BotMenuHandler {
                 toast = "⚠️ Нужно число 0–\(SelfPromoConfig.pauseMinutesRange.upperBound)"
             }
 
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Per-chat values typed instead of tapping a preset
+
+    private func applyChatValueInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        chatKey: ChatKey,
+        username: String?
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
         case .chatCustomRole:
             resumePage = .role
             if trimmed.isEmpty {
@@ -199,6 +337,24 @@ extension BotMenuHandler {
                 toast = "⚠️ Нужно число от 1 до 50"
             }
 
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Markup, daily premium taste, wallets
+
+    private func applyEconomyInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
         case .markupPercent:
             resumePage = .superAdmin
             guard isSuper else { toast = "🔒 Только суперадмин"; break }
@@ -221,6 +377,114 @@ extension BotMenuHandler {
                 toast = "⚠️ Нужно число 0–100"
             }
 
+        case .balanceTopUp:
+            resumePage = .superBalances
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            let comps = trimmed.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            if comps.count >= 2,
+               let amount = Double(comps[1].replacingOccurrences(of: ",", with: ".")) {
+                let target = normalizeUsername(comps[0])
+                if target.isEmpty {
+                    toast = "⚠️ Нужен @username"
+                } else {
+                    let wallet = await state.creditBalance(username: target, amountUsd: amount)
+                    toast = "✓ Баланс @\(target.lowercased()) · <b>\(String(format: "$%.4f", wallet.balanceUsd))</b>"
+                }
+            } else {
+                toast = "⚠️ Формат: <code>@username сумма</code>, например <code>@user 5</code>"
+            }
+
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Card acquiring: token, subscription price, credit FX rate
+
+    private func applyCardInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
+        case .cardProviderToken:
+            resumePage = .superCard
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            if trimmed == "-" {
+                await state.setCardProviderToken(nil)
+                toast = "✓ Токен удалён"
+            } else if trimmed.isEmpty {
+                toast = "⚠️ Пустой токен"
+            } else if !trimmed.contains(":") {
+                toast = "⚠️ Не похоже на токен BotFather (нет <code>:</code>). Пример: <code>123456789:TEST:...</code>"
+            } else {
+                await state.setCardProviderToken(trimmed)
+                let card = await state.cardConfig()
+                toast = "✓ Токен сохранён" + (card.isTestToken ? " (тестовый режим)" : "")
+            }
+
+        case .cardUsdRate:
+            resumePage = .superCard
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            let rateInput = trimmed.replacingOccurrences(of: ",", with: ".")
+            if let value = Double(rateInput), value >= 0 {
+                if value == 0 {
+                    await state.setCardUsdRateMinorUnits(nil)
+                    toast = "✓ Пополнение баланса картой отключено."
+                } else {
+                    await state.setCardUsdRateMinorUnits(Int((value * 100).rounded()))
+                    let card = await state.cardConfig()
+                    toast = "✓ Курс: <b>\(card.usdRateLabel ?? "—")</b>"
+                }
+            } else {
+                toast = "⚠️ Введите число, например <code>95</code>, или <code>0</code> для отключения."
+            }
+
+        case .cardPrice:
+            resumePage = .superCard
+            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
+            if let value = Double(normalized), value >= 0 {
+                if value == 0 {
+                    await state.setCardPriceMinorUnits(nil)
+                    toast = "✓ Продажи картой отключены."
+                } else {
+                    let minorUnits = Int((value * 100).rounded())
+                    let card = await state.cardConfig()
+                    if minorUnits < card.currency.minMinorUnits {
+                        toast = "⚠️ Минимум для \(card.currency.rawValue): \(card.currency.format(minorUnits: card.currency.minMinorUnits))"
+                    } else {
+                        await state.setCardPriceMinorUnits(minorUnits)
+                        toast = "✓ Цена картой: <b>\(card.currency.format(minorUnits: minorUnits))</b>"
+                    }
+                }
+            } else {
+                toast = "⚠️ Введите число, например <code>499</code> или <code>4.99</code>, или <code>0</code> для отключения."
+            }
+
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Renewal reminders and winback schedule
+
+    private func applyReminderInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
         case .reminderDaysBefore:
             resumePage = .superReminders
             guard isSuper else { toast = "🔒 Только суперадмин"; break }
@@ -319,6 +583,24 @@ extension BotMenuHandler {
                 toast = "⚠️ Нужно число \(SubscriptionReminderConfig.walletWinbackRange.lowerBound)–\(SubscriptionReminderConfig.walletWinbackRange.upperBound)"
             }
 
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Growth: onboarding examples and referral economics
+
+    private func applyGrowthInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        var resumePage: MenuPage = .adminPanel
+
+        switch pending.kind {
         case .onboardingAdd, .onboardingEdit:
             resumePage = .superOnboarding
             guard isSuper else { toast = "🔒 Только суперадмин"; break }
@@ -387,93 +669,10 @@ extension BotMenuHandler {
                 toast = "⚠️ Нужно число \(ReferralConfig.capRange.lowerBound)–\(ReferralConfig.capRange.upperBound)"
             }
 
-        case .balanceTopUp:
-            resumePage = .superBalances
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
-            let comps = trimmed.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-            if comps.count >= 2,
-               let amount = Double(comps[1].replacingOccurrences(of: ",", with: ".")) {
-                let target = normalizeUsername(comps[0])
-                if target.isEmpty {
-                    toast = "⚠️ Нужен @username"
-                } else {
-                    let wallet = await state.creditBalance(username: target, amountUsd: amount)
-                    toast = "✓ Баланс @\(target.lowercased()) · <b>\(String(format: "$%.4f", wallet.balanceUsd))</b>"
-                }
-            } else {
-                toast = "⚠️ Формат: <code>@username сумма</code>, например <code>@user 5</code>"
-            }
-
-        case .cardProviderToken:
-            resumePage = .superCard
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
-            if trimmed == "-" {
-                await state.setCardProviderToken(nil)
-                toast = "✓ Токен удалён"
-            } else if trimmed.isEmpty {
-                toast = "⚠️ Пустой токен"
-            } else if !trimmed.contains(":") {
-                toast = "⚠️ Не похоже на токен BotFather (нет <code>:</code>). Пример: <code>123456789:TEST:...</code>"
-            } else {
-                await state.setCardProviderToken(trimmed)
-                let card = await state.cardConfig()
-                toast = "✓ Токен сохранён" + (card.isTestToken ? " (тестовый режим)" : "")
-            }
-
-        case .cardUsdRate:
-            resumePage = .superCard
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
-            let rateInput = trimmed.replacingOccurrences(of: ",", with: ".")
-            if let value = Double(rateInput), value >= 0 {
-                if value == 0 {
-                    await state.setCardUsdRateMinorUnits(nil)
-                    toast = "✓ Пополнение баланса картой отключено."
-                } else {
-                    await state.setCardUsdRateMinorUnits(Int((value * 100).rounded()))
-                    let card = await state.cardConfig()
-                    toast = "✓ Курс: <b>\(card.usdRateLabel ?? "—")</b>"
-                }
-            } else {
-                toast = "⚠️ Введите число, например <code>95</code>, или <code>0</code> для отключения."
-            }
-
-        case .cardPrice:
-            resumePage = .superCard
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
-            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
-            if let value = Double(normalized), value >= 0 {
-                if value == 0 {
-                    await state.setCardPriceMinorUnits(nil)
-                    toast = "✓ Продажи картой отключены."
-                } else {
-                    let minorUnits = Int((value * 100).rounded())
-                    let card = await state.cardConfig()
-                    if minorUnits < card.currency.minMinorUnits {
-                        toast = "⚠️ Минимум для \(card.currency.rawValue): \(card.currency.format(minorUnits: card.currency.minMinorUnits))"
-                    } else {
-                        await state.setCardPriceMinorUnits(minorUnits)
-                        toast = "✓ Цена картой: <b>\(card.currency.format(minorUnits: minorUnits))</b>"
-                    }
-                }
-            } else {
-                toast = "⚠️ Введите число, например <code>499</code> или <code>4.99</code>, или <code>0</code> для отключения."
-            }
-
-        case .simulateAs:
+        default:
             break
         }
 
-        let (menuText, markup) = await renderPage(resumePage, chatKey: chatKey, username: username)
-        try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
-        if !toast.isEmpty {
-            _ = try? await telegram.sendMessage(.init(
-                chatID: chatKey.chatID,
-                threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                replyTo: nil,
-                text: toast,
-                replyMarkup: nil
-            ))
-        }
-        return true
+        return (toast, resumePage)
     }
 }
