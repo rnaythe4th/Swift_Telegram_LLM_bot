@@ -397,6 +397,11 @@ actor CryptoPaymentService {
             // payment path pays, so the reward does not depend on how the
             // friend happened to pay.
             let referralBonus = await redeemReferralConversionBonus(payerKey: copy.username)
+            // Paid traffic: same reasoning — the campaign that brought this
+            // customer is credited on every payment path, not just the Telegram one.
+            if let payerUserID = UserKey.userID(from: copy.username) {
+                await state.recordTrafficSourcePayment(userID: payerUserID)
+            }
             // The chain has already moved the money — everything it bought goes
             // to disk before anyone is told about it, exactly as the Stars/card
             // path does (CLAUDE.md §17).

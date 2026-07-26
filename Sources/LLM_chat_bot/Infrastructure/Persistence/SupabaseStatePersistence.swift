@@ -99,6 +99,7 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         configs.onboarding = try await fetchConfig(.onboarding, as: OnboardingConfig.self)
         configs.referrals = try await fetchConfig(.referrals, as: ReferralConfig.self)
         configs.referralLedger = try await fetchConfig(.referralLedger, as: ReferralLedger.self)
+        configs.trafficSources = try await fetchConfig(.trafficSources, as: TrafficSourceLedger.self)
         configs.userDirectory = try await fetchConfig(.userDirectory, as: UserDirectory.self)
 
         return PersistedBotState(
@@ -254,6 +255,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         case .referrals(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .referralLedger(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .trafficSources(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .userDirectory(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])

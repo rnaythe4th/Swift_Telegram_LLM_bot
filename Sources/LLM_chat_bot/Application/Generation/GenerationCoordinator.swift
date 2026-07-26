@@ -378,6 +378,10 @@ final class GenerationCoordinator: @unchecked Sendable {
         // nothing; both notices are delivered to DMs (see the method).
         if let userID = origin.user?.id {
             await payReferralIfDue(userID: userID, username: username)
+            // Paid traffic: a click that never produced an answer is not an
+            // activation, so the campaign is credited here rather than at
+            // /start. Idempotent — this runs on every turn.
+            await state.markTrafficSourceActivation(userID: userID)
         }
 
         // Free-tier gate with a daily premium "taste": a sender without full

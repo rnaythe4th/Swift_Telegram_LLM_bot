@@ -33,6 +33,7 @@ private enum MenuPage: String {
     case superReminders = "superreminders"
     case superOnboarding = "superonboarding"
     case superReferrals = "superref"
+    case superTraffic = "supersrc"
     case referral = "ref"
     case adminInvite = "admininvite"
     case close
@@ -601,7 +602,10 @@ final class BotMenuHandler: @unchecked Sendable {
                 return
             }
             switch menuPage {
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superReferrals:
+            // Every `super*` page belongs here — the buttons inside them are
+            // gated separately, but the pages themselves show the owner's
+            // configuration and numbers.
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superReferrals, .superTraffic:
                 guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
                     return
@@ -1412,6 +1416,14 @@ final class BotMenuHandler: @unchecked Sendable {
             try await handleReferralAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
             return
 
+        case "strf":
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            try await handleTrafficAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            return
+
         case "sbal":
             guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
@@ -1709,6 +1721,8 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderSuperOnboarding(chatKey: chatKey)
         case .superReferrals:
             return await renderSuperReferrals(chatKey: chatKey)
+        case .superTraffic:
+            return await renderSuperTraffic(chatKey: chatKey)
         case .referral:
             // Private chats only (guarded at the nav gate), where chatID == the
             // user's ID — that is whose link and wallet the page is about.
@@ -3345,6 +3359,7 @@ final class BotMenuHandler: @unchecked Sendable {
         let onboarding = await state.onboardingConfig()
         let referral = await state.referralConfig()
         let referralOverview = await state.referralOverview(topLimit: 1)
+        let traffic = await state.trafficSourceOverview()
         let lifecycle = await state.subscriptionLifecycleStats()
         let balances = await state.allBalances()
         let balancesTotal = balances.reduce(0.0) { $0 + $1.wallet.balanceUsd }
@@ -3366,7 +3381,8 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton("⏳ Напоминания и winback · \(reminders.enabled ? "вкл" : "выкл")", action: "nav:superreminders")],
             [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.enabledExamples.count)" : "выкл")", action: "nav:superonboarding")],
             [menuButton("🎁 Приглашения · \(referral.enabled ? ReferralConfig.formatUsd(cents: referral.inviterRewardCents) : "выкл")", action: "nav:superref")],
-            [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel")],
+            [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel"),
+             menuButton("📈 Источники · \(traffic.campaigns)", action: "nav:supersrc")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
             [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
              menuButton("🎭 Роль", action: "pm:role")],
@@ -3387,6 +3403,7 @@ final class BotMenuHandler: @unchecked Sendable {
         💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · в личке <b>\(onboarding.activeExamples(inGroup: false).count)</b> · в группах <b>\(onboarding.showInGroups ? onboarding.activeExamples(inGroup: true).count : 0)</b>
         ⏳ Напоминания · <b>\(reminders.enabled ? "вкл" : "выкл")</b> · скоро истекут <b>\(lifecycle.expiringSoon.count)</b> · winback-офферов <b>\(lifecycle.activeDiscounts.count)</b>
         🎁 Приглашения · <b>\(referral.enabled ? "вкл" : "выкл")</b> · выплачено пар <b>\(referralOverview.rewarded)</b> · \(String(format: "$%.2f", referralOverview.paidOutUsd)) · ждут <b>\(referralOverview.pending)</b>
+        📈 Источники рекламы · кампаний <b>\(traffic.campaigns)</b> · пришло <b>\(traffic.joined)</b> · оплатили <b>\(traffic.payers)</b>
         💰 Балансов · <b>\(balances.count)</b> · остатки \(String(format: "$%.2f", balancesTotal)) · маржа <b>\(String(format: "$%.4f", marginTotal))</b> · /balance list
         🆓 Бесплатных моделей · <b>\(freeCount)</b>
         🪙 Открытых счетов · <b>\(openInvoices.count)</b>
@@ -3499,6 +3516,7 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton("⏳ Напоминания и winback", action: "nav:superreminders")],
             [menuButton("💡 Примеры-запросы", action: "nav:superonboarding"),
              menuButton("📣 Реклама", action: "nav:superads")],
+            [menuButton("📈 Источники трафика", action: "nav:supersrc")],
             navButtons(),
         ]
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
@@ -3915,6 +3933,96 @@ final class BotMenuHandler: @unchecked Sendable {
 
         default:
             try await showPage(.superReferrals, chatKey: chatKey, callback: callback, message: message)
+        }
+    }
+
+    // MARK: - Paid-traffic sources (`src_` deep links)
+
+    /// Where the ad money went. Reading this page is the whole point of the
+    /// `src_` links: spend ÷ payers is CAC, and without a per-campaign number
+    /// the budget goes to whichever channel *felt* like it worked.
+    private func renderSuperTraffic(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+        let overview = await state.trafficSourceOverview()
+
+        var rows: [[InlineKeyboardButton]] = []
+        if overview.campaigns > 0 {
+            rows.append([menuButton("🗑 Очистить статистику источников", action: "strf:clear")])
+        }
+        rows.append([menuButton("📊 Воронка", action: "nav:superfunnel"),
+                     menuButton("← К супер-админу", action: "nav:superadmin")])
+
+        var lines: [String] = ["<b>📈 Источники трафика (реклама)</b>", ""]
+
+        if overview.campaigns == 0 {
+            lines.append("Пока ни одного перехода по рекламной ссылке.")
+        } else {
+            lines.append("Кампаний · <b>\(overview.campaigns)</b> · пришло <b>\(overview.joined)</b> · написали <b>\(overview.activated)</b> · оплатили <b>\(overview.payers)</b>")
+            lines.append("Всего оплат · <b>\(overview.payments)</b> <i>(с повторными)</i>")
+            lines.append("")
+            lines.append("<b>Кампании</b> <i>(пришло → написали → оплатили)</i>")
+            for (index, row) in overview.rows.enumerated() {
+                lines.append(String(
+                    format: "%d. <code>%@</code> · %d → %d → <b>%d</b> · конверсия %.1f%%",
+                    index + 1, row.tag, row.tally.joined, row.tally.activated,
+                    row.tally.payers, row.tally.conversionPercent
+                ))
+            }
+        }
+
+        // Opens that produced no attribution: without them "рекламу никто не
+        // видит" is indistinguishable from "видят, но это уже наши люди".
+        if overview.repeatOpens > 0 || overview.knownUserOpens > 0 {
+            lines.append("")
+            lines.append("<b>Переходы без засчёта</b> из \(overview.opens) всего")
+            if overview.repeatOpens > 0 { lines.append("• уже пришли раньше по рекламе · \(overview.repeatOpens)") }
+            if overview.knownUserOpens > 0 { lines.append("• уже пользовались ботом · \(overview.knownUserOpens)") }
+        }
+
+        lines.append("")
+        if botUsername.isEmpty {
+            lines.append("Ссылка для рекламы: <code>?start=src_метка</code>")
+        } else {
+            lines.append("<b>Как поставить метку.</b> В каждое объявление ставьте свою ссылку:")
+            // Latin on purpose: `sanitize` drops everything outside [a-z0-9_-],
+            // so a Cyrillic example would teach a tag that silently vanishes.
+            lines.append("<code>\(TrafficSourceLink.url(botUsername: botUsername, tag: "ai_channel"))</code>")
+        }
+        lines.append("""
+            <i>Метка — латиница, цифры, «_» и «-», до \(TrafficSourceLink.maxTagLength) символов. Своя метка на каждый канал: тогда «потратил ÷ оплатили» и есть цена клиента (CAC) этого канала. Засчитывается первый переход человека — канал не может присвоить клиента, которого привёл другой; те, кто уже пользовался ботом, в «пришло» не попадают.</i>
+            """)
+
+        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func handleTrafficAdminAction(
+        parts: [String],
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        message: MaybeInaccessibleMessage
+    ) async throws {
+        switch parts.count >= 2 ? parts[1] : "" {
+        case "clear":
+            let overview = await state.trafficSourceOverview()
+            let text = """
+                <b>🗑 Очистить статистику источников?</b>
+
+                Будет удалено кампаний · <b>\(overview.campaigns)</b> · переходов <b>\(overview.joined)</b> · оплативших <b>\(overview.payers)</b>.
+
+                ⚠️ Цифры уже закупленной рекламы восстановить будет нельзя. Счётчики воронки и деньги пользователей не меняются.
+                """
+            let markup = InlineKeyboardMarkup(inline_keyboard: [
+                [menuButton("🗑 Да, очистить", action: "strf:clearyes")],
+                [menuButton("❌ Отмена", action: "nav:supersrc")],
+            ])
+            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+
+        case "clearyes":
+            await state.clearTrafficSources()
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Статистика источников очищена")
+            try await showPage(.superTraffic, chatKey: chatKey, callback: callback, message: message)
+
+        default:
+            try await showPage(.superTraffic, chatKey: chatKey, callback: callback, message: message)
         }
     }
 

@@ -705,6 +705,9 @@ final class BotOrchestrator: @unchecked Sendable {
             // actually for — credit the inviter before the payment flush, so
             // the bonus is as durable as the payment that earned it.
             let topupBonus = await state.redeemReferralPaymentBonus(payerUserID: payer.id)
+            // Paid traffic: credit the campaign that brought this customer
+            // before the flush, so attribution is as durable as the payment.
+            await state.recordTrafficSourcePayment(userID: payer.id)
             await metrics.increment(MetricName.paymentsProcessed)
             await persistence?.flushNow()
             await announceReferralBonus(topupBonus)
@@ -739,6 +742,7 @@ final class BotOrchestrator: @unchecked Sendable {
         case .alreadyUnlimited: break
         }
         let referralBonus = await state.redeemReferralPaymentBonus(payerUserID: payer.id)
+        await state.recordTrafficSourcePayment(userID: payer.id)
         await metrics.increment(MetricName.paymentsProcessed)
         // Payments are the one thing that must never wait out the debounce.
         await persistence?.flushNow()

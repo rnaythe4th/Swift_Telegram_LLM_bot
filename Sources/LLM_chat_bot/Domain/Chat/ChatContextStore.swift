@@ -188,6 +188,11 @@ actor ChatContextStore {
     /// ("one attribution per person, once per pair") depend on it surviving
     /// restarts, so unlike the daily premium counter it is not in-memory.
     var referralLedgerValue: ReferralLedger = .empty
+    /// Paid-traffic attributions + per-campaign aggregates behind `src_` deep
+    /// links. Persisted via GlobalConfigKey.trafficSources: an ad buy is judged
+    /// weeks after the click, so these numbers have to outlive every redeploy in
+    /// between or the campaign becomes unmeasurable.
+    var trafficSourceLedgerValue: TrafficSourceLedger = .empty
     /// Pay-as-you-go wallets, keyed by `UserKey`.
     var userBalances: [String: UserBalance] = [:]
     /// userID ↔ @username directory. Everything above that is "keyed by user"
@@ -2974,6 +2979,102 @@ actor ChatContextStore {
             referralPaidCents: Int((referralLedgerValue.paidOutUsd * 100).rounded()),
             referralConversions: referralLedgerValue.paidConversionCount
         )
+    }
+
+    // MARK: - Paid-traffic attribution (`src_` deep links)
+
+    func trafficSourceLedger() -> TrafficSourceLedger { trafficSourceLedgerValue }
+
+    private func markTrafficSourcesDirty() {
+        trafficSourceLedgerValue.prune()
+        dirtyConfigs.insert(.trafficSources)
+    }
+
+    /// Files a person under the campaign whose link they opened.
+    ///
+    /// Two rules keep the numbers honest, because CAC is computed from them:
+    /// **first touch wins** (a later link never steals a customer an earlier
+    /// campaign paid to acquire), and somebody who was already using the bot is
+    /// not an acquisition at all — they are counted separately so a channel
+    /// cannot inflate its arrivals with people it did not bring.
+    @discardableResult
+    func bindTrafficSource(userID: Int, tag rawTag: String, username: String?) -> TrafficSourceBindOutcome {
+        guard let tag = TrafficSourceLink.sanitize(rawTag) else { return .knownUser }
+        let key = String(userID)
+
+        if let existing = trafficSourceLedgerValue.attributions[key] {
+            trafficSourceLedgerValue.repeatOpens += 1
+            markTrafficSourcesDirty()
+            return .alreadyAttributed(tag: existing.tag)
+        }
+
+        if hasPriorBotActivity(userID: userID, username: username) {
+            trafficSourceLedgerValue.knownUserOpens += 1
+            markTrafficSourcesDirty()
+            return .knownUser
+        }
+
+        let now = Date()
+        let stored = trafficSourceLedgerValue.storageTag(for: tag)
+        trafficSourceLedgerValue.attributions[key] = TrafficSourceAttribution(tag: stored, joinedAt: now)
+        var tally = trafficSourceLedgerValue.tallies[stored] ?? TrafficSourceTally(firstSeenAt: now)
+        tally.joined += 1
+        tally.lastSeenAt = now
+        trafficSourceLedgerValue.tallies[stored] = tally
+        markTrafficSourcesDirty()
+        return .bound(tag: stored)
+    }
+
+    /// Marks that an attributed person got a real answer. Idempotent — the
+    /// caller runs on every turn.
+    func markTrafficSourceActivation(userID: Int) {
+        let key = String(userID)
+        guard var record = trafficSourceLedgerValue.attributions[key], record.activatedAt == nil else { return }
+        let now = Date()
+        record.activatedAt = now
+        trafficSourceLedgerValue.attributions[key] = record
+        var tally = trafficSourceLedgerValue.tallies[record.tag] ?? TrafficSourceTally(firstSeenAt: now)
+        tally.activated += 1
+        tally.lastSeenAt = now
+        trafficSourceLedgerValue.tallies[record.tag] = tally
+        markTrafficSourcesDirty()
+    }
+
+    /// Credits a payment to the campaign that brought the payer. `payers` counts
+    /// distinct people (the CAC denominator), `payments` counts every purchase,
+    /// so repeat buyers show up without distorting the acquisition cost.
+    func recordTrafficSourcePayment(userID: Int) {
+        let key = String(userID)
+        guard var record = trafficSourceLedgerValue.attributions[key] else { return }
+        let now = Date()
+        let isFirstPayment = record.paidAt == nil
+        if isFirstPayment { record.paidAt = now }
+        record.payments += 1
+        trafficSourceLedgerValue.attributions[key] = record
+        var tally = trafficSourceLedgerValue.tallies[record.tag] ?? TrafficSourceTally(firstSeenAt: now)
+        if isFirstPayment { tally.payers += 1 }
+        tally.payments += 1
+        tally.lastSeenAt = now
+        trafficSourceLedgerValue.tallies[record.tag] = tally
+        markTrafficSourcesDirty()
+    }
+
+    func trafficSourceOverview() -> TrafficSourceOverview {
+        let ledger = trafficSourceLedgerValue
+        return TrafficSourceOverview(
+            rows: ledger.ranked(),
+            joined: ledger.totalJoined,
+            activated: ledger.totalActivated,
+            payers: ledger.totalPayers,
+            payments: ledger.totalPayments,
+            repeatOpens: ledger.repeatOpens,
+            knownUserOpens: ledger.knownUserOpens
+        )
+    }
+
+    func clearTrafficSources() {
+        trafficSourceLedgerValue = .empty
+        dirtyConfigs.insert(.trafficSources)
     }
 
     // MARK: - Per-tenant licensed users (paid access for individuals)

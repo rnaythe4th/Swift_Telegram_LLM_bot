@@ -398,6 +398,12 @@ final class BotCommandHandler: @unchecked Sendable {
             try await handleReferralStart(inviterUserID: inviterUserID, chatKey: chatKey, fromUser: fromUser)
             return
         }
+        // Paid-traffic tag: t.me/<bot>?start=src_<кампания>. Silent by design —
+        // this only labels where the person came from, so there is nothing to
+        // tell them about; the greeting must look exactly like any other.
+        if let tag = TrafficSourceLink.tag(payload: payload), let user = fromUser, chatKey.chatID > 0 {
+            await state.bindTrafficSource(userID: user.id, tag: tag, username: user.username)
+        }
         try await sendStartGreeting(chatKey: chatKey)
     }
 

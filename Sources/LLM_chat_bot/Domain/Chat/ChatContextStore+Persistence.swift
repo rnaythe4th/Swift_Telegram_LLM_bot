@@ -193,6 +193,8 @@ extension ChatContextStore {
             return .referrals(referralConfigValue)
         case .referralLedger:
             return .referralLedger(referralLedgerValue)
+        case .trafficSources:
+            return .trafficSources(trafficSourceLedgerValue)
         case .userDirectory:
             return .userDirectory(userDirectoryValue)
         }
@@ -294,6 +296,7 @@ extension ChatContextStore {
         onboardingConfigValue = (state.configs.onboarding ?? .default).normalized
         referralConfigValue = (state.configs.referrals ?? .default).normalized
         referralLedgerValue = state.configs.referralLedger ?? .empty
+        trafficSourceLedgerValue = state.configs.trafficSources ?? .empty
     }
 
     // MARK: - Legacy snapshot restore (one-time migration path)

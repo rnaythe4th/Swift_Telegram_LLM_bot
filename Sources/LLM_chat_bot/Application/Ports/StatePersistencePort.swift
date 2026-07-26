@@ -24,6 +24,7 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case onboarding = "onboarding"
     case referrals = "referrals"
     case referralLedger = "referral_ledger"
+    case trafficSources = "traffic_sources"
     case userDirectory = "user_directory"
 }
 
@@ -79,6 +80,8 @@ enum GlobalConfigValue: Sendable {
     case referrals(ReferralConfig)
     /// Referral attributions + per-inviter aggregates (roadmap step 10).
     case referralLedger(ReferralLedger)
+    /// Paid-traffic attributions + per-campaign aggregates (`src_` deep links).
+    case trafficSources(TrafficSourceLedger)
     /// userID ↔ @username directory behind every `UserKey`.
     case userDirectory(UserDirectory)
 
@@ -106,6 +109,7 @@ enum GlobalConfigValue: Sendable {
         case .onboarding: return .onboarding
         case .referrals: return .referrals
         case .referralLedger: return .referralLedger
+        case .trafficSources: return .trafficSources
         case .userDirectory: return .userDirectory
         }
     }
@@ -201,6 +205,7 @@ struct PersistedGlobalConfigs: Sendable {
     var onboarding: OnboardingConfig?
     var referrals: ReferralConfig?
     var referralLedger: ReferralLedger?
+    var trafficSources: TrafficSourceLedger?
     var userDirectory: UserDirectory?
 
     var hasAnyValue: Bool {
@@ -210,7 +215,7 @@ struct PersistedGlobalConfigs: Sendable {
             || markup != nil || balances != nil || funnel != nil || funnelDaily != nil
             || dailyPremiumLimit != nil || dailyPremiumUsage != nil || selfPromo != nil
             || reminders != nil || onboarding != nil || referrals != nil || referralLedger != nil
-            || userDirectory != nil
+            || trafficSources != nil || userDirectory != nil
     }
 }
 
