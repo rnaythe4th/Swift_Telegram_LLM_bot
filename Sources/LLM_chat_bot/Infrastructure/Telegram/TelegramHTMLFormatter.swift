@@ -1,5 +1,11 @@
 import Foundation
 
+/// Sanitizer for everything the bot sends: keeps the tags Telegram renders,
+/// escapes the rest, and closes whatever the model left open.
+///
+/// The allow-list below is mirrored by `MessageSplitter.renderedTags`, which
+/// decides which tags are worth re-opening at the head of a continuation
+/// message; keep the two in step when adding a tag.
 struct TelegramHTMLFormatter {
     /// Функция принимает HTML-текст и возвращает отформатированную строку,
     /// содержащую только поддерживаемые Telegram теги и экранированные спецсимволы.

@@ -730,7 +730,12 @@ final class GenerationCoordinator: @unchecked Sendable {
                     if MessageSplitter.renderedLength(messageAccumulator) >= MessageSplitter.charLimit {
                         let (done, remaining) = MessageSplitter.splitRendered(messageAccumulator)
                         let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
-                        _ = await persist(prefix + done + "\n\n<i>↓ продолжение ниже</i>")
+                        // Close what the cut left open before the marker, or
+                        // the note lands inside the block it follows — inside a
+                        // code listing it would read as part of the code. The
+                        // continuation re-opens the same tags (splitRendered).
+                        let closers = MessageSplitter.closingTagMarkup(in: done)
+                        _ = await persist(prefix + done + closers + "\n\n<i>↓ продолжение ниже</i>")
                         messageAccumulator = remaining
                         await draft.rotate(initialText: remaining)
                         continue
@@ -764,12 +769,17 @@ final class GenerationCoordinator: @unchecked Sendable {
         }
         await draft.finish()
 
+        // A stream can stop mid-tag (cancelled, or the model just ended there),
+        // and the sanitizer closes dangling tags only at the very end — which
+        // would put the notice or the footer inside the answer's last block.
+        let closers = MessageSplitter.closingTagMarkup(in: messageAccumulator)
+
         let finalText: String
         if isCancelled {
             let stopNotice = await cancellationNotice(for: generationID)
             finalText = messageAccumulator.isEmpty
                 ? stopNotice
-                : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + "\n\n" + stopNotice
+                : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + closers + "\n\n" + stopNotice
         } else {
             let footer = await makeFooter(
                 streamMeta: streamMeta,
@@ -783,7 +793,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
             finalText = messageAccumulator.isEmpty
                 ? "<i>Пустой ответ.</i>\(footer)"
-                : prefix + messageAccumulator + footer
+                : prefix + messageAccumulator + closers + footer
         }
 
         if await persist(finalText) {
@@ -870,7 +880,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 .init(
                     chatID: chatKey.chatID,
                     messageID: currentPlaceholder.message_id,
-                    text: done + "\n\n<i>↓ продолжение ниже</i>",
+                    text: done + MessageSplitter.closingTagMarkup(in: done) + "\n\n<i>↓ продолжение ниже</i>",
                     replyMarkup: stopMarkup
                 )
             )
@@ -962,12 +972,16 @@ final class GenerationCoordinator: @unchecked Sendable {
             isCancelled = true
         }
 
+        // See the draft path: the trailer must sit outside whatever block the
+        // answer stopped inside.
+        let closers = MessageSplitter.closingTagMarkup(in: messageAccumulator)
+
         var finalText: String
         if isCancelled {
             let stopNotice = await self.cancellationNotice(for: generationID)
             finalText = messageAccumulator.isEmpty
                 ? stopNotice
-                : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + "\n\n" + stopNotice
+                : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + closers + "\n\n" + stopNotice
         } else {
             let footer = await makeFooter(
                 streamMeta: streamMeta,
@@ -981,7 +995,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
             finalText = messageAccumulator.isEmpty
                 ? "<i>Пустой ответ.</i>\(footer)"
-                : prefix + messageAccumulator + footer
+                : prefix + messageAccumulator + closers + footer
         }
         if continuationFailed {
             finalText += "\n\n⚠️ <i>Ответ пришлось оборвать: не удалось отправить продолжение. Повторите запрос.</i>"
