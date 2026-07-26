@@ -58,6 +58,7 @@ struct BlueprintBotApp {
         let telegram = TelegramHTTPGateway(
             network: network,
             botToken: config.telegramToken,
+            apiBase: config.telegramAPIBase,
             rateLimiter: rateLimiter,
             metrics: metrics
         )

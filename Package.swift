@@ -26,7 +26,13 @@ let package = Package(
         // config types. Nothing here touches the network or Supabase.
         .testTarget(
             name: "LLM_chat_botTests",
-            dependencies: ["LLM_chat_bot"]
+            dependencies: [
+                "LLM_chat_bot",
+                // The end-to-end tests stand up a local Bot API stand-in with
+                // the same NIO server the app itself serves /health from.
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
         ),
     ]
 )

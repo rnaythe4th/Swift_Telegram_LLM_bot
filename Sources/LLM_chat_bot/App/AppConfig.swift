@@ -21,6 +21,7 @@ enum EnvironmentKey: String {
     case ownerUserID = "OWNER_USER_ID"
     case logLevel = "LOG_LEVEL"
     case maxConcurrentGenerations = "MAX_CONCURRENT_GENERATIONS"
+    case telegramAPIBase = "TELEGRAM_API_BASE"
 }
 
 enum AppConfigError: LocalizedError {
@@ -75,6 +76,10 @@ struct AppConfig: Sendable {
     /// on their first message. A userID cannot be transferred.
     let ownerUserID: Int?
     let maxConcurrentGenerations: Int
+    /// Bot API endpoint. Only ever set in tests, which point it at a local
+    /// stand-in to assert what the bot actually sends (§19). Unset in
+    /// production — the default is Telegram itself.
+    let telegramAPIBase: String
 
     /// Server-side Supabase key: the service key bypasses RLS and never ships
     /// to clients — preferred. The anon key remains a fallback for setups
@@ -119,7 +124,8 @@ struct AppConfig: Sendable {
             webhookSecret: optionalEnv(.webhookSecret),
             metricsToken: optionalEnv(.metricsToken),
             ownerUserID: optionalEnv(.ownerUserID).flatMap { Int($0) }.flatMap { $0 > 0 ? $0 : nil },
-            maxConcurrentGenerations: Int(optionalEnv(.maxConcurrentGenerations) ?? "") ?? 64
+            maxConcurrentGenerations: Int(optionalEnv(.maxConcurrentGenerations) ?? "") ?? 64,
+            telegramAPIBase: optionalEnv(.telegramAPIBase) ?? TelegramHTTPGateway.defaultAPIBase
         )
     }
 

@@ -17,8 +17,15 @@ struct TelegramAPIError: Error, LocalizedError {
 }
 
 final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
+    /// Where the Bot API lives. Overridable (`TELEGRAM_API_BASE`) for one
+    /// reason: end-to-end tests point it at a local stand-in and then assert
+    /// what the bot actually sent — text, keyboard, parse mode — instead of
+    /// only that some call was made. Never set it in production.
+    static let defaultAPIBase = "https://api.telegram.org"
+
     private let network: NetworkClient
     private let telegramURL: String
+    private let fileURLBase: String
     private let botToken: String
     private let rateLimiter: TelegramRateLimiter?
     private let metrics: RuntimeMetrics?
@@ -26,12 +33,15 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     init(
         network: NetworkClient,
         botToken: String,
+        apiBase: String = TelegramHTTPGateway.defaultAPIBase,
         rateLimiter: TelegramRateLimiter? = nil,
         metrics: RuntimeMetrics? = nil
     ) {
+        let base = apiBase.hasSuffix("/") ? String(apiBase.dropLast()) : apiBase
         self.network = network
         self.botToken = botToken
-        self.telegramURL = "https://api.telegram.org/bot\(botToken)"
+        self.telegramURL = "\(base)/bot\(botToken)"
+        self.fileURLBase = "\(base)/file/bot\(botToken)"
         self.rateLimiter = rateLimiter
         self.metrics = metrics
     }
@@ -399,7 +409,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     func downloadFile(filePath: String) async throws -> Data {
         let safePath = try Self.sanitizeFilePath(filePath)
         let spec = HTTPRequestSpec(
-            url: "https://api.telegram.org/file/bot\(botToken)/\(safePath)",
+            url: "\(fileURLBase)/\(safePath)",
             method: .get,
             timeoutSeconds: 35,
             maxBodyBytes: 20 << 20,
