@@ -9,7 +9,10 @@ WORKDIR /app
 COPY Package.swift Package.resolved ./
 RUN swift package resolve
 
+# Tests are copied because SwiftPM validates every target in the manifest: with
+# Tests/ missing the test target claims Sources/ and the build fails outright.
 COPY Sources ./Sources
+COPY Tests ./Tests
 RUN swift build -c release --product LLM_chat_bot
 RUN strip .build/release/LLM_chat_bot || true
 

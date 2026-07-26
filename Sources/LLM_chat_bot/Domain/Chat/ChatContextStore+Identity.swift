@@ -8,8 +8,18 @@ extension ChatContextStore {
 
     /// Storage key for a person named by @username. `#<userID>` once we have
     /// met them, the bare username while they are only a pending reference.
+    ///
+    /// An already-resolved key round-trips untouched, exactly like in
+    /// `userKeyOrRaw`: callers hold keys, not handles (`invokerKey`,
+    /// `actorKey`), and pass them in as `username:` on purpose (CLAUDE.md §6).
+    /// Without this every role gate silently answered "no" for identified
+    /// users — `UserKey.pending` rejects `#`, which is what keeps *typed* text
+    /// from forging a key, and that rejection must not reach callers who
+    /// already did the resolving.
     func userKey(username: String?) -> String? {
-        guard let pending = UserKey.pending(username) else { return nil }
+        guard let raw = username?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+        if UserKey.userID(from: raw) != nil { return raw }
+        guard let pending = UserKey.pending(raw) else { return nil }
         if let userID = userDirectoryValue.userID(forUsername: pending) {
             return UserKey.forUserID(userID)
         }

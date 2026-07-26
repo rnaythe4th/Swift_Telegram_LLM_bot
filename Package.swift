@@ -22,5 +22,11 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
         ),
+        // Unit tests for the pure logic: the state actor, formatters, parsers and
+        // config types. Nothing here touches the network or Supabase.
+        .testTarget(
+            name: "LLM_chat_botTests",
+            dependencies: ["LLM_chat_bot"]
+        ),
     ]
 )
