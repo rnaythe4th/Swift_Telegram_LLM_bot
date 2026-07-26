@@ -31,6 +31,24 @@ struct BlueprintBotApp {
 
     static func main() async throws {
         let config = try AppConfig.load()
+
+        // Before the first log line: a leaked bot token is a complete takeover,
+        // and transport errors quote the URL they failed on — which for every
+        // Telegram call embeds the token.
+        SecretRedactor.shared.register([
+            config.telegramToken,
+            config.deepseekKey,
+            config.routerApiKey,
+            config.supabaseServiceKey,
+            config.supabaseAnonKey,
+            config.webhookSecret,
+            config.metricsToken,
+            config.tonapiKey,
+            config.etherscanApiKey,
+            config.bscscanApiKey,
+            config.trongridApiKey
+        ])
+
         let logger = ConsoleLogger.fromEnvironment()
         let metrics = RuntimeMetrics()
         let flags = RuntimeFlags()
@@ -49,8 +67,13 @@ struct BlueprintBotApp {
             throw AppBootstrapError.missingBotUsername
         }
 
+        if config.ownerUserID == nil {
+            logger.warning("OWNER_USER_ID is not set — the owner is recognised by @\(ownerUsername) alone; set it so root cannot follow the username to somebody else")
+        }
+
         let state = ChatContextStore(
             ownerUsername: ownerUsername,
+            ownerUserID: config.ownerUserID,
             model: "google/gemini-3-flash-preview",
             systemPrompt: systemPrompt,
             formatOptions: formatOptions,
@@ -189,6 +212,12 @@ struct BlueprintBotApp {
             }
         }
 
+        // `/metrics` reports revenue, funnel counts and subscriber tallies on the
+        // same public domain the webhook uses. Falling back to the webhook secret
+        // means it is never open by accident — that value is either operator-set
+        // or the random one generated above, which nobody can guess.
+        let metricsToken = config.metricsToken ?? webhookSecret
+
         let server = AppHTTPServer(port: config.healthPort) { [orchestrator, intake, telegram, flags] head, body in
             let path = head.uri.split(separator: "?", maxSplits: 1).first.map(String.init) ?? "/"
             switch (head.method, path) {
@@ -201,6 +230,12 @@ struct BlueprintBotApp {
                     : AppHTTPResponse(status: .serviceUnavailable, body: "starting")
 
             case (.GET, "/metrics"):
+                let presented = head.headers.first(name: "Authorization")
+                    .map { $0.hasPrefix("Bearer ") ? String($0.dropFirst(7)) : $0 }
+                    ?? head.headers.first(name: "X-Metrics-Token")
+                guard SecretGuard.constantTimeEquals(presented, metricsToken) else {
+                    return AppHTTPResponse(status: .unauthorized, body: "unauthorized")
+                }
                 let report = await orchestrator.metricsReport()
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -208,7 +243,10 @@ struct BlueprintBotApp {
                 return .json(json)
 
             case (.POST, WebhookEndpoint.path):
-                guard head.headers.first(name: WebhookEndpoint.secretHeader) == webhookSecret else {
+                guard SecretGuard.constantTimeEquals(
+                    head.headers.first(name: WebhookEndpoint.secretHeader),
+                    webhookSecret
+                ) else {
                     return AppHTTPResponse(status: .unauthorized, body: "bad secret")
                 }
                 // 503 before restore completes and while draining — Telegram

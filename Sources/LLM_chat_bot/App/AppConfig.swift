@@ -17,6 +17,8 @@ enum EnvironmentKey: String {
     case webhookPublicURL = "WEBHOOK_PUBLIC_URL"
     case railwayPublicDomain = "RAILWAY_PUBLIC_DOMAIN"
     case webhookSecret = "TELEGRAM_WEBHOOK_SECRET"
+    case metricsToken = "METRICS_TOKEN"
+    case ownerUserID = "OWNER_USER_ID"
     case logLevel = "LOG_LEVEL"
     case maxConcurrentGenerations = "MAX_CONCURRENT_GENERATIONS"
 }
@@ -60,6 +62,18 @@ struct AppConfig: Sendable {
     let updateMode: UpdateMode
     let webhookPublicURL: String?
     let webhookSecret: String?
+    /// Bearer token guarding `GET /metrics`. The endpoint sits on the same
+    /// public domain as the webhook and reports revenue, funnel counts and
+    /// subscriber tallies — business intelligence that has no business being
+    /// world-readable. Unset → the webhook secret is used instead, so the
+    /// endpoint is never open; Railway's healthcheck probes `/ready`, which
+    /// stays public.
+    let metricsToken: String?
+    /// Owner's Telegram userID. Optional but strongly recommended: without it
+    /// the bot recognises its owner by the configured @username, and a username
+    /// is rented — whoever registers it after the owner drops it inherits root
+    /// on their first message. A userID cannot be transferred.
+    let ownerUserID: Int?
     let maxConcurrentGenerations: Int
 
     /// Server-side Supabase key: the service key bypasses RLS and never ships
@@ -103,6 +117,8 @@ struct AppConfig: Sendable {
             updateMode: updateMode,
             webhookPublicURL: webhookPublicURL,
             webhookSecret: optionalEnv(.webhookSecret),
+            metricsToken: optionalEnv(.metricsToken),
+            ownerUserID: optionalEnv(.ownerUserID).flatMap { Int($0) }.flatMap { $0 > 0 ? $0 : nil },
             maxConcurrentGenerations: Int(optionalEnv(.maxConcurrentGenerations) ?? "") ?? 64
         )
     }

@@ -270,9 +270,16 @@ actor CryptoPaymentService {
 
         // amountDelta mode
 
-        // 1) Exact amount match against an open invoice
+        // 1) Exact match against what an invoice is still owed.
+        //
+        // Against `remainingAtomic`, not `exactAmountAtomic`, and across
+        // `.partial` as well as `.open`: the invoice tells the payer «осталось
+        // доплатить X», so a transfer of exactly X is the least ambiguous
+        // signal there is. Matching only untouched invoices meant a single
+        // stray unit landing on someone's invoice flipped it to `.partial` and
+        // their real, exact-amount payment then matched nothing at all.
         if let exact = openInvoices
-            .filter({ $0.status == .open && $0.exactAmountAtomic == amountAtomic })
+            .filter({ $0.remainingAtomic == amountAtomic })
             .sorted(by: { $0.createdAt < $1.createdAt })
             .first {
             return await applyMatch(
@@ -300,11 +307,26 @@ actor CryptoPaymentService {
             }
         }
 
-        // 3) Adopt oldest unlinked open invoice if amount within reasonable bounds
-        if let candidate = openInvoices
-            .filter({ $0.status == .open && $0.linkedSenders.isEmpty && amountAtomic <= $0.exactAmountAtomic })
-            .sorted(by: { $0.createdAt < $1.createdAt })
-            .first {
+        // 3) Adopt an unlinked invoice — but only for a payment large enough to
+        // be a genuine attempt at it.
+        //
+        // Adopting *any* amount let one dust transfer attach an arbitrary
+        // sender to a stranger's invoice and park it in `.partial`; from there
+        // every further transfer from that address (step 2) went to the
+        // stranger's invoice too. Requiring at least half the outstanding
+        // amount prices the attack above the subscription it targets, and the
+        // closest invoice wins rather than the oldest, so a real underpayment
+        // still lands where the payer meant it to.
+        let adoptable = openInvoices.filter {
+            $0.linkedSenders.isEmpty
+                && amountAtomic <= $0.remainingAtomic
+                && amountAtomic >= Self.minimumAdoptableShare(of: $0.remainingAtomic)
+        }
+        if let candidate = adoptable.min(by: {
+            let lhs = $0.remainingAtomic - amountAtomic
+            let rhs = $1.remainingAtomic - amountAtomic
+            return lhs == rhs ? $0.createdAt < $1.createdAt : lhs < rhs
+        }) {
             return await applyMatch(
                 invoice: candidate,
                 addedAtomic: amountAtomic,
@@ -314,8 +336,17 @@ actor CryptoPaymentService {
             )
         }
 
-        logger.info("crypto: orphan transfer \(asset.rawValue) amount=\(amountAtomic) tx=\(txHash)")
+        // Money arrived and nothing was credited for it — the operator has to be
+        // able to find this without going looking, so it is not an info line.
+        logger.warning("crypto: orphan transfer \(asset.rawValue) amount=\(amountAtomic) from=\(fromAddress ?? "?") tx=\(txHash)")
         return .unmatched
+    }
+
+    /// Smallest transfer that may claim an invoice it is not linked to. Half of
+    /// what the invoice is still owed: enough headroom for network fees eaten
+    /// off a real payment, far too expensive to spray at strangers' invoices.
+    private static func minimumAdoptableShare(of remainingAtomic: Int64) -> Int64 {
+        max(1, remainingAtomic / 2)
     }
 
     private func applyMatch(

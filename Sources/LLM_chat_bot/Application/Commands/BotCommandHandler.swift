@@ -647,7 +647,7 @@ final class BotCommandHandler: @unchecked Sendable {
             lines.append("Тема · <code>\(chatKey.threadID)</code>")
         }
         if let meta {
-            lines.append("Тип · \(meta.type)" + (meta.title.map { " · «\($0)»" } ?? ""))
+            lines.append("Тип · \(meta.type)" + (meta.safeTitle.map { " · «\($0)»" } ?? ""))
         }
         lines.append(ownerLabel.map { "Премиум · открыл \($0)" } ?? "Премиум · <i>здесь не открыт</i>")
         lines.append("")

@@ -20,18 +20,44 @@ enum UserKey {
 
     static func forUserID(_ userID: Int) -> String { "\(idPrefix)\(userID)" }
 
+    /// Characters a Telegram username is made of. Anything a pending key is
+    /// built from has to fit here — the key is not just a label: it is written
+    /// into database filters and printed into HTML, and both of those have
+    /// syntax of their own that a free-form string could reach into.
+    private static let usernameCharacters = Set("abcdefghijklmnopqrstuvwxyz0123456789_")
+
     /// Key for a person we have not identified yet. Empty username → nil, so a
     /// blank never becomes a key everyone shares.
+    ///
+    /// Rejects anything that is not username-shaped, so a hand-typed
+    /// `/tenant adduser` argument cannot forge an identified key (`#12345`,
+    /// which the `#` would otherwise allow) or smuggle punctuation downstream.
     static func pending(_ username: String?) -> String? {
         guard let raw = username?.trimmingCharacters(in: .whitespaces).lowercased(), !raw.isEmpty else {
             return nil
         }
-        return raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        let bare = raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        guard !bare.isEmpty, bare.count <= 32, bare.allSatisfy({ usernameCharacters.contains($0) }) else {
+            return nil
+        }
+        return bare
+    }
+
+    /// Last-resort key for text that is not username-shaped: everything outside
+    /// the username alphabet is dropped rather than carried into storage. The
+    /// result addresses no real record (which is the correct outcome for a
+    /// typo), but it is safe to put in a URL filter or a message.
+    static func sanitizedPendingFallback(_ raw: String) -> String {
+        String(raw.lowercased().filter { usernameCharacters.contains($0) }.prefix(32))
     }
 
     static func userID(from key: String) -> Int? {
         guard key.hasPrefix(idPrefix) else { return nil }
-        return Int(key.dropFirst(idPrefix.count))
+        let digits = key.dropFirst(idPrefix.count)
+        // `Int(_:)` accepts a leading `+`/`-`, which would make `#-1` and `#1`
+        // two spellings that both parse — keys must have exactly one form.
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isNumber }) else { return nil }
+        return Int(digits)
     }
 
     static func isIdentified(_ key: String) -> Bool { key.hasPrefix(idPrefix) }
@@ -39,6 +65,36 @@ enum UserKey {
 
 /// What we last knew about a person behind a `UserKey`.
 struct UserIdentity: Codable, Sendable, Equatable {
+    /// A Telegram display name is arbitrary user-chosen text, and every label
+    /// built from it is pasted into an HTML message the bot signs its own name
+    /// to. Left raw, `first_name` = `<a href="…">Поддержка</a>` renders as a
+    /// live link inside a bot message — no model, no prompt injection needed.
+    /// Escaping here (rather than at each of the ~40 call sites) is what makes
+    /// that impossible; the send-time sanitizer passes these entities through
+    /// unchanged, so the reader still sees the literal characters.
+    static let maxNameLength = 64
+
+    static func sanitizeName(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        // Newlines and control characters let a name forge extra lines in a
+        // list ("@alice\n@bob · суперадмин").
+        let collapsed = raw
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .unicodeScalars
+            .filter { $0.value >= 0x20 && $0.value != 0x7F }
+            .reduce(into: "") { $0.unicodeScalars.append($1) }
+            .trimmingCharacters(in: .whitespaces)
+        guard !collapsed.isEmpty else { return nil }
+        let clipped = collapsed.count > maxNameLength
+            ? String(collapsed.prefix(maxNameLength)) + "…"
+            : collapsed
+        return clipped
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
     var userID: Int
     /// Lowercased, without `@`; nil when the person has no username set.
     var username: String?
@@ -52,9 +108,18 @@ struct UserIdentity: Codable, Sendable, Equatable {
     /// Label for the interface. A username when there is one — that is what
     /// people recognise — otherwise the name, otherwise the bare id. The
     /// internal `#<userID>` key is never shown.
+    ///
+    /// HTML-safe by construction (see `sanitizeName`): a label goes straight
+    /// into message text, so it must never be able to open a tag.
     var displayLabel: String {
-        if let username, !username.isEmpty { return "@\(username)" }
-        if let firstName, !firstName.isEmpty { return firstName }
+        // A username is `a–z0–9_` by Telegram's own rules, so it needs no
+        // escaping — but it is stored data, and stored data can predate a rule.
+        if let username, !username.isEmpty {
+            return "@\(Self.sanitizeName(username) ?? username)"
+        }
+        if let firstName, !firstName.isEmpty {
+            return Self.sanitizeName(firstName) ?? "id \(userID)"
+        }
         return "id \(userID)"
     }
 }
@@ -190,7 +255,11 @@ struct UserDirectory: Codable, Sendable {
     /// by their current username; a pending record is shown by the username it
     /// was created with.
     func displayLabel(forKey key: String) -> String {
-        guard let userID = UserKey.userID(from: key) else { return "@\(key)" }
+        // A pending key is a handle somebody typed into `/tenant adduser`, so it
+        // is no more trustworthy than a display name — escape it the same way.
+        guard let userID = UserKey.userID(from: key) else {
+            return "@\(UserIdentity.sanitizeName(key) ?? key)"
+        }
         return identities[userID]?.displayLabel ?? "id \(userID)"
     }
 

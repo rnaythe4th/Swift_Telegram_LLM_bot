@@ -24,6 +24,51 @@ enum ExplorerError: LocalizedError {
     }
 }
 
+/// TON addresses come in two spellings for the same account: the raw
+/// `<workchain>:<32-byte hex>` an indexer returns, and the base64url
+/// "user-friendly" `EQ…`/`UQ…` a wallet shows. Deciding whether two of them
+/// name the same account therefore means decoding, not string matching — and
+/// this comparison decides whether an incoming token is the USDT we invoiced or
+/// something an attacker minted for free.
+enum TonAddress {
+    /// Canonical `<workchain>:<64 lowercase hex>`, or nil if the input is
+    /// neither spelling.
+    static func normalized(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let colon = trimmed.firstIndex(of: ":") {
+            guard let workchain = Int(trimmed[trimmed.startIndex..<colon]) else { return nil }
+            let hex = trimmed[trimmed.index(after: colon)...].lowercased()
+            guard hex.count == 64, hex.allSatisfy(\.isHexDigit) else { return nil }
+            return "\(workchain):\(hex)"
+        }
+
+        // Friendly form: base64url of [flags][workchain][32-byte hash][crc16].
+        var base64 = trimmed
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 { base64 += "=" }
+        guard let data = Data(base64Encoded: base64), data.count == 36 else { return nil }
+        let workchain = Int(Int8(bitPattern: data[data.startIndex + 1]))
+        let hash = data
+            .subdata(in: (data.startIndex + 2)..<(data.startIndex + 34))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "\(workchain):\(hash)"
+    }
+
+    /// True only when both addresses decode to the same account. An input that
+    /// decodes to nothing matches nothing but an identical string — guessing
+    /// here is what let any jetton pass as USDT.
+    static func equal(_ lhs: String, _ rhs: String) -> Bool {
+        guard let a = normalized(lhs), let b = normalized(rhs) else {
+            return lhs.caseInsensitiveCompare(rhs) == .orderedSame
+        }
+        return a == b
+    }
+}
+
 // MARK: - TON
 
 final class TonExplorer: @unchecked Sendable {
@@ -91,7 +136,9 @@ final class TonExplorer: @unchecked Sendable {
             throw ExplorerError.http(String(describing: error))
         }
 
-        let normalizedAddress = address.lowercased()
+        // Our own address is configured by hand, so it arrives in whichever
+        // spelling the admin's wallet showed them; tonapi answers in the raw
+        // one. Comparing the two as strings never matches.
         var transfers: [IncomingCryptoTransfer] = []
         var maxTs = cursor.lastSeenUnix
 
@@ -104,7 +151,7 @@ final class TonExplorer: @unchecked Sendable {
                 switch asset {
                 case .tonNative:
                     guard action.type == "TonTransfer", let p = action.TonTransfer else { continue }
-                    if p.recipient.address.lowercased() != normalizedAddress { continue }
+                    if !TonAddress.equal(p.recipient.address, address) { continue }
                     if p.amount <= 0 { continue }
                     transfers.append(IncomingCryptoTransfer(
                         asset: .tonNative,
@@ -116,8 +163,14 @@ final class TonExplorer: @unchecked Sendable {
                 case .usdtTon:
                     guard action.type == "JettonTransfer", let p = action.JettonTransfer else { continue }
                     guard let contract = asset.contractAddress else { continue }
-                    if !addressesEqual(p.jetton.address, contract) { continue }
-                    if let recipient = p.recipient?.address, recipient.lowercased() != normalizedAddress { continue }
+                    // Which token this is decides whether real money arrived.
+                    // Anyone can mint a jetton with USDT's decimals and send it
+                    // for the price of gas, so this comparison must be exact.
+                    if !TonAddress.equal(p.jetton.address, contract) { continue }
+                    // A transfer with no recipient we can read is not one we can
+                    // attribute — dropping it is the safe direction.
+                    guard let recipient = p.recipient?.address,
+                          TonAddress.equal(recipient, address) else { continue }
                     guard let amount = Int64(p.amount), amount > 0 else { continue }
                     transfers.append(IncomingCryptoTransfer(
                         asset: .usdtTon,
@@ -135,16 +188,6 @@ final class TonExplorer: @unchecked Sendable {
         return (transfers, ExplorerCursor(lastSeenUnix: maxTs))
     }
 
-    private func addressesEqual(_ a: String, _ b: String) -> Bool {
-        // Compare by lowercased; tonapi may use raw `0:...` while constants use friendly EQ form.
-        // For jetton master contracts a substring match on hex tail is acceptable for our purpose.
-        let la = a.lowercased()
-        let lb = b.lowercased()
-        if la == lb { return true }
-        if la.contains(":"), lb.hasPrefix("eq") || lb.hasPrefix("uq") { return true }
-        if lb.contains(":"), la.hasPrefix("eq") || la.hasPrefix("uq") { return true }
-        return false
-    }
 }
 
 // MARK: - EVM (BSC / Ethereum) — Etherscan API V2 (multichain, one key)
@@ -291,13 +334,15 @@ final class TronExplorer: @unchecked Sendable {
         }
 
         let normalizedAddress = address.lowercased()
-        let normalizedContract = contract.lowercased()
         var transfers: [IncomingCryptoTransfer] = []
         var maxTs = cursor.lastSeenUnix
 
         for tx in resp.data {
             if tx.type != "Transfer" { continue }
-            if (tx.token_info.address?.lowercased() ?? "") != normalizedContract { continue }
+            // Exact, not case-folded: Tron addresses are base58, where case is
+            // significant. This is the check that separates real USDT from a
+            // token anyone can mint, so it does not get to be approximate.
+            guard tx.token_info.address == contract else { continue }
             if tx.to.lowercased() != normalizedAddress { continue }
             guard let amount = Int64(tx.value), amount > 0 else { continue }
             let tsSec = Int(tx.block_timestamp / 1000)

@@ -1,5 +1,16 @@
 import Foundation
 
+enum PersistenceEncodingError: LocalizedError {
+    case unencodableFilterValue(table: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unencodableFilterValue(let table):
+            return "Refusing to build a DELETE filter for \(table): a key could not be encoded"
+        }
+    }
+}
+
 /// Row-based persistence on Supabase Postgres via PostgREST.
 ///
 /// Schema (see DEPLOY.md for the SQL):
@@ -265,11 +276,27 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
     }
 
     private func delete(table: String, column: String, values: [String]) async throws {
-        let list = values.joined(separator: ",")
-        let filter = "\(column)=in.(\(list))"
-        let encoded = filter.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? filter
+        // A DELETE that loses its filter deletes the whole table, so an empty
+        // list must never reach PostgREST as a bare `?`.
+        let encodedValues = values.compactMap {
+            $0.addingPercentEncoding(withAllowedCharacters: Self.strictValueAllowed)
+        }
+        guard !encodedValues.isEmpty, encodedValues.count == values.count else {
+            guard values.isEmpty else {
+                throw NetworkTransportError.encodeFailure(
+                    PersistenceEncodingError.unencodableFilterValue(table: table)
+                )
+            }
+            return
+        }
+        // Only the values are escaped; `column=`, `in.` and the parentheses are
+        // the filter's own syntax and stay literal. Escaping the values is what
+        // matters: `.urlQueryAllowed` (the previous choice) leaves `&`, `=` and
+        // `+` alone, so a stored key holding an `&` would split this filter into
+        // extra query parameters and strand the DELETE without one.
+        let filter = "\(column)=in.(\(encodedValues.joined(separator: ",")))"
         let spec = HTTPRequestSpec(
-            url: "\(baseURL)/rest/v1/\(table)?\(encoded)",
+            url: "\(baseURL)/rest/v1/\(table)?\(filter)",
             method: .delete,
             headers: authHeaders,
             timeoutSeconds: 20,
@@ -277,6 +304,15 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         )
         _ = try await network.perform(spec)
     }
+
+    /// Unreserved characters only, so nothing inside a value can be read as URL
+    /// or filter structure. PostgREST percent-decodes before parsing, so the
+    /// quotes `quoted(_:)` adds survive as quotes.
+    private static let strictValueAllowed: CharacterSet = {
+        var set = CharacterSet.alphanumerics
+        set.insert(charactersIn: "-._~")
+        return set
+    }()
 
     private func quoted(_ value: String) -> String {
         "\"\(value.replacingOccurrences(of: "\"", with: ""))\""

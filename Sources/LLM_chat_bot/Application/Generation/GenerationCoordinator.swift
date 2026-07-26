@@ -407,7 +407,18 @@ final class GenerationCoordinator: @unchecked Sendable {
                     text: "⚡ Дневной лимит вам больше не мешает — вернул умную модель <code>\(restored)</code>. Сменить: /menu → 🤖 Модель"
                 )
             }
-        } else if let effectiveFree = await state.effectiveFreeModelIDs() {
+        } else {
+            // Which models are free comes from OpenRouter's catalogue plus the
+            // super-admin's pins. When neither is available the set is unknown —
+            // and an unknown set must not mean "everything is free": that is the
+            // one failure mode that hands every paid model to every user at the
+            // owner's expense, silently, for as long as the catalogue is
+            // unreachable. Unknown is therefore treated as "assume paid": the
+            // daily allowance still applies, and only the fallback is missing.
+            let effectiveFree = await state.effectiveFreeModelIDs()
+            if effectiveFree == nil {
+                logger.warning("free-model set unknown (OpenRouter catalogue unavailable) — treating paid models as capped")
+            }
             // A fresh daily allowance gives the parked paid model back — quietly.
             // The gate below only fires while the chat model *is* paid, so a chat
             // sitting on the cap fallback would never reach `consumeDailyPremium`
@@ -421,11 +432,7 @@ final class GenerationCoordinator: @unchecked Sendable {
                 await state.restoreDowngradedModel(chatKey: chatKey)
             }
             let currentModel = await state.model(chatKey: chatKey)
-            if !effectiveFree.contains(currentModel) {
-                guard let firstFree = await state.firstFreeModel() else {
-                    try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Бесплатные модели сейчас недоступны. Напишите администратору бота.")
-                    return
-                }
+            if !(effectiveFree?.contains(currentModel) ?? false) {
                 let isGroup = !origin.isPrivate
                 let decision = await state.consumeDailyPremium(
                     chatID: chatKey.chatID,
@@ -445,6 +452,20 @@ final class GenerationCoordinator: @unchecked Sendable {
                     lastPremiumCall = remaining == 0 ? limit : nil
                 case .exhausted(let limit):
                     await state.bumpFunnel(.capHit)
+                    // The fallback is resolved here rather than before the
+                    // allowance is spent: a turn that stays inside the daily
+                    // quota needs no fallback at all, so an unreachable
+                    // catalogue must not cost the user a unit for nothing.
+                    guard let firstFree = await state.firstFreeModel() else {
+                        // Nothing free to fall back to. Refusing is the only
+                        // honest option — the alternative is answering on a paid
+                        // model, for free, to someone who has spent their quota.
+                        try await sendUserFeedback(
+                            chatKey: chatKey,
+                            text: "ℹ️ Умные ответы на сегодня закончились, а бесплатные модели сейчас недоступны. Попробуйте позже или откройте премиум: /buy"
+                        )
+                        return
+                    }
                     await state.downgradeModelToFree(chatKey: chatKey, freeModel: firstFree)
                     try? await sendDailyLimitOffer(chatKey: chatKey, isGroup: isGroup, limit: limit, freeModel: firstFree)
                 }

@@ -421,9 +421,12 @@ final class BotOrchestrator: @unchecked Sendable {
         // chat, and an unattributed question followed by an answer reads as the
         // bot talking to itself.
         let isPrivate = message.chat.type == "private"
+        // The name goes into an HTML message, so it takes the same escaping as
+        // every other stored label (`UserIdentity.displayLabel`) — a display
+        // name is arbitrary text the person picked for themselves.
         let asker = isPrivate
             ? nil
-            : callback.from.username.map { "@\($0)" } ?? callback.from.first_name
+            : await state.displayLabel(forKey: state.userKey(userID: callback.from.id))
         let echo = try? await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,

@@ -38,7 +38,9 @@ struct ConsoleLogger: LoggerPort {
 
     private func log(_ level: Level, _ tag: String, _ message: String) {
         guard level >= minLevel else { return }
-        print("\(Self.timestamp()) [\(tag)] \(message)")
+        // Errors quote the request that failed, and every Telegram request URL
+        // carries the bot token. Redacting here covers every call site at once.
+        print("\(Self.timestamp()) [\(tag)] \(SecretRedactor.shared.redact(message))")
         fflush(stdout)
     }
 

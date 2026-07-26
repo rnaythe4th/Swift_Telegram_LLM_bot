@@ -6,8 +6,16 @@ enum UserFacingError {
 
     static func message(_ error: Error, context: String? = nil) -> String {
         let body = describe(error)
-        guard let context, !context.isEmpty else { return body }
-        return "\(context): \(body)"
+        let text: String
+        if let context, !context.isEmpty {
+            text = "\(context): \(body)"
+        } else {
+            text = body
+        }
+        // Belt and braces for the unrecognised-error branches below, which
+        // print whatever an arbitrary `Error` chose to say: a request URL in
+        // there would carry the bot token straight into a chat.
+        return SecretRedactor.shared.redact(text)
     }
 
     static func shortMessage(_ error: Error, context: String? = nil) -> String {
@@ -77,19 +85,13 @@ enum UserFacingError {
     private static func describeTransport(_ error: NetworkTransportError) -> String {
         switch error {
         case .invalidStatus(let response):
-            let bodyText = String(data: response.data, encoding: .utf8) ?? ""
-            let parsed = parseAPIErrorMessage(from: response.data, bodyText: bodyText)
-            let statusReason = httpStatusReason(response.statusCode)
-
-            if let parsed, !parsed.isEmpty {
-                return "\(statusReason). \(parsed)"
-            }
-
-            let trimmed = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                return statusReason
-            }
-            return "\(statusReason). \(truncate(trimmed, limit: bodyPreviewLimit))"
+            // Only the status reason, which is written for this audience and in
+            // Russian. The upstream body used to be pasted in verbatim: that is
+            // English provider jargon at best, and at worst it echoes whatever
+            // the service chose to put in an error — request fragments, account
+            // identifiers, key prefixes — into a user's chat. The full body is
+            // still logged, where support can read it.
+            return httpStatusReason(response.statusCode)
 
         case .decodeFailure:
             return "Сервис ИИ ответил непонятно. Попробуйте ещё раз."
@@ -122,68 +124,6 @@ enum UserFacingError {
         case 500...599: return "Сервис ИИ временно недоступен — попробуйте позже (\(code))"
         default: return "Сбой на стороне сервиса ИИ (\(code))"
         }
-    }
-
-    private static func parseAPIErrorMessage(from data: Data, bodyText: String) -> String? {
-        guard !data.isEmpty,
-              let json = try? JSONSerialization.jsonObject(with: data, options: []) else {
-            return nil
-        }
-
-        if let dict = json as? [String: Any] {
-            if let value = extractMessage(from: dict) { return value }
-        }
-
-        if let array = json as? [[String: Any]] {
-            for entry in array {
-                if let value = extractMessage(from: entry) { return value }
-            }
-        }
-
-        return nil
-    }
-
-    private static func extractMessage(from dict: [String: Any]) -> String? {
-        if let errorField = dict["error"] {
-            if let str = errorField as? String, !str.isEmpty { return str }
-            if let nested = errorField as? [String: Any] {
-                if let value = pickString(nested, keys: ["message", "description", "detail"]) {
-                    return value
-                }
-                if let metadata = nested["metadata"] as? [String: Any],
-                   let raw = metadata["raw"] as? String,
-                   !raw.isEmpty {
-                    return raw
-                }
-            }
-        }
-
-        if let value = pickString(dict, keys: [
-            "description",
-            "message",
-            "error_description",
-            "detail",
-            "msg",
-            "errorMessage"
-        ]) {
-            return value
-        }
-
-        if let parameters = dict["parameters"] as? [String: Any],
-           let value = pickString(parameters, keys: ["description", "message"]) {
-            return value
-        }
-
-        return nil
-    }
-
-    private static func pickString(_ dict: [String: Any], keys: [String]) -> String? {
-        for key in keys {
-            if let value = dict[key] as? String, !value.trimmingCharacters(in: .whitespaces).isEmpty {
-                return value
-            }
-        }
-        return nil
     }
 
     private static func truncate(_ text: String, limit: Int) -> String {

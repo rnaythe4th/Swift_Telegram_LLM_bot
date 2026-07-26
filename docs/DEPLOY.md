@@ -131,6 +131,7 @@ alter table if exists public.bot_state enable row level security;
 | `SUPABASE_URL` | URL проекта Supabase |
 | `SUPABASE_SERVICE_KEY` | service_role ключ Supabase |
 | `TELEGRAM_WEBHOOK_SECRET` | случайная строка, сгенерируйте: `openssl rand -hex 32` |
+| `OWNER_USER_ID` | ваш числовой Telegram userID (узнать: напишите боту и посмотрите `/chatid` в личке). См. ниже — без него владельца опознают по @нику |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `30` — сколько Railway ждёт после SIGTERM, прежде чем убить процесс (нужно для финального сброса состояния) |
 
 Опциональные:
@@ -139,6 +140,7 @@ alter table if exists public.bot_state enable row level security;
 |---|---|
 | `UPDATE_MODE` | `auto` (по умолчанию) / `webhook` / `polling` |
 | `WEBHOOK_PUBLIC_URL` | нужен только вне Railway (на Railway домен подхватывается сам из `RAILWAY_PUBLIC_DOMAIN`) |
+| `METRICS_TOKEN` | токен для `GET /metrics`. Если не задан, используется `TELEGRAM_WEBHOOK_SECRET` — эндпоинт закрыт в любом случае |
 | `MAX_CONCURRENT_GENERATIONS` | лимит одновременных LLM-стримов, по умолчанию `64` |
 | `LOG_LEVEL` | `info` (по умолчанию) / `warning` / `error` |
 | `TONAPI_KEY`, `ETHERSCAN_API_KEY`, `TRONGRID_API_KEY` | ключи крипто-обозревателей, если используете крипто-платежи. Один ключ etherscan.io покрывает и ETH, и BSC (Etherscan API V2). `BSCSCAN_API_KEY` — legacy-фолбэк, не нужен. Подробно — PAYMENTS_SETUP.md |
@@ -146,6 +148,21 @@ alter table if exists public.bot_state enable row level security;
 `TELEGRAM_WEBHOOK_SECRET` технически опционален (бот сгенерирует случайный на
 старте), но статический лучше: при перекрывающихся деплоях оба инстанса
 принимают один и тот же секрет без окна 401-ошибок.
+
+**`OWNER_USER_ID` — задайте его.** Без него владелец бота опознаётся только по
+@нику из конфигурации, а ник в Telegram арендуемый: если владелец его освободит,
+следующий, кто этот ник займёт, получит права root при первом же сообщении боту.
+userID передать нельзя, поэтому с ним root закреплён за аккаунтом навсегда — и
+не зависит ни от ника, ни от того, что успело записаться в базу.
+
+**`/metrics` закрыт токеном.** Эндпоинт живёт на том же публичном домене, что и
+вебхук, и отдаёт воронку, выручку и счётчики подписчиков. Запрос:
+
+```
+curl -H "Authorization: Bearer $METRICS_TOKEN" https://<домен>/metrics
+```
+
+`/health` и `/ready` остаются открытыми — на `/ready` смотрит healthcheck Railway.
 
 ---
 

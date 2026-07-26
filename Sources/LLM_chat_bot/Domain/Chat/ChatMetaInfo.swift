@@ -19,11 +19,22 @@ struct ChatMetaInfo: Codable, Sendable, Equatable {
     var botRemoved: Bool?
 
     /// Compact display label: title for groups, @username / name for privates.
+    ///
+    /// HTML-safe like `UserIdentity.displayLabel`: a group title is free text
+    /// chosen by whoever can rename the chat, and it is printed straight into
+    /// the admin's chat list — an unescaped one could open a tag there.
     var displayLabel: String {
-        if let title, !title.isEmpty { return title }
-        if let username, !username.isEmpty { return "@\(username)" }
-        if let firstName, !firstName.isEmpty { return firstName }
+        if let title, !title.isEmpty { return UserIdentity.sanitizeName(title) ?? type }
+        if let username, !username.isEmpty { return "@\(UserIdentity.sanitizeName(username) ?? username)" }
+        if let firstName, !firstName.isEmpty { return UserIdentity.sanitizeName(firstName) ?? type }
         return type
+    }
+
+    /// Title as it is safe to print. Same rule as `displayLabel`, for the call
+    /// sites that want the title specifically (`/inspect`).
+    var safeTitle: String? {
+        guard let title, !title.isEmpty else { return nil }
+        return UserIdentity.sanitizeName(title)
     }
 }
 

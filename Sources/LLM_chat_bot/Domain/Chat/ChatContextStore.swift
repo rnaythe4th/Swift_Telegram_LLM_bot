@@ -138,6 +138,9 @@ actor ChatContextStore {
 
     var superAdminUsernames: Set<String>
     let rootSuperAdminUsername: String
+    /// Owner's Telegram userID when configured (`OWNER_USER_ID`). Root is then
+    /// this account and nothing else — not a stored key, not a handle.
+    let pinnedOwnerUserID: Int?
     let defaultOwnerUsername: String
     var formatOptions: String
     let companyChatId: Int
@@ -263,6 +266,7 @@ actor ChatContextStore {
 
     init(
         ownerUsername: String,
+        ownerUserID: Int? = nil,
         model: String,
         systemPrompt: String,
         formatOptions: String,
@@ -273,7 +277,15 @@ actor ChatContextStore {
     ) {
         // The directory is empty here, so the owner starts as a pending key and
         // is re-filed under `#<userID>` the first time they talk to the bot.
-        let owner = ownerUsername.lowercased()
+        //
+        // Unless `ownerUserID` is configured, in which case root is that account
+        // from the start. A @username is rented: release it and whoever
+        // registers it next inherits the pending root record on their first
+        // message. A userID cannot change hands, so pinning root to one closes
+        // that door — and keeps the owner's own access from depending on a
+        // handle they might one day drop.
+        self.pinnedOwnerUserID = ownerUserID
+        let owner = ownerUserID.map { UserKey.forUserID($0) } ?? ownerUsername.lowercased()
         self.superAdminUsernames = [owner]
         self.rootSuperAdminUsername = owner
         self.defaultOwnerUsername = owner
@@ -321,8 +333,19 @@ actor ChatContextStore {
 
     /// Variant for call sites that already hold a non-optional username; a
     /// blank one can only key itself, which no real record ever uses.
+    ///
+    /// The fallback is *sanitized*, not raw. This is the one place free-form
+    /// text (a hand-typed `/tenant adduser` argument) could become a storage
+    /// key, and a storage key is not inert: it is written into database filters
+    /// and printed into HTML. A key that keeps only username characters cannot
+    /// reach into either, and cannot impersonate an identified `#<userID>` key.
     func userKeyOrRaw(_ username: String) -> String {
-        userKey(username: username) ?? username.lowercased()
+        let trimmed = username.trimmingCharacters(in: .whitespaces)
+        // An already-resolved key round-trips untouched — callers pass
+        // `#<userID>` deliberately (CLAUDE.md §6).
+        if UserKey.userID(from: trimmed) != nil { return trimmed }
+        if let resolved = userKey(username: trimmed) { return resolved }
+        return UserKey.sanitizedPendingFallback(trimmed)
     }
 
     /// Every key a person's records could sit under, most authoritative first:
@@ -346,7 +369,11 @@ actor ChatContextStore {
     /// in the directory the first time they are seen, so root survives them
     /// changing the @username the bot was configured with.
     var rootSuperAdminKey: String {
-        userDirectoryValue.rootKey ?? userKey(username: rootSuperAdminUsername) ?? rootSuperAdminUsername
+        // A configured owner account wins over everything stored: that is the
+        // point of configuring it — root stops depending on who currently holds
+        // a @username, or on what an earlier run happened to pin.
+        if let pinnedOwnerUserID { return UserKey.forUserID(pinnedOwnerUserID) }
+        return userDirectoryValue.rootKey ?? userKey(username: rootSuperAdminUsername) ?? rootSuperAdminUsername
     }
 
     /// Label for a stored key: `@username` when known, otherwise the person's
