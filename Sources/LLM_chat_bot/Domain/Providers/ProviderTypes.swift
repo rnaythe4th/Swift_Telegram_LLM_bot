@@ -126,3 +126,9 @@ enum ReasoningEffort: String, Codable, Sendable, CaseIterable {
         }
     }
 }
+
+extension ServiceProvider: CaseIterable {
+    public static var allCases: [ServiceProvider] {
+        [.openrouter, .deepseek, .yandex]
+    }
+}

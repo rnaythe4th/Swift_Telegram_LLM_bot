@@ -97,15 +97,29 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   стрима (draft или edit), сборка футера, показ рекламы. См. §9.
   Вход в пайплайн — `GenerationOrigin` (кто спросил, личка ли, на что отвечать):
   строится из `TelegramMessage` либо синтезируется для тапа по примеру
-  (`runReadyPrompt`).
+  (`runReadyPrompt`). Рядом — `+Streaming.swift` (draft/edit-раннеры, разбивка
+  длинных ответов) и `+Monetization.swift` (реклама, офферы при лимите и пустом
+  балансе, реферальная выплата, футер).
 - `Generation/DraftStreamer.swift` — «печатающая машинка» через `sendMessageDraft`.
 - `Commands/` — `CommandParser.swift` (парсинг `/cmd@bot`+suffix) и
-  `BotCommandHandler.swift` (~1900 строк, реализация всех команд). См. §12.
+  `BotCommandHandler.swift` — обвязка, гейты ролей, `handleIfCommand`. Тела
+  команд разнесены по `BotCommandHandler+*.swift`: `Dispatch` (switch
+  команда → обработчик), `Start` (`/start`, диплинки, приветствия), `Referral`,
+  `Info` (`/chatid`, `/inspect`, `/history`), `Onboarding`, `Balance`,
+  `Reminders`, `Ads`, `Admin` (whitelist/defaults/chats/users/presets),
+  `Tenant`, `SuperAdmin` (`/superadmin`, `/simulate`, крипта, free-модели),
+  `Buy`. См. §12.
 - `Callbacks/` — `BotCallbackAction.swift` (типы callback_data: `stop`, `menu`,
   `faq`, `ex:<id>` — пример онбординга) и `BotCallbackHandler.swift` (роутинг
   нажатий кнопок).
-- `Menu/BotMenuHandler.swift` — inline-меню (~3700 строк): страницы, рендеринг,
-  обработка ввода текста после нажатия кнопок. См. §13.
+- `Menu/` — inline-меню (§13). `MenuPage.swift` — каталог страниц,
+  `SuperHelpSection.swift` — справка суперадмина по разделам,
+  `BotMenuHandler.swift` — обвязка, диспетчер callback'ов
+  (`processAction` → восемь групповых обработчиков), `showPage`/`renderPage`.
+  Страницы и действия — по `BotMenuHandler+*.swift`: `MainPage`, `ChatSettings`,
+  `Purchase`, `Presets`, `Admin`, `Tenants`, `SuperAdmin`, `PaymentSettings`
+  (Stars/карта/крипта/free-модели), `Retention`, `Onboarding`, `Referral`,
+  `Growth` (воронка, реклама, источники), `Help`, `TextInput`, `AdminInput`.
 - `Formatting/ResponseFooterFormatter.swift` — футер под ответом (токены, стоимость
   ×markup, модель, остаток баланса).
 - `Payments/` — `CryptoPaymentService.swift` (инвойсы, курсы, матчинг),
@@ -125,8 +139,18 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   `StatePersistencePort`, `MediaResolverPort`, `LoggerPort` + модели портов.
 
 ### Domain/
-- `Chat/ChatContextStore.swift` — **сердце системы** (~1950 строк), актор,
-  хранит всё состояние в памяти и правила бизнес-логики. См. §5.
+- `Chat/ChatContextStore.swift` — **сердце системы**, актор: хранилище состояния,
+  dirty-наборы и boot-обвязка. См. §5. Логика разнесена по
+  `ChatContextStore+*.swift` (все — расширения того же актора, поэтому поля
+  `internal`, но за пределами этих файлов их никто не трогает):
+  `Identity` (UserKey ↔ ник, `adoptRecords`), `Tenants`, `Subscriptions`
+  (активация, цены, расписание напоминаний), `Auth` (роли + резолв доступа),
+  `Presets`, `ChatContext` (память чата и её мутации), `Chats` (списки, мета,
+  инвайты), `PendingInput`, `Payments` (Stars/карта/крипта/курсоры),
+  `Models` (free-модели), `Premium` (дневная порция), `Analytics`
+  (воронка + `src_`), `Onboarding`, `Referral`, `Balances`, `Ads`.
+- `Chat/ChatContextTypes.swift` — value-типы стора: `TenantState`, `ChatContext`,
+  `GenerationSnapshot`, `HelpData`, `TenantStatsRow`, `SimulatedRole`.
 - `Chat/ChatContextStore+Persistence.swift` — экспорт/импорт строк (dirty-дренаж,
   restore), изоляция кода персистентности от основного актора.
 - `Chat/BotStateSnapshot.swift` — `CumulativeUsage`, снапшот-DTO (`*Snapshot`),
@@ -1254,6 +1278,15 @@ OpenRouter кэшируется в памяти и на старте может 
 
 ## 17. Конвенции и подводные камни
 
+- **Код живёт в файле своей темы.** Четыре крупных типа (`ChatContextStore`,
+  `BotMenuHandler`, `BotCommandHandler`, `GenerationCoordinator`) разбиты на
+  расширения `Тип+Тема.swift` (§3): в «головном» файле только зависимости,
+  хранилище и диспетчеры, тело — в тематическом файле. Новый обработчик
+  дописывается в существующий `+файл` своей темы, а не в головной; новая тема —
+  новый `+файл` с шапкой-комментарием, что в нём. Файл, переваливший ~700 строк,
+  пора делить: чтобы прочитать одну ветку логики, не должен грузиться весь тип.
+  Члены, к которым обращается соседний `+файл`, — `internal` без `private`;
+  за пределами файлов одного типа их всё равно никто не трогает.
 - **Всё состояние — через актор `ChatContextStore`**. Новая изменяемая сущность
   обязана: (а) помечать dirty-set при мутации, (б) экспортироваться/импортироваться
   в `ChatContextStore+Persistence.swift`, (в) при необходимости получить
