@@ -813,10 +813,10 @@ final class BotMenuHandler: @unchecked Sendable {
             if parts[1] == "custom" {
                 await state.setAdminPendingInput(.init(kind: .chatCustomTemp, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
                 let prompt = """
-                <b>🌡 Своя температура</b>
+                <b>🌡 Свой стиль ответа</b>
 
                 Отправьте число от <code>0.0</code> до <code>2.0</code> одним сообщением.
-                <i>0.0 — точно и предсказуемо · 2.0 — креативно и хаотично</i>
+                <i>0.0 — строго по фактам и предсказуемо · 2.0 — творчески и непредсказуемо</i>
                 """
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:temp")]])
                 try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
@@ -1076,13 +1076,13 @@ final class BotMenuHandler: @unchecked Sendable {
             switch parts[1] {
             case "model":
                 kind = .defaultsModel
-                prompt = "<b>⚙️ Модель по умолчанию</b>\n\nТекущая: <code>\(defs.model)</code>\n\nОтправьте ID модели одним сообщением."
+                prompt = "<b>⚙️ Модель в новых чатах</b>\n\nСейчас: <code>\(defs.model)</code>\n\nОтправьте ID модели одним сообщением (названия — на openrouter.ai)."
             case "hist":
                 kind = .defaultsHistory
-                prompt = "<b>⚙️ Длина истории по умолчанию</b>\n\nТекущая: <b>\(defs.historyLength)</b>\n\nОтправьте число от 1 до 50."
+                prompt = "<b>⚙️ Память в новых чатах</b>\n\nСейчас: <b>\(defs.historyLength) сообщ.</b>\n\nОтправьте число от 1 до 50 — сколько последних сообщений бот держит в голове."
             case "role":
                 kind = .defaultsRole
-                prompt = "<b>⚙️ Роль по умолчанию</b>\n\nТекущая:\n<blockquote expandable>\(defs.role)</blockquote>\n\nОтправьте новый текст роли одним сообщением."
+                prompt = "<b>⚙️ Роль в новых чатах</b>\n\nСейчас:\n<blockquote expandable>\(defs.role)</blockquote>\n\nОтправьте новый текст роли одним сообщением."
             default:
                 return
             }
@@ -1131,14 +1131,41 @@ final class BotMenuHandler: @unchecked Sendable {
             switch parts[1] {
             case "add":
                 await state.setAdminPendingInput(.init(kind: .tenantRegister, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
-                let prompt = "<b>🏢 Зарегистрировать tenant</b>\n\nОтправьте @username одним сообщением."
+                let prompt = "<b>🏢 Зарегистрировать тенанта</b>\n\nОтправьте @username одним сообщением."
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:supertenants")]])
                 try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
             case "rm":
+                // Deleting a tenant throws away a paid subscription, their
+                // chats and their guest list — a mis-tap in a list of names
+                // must not be able to do that silently.
                 guard parts.count >= 3 else { return }
                 let target = parts[2]
-                let removed = await state.removeTenant(username: target)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалён" : "Нельзя")
+                let label = await state.displayLabel(forKey: target)
+                let row = await state.tenantStats().first { $0.username == target }
+                let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+                let subLine: String
+                if let row {
+                    subLine = row.paidUntil.map { "Подписка до <b>\(f.string(from: $0))</b> · чатов <b>\(row.chatCount)</b> · гостей <b>\(row.licensedUserCount)</b>" }
+                        ?? "Подписка <b>бессрочная</b> · чатов <b>\(row.chatCount)</b> · гостей <b>\(row.licensedUserCount)</b>"
+                } else {
+                    subLine = "<i>данных нет</i>"
+                }
+                let confirmText = """
+                <b>🗑 Удалить тенанта \(label)?</b>
+
+                \(subLine)
+
+                ⚠️ Подписка, привязанные чаты и список гостей пропадут. Их чаты вернутся на бесплатные модели. Отменить нельзя — только оформить заново.
+                """
+                let confirmMarkup = InlineKeyboardMarkup(inline_keyboard: [
+                    [menuButton("🗑 Да, удалить", action: "stenant:rmyes:\(target)")],
+                    [menuButton("❌ Отмена", action: "nav:supertenants")],
+                ])
+                try await editOrAnswer(callback: callback, message: message, text: confirmText, markup: confirmMarkup)
+            case "rmyes":
+                guard parts.count >= 3 else { return }
+                let removed = await state.removeTenant(username: parts[2])
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалён" : "Нельзя удалить")
                 try await showPage(.superTenants, chatKey: chatKey, callback: callback, message: message)
             case "info":
                 guard parts.count >= 3 else { return }
@@ -1151,20 +1178,20 @@ final class BotMenuHandler: @unchecked Sendable {
                     let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продлена до \(f.string(from: until))")
                 } else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Tenant не найден")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Тенант не найден")
                 }
                 let (text, markup) = await renderSuperTenantInfo(username: parts[2])
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
             case "unlim":
                 guard parts.count >= 3 else { return }
                 let ok = await state.setTenantUnlimited(username: parts[2])
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Подписка бессрочная" : "Tenant не найден")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Подписка бессрочная" : "Тенант не найден")
                 let (text, markup) = await renderSuperTenantInfo(username: parts[2])
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
             case "exp":
                 guard parts.count >= 3 else { return }
                 let ok = await state.expireTenantSubscription(username: parts[2])
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "⛔ Подписка завершена" : "Tenant не найден")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "⛔ Подписка завершена" : "Тенант не найден")
                 let (text, markup) = await renderSuperTenantInfo(username: parts[2])
                 try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
             default:
@@ -1408,6 +1435,21 @@ final class BotMenuHandler: @unchecked Sendable {
             try await handleOnboardingAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
             return
 
+        case "sahelp":
+            // One topic of the super-admin reference (the whole text does not
+            // fit in a single Telegram message).
+            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+                return
+            }
+            guard parts.count >= 2, let section = SuperHelpSection(rawValue: parts[1]) else {
+                try await showPage(.superAdminHelp, chatKey: chatKey, callback: callback, message: message)
+                return
+            }
+            let (helpText, helpMarkup) = renderSuperAdminHelpSection(section)
+            try await editOrAnswer(callback: callback, message: message, text: helpText, markup: helpMarkup)
+            return
+
         case "sref":
             guard await state.isSuperAdmin(username: invokerKey(callback)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
@@ -1444,6 +1486,26 @@ final class BotMenuHandler: @unchecked Sendable {
                 let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superbal")]])
                 try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
             case "rm":
+                // The wallet holds money the person paid for: confirm before
+                // it disappears from a one-tap row in a list.
+                guard parts.count >= 3 else { return }
+                let target = parts[2]
+                let label = await state.displayLabel(forKey: target)
+                let wallet = await state.balance(username: target)
+                let amount = wallet.map { String(format: "$%.4f", $0.balanceUsd) } ?? "—"
+                let confirmText = """
+                <b>🗑 Удалить кошелёк \(label)?</b>
+
+                Остаток · <b>\(amount)</b>
+
+                ⚠️ Остаток пропадёт вместе с историей списаний. Если человек пополнял баланс деньгами, это его деньги. Отменить нельзя.
+                """
+                let confirmMarkup = InlineKeyboardMarkup(inline_keyboard: [
+                    [menuButton("🗑 Да, удалить", action: "sbal:rmyes:\(target)")],
+                    [menuButton("❌ Отмена", action: "nav:superbal")],
+                ])
+                try await editOrAnswer(callback: callback, message: message, text: confirmText, markup: confirmMarkup)
+            case "rmyes":
                 guard parts.count >= 3 else { return }
                 let removed = await state.removeBalance(username: parts[2])
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Кошелёк удалён" : "Кошелёк не найден")
@@ -1666,7 +1728,7 @@ final class BotMenuHandler: @unchecked Sendable {
         case .temp:
             return await renderTemp(chatKey: chatKey)
         case .stats:
-            return await renderStats(chatKey: chatKey)
+            return await renderStats(chatKey: chatKey, username: username)
         case .history:
             return await renderHistory(chatKey: chatKey)
         case .provider:
@@ -1758,8 +1820,14 @@ final class BotMenuHandler: @unchecked Sendable {
             usageLine = "📈 " + parts.joined(separator: " · ")
         }
 
+        // In a group the menu is one shared message: whoever taps, everyone
+        // reads the result. So the page only ever states facts about the chat
+        // itself — a personal wallet balance (or "your subscription runs until
+        // …") would be published to every member (CLAUDE.md §13/§17).
+        let isGroupChat = chatKey.chatID < 0
+
         // Pay-as-you-go users see their wallet right on the main page.
-        let wallet = await state.balance(username: username)
+        let wallet = isGroupChat ? nil : await state.balance(username: username)
         var balanceLine = ""
         if let wallet {
             let status = wallet.balanceUsd > 0 ? "" : " <i>(исчерпан)</i>"
@@ -1768,11 +1836,13 @@ final class BotMenuHandler: @unchecked Sendable {
 
         // Who pays for the smart models here — the sponsor's standing credit
         // (roadmap step 3) and the answer to "почему у меня платные модели".
-        let access = await state.chatAccessStatus(chatID: chatKey.chatID, username: username)
+        let access = await state.chatAccessStatus(
+            chatID: chatKey.chatID,
+            username: isGroupChat ? nil : username
+        )
         // Free tier: show what is *left* today, not just the cap. A number that
         // visibly counts down is the whole point of the daily taste (step 6);
         // a static "5 в день" tells nobody where they stand.
-        let isGroupChat = chatKey.chatID < 0
         let dailyPremium: (remaining: Int, limit: Int) = access.isCovered
             ? (0, 0)
             : await state.remainingDailyPremium(
@@ -1810,7 +1880,7 @@ final class BotMenuHandler: @unchecked Sendable {
         if reasoningSupported {
             rows[2].append(menuButton("🧠 Обдумывание", action: "nav:reasoning"))
         }
-        rows.append([menuButton("📊 Что показывать в ответе", action: "nav:stats")])
+        rows.append([menuButton("📊 Что показывать под ответом", action: "nav:stats")])
         if usage.generationCount > 0 {
             rows.append([menuButton("🗑 Сбросить статистику", action: "stats:usage-reset")])
         }
@@ -1824,10 +1894,12 @@ final class BotMenuHandler: @unchecked Sendable {
         let starsPrice = await state.starsPrice()
         let cryptoCents = await state.cryptoPriceUsdCents()
         var isTenant = false
-        if let username {
+        if let username, !isGroupChat {
             isTenant = await state.isTenant(username: username)
         }
-        if (starsPrice ?? 0) > 0 || cryptoCents != nil || isTenant || wallet != nil {
+        let card = await state.cardConfig()
+        if (starsPrice ?? 0) > 0 || cryptoCents != nil || card.isEnabled || isTenant || wallet != nil {
+            // "Продлить" would out the tapper as a paying customer in a group.
             let payLabel = isTenant ? "🔄 Продлить премиум" : "⚡ Премиум-доступ"
             rows.append([menuButton(payLabel, action: "nav:pay")])
         }
@@ -1883,7 +1955,7 @@ final class BotMenuHandler: @unchecked Sendable {
             // Only promise a daily taste of the smart models when one is
             // actually configured (the super-admin can set the cap to 0).
             let taste = dailyPremiumLimit > 0
-                ? " · умных ответов сегодня осталось · \(dailyPremiumLeft) из \(dailyPremiumLimit)"
+                ? " · сегодня осталось умных ответов: <b>\(dailyPremiumLeft) из \(dailyPremiumLimit)</b>"
                 : ""
             return isGroup
                 ? "🆓 Бесплатный доступ\(taste) · премиум для всего чата откроет любой участник"
@@ -2003,16 +2075,27 @@ final class BotMenuHandler: @unchecked Sendable {
         }
         rows.append([menuButton("✏️ Ввести ID модели", action: "model:custom")])
         rows.append([menuButton("⚙️ Мои заготовки", action: "pm:model")])
-        rows.append(navButtons())
 
         var legendLine = ""
         var accessLine = ""
         if restrictionsActive {
-            legendLine = "\n🆓 — для всех · ⭐ — полный доступ"
+            legendLine = "\n<i>🆓 — доступна всем · ⭐ — умная модель, нужен премиум или баланс</i>"
             if !hasFullAccess {
-                accessLine = "\n\n<i>Модели с ⭐ доступны после покупки — /buy</i>"
+                // The picker is exactly where someone finds out they cannot
+                // have the model they want — telling them to go type /buy
+                // loses everyone who is not ready to type.
+                let taste = await state.remainingDailyPremium(
+                    chatID: chatKey.chatID,
+                    userID: chatKey.chatID > 0 ? chatKey.chatID : nil,
+                    isGroup: chatKey.chatID < 0
+                )
+                accessLine = taste.limit > 0
+                    ? "\n\n<i>Умные модели (⭐) можно попробовать бесплатно: сегодня осталось \(taste.remaining) из \(taste.limit). Дальше — премиум или баланс.</i>"
+                    : "\n\n<i>Умные модели (⭐) открываются премиумом или балансом.</i>"
+                rows.append([menuButton("⚡ Открыть умные модели", action: "nav:pay:\(PurchaseSource.model.rawValue)")])
             }
         }
+        rows.append(navButtons())
 
         let allPresets = globalPresets + chatPresets
         var priceSection = ""
@@ -2087,7 +2170,7 @@ final class BotMenuHandler: @unchecked Sendable {
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
-    private func renderStats(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    private func renderStats(chatKey: ChatKey, username: String? = nil) async -> (String, InlineKeyboardMarkup) {
         let help = await state.fetchHelp(chatKey: chatKey)
         let testModeOn = help.testModeSuffix != nil
         let testLabel: String = {
@@ -2096,27 +2179,35 @@ final class BotMenuHandler: @unchecked Sendable {
             }
             return "⚪️ Тест-режим"
         }()
-        let rows: [[InlineKeyboardButton]] = [
+        var rows: [[InlineKeyboardButton]] = [
             [menuButton("\(toggleMark(help.showTokens)) Объём текста", action: "stats:toggle:tokens"),
              menuButton("\(toggleMark(help.showCost)) Стоимость", action: "stats:toggle:cost")],
             [menuButton("\(toggleMark(help.showModel)) Модель", action: "stats:toggle:model")],
-            [menuButton("\(toggleMark(help.backupNotify)) Отчёты о сохранении", action: "stats:toggle:backup")],
-            [menuButton(testLabel, action: "stats:toggle:testmode")],
-            navButtons(),
         ]
+        // Storage reports and the test-mode suffix are operator tools: for a
+        // regular user they are two switches that explain nothing and do
+        // nothing they want. They stay one tap away for whoever runs the bot.
+        let isSuper = await state.isSuperAdmin(username: username)
+        let isChatAdmin = await state.isAdmin(username: username, chatID: chatKey.chatID)
+        let isOperator = isSuper || isChatAdmin
+        if isOperator || help.backupNotify || testModeOn {
+            rows.append([menuButton("\(toggleMark(help.backupNotify)) Отчёты о сохранении", action: "stats:toggle:backup")])
+            rows.append([menuButton(testLabel, action: "stats:toggle:testmode")])
+        }
+        rows.append(navButtons())
+
         let testHint = testModeOn
             ? "\n\n<i>🧪 Тест-режим включён — дописывайте <code>\(help.testModeSuffix!)</code> к командам, чтобы их выполнял именно этот бот.</i>"
             : ""
         let text = """
         <b>📊 Что показывать под ответом</b>
 
-        🟢 — показывать · ⚪️ — не показывать
+        Бот может подписывать каждый свой ответ короткой строкой. Нажмите, чтобы включить или выключить.
+        🟢 — показываю · ⚪️ — не показываю
 
         <i>Объём текста — сколько текста обработано на этот ответ
         Стоимость — сколько списалось за этот ответ
-        Модель — какая модель отвечала</i>
-
-        Нажмите, чтобы переключить.\(testHint)
+        Модель — какая модель отвечала</i>\(testHint)
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3211,17 +3302,19 @@ final class BotMenuHandler: @unchecked Sendable {
             if invoices.isEmpty {
                 text += "<i>нет</i>"
             } else {
-                let formatter = ISO8601DateFormatter()
-                formatter.formatOptions = [.withInternetDateTime]
                 let sorted = invoices.sorted { $0.createdAt < $1.createdAt }
                 for inv in sorted.prefix(20) {
                     let amount = CryptoAmountFormatter.format(atomic: inv.exactAmountAtomic, decimals: inv.asset.decimals)
                     let received = CryptoAmountFormatter.format(atomic: inv.accumulatedAtomic, decimals: inv.asset.decimals)
                     text += "\n• \(await state.displayLabel(forKey: inv.username)) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)"
                 }
+                if invoices.count > 20 {
+                    text += "\n\n<i>Показаны первые 20 из \(invoices.count) — полный список /tenant cryptoinvoices.</i>"
+                }
             }
             let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("← Назад", action: "nav:superadmin")]
+                [menuButton("🪙 К настройкам крипты", action: "nav:supercrypto")],
+                [menuButton("← К супер-админу", action: "nav:superadmin")],
             ])
             try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
 
@@ -3370,7 +3463,7 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton(cryptoButtonLabel, action: "nav:supercrypto")],
             [menuButton(cardButtonLabel, action: "nav:supercard")],
             [menuButton("🆓 Бесплатные модели · \(freeCount)", action: "nav:superfreemodels")],
-            [menuButton("🏢 Tenants и статистика · \(totalTenants)", action: "nav:supertenants")],
+            [menuButton("🏢 Тенанты и статистика · \(totalTenants)", action: "nav:supertenants")],
             [menuButton("👁 Чаты бота", action: "nav:superchats"),
              menuButton("📣 Реклама", action: "nav:superads")],
             [menuButton("🛡 Суперадмины", action: "nav:superadmins"),
@@ -3384,10 +3477,10 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel"),
              menuButton("📈 Источники · \(traffic.campaigns)", action: "nav:supersrc")],
             [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
-            [menuButton("📋 Глобальные пресеты — Модель", action: "pm:model"),
-             menuButton("🎭 Роль", action: "pm:role")],
-            [menuButton("🌡 Темп.", action: "pm:temp"),
-             menuButton("📝 История", action: "pm:history")],
+            [menuButton("📋 Общие заготовки · 🤖 Модели", action: "pm:model"),
+             menuButton("🎭 Роли", action: "pm:role")],
+            [menuButton("🌡 Стили ответа", action: "pm:temp"),
+             menuButton("📝 Память", action: "pm:history")],
             [menuButton("ℹ️ Справка по командам", action: "nav:superadminhelp")],
             navButtons(),
         ]
@@ -3408,9 +3501,9 @@ final class BotMenuHandler: @unchecked Sendable {
         🆓 Бесплатных моделей · <b>\(freeCount)</b>
         🪙 Открытых счетов · <b>\(openInvoices.count)</b>
 
-        <b>Глобальные пресеты</b>
+        <b>Общие заготовки</b> <i>(кнопки во всех чатах)</i>
         🤖 Моделей · <b>\(globalModels)</b> · 🎭 Ролей · <b>\(globalRoles)</b>
-        🌡 Темп · <b>\(globalTemps)</b> · 📝 Истории · <b>\(globalHist)</b>
+        🌡 Стилей ответа · <b>\(globalTemps)</b> · 📝 Памяти · <b>\(globalHist)</b>
         """
         return (text, InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3517,7 +3610,10 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton("💡 Примеры-запросы", action: "nav:superonboarding"),
              menuButton("📣 Реклама", action: "nav:superads")],
             [menuButton("📈 Источники трафика", action: "nav:supersrc")],
-            navButtons(),
+            // Every other super* page goes back to the super menu; "← Назад"
+            // here used to drop the reader into the chat settings instead.
+            [menuButton("← К супер-админу", action: "nav:superadmin"),
+             menuButton("✕ Закрыть", action: "close")],
         ]
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3611,7 +3707,7 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         lines.append("")
-        lines.append("<i>Каждое напоминание уходит один раз за срок подписки: продление обнуляет отметки. Спонсор может отключить их у себя в админ-панели. Счётчики — на странице «📊 Воронка» и в /metrics.</i>")
+        lines.append("<i>Каждое напоминание уходит один раз за срок подписки: продление обнуляет отметки. Спонсор может отключить их у себя в «⚡ Мой премиум». Счётчики — на странице «📊 Воронка» и в /metrics.</i>")
 
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
     }
@@ -3635,13 +3731,18 @@ final class BotMenuHandler: @unchecked Sendable {
             [menuButton(config.enabled ? "🟢 Примеры включены" : "⚪️ Примеры выключены", action: "onb:toggle")],
             [menuButton(config.showInGroups ? "🟢 Показывать в группах" : "⚪️ Только в личке", action: "onb:groups")],
         ]
+        // Two rows per example: five buttons squeezed into one row left the
+        // example's own name unreadable, which is the one thing you need to
+        // see to know which row you are editing.
         for (index, example) in config.examples.enumerated() {
             rows.append([
                 menuButton("\(example.enabled ? "🟢" : "⚪️") \(example.label)", action: "onb:on:\(index)"),
-                menuButton("📍\(example.placement.shortLabel)", action: "onb:place:\(index)"),
-                menuButton("✏️", action: "onb:edit:\(index)"),
-                menuButton("↑", action: "onb:up:\(index)"),
-                menuButton("❌", action: "onb:del:\(index)"),
+            ])
+            rows.append([
+                menuButton("📍 \(example.placement.shortLabel)", action: "onb:place:\(index)"),
+                menuButton("✏️ Изменить", action: "onb:edit:\(index)"),
+                menuButton("↑ Выше", action: "onb:up:\(index)"),
+                menuButton("❌ Удалить", action: "onb:del:\(index)"),
             ])
         }
         if config.examples.count < OnboardingConfig.maxExamples {
@@ -3760,7 +3861,7 @@ final class BotMenuHandler: @unchecked Sendable {
         // Wallets are keyed by account, not by nick — resolve through the
         // userID so someone without a @username still sees their balance.
         if await state.balance(username: state.userKey(userID: userID)) != nil {
-            rows.append([menuButton("💰 Мой баланс", action: "nav:pay:\(PurchaseSource.referral.rawValue)")])
+            rows.append([menuButton("💰 Баланс и оплата", action: "nav:pay:\(PurchaseSource.referral.rawValue)")])
         }
         rows.append(navButtons())
         return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
@@ -3960,12 +4061,18 @@ final class BotMenuHandler: @unchecked Sendable {
             lines.append("Всего оплат · <b>\(overview.payments)</b> <i>(с повторными)</i>")
             lines.append("")
             lines.append("<b>Кампании</b> <i>(пришло → написали → оплатили)</i>")
-            for (index, row) in overview.rows.enumerated() {
+            // Up to `TrafficSourceLedger.maxTags` campaigns can exist; the page
+            // must stay inside one Telegram message, so show the top slice.
+            let listLimit = 25
+            for (index, row) in overview.rows.prefix(listLimit).enumerated() {
                 lines.append(String(
                     format: "%d. <code>%@</code> · %d → %d → <b>%d</b> · конверсия %.1f%%",
                     index + 1, row.tag, row.tally.joined, row.tally.activated,
                     row.tally.payers, row.tally.conversionPercent
                 ))
+            }
+            if overview.rows.count > listLimit {
+                lines.append("<i>…и ещё \(overview.rows.count - listLimit) кампаний с меньшим числом оплативших</i>")
             }
         }
 
@@ -4390,18 +4497,29 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderAdminChats(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
         guard let invoker = await state.userKey(username: username) else {
-            return ("У вас не задан @username.", InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+            return (Self.unknownAccountNotice, InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
         }
         let invokerLabel = await state.displayLabel(forKey: invoker)
         let chats = await state.chatsOwnedBy(invoker).sorted()
 
         var rows: [[InlineKeyboardButton]] = []
+        var listLines: [String] = []
+        // A bare `-1001234567890` says nothing about which chat it is: the
+        // owner has to guess which of their groups they are switching off.
         for chatID in chats.prefix(40) {
             let kind = chatID < 0 ? "👥" : "👤"
+            let label = await state.chatDisplayLabel(chatID: chatID)
+            let named = label != String(chatID)
             rows.append([
-                menuButton("\(kind) \(chatID)", action: "noop"),
+                menuButton("\(kind) \(label)", action: "noop"),
                 menuButton("🗑 Выключить", action: "tenant:rmchat:\(chatID)"),
             ])
+            listLines.append(named
+                ? "\(kind) <b>\(label)</b> · <code>\(chatID)</code>"
+                : "\(kind) <code>\(chatID)</code>")
+        }
+        if chats.count > 40 {
+            listLines.append("<i>…и ещё \(chats.count - 40)</i>")
         }
         let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
         if chatOwner != invoker {
@@ -4410,12 +4528,7 @@ final class BotMenuHandler: @unchecked Sendable {
         rows.append([menuButton("📥 Добавить чат по номеру", action: "tenant:assignprompt")])
         rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
 
-        let listText: String
-        if chats.isEmpty {
-            listText = "<i>пока ни одного</i>"
-        } else {
-            listText = chats.map { "• <code>\($0)</code>" }.joined(separator: "\n")
-        }
+        let listText = chats.isEmpty ? "<i>пока ни одного</i>" : listLines.joined(separator: "\n")
         let text = """
         <b>📋 Чаты с премиумом \(invokerLabel)</b> (\(chats.count))
 
@@ -4432,17 +4545,24 @@ final class BotMenuHandler: @unchecked Sendable {
         var rows: [[InlineKeyboardButton]] = [
             [menuButton("➕ Добавить гостя", action: "wl:add")],
         ]
+        var listLines: [String] = []
+        // Guests are stored by numeric ID, but the owner recognises people by
+        // name — resolve it whenever the bot has ever seen them.
         for id in ids.prefix(40) {
+            let label = await state.displayLabel(forUserID: id)
+            let named = label != "id \(id)"
             rows.append([
-                menuButton("\(id)", action: "noop"),
+                menuButton(label, action: "noop"),
                 menuButton("🗑 Убрать", action: "wl:remove:\(id)"),
             ])
+            listLines.append(named ? "• <b>\(label)</b> · <code>\(id)</code>" : "• <code>\(id)</code>")
+        }
+        if ids.count > 40 {
+            listLines.append("<i>…и ещё \(ids.count - 40)</i>")
         }
         rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
 
-        let listText = ids.isEmpty
-            ? "<i>пусто</i>"
-            : ids.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+        let listText = ids.isEmpty ? "<i>пусто</i>" : listLines.joined(separator: "\n")
         let text = """
         <b>👤 Гости этого чата</b> (\(ids.count))
 
@@ -4476,7 +4596,7 @@ final class BotMenuHandler: @unchecked Sendable {
 
     private func renderAdminUsers(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
         guard let invoker = await state.userKey(username: username) else {
-            return ("У вас не задан @username.", InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+            return (Self.unknownAccountNotice, InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
         }
         let invokerLabel = await state.displayLabel(forKey: invoker)
         let users = await state.licensedUsers(ownerUsername: invoker)
@@ -4512,11 +4632,14 @@ final class BotMenuHandler: @unchecked Sendable {
     private func renderSuperTenants(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
         let rows = await state.tenantStats()
 
-        var lines: [String] = ["<b>🏢 Tenants</b> (\(rows.count))"]
+        // A message Telegram cannot fit is trimmed without a word, so the tail
+        // of a long list would simply vanish: cap it and say so out loud.
+        let pageLimit = 20
+        var lines: [String] = ["<b>🏢 Тенанты — владельцы премиума</b> (\(rows.count))"]
         if rows.isEmpty {
             lines.append("<i>нет</i>")
         } else {
-            for row in rows {
+            for row in rows.prefix(pageLimit) {
                 let mark = row.isSuperAdmin ? "🛡" : "🛠"
                 let realStr = String(format: "$%.4f", row.usage.totalCost)
                 let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
@@ -4527,12 +4650,15 @@ final class BotMenuHandler: @unchecked Sendable {
             }
         }
 
+        if rows.count > pageLimit {
+            lines.append("\n<i>Показаны первые \(pageLimit) из \(rows.count). Полный список — /tenant stats.</i>")
+        }
         if !rows.isEmpty {
-            lines.append("\n<i>Нажмите на tenant — подписка и управление.</i>")
+            lines.append("\n<i>Нажмите на тенанта — подписка и управление.</i>")
         }
 
-        var buttons: [[InlineKeyboardButton]] = [[menuButton("➕ Зарегистрировать tenant", action: "stenant:add")]]
-        for row in rows {
+        var buttons: [[InlineKeyboardButton]] = [[menuButton("➕ Зарегистрировать тенанта", action: "stenant:add")]]
+        for row in rows.prefix(pageLimit) {
             var btnRow = [menuButton("\(row.isSuperAdmin ? "🛡" : "🛠") \(row.label)", action: "stenant:info:\(row.username)")]
             if !row.isSuperAdmin {
                 btnRow.append(menuButton("🗑", action: "stenant:rm:\(row.username)"))
@@ -4549,8 +4675,8 @@ final class BotMenuHandler: @unchecked Sendable {
         let target = username.lowercased()
         guard let row = await state.tenantStats().first(where: { $0.username == target }) else {
             return (
-                "Tenant @\(target) не найден.",
-                InlineKeyboardMarkup(inline_keyboard: [[menuButton("← К tenants", action: "nav:supertenants")]])
+                "Тенант @\(target) не найден.",
+                InlineKeyboardMarkup(inline_keyboard: [[menuButton("← К тенантам", action: "nav:supertenants")]])
             )
         }
 
@@ -4581,9 +4707,9 @@ final class BotMenuHandler: @unchecked Sendable {
              menuButton("⛔ Истечь сейчас", action: "stenant:exp:\(row.username)")],
         ]
         if !row.isSuperAdmin {
-            buttons.append([menuButton("🗑 Удалить tenant", action: "stenant:rm:\(row.username)")])
+            buttons.append([menuButton("🗑 Удалить тенанта", action: "stenant:rm:\(row.username)")])
         }
-        buttons.append([menuButton("← К tenants", action: "nav:supertenants")])
+        buttons.append([menuButton("← К тенантам", action: "nav:supertenants")])
         return (text, InlineKeyboardMarkup(inline_keyboard: buttons))
     }
 
@@ -4597,13 +4723,20 @@ final class BotMenuHandler: @unchecked Sendable {
             lines.append("<i>Кошельков нет. Баланс — оплата платных моделей по факту, без подписки: начислите сумму, бот списывает стоимость каждого ответа с наценкой.</i>")
         } else {
             var totalBalance = 0.0, totalBilled = 0.0, totalReal = 0.0
-            for entry in balances {
+            // Totals cover everyone; the per-wallet list is capped so the page
+            // is never silently trimmed by Telegram's length limit.
+            let listLimit = 20
+            for (index, entry) in balances.enumerated() {
                 let w = entry.wallet
                 totalBalance += w.balanceUsd
                 totalBilled += w.spentBilledUsd
                 totalReal += w.spentRealUsd
+                guard index < listLimit else { continue }
                 lines.append("• <b>\(entry.label)</b> · остаток <b>\(usd(w.balanceUsd))</b>")
                 lines.append("  списано \(usd(w.spentBilledUsd)) · реально \(usd(w.spentRealUsd)) · маржа <b>\(usd(w.spentBilledUsd - w.spentRealUsd))</b>")
+            }
+            if balances.count > listLimit {
+                lines.append("<i>…и ещё \(balances.count - listLimit) — полный список /balance list</i>")
             }
             lines.append("")
             lines.append("<b>Итого</b> · остатки \(usd(totalBalance)) · маржа <b>\(usd(totalBilled - totalReal))</b>")
@@ -4677,13 +4810,18 @@ final class BotMenuHandler: @unchecked Sendable {
     }
 
     private func renderAdminInvite(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
-        guard let invoker = username?.lowercased() else {
-            return ("У вас не задан @username.", InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+        // The invite is filed under the caller's storage key, like every other
+        // per-person record — a raw handle would miss anyone without one.
+        guard let invoker = await state.userKey(username: username) else {
+            return (Self.unknownAccountNotice, InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
         }
         guard await state.isTenant(username: invoker) else {
             return (
-                "Премиум неактивен — оформить: /buy",
-                InlineKeyboardMarkup(inline_keyboard: [[menuButton("← К моему премиуму", action: "nav:admin")]])
+                "🔗 <b>Ссылка-приглашение</b>\n\nОна появится, как только у вас будет активный премиум: по ссылке умные модели работают за ваш счёт.",
+                InlineKeyboardMarkup(inline_keyboard: [
+                    [menuButton("⚡ Открыть премиум", action: "nav:pay:\(PurchaseSource.menu.rawValue)")],
+                    [menuButton("← К моему премиуму", action: "nav:admin")],
+                ])
             )
         }
 
@@ -4846,11 +4984,33 @@ final class BotMenuHandler: @unchecked Sendable {
         return (Self.adminHelpText, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
+    /// Index of the super-admin reference. The whole text is far past
+    /// Telegram's 4096-character ceiling, and `editMessage` cannot split a
+    /// message — it silently trims to the first chunk, so half the reference
+    /// used to be invisible with no hint that anything was missing. One page
+    /// per topic keeps every section whole and makes it findable.
     private func renderSuperAdminHelp() -> (String, InlineKeyboardMarkup) {
+        var rows: [[InlineKeyboardButton]] = SuperHelpSection.allCases.map {
+            [menuButton($0.buttonLabel, action: "sahelp:\($0.rawValue)")]
+        }
+        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        let text = """
+        <b>🛡 Справка супер-админа</b>
+
+        Любая настройка имеет и кнопку, и команду: кнопки удобнее, команды быстрее.
+
+        Выберите раздел:
+        \(SuperHelpSection.allCases.map { "• \($0.title)" }.joined(separator: "\n"))
+        """
+        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+    }
+
+    private func renderSuperAdminHelpSection(_ section: SuperHelpSection) -> (String, InlineKeyboardMarkup) {
         let rows: [[InlineKeyboardButton]] = [
-            [menuButton("← К супер-админу", action: "nav:superadmin")],
+            [menuButton("← К разделам справки", action: "nav:superadminhelp")],
+            [menuButton("🛡 К супер-админу", action: "nav:superadmin")],
         ]
-        return (Self.superAdminHelpText, InlineKeyboardMarkup(inline_keyboard: rows))
+        return (section.body, InlineKeyboardMarkup(inline_keyboard: rows))
     }
 
     static let adminHelpText: String = """
@@ -4899,165 +5059,6 @@ final class BotMenuHandler: @unchecked Sendable {
 <b>━━━ 📋 Посмотреть ━━━</b>
 
 <code>/chats</code> — все чаты бота · <code>/users</code> — кто пишет в личке
-"""
-
-    static let superAdminHelpText: String = """
-<b>🛡 Справка супер-админа</b>
-
-Любая настройка имеет и кнопку, и команду. Списки кнопок — в соответствующих разделах меню.
-
-<b>━━━ 🛡 Суперадмины ━━━</b>
-
-UI: «🛡 Суперадмины» в супер-меню — ➕ добавить / 🗑 убрать (только главный суперадмин).
-
-<code>/superadmin add @username</code>
-<code>/superadmin remove @username</code>
-<code>/superadmin list</code>
-
-<b>━━━ 🏢 Tenants и лицензии ━━━</b>
-
-UI: «🏢 Tenants и статистика» — ➕ зарегистрировать / 🗑 удалить; нажмите на tenant — продление, бессрочная подписка, немедленное истечение.
-
-<code>/tenant list</code> — все tenants
-<code>/tenant stats</code> — статистика и подписки (токены, $, сроки)
-<code>/tenant add @username</code> — зарегистрировать вручную (бессрочно)
-<code>/tenant remove @username</code> — удалить tenant
-<code>/tenant extend @username &lt;дней&gt;</code> — продлить подписку
-<code>/tenant unlimited @username</code> — сделать бессрочной
-<code>/tenant expire @username</code> — завершить немедленно
-<code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат
-<code>/tenant unassign &lt;chatID&gt;</code> — отвязать чат
-
-<b>━━━ 👁 Прозрачность ━━━</b>
-
-UI: «👁 Чаты бота» в супер-меню — список чатов с названиями, по нажатию — настройки, роль и статистика чата.
-
-<code>/chats</code> — все чаты с ID и названиями
-<code>/inspect &lt;chatID&gt;</code> — настройки/роль/статистика любого чата
-<code>/chatid</code> — ID текущего чата
-
-<b>━━━ 💰 Балансы и наценка ━━━</b>
-
-UI: «💰 Балансы» в супер-меню — начислить/списать/удалить кошельки; «💹 Наценка» — изменить процент.
-
-Второй способ монетизации: пользователь платит за каждый ответ со своего баланса по ценам с наценкой (подписка чата имеет приоритет — тогда баланс не трогается).
-
-<code>/tenant markup &lt;процент&gt;</code> — наценка на цены моделей (по умолчанию 30%)
-<code>/balance add @user 5</code> — начислить $5 (себе тоже можно)
-<code>/balance set @user 10</code> · <code>/balance remove @user</code>
-<code>/balance list</code> — все кошельки: остаток, списано, реальный расход, маржа
-
-Пользователь видит цены и списания уже с наценкой (футер, /balance, меню); реальные цифры — только вам.
-
-<b>━━━ 📣 Реклама ━━━</b>
-
-UI: «📣 Реклама» в супер-меню — создать/включить/удалить кампании + настроить само-рекламу премиума.
-Показы идут только в чатах <b>без активной платной лицензии</b>, после ответа бота.
-
-Когда активных кампаний нет, слот занимает <b>само-реклама</b>: ваш текст плюс кнопка «⚡ Открыть премиум». Её тапы видно в «📊 Воронка» → «Откуда открывают покупку».
-
-<code>/ads</code> — список кампаний и вся справка
-<code>/ads add &lt;текст&gt;</code> — создать
-<code>/ads freq &lt;id&gt; &lt;N&gt; [мин]</code> — каждые N ответов, пауза в минутах
-<code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code> — лимит показов, равномерно на период
-<code>/ads button &lt;id&gt; &lt;текст&gt; | &lt;url&gt;</code> — кнопка-ссылка
-<code>/ads promo</code> — само-реклама: <code>on|off</code> · <code>text &lt;текст&gt;</code> · <code>freq &lt;N&gt; [мин]</code> · <code>reset</code>
-
-<b>━━━ ⏳ Напоминания и winback ━━━</b>
-
-UI: «⏳ Напоминания и winback» в супер-меню — расписание, скидка, ручная проверка, предпросмотр, список подписок под наблюдением.
-
-Бот сам пишет спонсору перед концом подписки (можно несколько волн, например за 3 дня и за 1 день), а после истечения делает winback-оффер со скидкой (скидка действует на Stars, крипту и карту и сгорает по времени). Каждое сообщение уходит один раз за срок подписки; продление обнуляет отметки; спонсор может отписаться у себя в админ-панели. Отдельно есть возврат по балансу: тем, кто платил деньгами, потратил всё и пропал.
-
-<code>/reminders</code> — статус + кто скоро истекает
-<code>/reminders on|off</code> · <code>/reminders chats on|off</code>
-<code>/reminders days 3,1</code> — за сколько дней напомнить (<code>off</code> — не напоминать)
-<code>/reminders winback 1,7</code> — дни winback (<code>off</code> — выключить)
-<code>/reminders discount 30</code> · <code>/reminders hours 48</code>
-<code>/reminders interval 60</code> — как часто проверять, мин
-<code>/reminders wallet 7</code> — вернуть тех, у кого кончился оплаченный баланс (0 — не писать)
-<code>/reminders run</code> — проверить сейчас · <code>/reminders test</code> — предпросмотр
-<code>/reminders clear</code> — снять все активные скидки
-
-<b>━━━ 💡 Примеры-запросы (онбординг) ━━━</b>
-
-UI: «💡 Примеры-запросы» в супер-меню — тексты кнопок и запросов, порядок, вкл/выкл каждого, предпросмотр, тапы по каждому примеру.
-
-Кнопки-примеры показываются в приветствии <code>/start</code> и (опционально) при добавлении бота в группу. Тап = обычный запрос: работают дневной лимит, биллинг, история чата.
-
-<code>/examples</code> — показать примеры в чате
-<code>/examples stats</code> — тапы по каждому примеру
-<code>/examples on|off</code> · <code>/examples groups</code>
-<code>/examples reset</code> — вернуть стандартный набор
-<code>/examples clearstats</code> — обнулить счётчики
-
-<b>━━━ 📊 Воронка и аналитика ━━━</b>
-
-UI: «📊 Воронка и аналитика» в супер-меню. Период переключается кнопками (сегодня · 7 дней · 30 дней · всё время) — рядом с числом периода видно и общий итог. По дням хранится 35 суток.
-
-Что там есть: путь <code>/start</code> → первое сообщение → упёрлись в лимит → открыли покупку → счёт → оплата, конверсия на каждом шаге, «Откуда открывают покупку» (лимит / само-реклама / меню / пустой баланс / напоминание), возвращаемость (видели ли человека спустя сутки и спустя неделю после первой встречи), спонсоры и winback.
-
-Те же числа в JSON — <code>/metrics</code>: <code>funnel</code> (всё время), <code>funnelToday</code>, <code>funnelWeek</code>.
-
-<b>━━━ 🎁 Приглашения (рефералы) ━━━</b>
-
-UI: «🎁 Приглашения» в супер-меню — награды обеим сторонам, бонус за оплату друга, лимит наград на человека, счётчики выплат, топ пригласивших, очистка журнала.
-
-Пользователь берёт свою ссылку в /ref или в меню. Награда начисляется на балансы <b>после первого реального ответа</b> приглашённому, один раз на пару, только если он раньше не пользовался ботом. Отдельно: когда приглашённый <b>впервые оплатил</b> (подписку или пополнение, любым способом), пригласившему приходит бонус — один раз на пару, лимит наград на него не действует.
-
-<code>/ref</code> — своя ссылка (у всех) · <code>/ref stats</code> — цифры программы
-<code>/ref on|off</code> — включить/выключить
-<code>/ref reward 1</code> · <code>/ref friend 1</code> — награды за регистрацию, $
-<code>/ref bonus 2</code> — бонус за оплату друга, $
-<code>/ref cap 20</code> — лимит оплаченных приглашений на человека (0 — без лимита)
-
-<b>━━━ 💫 Stars ━━━</b>
-
-UI: «💫 Stars» в супер-меню.
-<code>/tenant price &lt;Stars&gt;</code> — цена в Stars (0 = отключить)
-
-<b>━━━ 🪙 Крипто ━━━</b>
-
-UI: «🪙 Крипто» в супер-меню — все настройки кнопками. «🪙 Открытые счета» — список счетов.
-
-<code>/tenant cryptoprice &lt;USD&gt;</code> — цена в долларах (0 = отключить)
-<code>/tenant cryptomode delta|unique</code> — режим идентификации платежей
-<code>/tenant cryptoinvoices</code> — открытые счета
-
-<i>delta</i> — один адрес на сеть, плательщики различаются по уникальной сумме.
-<i>unique</i> — каждому счёту выдаётся свой адрес из пула (сумма у всех одинаковая).
-
-<b>Адреса (режим delta):</b>
-<code>/tenant cryptoaddr &lt;ton|bsc|eth|tron&gt; &lt;addr&gt;</code>
-<code>/tenant cryptoaddr list</code>
-
-<b>Пул адресов (режим unique):</b>
-<code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code>
-<code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code>
-<code>/tenant cryptopool list</code>
-
-<b>━━━ 💳 Карта (эквайринг) ━━━</b>
-
-UI: «💳 Карта» в супер-меню — токен провайдера, валюта (RUB/USD/EUR), цена. Всё кнопками, команд нет.
-
-Токен выдаёт @BotFather после подключения провайдера (ЮKassa, Stripe…): /mybots → бот → Bot Settings → Payments. Токен с <code>:TEST:</code> — тестовый режим (карта 4242 4242 4242 4242). Подробная инструкция — PAYMENTS_SETUP.md.
-
-<b>━━━ 🆓 Бесплатные модели ━━━</b>
-
-UI: «🆓 Бесплатные модели» в супер-меню — ➕ по ID, ☐/🆓 у пресетов.
-
-<code>/tenant freemodels add|remove|list|available &lt;id&gt;</code>
-
-<b>━━━ 🎭 Симуляция роли ━━━</b>
-
-UI: «🎭 Симуляция» в супер-меню — кнопки админ/обычный/выкл + «🧪 Тест покупки».
-
-<code>/simulate admin|user|off|status</code>
-<code>/simulate buy</code> — тест покупки: активация подписки без оплаты (откат: /tenant remove)
-
-<b>━━━ 🧪 Команды админа ━━━</b>
-
-Также доступны: /defaults, /presets, /whitelist, /chats, /users, /reset_stats.
 """
 
     // MARK: - Preset management renderers
@@ -5206,19 +5207,19 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         case .defaultsModel:
             guard isAdmin, !trimmed.isEmpty else { toast = "⚠️ ID модели пуст"; resumePage = .adminDefaults; break }
             let new = await state.setDefaultModel(trimmed, chatID: chatKey.chatID)
-            toast = "✓ Модель по умолчанию: \(new)"
+            toast = "✓ Модель в новых чатах · \(new)"
             resumePage = .adminDefaults
 
         case .defaultsRole:
             guard isAdmin, !trimmed.isEmpty else { toast = "⚠️ Текст пуст"; resumePage = .adminDefaults; break }
             _ = await state.setDefaultRole(trimmed, chatID: chatKey.chatID)
-            toast = "✓ Роль по умолчанию обновлена"
+            toast = "✓ Роль в новых чатах обновлена"
             resumePage = .adminDefaults
 
         case .defaultsHistory:
             if let n = Int(trimmed), (1...50).contains(n) {
                 _ = await state.setDefaultHistoryLength(n, chatID: chatKey.chatID)
-                toast = "✓ Длина истории по умолчанию: \(n)"
+                toast = "✓ Память в новых чатах · \(n) сообщ."
             } else {
                 toast = "⚠️ Нужно число 1–50"
             }
@@ -5258,7 +5259,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
                 toast = "⚠️ Нужен @username"
             } else {
                 await state.registerTenant(username: target)
-                toast = "✓ Tenant @\(target) создан"
+                toast = "✓ Тенант @\(target) создан"
             }
             resumePage = .superTenants
 
@@ -5266,7 +5267,7 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
             guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superTenants; break }
             let target = normalizeUsername(trimmed)
             let removed = await state.removeTenant(username: target)
-            toast = removed ? "✓ Tenant @\(target) удалён" : "Нельзя удалить"
+            toast = removed ? "✓ Тенант @\(target) удалён" : "Нельзя удалить"
             resumePage = .superTenants
 
         case .superAdminAdd:
@@ -5703,6 +5704,13 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         ))
     }
 
+    /// Shown when the caller's storage key cannot be resolved. It used to read
+    /// "У вас не задан @username", which is both wrong (identity is the userID
+    /// since CLAUDE.md §6) and a dead end — it told people to fix something
+    /// that is not the problem.
+    static let unknownAccountNotice =
+        "Не удалось определить ваш аккаунт. Напишите боту любое сообщение в личке и откройте меню снова."
+
     private func menuButton(_ text: String, action: String) -> InlineKeyboardButton {
         .init(text: text, callback_data: BotCallbackAction.menu(action: action).rawData)
     }
@@ -5735,6 +5743,246 @@ UI: «🎭 Симуляция» в супер-меню — кнопки адми
         }
     }
 
+}
+
+/// One topic of the super-admin reference. Split by topic because the whole
+/// text is over 8 000 characters: `editMessage` trims anything past ~3 900
+/// without a word, so a single page hid half of what it documented.
+enum SuperHelpSection: String, CaseIterable, Sendable {
+    case admins
+    case tenants
+    case payments
+    case money
+    case growth
+    case retention
+    case analytics
+
+    var title: String {
+        switch self {
+        case .admins: return "🛡 Суперадмины и симуляция"
+        case .tenants: return "🏢 Тенанты, лицензии, прозрачность"
+        case .payments: return "💳 Приём оплаты — Stars, крипта, карта"
+        case .money: return "💰 Балансы, наценка, бесплатные модели"
+        case .growth: return "📣 Реклама, примеры, приглашения, источники"
+        case .retention: return "⏳ Напоминания и winback"
+        case .analytics: return "📊 Воронка и аналитика"
+        }
+    }
+
+    var buttonLabel: String { title }
+
+    var body: String {
+        switch self {
+        case .admins:
+            return """
+            <b>🛡 Суперадмины и симуляция</b>
+
+            <b>━━━ Суперадмины ━━━</b>
+
+            UI: «🛡 Суперадмины» в супер-меню — ➕ добавить / 🗑 убрать (только главный суперадмин).
+
+            <code>/superadmin add @username</code>
+            <code>/superadmin remove @username</code>
+            <code>/superadmin list</code>
+
+            <b>━━━ 🎭 Симуляция роли ━━━</b>
+
+            UI: «🎭 Симуляция» в супер-меню — кнопки админ / обычный / выкл + «🧪 Тест покупки».
+            Пока симуляция включена, бот считает вас обычным человеком: так проверяются реклама, дневной лимит и тексты продажи.
+
+            <code>/simulate admin|user|off|status</code>
+            <code>/simulate buy</code> — тест покупки: подписка активируется без оплаты (откат: <code>/tenant remove</code>)
+
+            <b>━━━ 🧪 Ещё ━━━</b>
+
+            Доступны и все команды админа: /defaults, /presets, /whitelist, /chats, /users, /reset_stats.
+            """
+
+        case .tenants:
+            return """
+            <b>🏢 Тенанты, лицензии, прозрачность</b>
+
+            Тенант — один оплативший человек со своей копией настроек: его чаты, гости, пресеты и статистика.
+
+            UI: «🏢 Tenants и статистика» — ➕ зарегистрировать / 🗑 удалить; нажмите на тенанта — продление, бессрочная подписка, немедленное истечение.
+
+            <code>/tenant list</code> — все тенанты
+            <code>/tenant stats</code> — статистика и подписки (токены, $, сроки)
+            <code>/tenant add @username</code> — зарегистрировать вручную (бессрочно)
+            <code>/tenant remove @username</code> — удалить тенанта
+            <code>/tenant extend @username &lt;дней&gt;</code> — продлить подписку
+            <code>/tenant unlimited @username</code> — сделать бессрочной
+            <code>/tenant expire @username</code> — завершить немедленно
+            <code>/tenant assign @username &lt;chatID&gt;</code> — привязать чат
+            <code>/tenant unassign &lt;chatID&gt;</code> — отвязать чат
+
+            <b>━━━ 👁 Прозрачность ━━━</b>
+
+            UI: «👁 Чаты бота» в супер-меню — список чатов с названиями, по нажатию — настройки, роль и статистика чата.
+
+            <code>/chats</code> — все чаты с ID и названиями
+            <code>/inspect &lt;chatID&gt;</code> — настройки, роль и статистика любого чата
+            <code>/chatid</code> — ID текущего чата
+            """
+
+        case .payments:
+            return """
+            <b>💳 Приём оплаты</b>
+
+            <b>━━━ 💫 Stars ━━━</b>
+
+            UI: «💫 Stars» в супер-меню — цена подписки и курс пополнений.
+            <code>/tenant price &lt;Stars&gt;</code> — цена подписки в Stars (0 = отключить)
+
+            Курс пополнений (Stars за $1) задаётся отдельно и не зависит от цены подписки: пакеты кредитов продаются, даже когда подписка выключена.
+
+            <b>━━━ 🪙 Крипта ━━━</b>
+
+            UI: «🪙 Крипто» в супер-меню — все настройки кнопками. «🪙 Открытые счета» — список счетов.
+
+            <code>/tenant cryptoprice &lt;USD&gt;</code> — цена в долларах (0 = отключить)
+            <code>/tenant cryptomode delta|unique</code> — режим идентификации платежей
+            <code>/tenant cryptoinvoices</code> — открытые счета
+
+            <i>delta</i> — один адрес на сеть, плательщики различаются по уникальной сумме.
+            <i>unique</i> — каждому счёту выдаётся свой адрес из пула (сумма у всех одинаковая).
+
+            <b>Адреса (режим delta):</b>
+            <code>/tenant cryptoaddr &lt;ton|bsc|eth|tron&gt; &lt;addr&gt;</code>
+            <code>/tenant cryptoaddr list</code>
+
+            <b>Пул адресов (режим unique):</b>
+            <code>/tenant cryptopool add &lt;chain&gt; &lt;addr&gt;</code>
+            <code>/tenant cryptopool remove &lt;chain&gt; &lt;index&gt;</code>
+            <code>/tenant cryptopool list</code>
+
+            <b>━━━ 💳 Карта (эквайринг) ━━━</b>
+
+            UI: «💳 Карта» в супер-меню — токен провайдера, валюта (RUB/USD/EUR), цена подписки, курс пополнений. Всё кнопками, команд нет.
+
+            Токен выдаёт @BotFather после подключения провайдера (ЮKassa, Stripe…): /mybots → бот → Bot Settings → Payments. Токен с <code>:TEST:</code> — тестовый режим (карта 4242 4242 4242 4242). Подробная инструкция — PAYMENTS_SETUP.md.
+            """
+
+        case .money:
+            return """
+            <b>💰 Балансы, наценка, бесплатные модели</b>
+
+            <b>━━━ Балансы и наценка ━━━</b>
+
+            UI: «💰 Балансы» в супер-меню — начислить / списать / удалить кошельки; «💹 Наценка» — изменить процент.
+
+            Второй способ монетизации: человек платит за каждый ответ со своего баланса по ценам с наценкой (подписка чата имеет приоритет — тогда баланс не трогается).
+
+            <code>/tenant markup &lt;процент&gt;</code> — наценка на цены моделей (по умолчанию 30%)
+            <code>/balance add @user 5</code> — начислить $5 (себе тоже можно)
+            <code>/balance set @user 10</code> · <code>/balance remove @user</code>
+            <code>/balance list</code> — все кошельки: остаток, списано, реальный расход, маржа
+
+            Пользователь видит цены и списания уже с наценкой (под ответом, /balance, меню); реальные цифры — только вам.
+
+            <b>━━━ 🎁 Премиум-лимит в день ━━━</b>
+
+            UI: «🎁 Премиум-лимит/день» в супер-меню. Сколько ответов умной модели в день получает бесплатный чат (в группе — общий на чат, в личке — на человека), прежде чем бот перейдёт на бесплатную модель и предложит премиум. <code>0</code> — совсем без «вкуса премиума». Бесплатные модели всегда без лимита.
+
+            <b>━━━ 🆓 Бесплатные модели ━━━</b>
+
+            UI: «🆓 Бесплатные модели» в супер-меню — ➕ по ID, ☐/🆓 у пресетов.
+
+            <code>/tenant freemodels add|remove|list|available &lt;id&gt;</code>
+
+            Закреплённые модели плюс бесплатные с OpenRouter и есть то, что доступно людям без премиума.
+            """
+
+        case .growth:
+            return """
+            <b>📣 Реклама, примеры, приглашения, источники</b>
+
+            <b>━━━ 📣 Реклама ━━━</b>
+
+            UI: «📣 Реклама» в супер-меню — создать / включить / удалить кампании + настроить само-рекламу премиума.
+            Показы идут только в чатах <b>без активной платной лицензии</b>, после ответа бота.
+
+            Когда активных кампаний нет, слот занимает <b>само-реклама</b>: ваш текст плюс кнопка «⚡ Открыть премиум». Её тапы видно в «📊 Воронка» → «Откуда открывают покупку».
+
+            <code>/ads</code> — список кампаний и вся справка
+            <code>/ads add &lt;текст&gt;</code> — создать
+            <code>/ads freq &lt;id&gt; &lt;N&gt; [мин]</code> — каждые N ответов, пауза в минутах
+            <code>/ads limit &lt;id&gt; &lt;показов&gt; [дней]</code> — лимит показов, равномерно на период
+            <code>/ads button &lt;id&gt; &lt;текст&gt; | &lt;url&gt;</code> — кнопка-ссылка
+            <code>/ads promo</code> — само-реклама: <code>on|off</code> · <code>text &lt;текст&gt;</code> · <code>freq &lt;N&gt; [мин]</code> · <code>reset</code>
+
+            <b>━━━ 💡 Примеры-запросы (онбординг) ━━━</b>
+
+            UI: «💡 Примеры-запросы» — тексты кнопок и запросов, порядок, размещение (личка/группы), вкл/выкл, предпросмотр, тапы по каждому примеру.
+
+            Кнопки-примеры показываются в приветствии <code>/start</code> и (опционально) при добавлении бота в группу. Тап = обычный запрос: работают дневной лимит, биллинг, история чата.
+
+            <code>/examples</code> — показать примеры в чате
+            <code>/examples stats</code> — тапы по каждому примеру
+            <code>/examples on|off</code> · <code>/examples groups</code>
+            <code>/examples reset</code> — вернуть стандартный набор
+            <code>/examples clearstats</code> — обнулить счётчики
+
+            <b>━━━ 🎁 Приглашения (рефералы) ━━━</b>
+
+            UI: «🎁 Приглашения» — награды обеим сторонам, бонус за оплату друга, лимит наград на человека, счётчики выплат, топ пригласивших, очистка журнала.
+
+            Человек берёт свою ссылку в /ref или в меню. Награда начисляется на балансы <b>после первого реального ответа</b> приглашённому, один раз на пару, только если он раньше не пользовался ботом. Отдельно: когда приглашённый <b>впервые оплатил</b> (подписку или пополнение, любым способом), пригласившему приходит бонус — один раз на пару, лимит наград на него не действует.
+
+            <code>/ref</code> — своя ссылка (у всех) · <code>/ref stats</code> — цифры программы
+            <code>/ref on|off</code> · <code>/ref reward 1</code> · <code>/ref friend 1</code>
+            <code>/ref bonus 2</code> — бонус за оплату друга, $
+            <code>/ref cap 20</code> — лимит оплаченных приглашений на человека (0 — без лимита)
+
+            <b>━━━ 📈 Источники трафика ━━━</b>
+
+            UI: «📈 Источники» — кампании по числу оплативших, конверсия, шаблон ссылки, очистка.
+
+            В каждое объявление ставьте свою ссылку <code>?start=src_метка</code>. «Потратил ÷ оплатили» по метке и есть цена клиента (CAC) этого канала. Засчитывается первый переход человека; те, кто уже пользовался ботом, в «пришло» не попадают. Команд нет — только кнопки.
+            """
+
+        case .retention:
+            return """
+            <b>⏳ Напоминания и winback</b>
+
+            UI: «⏳ Напоминания и winback» в супер-меню — расписание, скидка, ручная проверка, предпросмотр, список подписок под наблюдением.
+
+            Бот сам пишет спонсору перед концом подписки (можно несколько волн, например за 3 дня и за 1 день), а после истечения делает winback-оффер со скидкой. Скидка действует на Stars, крипту и карту и сгорает по времени.
+
+            Каждое сообщение уходит один раз за срок подписки; продление обнуляет отметки; спонсор может отписаться у себя в «⚡ Мой премиум». Чат, из которого бота удалили, и человек, который его заблокировал, из рассылки выпадают сами.
+
+            Отдельно есть <b>возврат по балансу</b>: тем, кто платил деньгами, потратил всё и пропал на N дней. Аудитория намеренно узкая — рассылка тем, кто ничего не платил, покупает только блокировки.
+
+            <code>/reminders</code> — статус + кто скоро истекает
+            <code>/reminders on|off</code> · <code>/reminders chats on|off</code>
+            <code>/reminders days 3,1</code> — за сколько дней напомнить (<code>off</code> — не напоминать)
+            <code>/reminders winback 1,7</code> — дни winback (<code>off</code> — выключить)
+            <code>/reminders discount 30</code> · <code>/reminders hours 48</code>
+            <code>/reminders interval 60</code> — как часто проверять, мин
+            <code>/reminders wallet 7</code> — вернуть тех, у кого кончился оплаченный баланс (0 — не писать)
+            <code>/reminders run</code> — проверить сейчас · <code>/reminders test</code> — предпросмотр
+            <code>/reminders clear</code> — снять все активные скидки
+            """
+
+        case .analytics:
+            return """
+            <b>📊 Воронка и аналитика</b>
+
+            UI: «📊 Воронка и аналитика» в супер-меню. Период переключается кнопками (сегодня · 7 дней · 30 дней · всё время) — рядом с числом периода видно и общий итог. По дням хранится 35 суток.
+
+            Что там есть:
+            • путь <code>/start</code> → первое сообщение → упёрлись в лимит → открыли покупку → счёт → оплата и конверсия на каждом шаге;
+            • «Откуда открывают покупку» — лимит, само-реклама, меню, пустой баланс, напоминание, выбор модели;
+            • возвращаемость: видели ли человека спустя сутки и спустя неделю после первой встречи;
+            • спонсоры: активные, истёкшие, скоро истекающие, живые winback-скидки;
+            • удержание: напоминания, winback-офферы и возвраты.
+
+            Счётчики событийные (не уникальные люди) и переживают рестарт.
+
+            Те же числа в JSON — <code>/metrics</code>: <code>funnel</code> (всё время), <code>funnelToday</code>, <code>funnelWeek</code>. Эндпоинт закрыт токеном <code>METRICS_TOKEN</code> (если не задан — секретом вебхука).
+            """
+        }
+    }
 }
 
 extension ServiceProvider: CaseIterable {

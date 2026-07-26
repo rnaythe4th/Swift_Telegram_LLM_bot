@@ -62,6 +62,12 @@ final class BotCommandHandler: @unchecked Sendable {
     /// no @username has nothing else to be recognised by; passing the raw handle
     /// silently fails every gate for them (CLAUDE.md §6). Store methods take a
     /// key through their `username:` parameter unchanged.
+    /// Reply when the caller's storage key cannot be resolved at all (no user
+    /// on the update). It used to read "У вас не задан @username", which is
+    /// both wrong — identity is the userID (§6) — and a dead end.
+    static let unknownAccountNotice =
+        "Не удалось определить ваш аккаунт. Напишите боту любое сообщение в личке и повторите команду."
+
     private func actorKey(_ user: TelegramUser?) async -> String? {
         if let userID = user?.id { return state.userKey(userID: userID) }
         return await state.userKey(username: user?.username)
@@ -1492,14 +1498,14 @@ final class BotCommandHandler: @unchecked Sendable {
             guard !value.isEmpty, let length = Int(value), (1...50).contains(length) else {
                 if value.isEmpty {
                     let defs = await state.getDefaults(chatID: chatKey.chatID)
-                    try await sendUserFeedback(chatKey: chatKey, text: "Длина истории по умолчанию · <b>\(defs.historyLength)</b>")
+                    try await sendUserFeedback(chatKey: chatKey, text: "Память в новых чатах · <b>\(defs.historyLength) сообщ.</b>")
                 } else {
                     try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50.</i>\n<i>Пример:</i> <code>/defaults historylength 11</code>")
                 }
                 return
             }
             let new = await state.setDefaultHistoryLength(length, chatID: chatKey.chatID)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Длина истории по умолчанию · <b>\(new)</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Память в новых чатах · <b>\(new) сообщ.</b>")
 
         default:
             let defs = await state.getDefaults(chatID: chatKey.chatID)
@@ -1615,7 +1621,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 subcommand: subcommand,
                 value: value,
                 typeKey: "temp",
-                typeName: "температуры",
+                typeName: "стиля ответа",
                 list: { [self] in await state.tempPresets(chatID: chatKey.chatID) },
                 add: { [self] display, val, _ in await state.addTempPreset(display: display, value: val, chatID: chatKey.chatID) },
                 remove: { [self] val in await state.removeTempPreset(value: val, chatID: chatKey.chatID) }
@@ -1627,7 +1633,7 @@ final class BotCommandHandler: @unchecked Sendable {
                 subcommand: subcommand,
                 value: value,
                 typeKey: "history",
-                typeName: "длины истории",
+                typeName: "памяти",
                 list: { [self] in await state.historyLengthPresets(chatID: chatKey.chatID) },
                 add: { [self] display, val, _ in await state.addHistoryLengthPreset(display: display, value: val, chatID: chatKey.chatID) },
                 remove: { [self] val in await state.removeHistoryLengthPreset(value: val, chatID: chatKey.chatID) }
@@ -1837,13 +1843,14 @@ final class BotCommandHandler: @unchecked Sendable {
         case "claim":
             // Admin attaches the current chat to their licence.
             guard let username = invokerUsername else {
-                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
             let ok = await state.assignChat(chatID: chatKey.chatID, to: username)
+            let claimLabel = await state.displayLabel(forKey: username)
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ Этот чат привязан к @\(username)."
-                : "У @\(username) нет премиума — оформить: /buy")
+                ? "✓ Премиум включён в этом чате — за счёт \(claimLabel)."
+                : "У \(claimLabel) нет активного премиума — оформить: /buy")
 
         case "release":
             // Admin detaches the current chat from their licence.
@@ -1860,7 +1867,7 @@ final class BotCommandHandler: @unchecked Sendable {
         case "chats":
             // Admin → own chats; super → all (already covered by /chats).
             guard let username = invokerUsername else {
-                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
             let chats = await state.chatsOwnedBy(username)
@@ -1868,12 +1875,12 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(chatKey: chatKey, text: "Ваш премиум пока не включён ни в одном чате.")
             } else {
                 let list = chats.sorted().map { "• <code>\($0)</code>" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты с премиумом @\(username)</b> (\(chats.count))\n\(list)")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты с премиумом \(await state.displayLabel(forKey: username))</b> (\(chats.count))\n\(list)")
             }
 
         case "adduser":
             guard let username = invokerUsername else {
-                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
             let target = normalizeUsername(arg1)
@@ -1888,7 +1895,7 @@ final class BotCommandHandler: @unchecked Sendable {
 
         case "removeuser":
             guard let username = invokerUsername else {
-                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
             let target = normalizeUsername(arg1)
@@ -1903,7 +1910,7 @@ final class BotCommandHandler: @unchecked Sendable {
 
         case "users":
             guard let username = invokerUsername else {
-                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
             let users = await state.licensedUsers(ownerUsername: username)
@@ -1911,12 +1918,12 @@ final class BotCommandHandler: @unchecked Sendable {
                 try await sendUserFeedback(chatKey: chatKey, text: "Гостей премиума пока нет.\n\n<i>Проще всего пригласить ссылкой: /tenant invite</i>")
             } else {
                 let list = users.map { "• \($0.label)" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Гости премиума @\(username)</b> (\(users.count))\n\(list)")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Гости премиума \(await state.displayLabel(forKey: username))</b> (\(users.count))\n\(list)")
             }
 
         case "invite":
             guard let username = invokerUsername else {
-                try await sendUserFeedback(chatKey: chatKey, text: "У вас не задан @username.")
+                try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
             guard await state.isTenant(username: username) else {
@@ -2224,22 +2231,29 @@ final class BotCommandHandler: @unchecked Sendable {
             let activation = await state.activatePaidSubscription(username: username)
             await state.assignChat(chatID: chatKey.chatID, to: username)
             let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
+            // `username` here is the storage key (`#12345`): printing it would
+            // show "@#12345" and, worse, the suggested rollback command would
+            // resolve to a different key (`#` is stripped from typed input).
+            let label = await state.displayLabel(forKey: username)
+            let handle = await state.username(forKey: username)
             let resultLine: String
             switch activation {
             case .started(let until):
-                resultLine = "Создан tenant @\(username), подписка до <b>\(f.string(from: until))</b>."
+                resultLine = "Создан тенант \(label), подписка до <b>\(f.string(from: until))</b>."
             case .extended(let until):
-                resultLine = "Подписка @\(username) продлена до <b>\(f.string(from: until))</b>."
+                resultLine = "Подписка \(label) продлена до <b>\(f.string(from: until))</b>."
             case .alreadyUnlimited:
-                resultLine = "У @\(username) бессрочный доступ — активация ничего не меняет."
+                resultLine = "У \(label) бессрочный доступ — активация ничего не меняет."
             }
+            let rollback = handle.map { "<code>/tenant remove @\($0)</code>" }
+                ?? "/menu → 🛡 Супер-админ → 🏢 Тенанты → 🗑"
             try await sendUserFeedback(chatKey: chatKey, text: """
                 🧪 <b>Тест покупки выполнен.</b>
                 \(resultLine)
-                Этот чат привязан к лицензии @\(username).
+                Этот чат привязан к лицензии \(label).
 
-                Откатить: <code>/tenant remove @\(username)</code>
-                Проверить поведение подписки: /menu → Админ-панель, /buy
+                Откатить: \(rollback)
+                Проверить поведение подписки: /menu → ⚡ Мой премиум, /buy
                 """)
 
         default:

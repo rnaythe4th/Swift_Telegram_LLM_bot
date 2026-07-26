@@ -77,6 +77,7 @@ enum PurchaseSource: String, CaseIterable, Sendable {
     case reminder   // renewal reminder / winback (step 8)
     case balance    // "balance ran out" notice (step 5)
     case referral   // referral page
+    case model      // model picker, where a paid model is out of reach
 
     var label: String {
         switch self {
@@ -88,6 +89,7 @@ enum PurchaseSource: String, CaseIterable, Sendable {
         case .reminder: return "Напоминание · winback"
         case .balance: return "Баланс закончился"
         case .referral: return "Приглашения"
+        case .model: return "Выбор модели"
         }
     }
 
