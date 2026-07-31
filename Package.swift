@@ -8,7 +8,12 @@ let package = Package(
     platforms: [.macOS(.v13)],
     dependencies: [
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.23.0"),
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.64.0")
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.64.0"),
+        // Hosted-checkout gateways sign their callbacks (MD5/HMAC-SHA256), and a
+        // signature check is the only thing standing between a POST from the
+        // internet and a free subscription. Already in the resolved graph via
+        // async-http-client, so this only surfaces the product.
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -20,6 +25,7 @@ let package = Package(
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
         // Unit tests for the pure logic: the state actor, formatters, parsers and

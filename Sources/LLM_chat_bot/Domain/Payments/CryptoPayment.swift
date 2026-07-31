@@ -98,13 +98,10 @@ enum CryptoInvoiceStatus: String, Codable, Sendable {
     case cancelled
 }
 
-/// What a crypto invoice buys. Absent (nil) on invoices persisted before credit
-/// packs existed → decoded as `.subscription` via `resolvedPurpose`.
-enum CryptoInvoicePurpose: Codable, Sendable, Equatable {
-    case subscription
-    /// Top up the pay-as-you-go balance by `cents` USD (face value credited).
-    case credit(cents: Int)
-}
+/// What a crypto invoice buys — the same two cases every other payment method
+/// resolves to (`PurchasePurpose`). Absent (nil) on invoices persisted before
+/// credit packs existed → decoded as `.subscription` via `resolvedPurpose`.
+typealias CryptoInvoicePurpose = PurchasePurpose
 
 struct CryptoInvoice: Codable, Sendable, Identifiable {
     var id: String

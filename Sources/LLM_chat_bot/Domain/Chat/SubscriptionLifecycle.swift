@@ -263,11 +263,22 @@ struct SubscriptionPricing: Sendable {
     /// Card amounts pre-formatted with their currency (the store knows it).
     var cardLabelFull: String?
     var cardLabel: String?
+    /// Hosted checkout (§7 «Внешняя касса»). Here rather than computed at the
+    /// call site for the same reason as the card: a winback discount lives on
+    /// the account, and a price quoted anywhere but here would drift from the
+    /// price actually charged.
+    var externalMinorUnitsFull: Int?
+    var externalMinorUnits: Int?
+    var externalLabelFull: String?
+    var externalLabel: String?
 
     /// True only when the discount actually changes a quoted price.
     var hasDiscount: Bool {
         guard discount != nil else { return false }
-        return stars != starsFull || cryptoCents != cryptoCentsFull || cardMinorUnits != cardMinorUnitsFull
+        return stars != starsFull
+            || cryptoCents != cryptoCentsFull
+            || cardMinorUnits != cardMinorUnitsFull
+            || externalMinorUnits != externalMinorUnitsFull
     }
 }
 

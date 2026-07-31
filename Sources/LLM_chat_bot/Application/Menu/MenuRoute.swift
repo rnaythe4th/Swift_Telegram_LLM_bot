@@ -25,6 +25,8 @@ enum MenuCommand: String, CaseIterable {
     // Super-admin
     case sa, stenant, sim, sinspect, ads, markup, dailylimit
     case stars, freemodels, sbal, crypto, card
+    /// Hosted checkout settings (§7 «Внешняя касса»).
+    case extpay
     // Growth and retention
     case funnel, promo, rem, examples, onb, sref, strf
     // Help

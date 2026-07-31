@@ -86,6 +86,14 @@ enum AdminPendingInputKind: Sendable {
     case cardPrice
     /// FX rate that prices USD credit packs on the card (roadmap step 2).
     case cardUsdRate
+    // Hosted checkout (§7 «Внешняя касса»): merchant credentials and prices.
+    case externalMerchantID
+    case externalSecret
+    case externalCallbackSecret
+    case externalPrice
+    case externalUsdRate
+    /// `<код> | <название>` of one more rail on the vendor's checkout page.
+    case externalMethodAdd
     // Renewal reminders / winback schedule (roadmap step 8).
     case reminderDaysBefore
     case reminderWinbackDays

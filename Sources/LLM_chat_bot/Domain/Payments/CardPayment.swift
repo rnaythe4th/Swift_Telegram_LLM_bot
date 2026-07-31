@@ -1,8 +1,10 @@
 import Foundation
 
-/// Fiat currencies offered for card payments through Telegram Payments.
-/// All listed currencies use 2 decimal places (minor units = cents/kopecks).
-enum CardCurrency: String, Codable, Sendable, CaseIterable {
+/// Fiat currencies the bot can charge in — Telegram card payments and any
+/// hosted checkout (§7 «Внешняя касса»). All listed currencies use 2 decimal
+/// places, so a price is always an `Int` of minor units (cents/kopecks) and
+/// never a `Double` that rounds differently on two screens.
+enum FiatCurrency: String, Codable, Sendable, CaseIterable {
     case rub = "RUB"
     case usd = "USD"
     case eur = "EUR"
@@ -31,6 +33,37 @@ enum CardCurrency: String, Codable, Sendable, CaseIterable {
         if frac == 0 { return "\(whole) \(symbol)" }
         return String(format: "%d.%02d %@", whole, frac, symbol)
     }
+
+    /// `499`, `499.00`, `499,5`, `1 499.90` → minor units.
+    ///
+    /// Integer math on purpose: a payment gateway quotes the amount as a
+    /// decimal string and signs that exact string, and `Double("0.29") * 100`
+    /// is 28.999999999999996 — one rounding away from rejecting a real payment
+    /// as an amount mismatch.
+    static func minorUnits(from raw: String) -> Int? {
+        let cleaned = raw
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\u{00a0}", with: "")
+            .replacingOccurrences(of: ",", with: ".")
+        guard !cleaned.isEmpty else { return nil }
+        let parts = cleaned.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let whole = Int(parts[0]), whole >= 0 else { return nil }
+        guard parts.count > 1 else { return whole * 100 }
+        let fraction = parts[1]
+        guard fraction.allSatisfy(\.isNumber) else { return nil }
+        // More than two decimals is not an amount in this currency; rounding it
+        // silently would credit a different sum than the one that was paid.
+        guard fraction.count <= 2 else { return nil }
+        let padded = fraction + String(repeating: "0", count: 2 - fraction.count)
+        guard let cents = Int(padded) else { return nil }
+        return whole * 100 + cents
+    }
+
+    /// The decimal string a gateway is given and signs: always two decimals, so
+    /// what we sign and what we later compare are produced by one function.
+    static func decimalString(minorUnits: Int) -> String {
+        String(format: "%d.%02d", minorUnits / 100, abs(minorUnits % 100))
+    }
 }
 
 /// Card acquiring configuration (Telegram Payments via a BotFather-connected
@@ -39,7 +72,7 @@ enum CardCurrency: String, Codable, Sendable, CaseIterable {
 struct CardPaymentConfig: Codable, Sendable {
     /// Token issued by BotFather after connecting a payment provider.
     var providerToken: String?
-    var currency: CardCurrency
+    var currency: FiatCurrency
     /// Subscription price in minor units (cents/kopecks); nil = sales off.
     var priceMinorUnits: Int?
     /// Minor units charged per $1 of a credit pack (roadmap step 2). Credit

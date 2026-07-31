@@ -97,6 +97,9 @@ extension BotMenuHandler {
         let starsAvailable = (starsPrice ?? 0) > 0
         let cryptoAvailable = cryptoCents != nil && !cryptoAssets.isEmpty
         let card = await state.cardConfig()
+        // Hosted checkout (§7): the rails Telegram cannot reach — Сбер, СБП,
+        // карты РФ, крипта — behind one aggregator.
+        let external = await state.externalPaymentConfig()
 
         var lines: [String] = ["<b>⚡ Премиум-доступ для этого чата</b>", ""]
         var rows: Keyboard = []
@@ -192,6 +195,9 @@ extension BotMenuHandler {
                 if let minor = pricing.cardMinorUnits, let full = pricing.cardMinorUnitsFull, full != minor {
                     lines.append("Карта: <s>\(card.currency.format(minorUnits: full))</s> → <b>\(card.currency.format(minorUnits: minor))</b>")
                 }
+                if let minor = pricing.externalMinorUnits, let full = pricing.externalMinorUnitsFull, full != minor {
+                    lines.append("Касса: <s>\(external.currency.format(minorUnits: full))</s> → <b>\(external.currency.format(minorUnits: minor))</b>")
+                }
             }
 
             if starsAvailable, let starsPrice {
@@ -204,7 +210,16 @@ extension BotMenuHandler {
             if card.isEnabled, let minorUnits = pricing.cardMinorUnits {
                 rows.row([menuButton("💳 Картой · \(card.currency.format(minorUnits: minorUnits))", .buy, "card")])
             }
-            if !starsAvailable, !cryptoAvailable, !card.isEnabled {
+            if external.isEnabled, let minorUnits = pricing.externalMinorUnits {
+                let suffix = pricing.hasDiscount && pricing.externalMinorUnitsFull != minorUnits
+                    ? " (−\(pricing.discount?.percent ?? 0)%)"
+                    : ""
+                rows.row([menuButton(
+                    "🏦 \(externalMethodsLabel(external)) · \(external.currency.format(minorUnits: minorUnits))\(suffix)",
+                    .buy, "ext"
+                )])
+            }
+            if !starsAvailable, !cryptoAvailable, !card.isEnabled, !external.isEnabled {
                 lines.append("")
                 lines.append("ℹ️ Продажа доступа сейчас недоступна.")
             }
@@ -215,7 +230,8 @@ extension BotMenuHandler {
             // (Stars rate / crypto addresses / card FX rate).
             // Crypto packs need an address, not a subscription price: a pack
             // costs its own face value.
-            let creditsAvailable = await state.starsCreditsEnabled() || !cryptoAssets.isEmpty || card.creditsEnabled
+            let creditsAvailable = await state.starsCreditsEnabled() || !cryptoAssets.isEmpty
+                || card.creditsEnabled || external.creditsEnabled
             if username != nil, creditsAvailable {
                 lines.append("")
                 lines.append("💰 <b>Не готовы на месяц?</b> Пополните баланс — с него списывается стоимость каждого ответа, обычно доли цента. Доступны любые модели, подписка не нужна.")
@@ -235,6 +251,15 @@ extension BotMenuHandler {
         }
         rows.row(navButtons())
         return MenuScreen(lines.joined(separator: "\n"), rows)
+    }
+
+    /// What to call the hosted checkout on a button. Naming the rails ("Сбер,
+    /// СБП, карта") sells better than naming the aggregator, which no buyer has
+    /// heard of — but the list is configuration, so it is derived, not written.
+    func externalMethodsLabel(_ config: ExternalPaymentConfig) -> String {
+        let titles = config.activeMethods.prefix(3).map(\.title)
+        guard !titles.isEmpty else { return "Картой · СБП · Сбер" }
+        return titles.joined(separator: " · ")
     }
 
     // MARK: - Buy flow (user-facing)
@@ -258,6 +283,12 @@ extension BotMenuHandler {
 
         case "crypto", "ccrypto", "asset", "casset":
             try await handleCryptoPurchase(route: route, chatKey: chatKey, callback: callback, message: message)
+
+        case "ext", "cext":
+            try await handleExternalPurchase(route: route, chatKey: chatKey, callback: callback, message: message)
+
+        case "extcancel":
+            try await handleExternalCancel(route: route, callback: callback, message: message)
 
         case "refresh", "cancel":
             try await handleInvoiceControl(route: route, callback: callback, message: message)
@@ -294,6 +325,13 @@ extension BotMenuHandler {
         let creditCard = await state.cardConfig()
         if let minorUnits = creditCard.creditMinorUnits(cents: cents), creditCard.creditsEnabled {
             rows.row([menuButton("💳 Картой · \(creditCard.currency.format(minorUnits: minorUnits))", .buy, "ccard", "\(cents)")])
+        }
+        let creditExternal = await state.externalPaymentConfig()
+        if creditExternal.creditsEnabled, let minorUnits = creditExternal.creditMinorUnits(cents: cents) {
+            rows.row([menuButton(
+                "🏦 \(externalMethodsLabel(creditExternal)) · \(creditExternal.currency.format(minorUnits: minorUnits))",
+                .buy, "cext", "\(cents)"
+            )])
         }
         rows.row(navButtons())
         let text = """

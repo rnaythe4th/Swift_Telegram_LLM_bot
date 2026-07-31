@@ -42,7 +42,7 @@ extension ChatContextStore {
         dirtyConfigs.insert(.card)
     }
 
-    func setCardCurrency(_ currency: CardCurrency) {
+    func setCardCurrency(_ currency: FiatCurrency) {
         _cardConfig.currency = currency
         dirtyConfigs.insert(.card)
     }

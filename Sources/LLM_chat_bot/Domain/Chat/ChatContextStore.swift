@@ -136,6 +136,12 @@ actor ChatContextStore {
     /// Explorer scan positions, `"<asset>:<address>"` → unix seconds.
     var _explorerCursors: [String: Int] = [:]
 
+    /// Hosted checkout (§7 «Внешняя касса»): merchant credentials, prices and
+    /// the rails offered. Persisted with the open orders next to it, because a
+    /// callback lands in whichever process is alive by then.
+    var _externalPaymentConfig: ExternalPaymentConfig = .default
+    var _externalOrders: [String: ExternalPaymentOrder] = [:]
+
     var _simulatedRoles: [String: SimulatedRole] = [:]
 
     init(

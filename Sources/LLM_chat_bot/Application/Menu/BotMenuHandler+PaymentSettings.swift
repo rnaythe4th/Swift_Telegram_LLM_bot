@@ -81,7 +81,7 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(rateText, rateMarkup))
 
         case "currency":
-            guard let currency = route.arg(2).flatMap(CardCurrency.init(rawValue:)) else { return }
+            guard let currency = route.arg(2).flatMap(FiatCurrency.init(rawValue:)) else { return }
             await state.setCardCurrency(currency)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Валюта: \(currency.rawValue)")
             try await showPage(.superCard, chatKey: chatKey, callback: callback, message: message)
@@ -339,7 +339,7 @@ extension BotMenuHandler {
         ])
 
         var currencyRow: [InlineKeyboardButton] = []
-        for currency in CardCurrency.allCases {
+        for currency in FiatCurrency.allCases {
             let mark = currency == card.currency ? "✅ " : ""
             currencyRow.append(menuButton("\(mark)\(currency.rawValue)", .card, "currency", "\(currency.rawValue)"))
         }

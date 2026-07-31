@@ -29,6 +29,8 @@ enum MenuPage: String, CaseIterable {
     case superStars = "superstars"
     case superCrypto = "supercrypto"
     case superCard = "supercard"
+    /// Hosted checkout: Сбер/СБП/карты/крипта through one aggregator (§7).
+    case superExternalPay = "superextpay"
     case superFreeModels = "superfreemodels"
     case superTenants = "supertenants"
     case superAdmins = "superadmins"

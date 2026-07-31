@@ -67,14 +67,9 @@ extension BotOrchestrator {
     /// premium for everyone (roadmap step 4). The intake dedups by update_id,
     /// so Telegram redelivery won't double-greet.
     func handleSuccessfulPayment(message: TelegramMessage, payment: TelegramSuccessfulPayment) async {
-        // Telegram redelivers updates after webhook timeouts and restarts;
-        // the charge ID makes activation idempotent.
+        // Telegram redelivers updates after webhook timeouts and restarts; the
+        // charge ID is what makes activation idempotent, and `fulfil` checks it.
         let chargeID = payment.telegram_payment_charge_id
-        if await state.isPaymentProcessed(chargeID: chargeID) {
-            await metrics.increment(MetricName.paymentsDeduplicated)
-            logger.info("duplicate successful_payment ignored (charge \(chargeID))")
-            return
-        }
 
         // The payer is identified by userID, so a missing @username is no
         // longer a dead end — the money lands on their account either way.
@@ -87,24 +82,36 @@ extension BotOrchestrator {
         let payerKey = state.userKey(userID: payer.id)
         let payerLabel = await state.displayLabel(forKey: payerKey)
 
-        // Credit-pack top-up: add face value to the wallet, no subscription/tenant.
+        // `credits_<cents>` buys balance, anything else buys the subscription.
+        // Everything that follows from either — activation, wallet, funnel,
+        // referral bonus, traffic attribution, the flush — is one shared
+        // routine, so this path cannot drift from the crypto and hosted-checkout
+        // ones (CLAUDE.md §17).
         let payload = payment.invoice_payload
+        let purpose: PurchasePurpose
         if payload.hasPrefix("credits_"),
            let cents = Int(payload.dropFirst("credits_".count)),
            CreditPack.isValid(cents: cents) {
-            let wallet = await state.creditPurchasedBalance(key: payerKey, amountUsd: Double(cents) / 100.0)
-            await state.markPaymentProcessed(chargeID: chargeID)
-            await state.bumpFunnel(.creditTopup)
-            // Referral (step 10): a friend who pays is what the program is
-            // actually for — credit the inviter before the payment flush, so
-            // the bonus is as durable as the payment that earned it.
-            let topupBonus = await state.redeemReferralPaymentBonus(payerUserID: payer.id)
-            // Paid traffic: credit the campaign that brought this customer
-            // before the flush, so attribution is as durable as the payment.
-            await state.recordTrafficSourcePayment(userID: payer.id)
-            await metrics.increment(MetricName.paymentsProcessed)
-            await persistence?.flushNow()
-            await announceReferralBonus(topupBonus)
+            purpose = .credit(cents: cents)
+        } else {
+            purpose = .subscription
+        }
+
+        let outcome = await fulfillment.fulfil(PaymentReceipt(
+            payerKey: payerKey,
+            payerUserID: payer.id,
+            chatID: message.chat.id,
+            purpose: purpose,
+            idempotencyKey: chargeID
+        ))
+
+        let activation: SubscriptionActivation
+        let claim: ChatContextStore.ChatClaimOutcome
+        switch outcome {
+        case .duplicate:
+            return
+
+        case .credit(let cents, let wallet):
             _ = try? await telegram.sendMessage(.init(
                 chatID: message.chat.id,
                 threadID: message.message_thread_id,
@@ -117,30 +124,11 @@ extension BotOrchestrator {
             ))
             logger.info("credit top-up for \(payerLabel): +\(cents)c (charge \(chargeID))")
             return
-        }
 
-        let activation = await state.activatePaidSubscription(username: payerKey)
-        // Never move a group away from a sponsor who is still paying for it.
-        let claim = await state.claimChatForPayment(chatID: message.chat.id, payerKey: payerKey)
-        await state.markPaymentProcessed(chargeID: chargeID)
-        // A winback offer is one-shot: consume it whether or not it was still
-        // valid, and count the ones that actually brought the payment back.
-        if await state.consumeWinbackDiscount(username: payerKey) != nil {
-            await state.bumpFunnel(.winbackRedeemed)
+        case .subscription(let resolvedActivation, let resolvedClaim):
+            activation = resolvedActivation
+            claim = resolvedClaim
         }
-        // Funnel: count the conversion before the flush so it persists with the
-        // payment (not on the next debounce).
-        switch activation {
-        case .started: await state.bumpFunnel(.paid)
-        case .extended: await state.bumpFunnel(.renewed)
-        case .alreadyUnlimited: break
-        }
-        let referralBonus = await state.redeemReferralPaymentBonus(payerUserID: payer.id)
-        await state.recordTrafficSourcePayment(userID: payer.id)
-        await metrics.increment(MetricName.paymentsProcessed)
-        // Payments are the one thing that must never wait out the debounce.
-        await persistence?.flushNow()
-        await announceReferralBonus(referralBonus)
 
         let isPrivate = message.chat.type == "private"
         let formatter = DateFormatter()
@@ -204,23 +192,5 @@ extension BotOrchestrator {
             replyMarkup: nil
         ))
         logger.info("payment processed for \(payerLabel): \(payment.total_amount) \(payment.currency) (\(activation))")
-    }
-
-    /// Tells an inviter their friend converted. The money is already on their
-    /// balance, so a failed DM (blocked bot, never wrote to it) costs nothing
-    /// but the good news.
-    private func announceReferralBonus(_ bonus: ReferralPaymentBonus?) async {
-        guard let bonus else { return }
-        let delivered = (try? await telegram.sendMessage(.init(
-            chatID: bonus.inviterUserID,
-            threadID: nil,
-            replyTo: nil,
-            text: ReferralPresenter.paymentBonusText(bonus),
-            replyMarkup: ReferralPresenter.paymentBonusMarkup()
-        ))) != nil
-        if !delivered {
-            logger.warning("referral: could not notify \(bonus.inviterLabel) about the conversion bonus")
-        }
-        logger.info("referral conversion bonus: \(bonus.inviterLabel) +$\(bonus.amountUsd) (friend \(bonus.friendLabel))")
     }
 }

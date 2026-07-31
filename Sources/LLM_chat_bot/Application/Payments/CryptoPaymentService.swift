@@ -38,6 +38,10 @@ actor CryptoPaymentService {
     /// chain has already moved the money, so a SIGTERM in that window would
     /// leave a paid invoice with no subscription and no credited tx hash.
     private let persistence: PersistenceCoordinator?
+    /// What a completed payment buys, shared with every other payment method
+    /// (§17) — activation, wallet, funnel, referral bonus, traffic attribution
+    /// and the write-through flush.
+    private let fulfillment: PaymentFulfillmentService
 
     private var tonUsdRate: Double? = nil
     private var tonRateFetchedAt: Date? = nil
@@ -49,12 +53,14 @@ actor CryptoPaymentService {
         network: NetworkClient,
         telegram: TelegramGatewayPort,
         logger: LoggerPort,
+        fulfillment: PaymentFulfillmentService,
         persistence: PersistenceCoordinator? = nil
     ) {
         self.state = state
         self.network = network
         self.telegram = telegram
         self.logger = logger
+        self.fulfillment = fulfillment
         self.persistence = persistence
     }
 
@@ -367,53 +373,27 @@ actor CryptoPaymentService {
         if copy.accumulatedAtomic >= copy.exactAmountAtomic {
             copy.status = .paid
             await state.upsertCryptoInvoice(copy)
-            var activation: SubscriptionActivation? = nil
-            var claim: ChatContextStore.ChatClaimOutcome = .unknownTenant
-            var creditedCents: Int? = nil
-            var creditedBalanceUsd: Double = 0
-            switch copy.resolvedPurpose {
-            case .subscription:
-                let result = await state.activatePaidSubscription(username: copy.username)
-                // Same rule as the Stars/card path: a group that someone else's
-                // live subscription pays for stays with them.
-                claim = await state.claimChatForPayment(chatID: copy.userChatID, payerKey: copy.username)
-                // Same post-payment bookkeeping as the Stars/card path: a
-                // winback offer is one-shot, and the funnel counts the sale.
-                if await state.consumeWinbackDiscount(username: copy.username) != nil {
-                    await state.bumpFunnel(.winbackRedeemed)
-                }
-                switch result {
-                case .started: await state.bumpFunnel(.paid)
-                case .extended: await state.bumpFunnel(.renewed)
-                case .alreadyUnlimited: break
-                }
-                activation = result
-            case .credit(let cents):
-                let wallet = await state.creditPurchasedBalance(username: copy.username, amountUsd: Double(cents) / 100.0)
-                creditedCents = cents
-                creditedBalanceUsd = wallet.balanceUsd
-            }
-            // Referral (step 10): the same conversion bonus the Telegram
-            // payment path pays, so the reward does not depend on how the
-            // friend happened to pay.
-            let referralBonus = await redeemReferralConversionBonus(payerKey: copy.username)
-            // Paid traffic: same reasoning — the campaign that brought this
-            // customer is credited on every payment path, not just the Telegram one.
-            if let payerUserID = UserKey.userID(from: copy.username) {
-                await state.recordTrafficSourcePayment(userID: payerUserID)
-            }
-            // The chain has already moved the money — everything it bought goes
-            // to disk before anyone is told about it, exactly as the Stars/card
-            // path does (CLAUDE.md §17).
-            await persistence?.flushNow()
-            if let activation {
+            // Everything a payment buys happens in one place, so this path
+            // cannot drift from the Telegram and hosted-checkout ones: the
+            // chain has already moved the money, and `fulfil` flushes before
+            // returning (CLAUDE.md §7, §17).
+            let outcome = await fulfillment.fulfil(PaymentReceipt(
+                payerKey: copy.username,
+                // Invoices are filed under a `UserKey`; a pending record (a
+                // person the bot has only been told about) carries no userID,
+                // and referral/traffic attribution then has nothing to look up.
+                payerUserID: UserKey.userID(from: copy.username),
+                chatID: copy.userChatID,
+                purpose: copy.resolvedPurpose,
+                idempotencyKey: "crypto:\(txHash)"
+            ))
+            switch outcome {
+            case .duplicate:
+                break
+            case .subscription(let activation, let claim):
                 await notifyFullPayment(copy, activation: activation, claim: claim)
-            }
-            if let cents = creditedCents {
-                await notifyCreditPayment(copy, cents: cents, balanceUsd: creditedBalanceUsd)
-            }
-            if let referralBonus {
-                await announceReferralConversionBonus(referralBonus)
+            case .credit(let cents, let wallet):
+                await notifyCreditPayment(copy, cents: cents, balanceUsd: wallet.balanceUsd)
             }
             return .fullyPaid(copy)
         } else {
@@ -429,27 +409,6 @@ actor CryptoPaymentService {
     }
 
     // MARK: - Notifications
-
-    /// Credits the inviter's conversion bonus. The invoice stores the payer's
-    /// `UserKey`; a pending record (a person the bot has only been told about)
-    /// carries no userID, and referral attributions are keyed by userID — so
-    /// there is simply nothing to look up in that case. Announcing is a separate
-    /// step so the credit can be flushed before anyone hears about it.
-    private func redeemReferralConversionBonus(payerKey: String) async -> ReferralPaymentBonus? {
-        guard let payerUserID = UserKey.userID(from: payerKey) else { return nil }
-        return await state.redeemReferralPaymentBonus(payerUserID: payerUserID)
-    }
-
-    private func announceReferralConversionBonus(_ bonus: ReferralPaymentBonus) async {
-        _ = try? await telegram.sendMessage(.init(
-            chatID: bonus.inviterUserID,
-            threadID: nil,
-            replyTo: nil,
-            text: ReferralPresenter.paymentBonusText(bonus),
-            replyMarkup: ReferralPresenter.paymentBonusMarkup()
-        ))
-        logger.info("crypto: referral conversion bonus \(bonus.inviterLabel) +$\(bonus.amountUsd)")
-    }
 
     private func notifyFullPayment(
         _ invoice: CryptoInvoice,

@@ -205,12 +205,37 @@ struct AppAssembly {
             logger: logger
         )
 
+        // One post-payment routine for every method (§17): Stars and card go
+        // through it from the orchestrator, crypto from its monitor, the hosted
+        // checkout from its callback endpoint.
+        let fulfillment = PaymentFulfillmentService(
+            state: state,
+            telegram: telegram,
+            persistence: persistence,
+            metrics: metrics,
+            logger: logger
+        )
+
         let cryptoService = CryptoPaymentService(
             state: state,
             network: network,
             telegram: telegram,
             logger: logger,
+            fulfillment: fulfillment,
             persistence: persistence
+        )
+
+        let externalPayments = ExternalPaymentService(
+            state: state,
+            resolver: ExternalCheckoutRegistry(),
+            fulfillment: fulfillment,
+            telegram: telegram,
+            logger: logger,
+            metrics: metrics,
+            // The vendor answers over the public internet, so without a public
+            // address there is nothing to configure — the settings page says so
+            // rather than printing a URL that resolves to a laptop.
+            publicBaseURL: config.webhookPublicURL
         )
 
         return BotOrchestrator(
@@ -230,6 +255,7 @@ struct AppAssembly {
             generationLimiter: generationLimiter,
             botUsername: botUsername,
             formatOptions: formatOptions,
+            fulfillment: fulfillment,
             modelPriceMonitor: modelPriceMonitor,
             cryptoService: cryptoService,
             cryptoMonitor: makeCryptoMonitor(
@@ -238,7 +264,8 @@ struct AppAssembly {
                 service: cryptoService,
                 network: network,
                 logger: logger
-            )
+            ),
+            externalPayments: externalPayments
         )
     }
 
@@ -315,6 +342,32 @@ struct AppAssembly {
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 let json = (try? encoder.encode(report)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
                 return .json(json)
+
+            // Hosted-checkout notification (§7). Authenticated by the vendor's
+            // signature inside the service — there is no shared secret header
+            // to check here, and the aggregator posts a form, not JSON.
+            case (.POST, let path) where ExternalPaymentEndpoint.vendor(forPath: path) != nil,
+                 (.GET, let path) where ExternalPaymentEndpoint.vendor(forPath: path) != nil:
+                guard let vendor = ExternalPaymentEndpoint.vendor(forPath: path) else {
+                    return AppHTTPResponse(status: .notFound, body: "not found")
+                }
+                guard let service = orchestrator.externalPayments else {
+                    return AppHTTPResponse(status: .serviceUnavailable, body: "not configured")
+                }
+                // Some cabinets are configured to notify over GET, so both the
+                // query string and the body are read; the body wins on conflict.
+                var parameters = URLForm.parse(
+                    head.uri.split(separator: "?", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
+                )
+                for (name, value) in URLForm.parse(String(data: body, encoding: .utf8) ?? "") {
+                    parameters[name] = value
+                }
+                switch await service.handleCallback(vendor: vendor, parameters: parameters) {
+                case .acknowledged(let ack):
+                    return .ok(ack)
+                case .rejected(let reason):
+                    return AppHTTPResponse(status: .badRequest, body: reason)
+                }
 
             case (.POST, WebhookEndpoint.path):
                 guard SecretGuard.constantTimeEquals(

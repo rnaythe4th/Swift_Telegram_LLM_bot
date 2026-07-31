@@ -26,6 +26,9 @@ final class BotOrchestrator: @unchecked Sendable {
     let modelPriceMonitor: ModelPriceMonitor?
     let cryptoMonitor: CryptoPaymentMonitor?
     let reminderService: SubscriptionReminderService
+    /// What every payment path does after the money lands (§17).
+    let fulfillment: PaymentFulfillmentService
+    let externalPayments: ExternalPaymentService?
     let botUsername: String
 
     let backgroundTasks = LockedValue<[Task<Void, Never>]>([])
@@ -46,9 +49,14 @@ final class BotOrchestrator: @unchecked Sendable {
         generationLimiter: GenerationLimiter,
         botUsername: String,
         formatOptions: String,
+        /// Shared with the crypto and hosted-checkout services by the
+        /// composition root. It holds no state of its own (everything lives in
+        /// the store), so tests may let it be built here.
+        fulfillment: PaymentFulfillmentService? = nil,
         modelPriceMonitor: ModelPriceMonitor? = nil,
         cryptoService: CryptoPaymentService? = nil,
-        cryptoMonitor: CryptoPaymentMonitor? = nil
+        cryptoMonitor: CryptoPaymentMonitor? = nil,
+        externalPayments: ExternalPaymentService? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -59,6 +67,14 @@ final class BotOrchestrator: @unchecked Sendable {
         self.flags = flags
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoMonitor = cryptoMonitor
+        self.fulfillment = fulfillment ?? PaymentFulfillmentService(
+            state: state,
+            telegram: telegram,
+            persistence: persistence,
+            metrics: metrics,
+            logger: logger
+        )
+        self.externalPayments = externalPayments
         self.botUsername = botUsername
 
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
@@ -79,7 +95,8 @@ final class BotOrchestrator: @unchecked Sendable {
             botUsername: botUsername,
             modelPriceMonitor: modelPriceMonitor,
             cryptoService: cryptoService,
-            reminderService: reminderService
+            reminderService: reminderService,
+            externalPayments: externalPayments
         )
 
         self.menuHandler = menuHandler

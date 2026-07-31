@@ -52,6 +52,8 @@ enum Texts {
     static let cannotRemove = "Нельзя удалить"
     static let unknownPack = "Неизвестный пакет"
     static let cryptoUnavailable = "Крипто-оплата недоступна"
+    static let externalUnavailable = "Оплата через кассу недоступна"
+    static let notFound = "Не найдено"
     static let usernameRequired = "⚠️ Нужен @username"
 
     /// A button whose payload no longer resolves — a menu message left over

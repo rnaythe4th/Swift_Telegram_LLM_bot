@@ -13,6 +13,9 @@ final class BotMenuHandler: @unchecked Sendable {
     let modelPriceMonitor: ModelPriceMonitor?
     let cryptoService: CryptoPaymentService?
     let reminderService: SubscriptionReminderService?
+    /// Hosted checkout (§7 «Внешняя касса»): opens a signed link for the payer
+    /// and knows the notification URL the merchant cabinet needs.
+    let externalPayments: ExternalPaymentService?
 
     init(
         telegram: TelegramGatewayPort,
@@ -23,7 +26,8 @@ final class BotMenuHandler: @unchecked Sendable {
         botUsername: String = "",
         modelPriceMonitor: ModelPriceMonitor? = nil,
         cryptoService: CryptoPaymentService? = nil,
-        reminderService: SubscriptionReminderService? = nil
+        reminderService: SubscriptionReminderService? = nil,
+        externalPayments: ExternalPaymentService? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -34,6 +38,7 @@ final class BotMenuHandler: @unchecked Sendable {
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoService = cryptoService
         self.reminderService = reminderService
+        self.externalPayments = externalPayments
     }
 
     /// Plain chat message, no keyboard — used for the short confirmations and
@@ -124,7 +129,7 @@ final class BotMenuHandler: @unchecked Sendable {
             try await processAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
         case .sa, .stenant, .sim, .sinspect, .ads, .markup, .dailylimit,
-             .stars, .freemodels, .sbal, .crypto, .card:
+             .stars, .freemodels, .sbal, .crypto, .card, .extpay:
             try await processSuperAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
         case .funnel, .promo, .rem, .examples, .onb, .sref, .strf:
@@ -173,7 +178,7 @@ final class BotMenuHandler: @unchecked Sendable {
             // Every `super*` page belongs here — the buttons inside them are
             // gated separately, but the pages themselves show the owner's
             // configuration and numbers.
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superModes, .superReferrals, .superTraffic:
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superExternalPay, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superModes, .superReferrals, .superTraffic:
                 guard await requireSuperAdmin(callback) else { return }
             case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults, .adminInvite:
                 guard await requireAdmin(callback, chatKey: chatKey) else { return }
@@ -358,6 +363,8 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderSuperCrypto(chatKey: chatKey)
         case .superCard:
             return await renderSuperCard(chatKey: chatKey)
+        case .superExternalPay:
+            return await renderSuperExternalPay(chatKey: chatKey)
         case .superFreeModels:
             return await renderSuperFreeModels(chatKey: chatKey)
         case .superTenants:

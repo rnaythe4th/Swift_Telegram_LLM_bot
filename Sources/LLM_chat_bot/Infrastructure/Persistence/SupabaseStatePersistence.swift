@@ -102,6 +102,7 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         configs.referralLedger = try await fetchConfig(.referralLedger, as: ReferralLedger.self)
         configs.trafficSources = try await fetchConfig(.trafficSources, as: TrafficSourceLedger.self)
         configs.userDirectory = try await fetchConfig(.userDirectory, as: UserDirectory.self)
+        configs.externalPayments = try await fetchConfig(.externalPayments, as: ExternalPaymentSnapshot.self)
 
         return PersistedBotState(
             contexts: contextRows.map {
@@ -262,6 +263,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         case .trafficSources(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .userDirectory(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .externalPayments(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         }
         try await upsert(table: "bot_config", body: body)

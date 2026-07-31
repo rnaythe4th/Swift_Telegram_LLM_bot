@@ -27,6 +27,8 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case referralLedger = "referral_ledger"
     case trafficSources = "traffic_sources"
     case userDirectory = "user_directory"
+    /// Hosted checkout: merchant config + orders waiting for a callback (§7).
+    case externalPayments = "external_payments"
 }
 
 struct ChatContextRow: Sendable {
@@ -88,6 +90,8 @@ enum GlobalConfigValue: Sendable {
     case trafficSources(TrafficSourceLedger)
     /// userID ↔ @username directory behind every `UserKey`.
     case userDirectory(UserDirectory)
+    /// Third-party hosted checkout: credentials, prices, rails, open orders.
+    case externalPayments(ExternalPaymentSnapshot)
 
     var key: GlobalConfigKey {
         switch self {
@@ -116,6 +120,7 @@ enum GlobalConfigValue: Sendable {
         case .referralLedger: return .referralLedger
         case .trafficSources: return .trafficSources
         case .userDirectory: return .userDirectory
+        case .externalPayments: return .externalPayments
         }
     }
 }
@@ -213,6 +218,7 @@ struct PersistedGlobalConfigs: Sendable {
     var referralLedger: ReferralLedger?
     var trafficSources: TrafficSourceLedger?
     var userDirectory: UserDirectory?
+    var externalPayments: ExternalPaymentSnapshot?
 
     var hasAnyValue: Bool {
         starsPrice != nil || starsPerUsd != nil || freeModelIDs != nil || crypto != nil || card != nil
@@ -222,7 +228,7 @@ struct PersistedGlobalConfigs: Sendable {
             || dailyPremiumLimit != nil || dailyPremiumUsage != nil || selfPromo != nil
             || modes != nil
             || reminders != nil || onboarding != nil || referrals != nil || referralLedger != nil
-            || trafficSources != nil || userDirectory != nil
+            || trafficSources != nil || userDirectory != nil || externalPayments != nil
     }
 }
 

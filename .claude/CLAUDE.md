@@ -46,8 +46,10 @@ Telegram-бот на Swift (server-side, без Vapor), отвечающий п�
 
 - **Язык**: Swift 6.2, strict concurrency (акторы + `Sendable`). Executable target.
 - **Зависимости** (`Package.swift`): `async-http-client`, `swift-nio`
-  (`NIOPosix`, `NIOHTTP1`, `NIOFoundationCompat`). **Никакого Vapor** —
-  HTTP-сервер и клиент собраны напрямую на NIO/AsyncHTTPClient.
+  (`NIOPosix`, `NIOHTTP1`, `NIOFoundationCompat`), `swift-crypto` (`Crypto` —
+  MD5/HMAC подписей внешней кассы, §7; пакет и так был в графе транзитивно).
+  **Никакого Vapor** — HTTP-сервер и клиент собраны напрямую на
+  NIO/AsyncHTTPClient.
 - **Платформа**: `.macOS(.v13)`; в проде — Linux в Docker (`swift:6.2-bookworm`).
 - **Сборка**: `swift build -c release --product LLM_chat_bot`.
 - **Тесты**: `swift test` (цель `LLM_chat_botTests`, `Tests/LLM_chat_botTests/`). См. §19.
@@ -159,8 +161,13 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   неэкранированным путём чужого текста в HTML-сообщение бота.
 - `Formatting/ResponseFooterFormatter.swift` — футер под ответом (токены, стоимость
   ×markup, модель, остаток баланса).
-- `Payments/` — `CryptoPaymentService.swift` (инвойсы, курсы, матчинг),
-  `CryptoPaymentMonitor.swift` (поллинг блокчейнов).
+- `Payments/` — `PaymentFulfillmentService.swift` (**что происходит после
+  прихода денег — один раз на все способы**: дедуп, активация/зачисление,
+  claim чата, winback, воронка, реферальный бонус, атрибуция `src_`, `flushNow`;
+  §7/§17), `CryptoPaymentService.swift` (инвойсы, курсы, матчинг),
+  `CryptoPaymentMonitor.swift` (поллинг блокчейнов),
+  `ExternalPaymentService.swift` (внешняя касса: открыть счёт, подписать ссылку,
+  разобрать уведомление вендора; §7 «Внешняя касса»).
 - `Lifecycle/SubscriptionReminderService.swift` — фоновый свип подписок:
   напоминание перед истечением + winback-офферы со скидкой. См. §7/§14.
 - `Persistence/PersistenceCoordinator.swift` — write-behind: дренаж грязных
@@ -173,7 +180,9 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
 - `ModelPriceMonitor.swift` — фоновый мониторинг цен/бесплатности моделей OpenRouter.
 - `UserFacingError.swift` — перевод ошибок в понятные пользователю сообщения.
 - `Ports/` — протоколы: `TelegramGatewayPort`, `ProviderGatewayPort`,
-  `StatePersistencePort`, `MediaResolverPort`, `LoggerPort` + модели портов.
+  `StatePersistencePort`, `MediaResolverPort`, `LoggerPort`,
+  `ExternalCheckoutPort` (+ `ExternalCheckoutResolver`: подписать ссылку,
+  проверить уведомление — обе операции чистые, сети нет) + модели портов.
 
 ### Domain/
 - `Chat/ChatContextStore.swift` — **сердце системы**, актор: хранилище состояния,
@@ -184,7 +193,8 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   (активация, цены, расписание напоминаний), `Auth` (роли + резолв доступа),
   `Presets`, `ChatContext` (память чата и её мутации), `Chats` (списки, мета,
   инвайты), `PendingInput` (единственный слот ожидания + его владелец),
-  `Payments` (Stars/карта/крипта/курсоры),
+  `Payments` (Stars/карта/крипта/курсоры), `ExternalPayments` (внешняя касса:
+  реквизиты, цены, способы, счета),
   `Models` (что разрешено без оплаты + фолбэк), `Premium` (дневная порция),
   `Modes` (эталонные режимы + их применение к чату), `Analytics`
   (воронка + `src_`), `Onboarding`, `Referral`, `Balances`, `Ads`.
@@ -235,8 +245,17 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
 - `Providers/ProviderTypes.swift` — `ServiceProvider`, `ProviderCapabilities`,
   `StreamUsageSummary`/`StreamMeta`, `ProviderStreamEvent`, `GenerationOptions`,
   `ReasoningEffort`.
+- `Payments/PurchasePurpose.swift` — `subscription | credit(cents:)`: к этим
+  двум случаям сводится любой платёж, поэтому fulfilment общий (§17).
 - `Payments/CryptoPayment.swift` — сети/активы/инвойсы крипты + форматтер сумм.
-- `Payments/CardPayment.swift` — конфиг карточного эквайринга.
+- `Payments/CardPayment.swift` — `FiatCurrency` (RUB/USD/EUR + парсер и рендер
+  сумм в minor units) и конфиг карточного эквайринга.
+- `Payments/ExternalPayment.swift` — внешняя касса (§7): `ExternalPaymentVendor`
+  (вендор → адаптер, подписи, дефолтные способы), `ExternalPaymentMethod`
+  (рельс на странице кассы: код вендора + название), `ExternalPaymentConfig`
+  (реквизиты, валюта, цены, список способов; `credentials` — единственный вход
+  в адаптер), `ExternalPaymentOrder`/`ExternalPaymentSnapshot`,
+  `ExternalPaymentEndpoint` (`/payments/<vendor>`), `ExternalPaymentError`.
 
 ### Infrastructure/
 - `Telegram/TelegramHTTPGateway.swift` — реализация `TelegramGatewayPort`: все
@@ -261,6 +280,13 @@ Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Supaba
   `/ready`, `/metrics`, webhook).
 - `Payments/CryptoExplorers.swift` — `TonExplorer`, `EvmExplorer` (ETH/BSC,
   Etherscan V2 multichain по chainID), `TronExplorer`.
+- `Payments/FreeKassaCheckoutAdapter.swift` — внешняя касса FreeKassa (SCI):
+  подписанная ссылка `pay.fk.money` и проверка уведомления;
+  `ExternalCheckoutRegistry.swift` — `vendor → адаптер` **исчерпывающим
+  switch'ем** (новый вендор не соберётся без адаптера);
+  `PaymentSignature.swift` — MD5-подпись (схема вендора, не наш выбор).
+- `Networking/URLForm.swift` — `application/x-www-form-urlencoded` в обе
+  стороны: касса говорит формами, а не JSON.
 - `Logging/ConsoleLogger.swift` — `LoggerPort`, уровень из `LOG_LEVEL`.
 
 > Файл `Infrastructure/Networking/HealthCheckServer.swift` **удалён** — заменён
@@ -538,6 +564,39 @@ false во время симуляции; `isActuallySuperAdmin` игнорир�
     двум инвойсам одинаковую `exactAmountAtomic` — платёж одного закрывал подписку
     другого. Тексты `CryptoPaymentError` идут пользователю как есть
     (`UserFacingError` их не заворачивает).
+
+- **🏦 Внешняя касса** (`ExternalPaymentConfig`, `Domain/Payments/ExternalPayment.swift`)
+  — сторонний агрегатор держит платёжную страницу, и одна интеграция закрывает
+  то, чего нет ни в Telegram Payments (нужен провайдер и юрлицо), ни в голом
+  крипто-адресе: **Сбербанк Онлайн, СБП, карты РФ и зарубежные, крипта**.
+  Первый вендор — FreeKassa (SCI): бот подписывает ссылку секретным словом 1,
+  касса шлёт уведомление, подписанное словом 2, на `/payments/freekassa`
+  (§11), бот отвечает `YES` — иначе касса повторяет доставку.
+  - **Всё настраивается из бота** (страница «🏦 Внешняя касса», §13): ID
+    магазина, оба секретных слова, валюта, цена подписки, курс пополнений и
+    **список способов оплаты** (`код | название`, где код — ID платёжной
+    системы вендора). Набор рельсов — данные, а не релиз: агрегаторы заводят и
+    закрывают способы постоянно. Пустой список = покупатель выбирает на
+    странице кассы. Кнопка «↺ Стандартные» заполняет набор вендора.
+  - **Порог включения — реквизиты целиком**: `credentials` возвращает тройку
+    или nil, поэтому наполовину настроенный магазин не может выдать ссылку,
+    которая упадёт на стороне кассы с непонятной покупателю ошибкой.
+    Выключатель отдельно от реквизитов — выключить на день не значит идти в
+    кабинет за секретами заново.
+  - **Счёт живёт час и оплачивается один раз**: повторный тап «оплатить»
+    переиспользует открытый счёт (два живых счёта на одну покупку — это два
+    возможных платежа), а повторное уведомление ничего не начисляет
+    (`markExternalOrderPaid` + дедуп по `ext:<vendor>:<paymentID>`).
+    Недоплата не включает доступ: в чат уходит номер счёта, чтобы разобрались
+    руками.
+  - **Подпись — единственная аутентификация публичного эндпоинта**, поэтому
+    сравнение константное (`SecretGuard`), отсутствующая подпись = неверная, а
+    неподписанный POST получает 400 и ничего больше. Секретные слова
+    регистрируются в `SecretRedactor` в момент ввода (§15).
+  - Цена подписки идёт через `subscriptionPricing(username:)`
+    (`externalMinorUnits`), поэтому winback-скидка показана и списана одна и та
+    же; пакеты кредитов — через свой курс (`usdRateMinorUnits`), независимо от
+    цены подписки.
 
 Идемпотентность: `successful_payment` дедуплицируется по
 `telegram_payment_charge_id` (`processedPaymentChargeIDs`), крипта — по хешам
@@ -1072,7 +1131,8 @@ markup, balances, **funnel** (счётчики воронки, §7/§11), **funn
 счётчики их тапов, §7 «Онбординг»), **referrals** (награды/лимит реферала),
 **referral_ledger** (журнал привязок + агрегаты, §7 «Реферал»),
 **traffic_sources** (атрибуция рекламных меток `src_` + агрегаты по кампаниям,
-§7 «Источники») и
+§7 «Источники»), **external_payments** (внешняя касса: реквизиты магазина,
+валюта, цены, способы оплаты + открытые счета, §7 «Внешняя касса») и
 **user_directory** (userID ↔ @username + ключ владельца, §6 «Идентичность»).
 Значения конфигов оборачиваются в `{"value": …}`.
 
@@ -1145,6 +1205,12 @@ memory-only режим, запись отключена**, чтобы не за�
   Отмена генерации («Стоп») **не** обнуляет `activeCount` заранее: сессия живёт до
   `finish`, поэтому выключение дожидается записи ответа в историю. **Редеплой без
   потерь.**
+- **Эндпоинт кассы** (`/payments/<vendor>`, §7 «Внешняя касса»): принимает
+  уведомление агрегатора (POST или GET, форма — не JSON), аутентификация —
+  подпись вендора внутри адаптера, ответ — ровно то слово, которого касса ждёт
+  (`YES`), иначе доставка повторяется. Всё, что мы приняли, но не смогли
+  использовать (неизвестный счёт, недоплата), **подтверждается и логируется**:
+  иначе агрегатор долбит эндпоинт вечно. 400 — только неподписанному запросу.
 - **Health-эндпоинты** (`AppHTTPServer`): `/health` (liveness), `/ready` (503 пока
   restore не завершён и при draining — Railway healthcheck), `/metrics`
   (**закрыт токеном**: `Authorization: Bearer <METRICS_TOKEN>`, при незаданном —
@@ -1239,6 +1305,8 @@ crypto/…), `/inspect`, `/ads` (+ `/ads promo` — само-реклама, §7
 ссылка, «Поделиться», личная статистика; только в личке), admin-панель (`admin`, `adminhelp`,
 `adminchats`, `adminusers`, `adminwl`, `admindef`, `admininvite`), супер-панель
 (`superadmin`, `superadminhelp`, `superstars`, `supercrypto`, `supercard`,
+`superextpay` — внешняя касса: реквизиты, валюта, цены, способы оплаты, URL
+оповещения для кабинета,
 `superfreemodels`, `supertenants`, `superadmins`, `supersim`, `superchats`,
 `superads` — кампании + само-реклама (текст/частота/пауза/показы),
 `superbal`, `superfunnel` — воронка-аналитика с переключателем периода,
@@ -1555,8 +1623,21 @@ OpenRouter кэшируется в памяти и на старте может 
   (`UserBalance.toppedUpUsd`) и открывает новый цикл возврата по балансу (§7).
   Бонусы и начисления суперадмина обязаны идти обычным `creditBalance` — иначе
   бесплатный кредит превратит кого угодно в «доказанного плательщика».
-- **Идемпотентность**: любой платёжный путь дедуплицируется (charge_id / tx-хеш) —
-  Telegram и блокчейн-поллинг доставляют события повторно.
+- **Новый платёжный путь не пишет свой post-payment код.** Всё, что следует за
+  приходом денег, живёт в `PaymentFulfillmentService.fulfil(_:)`: дедуп,
+  активация или зачисление, `claimChatForPayment`, съедание winback-скидки,
+  счётчики воронки, реферальный бонус за конверсию, `recordTrafficSourcePayment`
+  и `flushNow` — в этом порядке. Список длинный, каждый пункт невидим, если о
+  нём забыть, и каждый — чьи-то деньги. Путь строит `PaymentReceipt`, получает
+  `PaymentFulfillmentOutcome` и рисует **только текст** для своего канала.
+- **Идемпотентность**: любой платёжный путь дедуплицируется (charge_id / tx-хеш /
+  `ext:<vendor>:<paymentID>`) — Telegram, блокчейн-поллинг и касса доставляют
+  события повторно.
+- **Подпись уведомления кассы проверяется до всего остального** и в постоянном
+  времени; отсутствующая подпись — это неверная подпись, а не «поля нет».
+  Адаптер, который отвечает вендору `YES` без проверки, дарит подписку любому,
+  кто знает URL. Тексты полей сверяются регистронезависимо: платёж, отклонённый
+  из-за строчной буквы в имени поля, неотличим от неверного секрета.
 - **Какой токен пришёл — решается точным сравнением адреса контракта.** Свой
   жетон может выпустить кто угодно за стоимость газа, поэтому приблизительное
   сравнение здесь = бесплатная подписка. У TON две записи одного адреса (сырая
@@ -1726,7 +1807,7 @@ Free-план даёт только бесплатные модели. Плат�
 
 ## 19. Тесты
 
-`swift test` — цель `LLM_chat_botTests` (`Tests/LLM_chat_botTests/`), 277 тестов,
+`swift test` — цель `LLM_chat_botTests` (`Tests/LLM_chat_botTests/`), 303 теста,
 чистая логика без сети: стор поднимается в памяти (`Fixtures.makeStore()`),
 Supabase, Telegram и провайдеры не участвуют.
 
@@ -1773,6 +1854,17 @@ Supabase, Telegram и провайдеры не участвуют.
   закрыты.
 - `PaymentTypeTests` — сравнение TON-адресов (обе записи одного счёта),
   форматирование атомарных сумм, пакеты кредитов, минимумы валют карты.
+- `ExternalPaymentTests` — внешняя касса (§7): подпись ссылки и уведомления
+  сверены с примером из документации вендора (хеш посчитан вне кода), подделка
+  подписи/суммы/чужого секрета отклоняется, суммы парсятся целочисленно
+  (`0.29` не превращается в 28.99…), реквизиты работают только тройкой,
+  пополнения переживают выключенную подписку, скидка не опускает цену ниже
+  минимума валюты, счёт переиспользуется и оплачивается один раз, конфиг и
+  открытые счета переживают рестарт.
+- `ExternalCallbackEndToEndTests` — деньги от кассы до доступа: подписанное
+  уведомление включает премиум и пишет плательщику, повторное — не продлевает
+  второй раз, пакет ложится на баланс по курсу суперадмина и помечается как
+  реальная оплата, неподписанное и недоплаченное не дают ничего.
 - `EndToEndTests` + `FakeTelegram.swift` — **сквозные**: апдейт входит в
   `BotOrchestrator.dispatch`, проходит настоящие команды/меню/генерацию и
   настоящий `TelegramHTTPGateway`, а приземляется в локальный дублёр Bot API —

@@ -54,6 +54,10 @@ extension BotMenuHandler {
             try await handleCardAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
+        case .extpay:
+            try await handleExternalPayAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
+            return
+
         default:
             break
         }
@@ -123,6 +127,7 @@ extension BotMenuHandler {
         let starsButtonLabel = starsPrice.map { "💫 Stars · \($0) ⭐" } ?? "💫 Stars · откл"
         let cryptoButtonLabel = cryptoCents.map { String(format: "🪙 Крипто · $%.2f", Double($0) / 100.0) } ?? "🪙 Крипто · откл"
 
+        let external = await state.externalPaymentConfig()
         let card = await state.cardConfig()
         let cardLabel = card.isEnabled ? "<b>\(card.priceLabel ?? "")</b>\(card.isTestToken ? " · тест" : "")" : "<b>отключена</b>"
         let cardButtonLabel = card.isEnabled ? "💳 Карта · \(card.priceLabel ?? "")" : "💳 Карта · откл"
@@ -150,6 +155,12 @@ extension BotMenuHandler {
             [menuButton(starsButtonLabel, page: .superStars)],
             [menuButton(cryptoButtonLabel, page: .superCrypto)],
             [menuButton(cardButtonLabel, page: .superCard)],
+            [menuButton(
+                external.isEnabled || external.creditsEnabled
+                    ? "🏦 Внешняя касса · \(external.priceLabel ?? external.usdRateLabel ?? "вкл")"
+                    : "🏦 Внешняя касса · откл",
+                page: .superExternalPay
+            )],
             [menuButton("🆓 Бесплатные модели · \(freeCount)", page: .superFreeModels)],
             [menuButton("🏢 Тенанты и статистика · \(totalTenants)", page: .superTenants)],
             [menuButton("👁 Чаты бота", page: .superChats),
@@ -179,6 +190,7 @@ extension BotMenuHandler {
         💫 Stars · \(starsLabel)
         🪙 Крипто · \(cryptoLabel) · режим <b>\(cryptoMode.displayName)</b>
         💳 Карта · \(cardLabel)
+        🏦 Внешняя касса · \(external.vendor.displayName) · \(external.isEnabled ? "<b>\(external.priceLabel ?? "")</b>" : "<b>откл</b>")\(external.creditsEnabled ? " · пополнения вкл" : "")
         💹 Наценка · <b>\(markupPct)%</b> · /tenant markup
         🎛 Режимы · <b>\(modes.enabled ? "вкл" : "выкл")</b> · всего <b>\(modes.activeModes.count)</b> · бесплатных <b>\(freeModeCount)</b> · рабочий <b>\(modes.defaultMode?.title ?? "—")</b>
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным

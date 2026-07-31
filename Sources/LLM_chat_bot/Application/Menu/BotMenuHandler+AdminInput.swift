@@ -60,6 +60,10 @@ extension BotMenuHandler {
         case .cardProviderToken, .cardUsdRate, .cardPrice:
             outcome = await applyCardInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
 
+        case .externalMerchantID, .externalSecret, .externalCallbackSecret,
+             .externalPrice, .externalUsdRate, .externalMethodAdd:
+            outcome = await applyExternalPaymentInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
+
         case .reminderDaysBefore, .reminderWinbackDays, .reminderDiscount,
              .reminderOfferHours, .reminderInterval, .reminderWalletDays:
             outcome = await applyReminderInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
@@ -482,6 +486,98 @@ extension BotMenuHandler {
             } else {
                 toast = "⚠️ Введите число, например <code>499</code> или <code>4.99</code>, или <code>0</code> для отключения."
             }
+
+        default:
+            break
+        }
+
+        return (toast, resumePage)
+    }
+
+    // MARK: - Hosted checkout: merchant credentials, prices, rails
+
+    private func applyExternalPaymentInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
+        var toast: String = ""
+        let resumePage: MenuPage = .superExternalPay
+        guard isSuper else { return (Texts.superAdminOnly, resumePage) }
+        let config = await state.externalPaymentConfig()
+
+        switch pending.kind {
+        case .externalMerchantID:
+            if trimmed == "-" || trimmed.isEmpty {
+                await state.updateExternalPaymentConfig { $0.merchantID = nil }
+                toast = "✓ \(config.vendor.merchantIDLabel) удалён"
+            } else {
+                await state.updateExternalPaymentConfig { $0.merchantID = trimmed }
+                toast = "✓ \(config.vendor.merchantIDLabel): <code>\(trimmed)</code>"
+            }
+
+        case .externalSecret, .externalCallbackSecret:
+            let isCallback = pending.kind == .externalCallbackSecret
+            let label = isCallback ? config.vendor.callbackSecretLabel : config.vendor.secretLabel
+            if trimmed == "-" || trimmed.isEmpty {
+                await state.updateExternalPaymentConfig {
+                    if isCallback { $0.callbackSecret = nil } else { $0.secretWord = nil }
+                }
+                toast = "✓ \(label) удалено"
+            } else {
+                await state.updateExternalPaymentConfig {
+                    if isCallback { $0.callbackSecret = trimmed } else { $0.secretWord = trimmed }
+                }
+                // The secret was typed into a chat and will be quoted back by
+                // any transport error that touches the checkout URL — register
+                // it for redaction the moment it exists (§15).
+                SecretRedactor.shared.register([trimmed])
+                toast = "✓ \(label) сохранено. <b>Удалите своё сообщение с секретом из чата.</b>"
+            }
+
+        case .externalPrice:
+            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
+            guard let value = Double(normalized), value >= 0 else {
+                toast = "⚠️ Введите число, например <code>499</code>, или <code>0</code> для отключения."
+                break
+            }
+            if value == 0 {
+                await state.updateExternalPaymentConfig { $0.priceMinorUnits = nil }
+                toast = "✓ Подписка через кассу не продаётся."
+            } else {
+                let minorUnits = Int((value * 100).rounded())
+                if minorUnits < config.currency.minMinorUnits {
+                    toast = "⚠️ Минимум для \(config.currency.rawValue): \(config.currency.format(minorUnits: config.currency.minMinorUnits))"
+                } else {
+                    await state.updateExternalPaymentConfig { $0.priceMinorUnits = minorUnits }
+                    toast = "✓ Цена подписки: <b>\(config.currency.format(minorUnits: minorUnits))</b>"
+                }
+            }
+
+        case .externalUsdRate:
+            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
+            guard let value = Double(normalized), value >= 0 else {
+                toast = "⚠️ Введите число, например <code>95</code>, или <code>0</code> для отключения."
+                break
+            }
+            if value == 0 {
+                await state.updateExternalPaymentConfig { $0.usdRateMinorUnits = nil }
+                toast = "✓ Пополнение баланса через кассу отключено."
+            } else {
+                await state.updateExternalPaymentConfig { $0.usdRateMinorUnits = Int((value * 100).rounded()) }
+                let updated = await state.externalPaymentConfig()
+                toast = "✓ Курс: <b>\(updated.usdRateLabel ?? "—")</b>"
+            }
+
+        case .externalMethodAdd:
+            guard let method = ExternalPaymentMethod.parse(trimmed) else {
+                toast = "⚠️ Формат: <code>код | название</code>, например <code>44 | СБП</code>."
+                break
+            }
+            let added = await state.addExternalPaymentMethod(method)
+            toast = added
+                ? "✓ Способ добавлен: <b>\(method.title)</b> (<code>\(method.code)</code>)"
+                : "⚠️ Такой код уже есть или список полон (максимум \(ExternalPaymentConfig.maxMethods))."
 
         default:
             break

@@ -201,6 +201,8 @@ extension ChatContextStore {
             return .trafficSources(trafficSourceLedgerValue)
         case .userDirectory:
             return .userDirectory(userDirectoryValue)
+        case .externalPayments:
+            return .externalPayments(externalPaymentSnapshot())
         }
     }
 
@@ -302,6 +304,7 @@ extension ChatContextStore {
         referralConfigValue = (state.configs.referrals ?? .default).normalized
         referralLedgerValue = state.configs.referralLedger ?? .empty
         trafficSourceLedgerValue = state.configs.trafficSources ?? .empty
+        restoreExternalPayments(state.configs.externalPayments)
     }
 
     // MARK: - Legacy snapshot restore (one-time migration path)

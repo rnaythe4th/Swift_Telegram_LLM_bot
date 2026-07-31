@@ -215,6 +215,8 @@ extension ChatContextStore {
         applying: SubscriptionDiscount? = nil
     ) -> SubscriptionPricing {
         let cardPrice = _cardConfig.isEnabled ? _cardConfig.priceMinorUnits : nil
+        let externalCurrency = _externalPaymentConfig.currency
+        let externalPrice = _externalPaymentConfig.isEnabled ? _externalPaymentConfig.priceMinorUnits : nil
         var pricing = SubscriptionPricing(
             discount: nil,
             starsFull: _starsPrice,
@@ -224,7 +226,11 @@ extension ChatContextStore {
             cardMinorUnitsFull: cardPrice,
             cardMinorUnits: cardPrice,
             cardLabelFull: cardPrice.map { _cardConfig.currency.format(minorUnits: $0) },
-            cardLabel: cardPrice.map { _cardConfig.currency.format(minorUnits: $0) }
+            cardLabel: cardPrice.map { _cardConfig.currency.format(minorUnits: $0) },
+            externalMinorUnitsFull: externalPrice,
+            externalMinorUnits: externalPrice,
+            externalLabelFull: externalPrice.map { externalCurrency.format(minorUnits: $0) },
+            externalLabel: externalPrice.map { externalCurrency.format(minorUnits: $0) }
         )
         guard let discount = applying ?? subscriptionDiscount(username: username, grace: grace, now: now) else {
             return pricing
@@ -235,6 +241,11 @@ extension ChatContextStore {
         // Card: never dip below the provider minimum — Telegram rejects it.
         pricing.cardMinorUnits = cardPrice.map { max(_cardConfig.currency.minMinorUnits, discount.apply(to: $0)) }
         pricing.cardLabel = pricing.cardMinorUnits.map { _cardConfig.currency.format(minorUnits: $0) }
+        // Same floor for the hosted checkout: aggregators reject a 30 ₽ order,
+        // and a discount that produces an unpayable link is worse than no
+        // discount at all.
+        pricing.externalMinorUnits = externalPrice.map { max(externalCurrency.minMinorUnits, discount.apply(to: $0)) }
+        pricing.externalLabel = pricing.externalMinorUnits.map { externalCurrency.format(minorUnits: $0) }
         return pricing
     }
 

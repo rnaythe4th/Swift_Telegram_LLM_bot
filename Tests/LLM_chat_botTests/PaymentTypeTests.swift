@@ -116,18 +116,18 @@ final class CreditPackTests: XCTestCase {
     }
 }
 
-final class CardCurrencyTests: XCTestCase {
+final class FiatCurrencyTests: XCTestCase {
 
     func testMinorUnitsAreFormattedWithTheirSymbol() {
-        XCTAssertTrue(CardCurrency.rub.format(minorUnits: 49900).contains("₽"))
-        XCTAssertTrue(CardCurrency.usd.format(minorUnits: 500).contains("$"))
-        XCTAssertTrue(CardCurrency.eur.format(minorUnits: 500).contains("€"))
+        XCTAssertTrue(FiatCurrency.rub.format(minorUnits: 49900).contains("₽"))
+        XCTAssertTrue(FiatCurrency.usd.format(minorUnits: 500).contains("$"))
+        XCTAssertTrue(FiatCurrency.eur.format(minorUnits: 500).contains("€"))
     }
 
     /// Telegram rejects an amount below the provider minimum, so a discount is
     /// never allowed to push a card price under it.
     func testEveryCurrencyDeclaresAMinimum() {
-        for currency in CardCurrency.allCases {
+        for currency in FiatCurrency.allCases {
             XCTAssertGreaterThan(currency.minMinorUnits, 0, "\(currency.rawValue)")
         }
     }

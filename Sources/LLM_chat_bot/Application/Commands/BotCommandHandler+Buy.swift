@@ -16,12 +16,16 @@ extension BotCommandHandler {
         let cryptoCreditsAvailable = !cryptoAssets.isEmpty
         let card = await state.cardConfig()
         let cardAvailable = card.isEnabled
+        // Hosted checkout (§7): Сбер, СБП, карты РФ и крипта одним счётом.
+        let external = await state.externalPaymentConfig()
+        let externalAvailable = external.isEnabled
 
         // Credit packs are sold through their own switches (Stars rate / crypto
         // addresses / card FX rate), so /buy stays useful even when monthly
         // subscriptions are switched off (roadmap step 2).
-        let creditsAvailable = await state.starsCreditsEnabled() || cryptoCreditsAvailable || card.creditsEnabled
-        guard (starsPrice ?? 0) > 0 || cryptoAvailable || cardAvailable || creditsAvailable else {
+        let creditsAvailable = await state.starsCreditsEnabled() || cryptoCreditsAvailable
+            || card.creditsEnabled || external.creditsEnabled
+        guard (starsPrice ?? 0) > 0 || cryptoAvailable || cardAvailable || externalAvailable || creditsAvailable else {
             try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Продажа доступа сейчас недоступна.")
             return
         }
@@ -55,7 +59,8 @@ extension BotCommandHandler {
         // Exactly one way to pay and nothing cheaper to offer → straight to the
         // invoice; otherwise show the choice, so the low-threshold top-up is
         // never hidden behind a single-method shortcut.
-        let methodCount = ((starsPrice ?? 0) > 0 ? 1 : 0) + (cryptoAvailable ? 1 : 0) + (cardAvailable ? 1 : 0)
+        let methodCount = ((starsPrice ?? 0) > 0 ? 1 : 0) + (cryptoAvailable ? 1 : 0)
+            + (cardAvailable ? 1 : 0) + (externalAvailable ? 1 : 0)
         let discountNote = pricing.hasDiscount ? " · скидка −\(pricing.discount?.percent ?? 0)%" : ""
         if methodCount == 1, !creditsAvailable {
             if let starsAmount = pricing.stars, starsAmount > 0 {
@@ -105,6 +110,12 @@ extension BotCommandHandler {
             rows.append([InlineKeyboardButton(
                 text: "💳 Картой · \(card.currency.format(minorUnits: minorUnits))",
                 callback_data: BotCallbackAction.menu(action: MenuRoute.link(.buy, "card")).rawData
+            )])
+        }
+        if externalAvailable, let minorUnits = pricing.externalMinorUnits {
+            rows.append([InlineKeyboardButton(
+                text: "🏦 \(menuHandler.externalMethodsLabel(external)) · \(external.currency.format(minorUnits: minorUnits))\(discountNote)",
+                callback_data: BotCallbackAction.menu(action: MenuRoute.link(.buy, "ext")).rawData
             )])
         }
         // Lower entry point right next to the monthly price: a top-up is the
