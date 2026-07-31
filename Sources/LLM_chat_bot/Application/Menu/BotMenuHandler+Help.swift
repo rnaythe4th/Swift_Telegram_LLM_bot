@@ -5,26 +5,21 @@ import Foundation
 extension BotMenuHandler {
     /// Super-admin reference, split by topic.
     func processHelpAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "sahelp":
+        switch route.command {
+        case .sahelp:
             // One topic of the super-admin reference (the whole text does not
             // fit in a single Telegram message).
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            guard parts.count >= 2, let section = SuperHelpSection(rawValue: parts[1]) else {
+            guard await requireSuperAdmin(callback) else { return }
+            guard let section = SuperHelpSection(rawValue: route.sub) else {
                 try await showPage(.superAdminHelp, chatKey: chatKey, callback: callback, message: message)
                 return
             }
-            let (helpText, helpMarkup) = renderSuperAdminHelpSection(section)
-            try await editOrAnswer(callback: callback, message: message, text: helpText, markup: helpMarkup)
+            try await editOrAnswer(callback: callback, message: message, screen: renderSuperAdminHelpSection(section))
             return
 
         default:
@@ -32,11 +27,11 @@ extension BotMenuHandler {
         }
     }
 
-    func renderAdminHelp() -> (String, InlineKeyboardMarkup) {
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton("← К моему премиуму", action: "nav:admin")],
+    func renderAdminHelp() -> MenuScreen {
+        let rows: Keyboard = [
+            [backButton(to: .adminPanel)],
         ]
-        return (Self.adminHelpText, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(Self.adminHelpText, rows)
     }
 
     /// Index of the super-admin reference. The whole text is far past
@@ -44,11 +39,11 @@ extension BotMenuHandler {
     /// message — it silently trims to the first chunk, so half the reference
     /// used to be invisible with no hint that anything was missing. One page
     /// per topic keeps every section whole and makes it findable.
-    func renderSuperAdminHelp() -> (String, InlineKeyboardMarkup) {
-        var rows: [[InlineKeyboardButton]] = SuperHelpSection.allCases.map {
-            [menuButton($0.buttonLabel, action: "sahelp:\($0.rawValue)")]
-        }
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+    func renderSuperAdminHelp() -> MenuScreen {
+        var rows = Keyboard(SuperHelpSection.allCases.map {
+            [menuButton($0.buttonLabel, .sahelp, "\($0.rawValue)")]
+        })
+        rows.row([backButton(to: .superAdmin)])
         let text = """
         <b>🛡 Справка супер-админа</b>
 
@@ -57,15 +52,15 @@ extension BotMenuHandler {
         Выберите раздел:
         \(SuperHelpSection.allCases.map { "• \($0.title)" }.joined(separator: "\n"))
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    private func renderSuperAdminHelpSection(_ section: SuperHelpSection) -> (String, InlineKeyboardMarkup) {
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton("← К разделам справки", action: "nav:superadminhelp")],
-            [menuButton("🛡 К супер-админу", action: "nav:superadmin")],
+    private func renderSuperAdminHelpSection(_ section: SuperHelpSection) -> MenuScreen {
+        let rows: Keyboard = [
+            [backButton(to: .superAdminHelp)],
+            [menuButton("🛡 К супер-админу", page: .superAdmin)],
         ]
-        return (section.body, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(section.body, rows)
     }
 
     static let adminHelpText: String = """

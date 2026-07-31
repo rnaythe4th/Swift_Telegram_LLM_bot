@@ -5,23 +5,23 @@ import Foundation
 // BotMenuHandler+ChatSettings.swift.
 
 extension BotMenuHandler {
-    func renderRole(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderRole(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let globalPresets = await state.rolePresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .role, chatKey: chatKey)
         let activeRole = help.role
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
 
         if !globalPresets.isEmpty {
             var currentRow: [InlineKeyboardButton] = []
             for (i, preset) in globalPresets.enumerated() {
                 let isActive = activeRole.hasPrefix(preset.value)
                 let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
-                currentRow.append(menuButton(label, action: "role:gsel:\(i)"))
-                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+                currentRow.append(menuButton(label, .role, "gsel", "\(i)"))
+                if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
-            if !currentRow.isEmpty { rows.append(currentRow) }
+            if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
         if !chatPresets.isEmpty {
@@ -29,15 +29,15 @@ extension BotMenuHandler {
             for (i, preset) in chatPresets.enumerated() {
                 let isActive = activeRole.hasPrefix(preset.value)
                 let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
-                currentRow.append(menuButton(label, action: "role:csel:\(i)"))
-                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+                currentRow.append(menuButton(label, .role, "csel", "\(i)"))
+                if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
-            if !currentRow.isEmpty { rows.append(currentRow) }
+            if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
-        rows.append([menuButton("✏️ Своя роль", action: "role:custom"), menuButton("↺ Стандартная", action: "role:default")])
-        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:role")])
-        rows.append(navButtons())
+        rows.row([menuButton("✏️ Своя роль", .role, "custom"), menuButton("↺ Стандартная", .role, "default")])
+        rows.row([menuButton("⚙️ Мои заготовки", .pm, "role")])
+        rows.row(navButtons())
 
         let text = """
         <b>🎭 Роль ассистента</b>
@@ -48,18 +48,25 @@ extension BotMenuHandler {
         <i>🌐 — общая для всех чатов · 💬 — только для этого</i>
         ✏️ — своя роль текстом (или /setrole &lt;текст&gt;)
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderModel(chatKey: ChatKey, username: String? = nil) async -> (String, InlineKeyboardMarkup) {
+    func renderModel(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let globalPresets = await state.modelPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
-        let effectiveFreeModels = await state.effectiveFreeModelIDs()
-        let hasFullAccess = await state.hasFullModelAccess(username: username, chatID: chatKey.chatID)
+        // What a free-tier chat may run: the zero-cost catalogue plus whatever
+        // the super-admin put behind a 🆓 mode.
+        let effectiveFreeModels = await state.allowedFreeModelIDs()
+        // Group menus are one shared message, so the legend and the upsell
+        // describe the chat's access, never the tapper's own (CLAUDE.md §13).
+        let hasFullAccess = await state.hasFullModelAccess(
+            username: chatKey.chatID < 0 ? nil : username,
+            chatID: chatKey.chatID
+        )
         let restrictionsActive = effectiveFreeModels != nil
         let modelPrices = await state.openRouterModelPrices()
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
 
         func isEffectivelyFree(_ id: String) -> Bool {
             guard let eff = effectiveFreeModels else { return true }
@@ -80,20 +87,26 @@ extension BotMenuHandler {
             var currentRow: [InlineKeyboardButton] = []
             for preset in presets {
                 let label = presetLabel(preset: preset, scope: action == "gsel" ? "🌐" : "💬")
-                currentRow.append(menuButton(label, action: "model:\(action):\(preset.value)"))
-                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+                currentRow.append(menuButton(label, .model, action, preset.value))
+                if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
-            if !currentRow.isEmpty { rows.append(currentRow) }
+            if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
         if !globalPresets.isEmpty { appendPresets(globalPresets, action: "gsel") }
         if !chatPresets.isEmpty { appendPresets(chatPresets, action: "csel") }
 
         if modelPriceMonitor != nil {
-            rows.append([menuButton("🆓 Бесплатные модели OpenRouter", action: "model:freemodels")])
+            rows.row([menuButton("🆓 Бесплатные модели OpenRouter", .model, "freemodels")])
         }
-        rows.append([menuButton("✏️ Ввести ID модели", action: "model:custom")])
-        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:model")])
+        rows.row([menuButton("✏️ Ввести ID модели", .model, "custom")])
+        rows.row([menuButton("⚙️ Мои заготовки", .pm, "model")])
+        // Free models are genuinely poor. Someone who tried one and did not
+        // like it needs one tap back to a combination that works, not a walk
+        // through the settings.
+        if await state.defaultMode() != nil {
+            rows.row([menuButton("↺ Рабочий режим", .mode, "reset")])
+        }
 
         var legendLine = ""
         var accessLine = ""
@@ -111,10 +124,10 @@ extension BotMenuHandler {
                 accessLine = taste.limit > 0
                     ? "\n\n<i>Умные модели (⭐) можно попробовать бесплатно: сегодня осталось \(taste.remaining) из \(taste.limit). Дальше — премиум или баланс.</i>"
                     : "\n\n<i>Умные модели (⭐) открываются премиумом или балансом.</i>"
-                rows.append([menuButton("⚡ Открыть умные модели", action: "nav:pay:\(PurchaseSource.model.rawValue)")])
+                rows.row([buyButton("⚡ Открыть умные модели", source: .model)])
             }
         }
-        rows.append(navButtons())
+        rows.row(navButtons())
 
         let allPresets = globalPresets + chatPresets
         var priceSection = ""
@@ -142,24 +155,24 @@ extension BotMenuHandler {
         <i>С конкретным сервисом — /model &lt;id&gt; | &lt;сервис&gt;</i>
         <i>Названия моделей — на openrouter.ai</i>\(accessLine)
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderTemp(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderTemp(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let globalPresets = await state.tempPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .temp, chatKey: chatKey)
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
 
         if !globalPresets.isEmpty {
             var currentRow: [InlineKeyboardButton] = []
             for preset in globalPresets {
                 let isActive = Float(preset.value).map { abs($0 - help.temp) < 0.001 } ?? false
                 let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
-                currentRow.append(menuButton(label, action: "temp:\(preset.value)"))
-                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+                currentRow.append(menuButton(label, .temp, "\(preset.value)"))
+                if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
-            if !currentRow.isEmpty { rows.append(currentRow) }
+            if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
         if !chatPresets.isEmpty {
@@ -167,15 +180,15 @@ extension BotMenuHandler {
             for preset in chatPresets {
                 let isActive = Float(preset.value).map { abs($0 - help.temp) < 0.001 } ?? false
                 let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
-                currentRow.append(menuButton(label, action: "temp:\(preset.value)"))
-                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+                currentRow.append(menuButton(label, .temp, "\(preset.value)"))
+                if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
-            if !currentRow.isEmpty { rows.append(currentRow) }
+            if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
-        rows.append([menuButton("✏️ Своё значение", action: "temp:custom")])
-        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:temp")])
-        rows.append(navButtons())
+        rows.row([menuButton("✏️ Своё значение", .temp, "custom")])
+        rows.row([menuButton("⚙️ Мои заготовки", .pm, "temp")])
+        rows.row(navButtons())
 
         let bucket = Self.tempBucket(help.temp)
         let text = """
@@ -186,10 +199,10 @@ extension BotMenuHandler {
         <i>Насколько свободно бот отвечает: 0.0 — строго по фактам и предсказуемо, 2.0 — творчески и непредсказуемо.</i>
         ✏️ — задать своё число (или /settemp &lt;0.0–2.0&gt;)
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderStats(chatKey: ChatKey, username: String? = nil) async -> (String, InlineKeyboardMarkup) {
+    func renderStats(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let testModeOn = help.testModeSuffix != nil
         let testLabel: String = {
@@ -198,10 +211,10 @@ extension BotMenuHandler {
             }
             return "⚪️ Тест-режим"
         }()
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton("\(toggleMark(help.showTokens)) Объём текста", action: "stats:toggle:tokens"),
-             menuButton("\(toggleMark(help.showCost)) Стоимость", action: "stats:toggle:cost")],
-            [menuButton("\(toggleMark(help.showModel)) Модель", action: "stats:toggle:model")],
+        var rows: Keyboard = [
+            [menuButton("\(toggleMark(help.showTokens)) Объём текста", .stats, "toggle", "tokens"),
+             menuButton("\(toggleMark(help.showCost)) Стоимость", .stats, "toggle", "cost")],
+            [menuButton("\(toggleMark(help.showModel)) Модель", .stats, "toggle", "model")],
         ]
         // Storage reports and the test-mode suffix are operator tools: for a
         // regular user they are two switches that explain nothing and do
@@ -210,10 +223,16 @@ extension BotMenuHandler {
         let isChatAdmin = await state.isAdmin(username: username, chatID: chatKey.chatID)
         let isOperator = isSuper || isChatAdmin
         if isOperator || help.backupNotify || testModeOn {
-            rows.append([menuButton("\(toggleMark(help.backupNotify)) Отчёты о сохранении", action: "stats:toggle:backup")])
-            rows.append([menuButton(testLabel, action: "stats:toggle:testmode")])
+            rows.row([menuButton("\(toggleMark(help.backupNotify)) Отчёты о сохранении", .stats, "toggle", "backup")])
+            rows.row([menuButton(testLabel, .stats, "toggle", "testmode")])
         }
-        rows.append(navButtons())
+        // Lives here rather than on the settings page: it is about the numbers
+        // this page controls, and on the main page it was one more button
+        // competing with the modes.
+        if help.cumulativeUsage.generationCount > 0 {
+            rows.row([menuButton("🗑 Сбросить статистику", .stats, "usage-reset")])
+        }
+        rows.row(navButtons())
 
         let testHint = testModeOn
             ? "\n\n<i>🧪 Тест-режим включён — дописывайте <code>\(help.testModeSuffix!)</code> к командам, чтобы их выполнял именно этот бот.</i>"
@@ -228,24 +247,29 @@ extension BotMenuHandler {
         Стоимость — сколько списалось за этот ответ
         Модель — какая модель отвечала</i>\(testHint)
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderHistory(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderHistory(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let globalPresets = await state.historyLengthPresets(chatID: chatKey.chatID)
-        let chatPresets = await state.chatPresets(category: .history, chatKey: chatKey)
-        var rows: [[InlineKeyboardButton]] = []
+        // Memory length multiplies the cost of *every* answer: each extra
+        // remembered message is re-sent to the model on each turn. It is the
+        // owner's lever, not a user preference — the picker is operator-only,
+        // the value and "what does it remember" stay visible to everyone.
+        let isOperator = await state.isAdmin(username: username, chatID: chatKey.chatID)
+        let globalPresets = isOperator ? await state.historyLengthPresets(chatID: chatKey.chatID) : []
+        let chatPresets = isOperator ? await state.chatPresets(category: .history, chatKey: chatKey) : []
+        var rows: Keyboard = []
 
         if !globalPresets.isEmpty {
             var currentRow: [InlineKeyboardButton] = []
             for preset in globalPresets {
                 let isActive = Int(preset.value) == help.maxHistory
                 let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
-                currentRow.append(menuButton(label, action: "history:length:\(preset.value)"))
-                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+                currentRow.append(menuButton(label, .history, "length", "\(preset.value)"))
+                if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
-            if !currentRow.isEmpty { rows.append(currentRow) }
+            if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
         if !chatPresets.isEmpty {
@@ -253,48 +277,53 @@ extension BotMenuHandler {
             for preset in chatPresets {
                 let isActive = Int(preset.value) == help.maxHistory
                 let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
-                currentRow.append(menuButton(label, action: "history:length:\(preset.value)"))
-                if currentRow.count == 2 { rows.append(currentRow); currentRow = [] }
+                currentRow.append(menuButton(label, .history, "length", "\(preset.value)"))
+                if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
-            if !currentRow.isEmpty { rows.append(currentRow) }
+            if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
-        rows.append([
-            menuButton("📜 Что бот помнит", action: "history:dump"),
-            menuButton("🧹 Очистить", action: "history:clear"),
+        rows.row([
+            menuButton("📜 Что бот помнит", .history, "dump"),
+            menuButton("🧹 Очистить", .history, "clear"),
         ])
-        rows.append([menuButton("✏️ Своё значение", action: "history:custom")])
-        rows.append([menuButton("⚙️ Мои заготовки", action: "pm:history")])
-        rows.append(navButtons())
+        if isOperator {
+            rows.row([menuButton("✏️ Своё значение", .history, "custom")])
+            rows.row([menuButton("⚙️ Мои заготовки", .pm, "history")])
+        }
+        rows.row(navButtons())
 
+        let hint = isOperator
+            ? "✏️ — задать своё число (или /historylength &lt;1–50&gt;)"
+            : "<i>Длину памяти задаёт владелец бота — она влияет на стоимость каждого ответа.</i>"
         let text = """
         <b>📝 Память бота</b>
 
         Помнит последние · <b>\(help.maxHistory) сообщ.</b>
 
         <i>Сколько прошлых сообщений бот держит в голове. Чем больше — тем лучше он понимает, о чём речь, но ответ медленнее и дороже.</i>
-        ✏️ — задать своё число (или /historylength &lt;1–50&gt;)
+        \(hint)
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderProvider(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderProvider(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let providers = ServiceProvider.allCases
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         var currentRow: [InlineKeyboardButton] = []
         for provider in providers {
             let label = (provider == help.provider ? "✓ " : "") + provider.rawValue
-            currentRow.append(menuButton(label, action: "provider:\(provider.commandValue)"))
+            currentRow.append(menuButton(label, .provider, "\(provider.commandValue)"))
             if currentRow.count == 2 {
-                rows.append(currentRow)
+                rows.row(currentRow)
                 currentRow = []
             }
         }
         if !currentRow.isEmpty {
-            rows.append(currentRow)
+            rows.row(currentRow)
         }
-        rows.append(navButtons())
+        rows.row(navButtons())
         let text = """
         <b>🔌 Сервис ИИ</b>
 
@@ -306,10 +335,10 @@ extension BotMenuHandler {
         DeepSeek — только модели DeepSeek, напрямую
         Yandex — YandexGPT</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderReasoning(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderReasoning(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
         let gateway = try? gateways.gateway(for: provider)
@@ -324,15 +353,15 @@ extension BotMenuHandler {
             Сервис <b>\(provider.commandValue)</b> этого не умеет.
             Смените сервис ИИ, чтобы включить.
             """
-            return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+            return MenuScreen(text, rows)
         }
 
         func btn(_ value: String, label: String) -> InlineKeyboardButton {
             let mark = (current == value || (value == "off" && current == nil)) ? "✓ " : ""
-            return menuButton(mark + label, action: "reasoning:set:\(value)")
+            return menuButton(mark + label, .reasoning, "set", "\(value)")
         }
 
-        let rows: [[InlineKeyboardButton]] = [
+        let rows: Keyboard = [
             [btn("low", label: "Быстро"), btn("medium", label: "Средне"), btn("high", label: "Глубоко")],
             [btn("off", label: "Выключить")],
             navButtons(),
@@ -347,11 +376,11 @@ extension BotMenuHandler {
         Средне — разумный компромисс
         Глубоко — самый точный ответ, но ждать дольше</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderHelp(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
-        let rows: [[InlineKeyboardButton]] = [navButtons()]
-        return (BotCallbackHandler.faqText, InlineKeyboardMarkup(inline_keyboard: rows))
+    func renderHelp(chatKey: ChatKey) async -> MenuScreen {
+        let rows: Keyboard = [navButtons()]
+        return MenuScreen(BotCallbackHandler.faqText, rows)
     }
 }

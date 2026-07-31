@@ -8,42 +8,41 @@ import Foundation
 extension BotMenuHandler {
     /// Per-chat settings: role, model, temperature, memory, footer toggles.
     func processChatSettingsAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "role":
-            try await handleRoleAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        switch route.command {
+        case .role:
+            try await handleRoleAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "model":
-            try await handleModelAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .model:
+            try await handleModelAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "temp":
-            try await handleTempAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .temp:
+            try await handleTempAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "stats":
-            try await handleStatsAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .stats:
+            try await handleStatsAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "history":
-            try await handleHistoryAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .history:
+            try await handleHistoryAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "provider":
-            try await handleProviderAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .provider:
+            try await handleProviderAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "reasoning":
-            try await handleReasoningAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .reasoning:
+            try await handleReasoningAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "reset":
-            await clearAllPendingInputs(chatKey: chatKey)
+        case .reset:
+            await state.clearPending(chatKey: chatKey)
             await state.resetChat(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Настройки сброшены")
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
             return
 
-        case "help":
+        case .help:
             try await showPage(.helpPage, chatKey: chatKey, callback: callback, message: message)
 
         default:
@@ -52,14 +51,14 @@ extension BotMenuHandler {
     }
 
     private func handleRoleAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        if parts[1] == "custom" {
-            await state.setAdminPendingInput(.init(kind: .chatCustomRole, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+        guard !route.sub.isEmpty else { return }
+        if route.sub == "custom" {
+            await state.setPending(.admin(.init(kind: .chatCustomRole)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>🎭 Своя роль</b>
 
@@ -68,19 +67,19 @@ extension BotMenuHandler {
 
             ⚠️ Переписка в этом чате будет очищена.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:role")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .role)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
-        } else if parts[1] == "default" {
+        } else if route.sub == "default" {
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: defaultRole)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль по умолчанию")
             try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             return
-        } else if parts[1] == "gsel", parts.count >= 3, let index = Int(parts[2]) {
+        } else if route.sub == "gsel", let index = route.int(2) {
             let presets = await state.rolePresets(chatID: chatKey.chatID)
             guard index >= 0, index < presets.count else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
             let roleValue = presets[index].value + formatOptions
@@ -88,10 +87,10 @@ extension BotMenuHandler {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(presets[index].display)")
             try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             return
-        } else if parts[1] == "csel", parts.count >= 3, let index = Int(parts[2]) {
+        } else if route.sub == "csel", let index = route.int(2) {
             let presets = await state.chatPresets(category: .role, chatKey: chatKey)
             guard index >= 0, index < presets.count else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
             let roleValue = presets[index].value + formatOptions
@@ -99,11 +98,11 @@ extension BotMenuHandler {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(presets[index].display)")
             try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             return
-        } else if parts[1] == "select", parts.count >= 3, let index = Int(parts[2]) {
+        } else if route.sub == "select", let index = route.int(2) {
             // Legacy: treat as global
             let presets = await state.rolePresets(chatID: chatKey.chatID)
             guard index >= 0, index < presets.count else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
             let roleValue = presets[index].value + formatOptions
@@ -115,14 +114,14 @@ extension BotMenuHandler {
     }
 
     private func handleModelAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        if parts[1] == "custom" {
-            await state.setAdminPendingInput(.init(kind: .chatCustomModel, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+        guard !route.sub.isEmpty else { return }
+        if route.sub == "custom" {
+            await state.setPending(.admin(.init(kind: .chatCustomModel)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>🤖 Своя модель</b>
 
@@ -134,44 +133,39 @@ extension BotMenuHandler {
 
             <i>Названия моделей — на openrouter.ai. При смене модели переписка очищается.</i>
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:model")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .model)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
         }
-        if parts[1] == "freemodels" {
+        if route.sub == "freemodels" {
             await sendOpenRouterFreeModels(chatKey: chatKey, callback: callback)
             return
         }
-        guard parts.count >= 3 else { return }
-        let modelValue = parts[2]
-        if parts[1] == "markfree" {
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
+        guard let modelValue = route.arg(2) else { return }
+        if route.sub == "markfree" {
+            guard await requireSuperAdmin(callback) else { return }
             await state.addFreeModel(modelValue)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🆓 Добавлено в бесплатные")
             try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
             return
-        } else if parts[1] == "unmarkfree" {
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
+        } else if route.sub == "unmarkfree" {
+            guard await requireSuperAdmin(callback) else { return }
             await state.removeFreeModel(modelValue)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Убрано из бесплатных")
             try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
             return
-        } else if parts[1] == "select" || parts[1] == "gsel" {
-            let presets = await state.modelPresets(chatID: chatKey.chatID)
+        } else if route.sub == "select" || route.sub == "gsel" || route.sub == "csel" {
+            // `select` is the legacy alias of `gsel`; the only difference
+            // between the branches is which list the value is looked up in.
+            let presets = route.sub == "csel"
+                ? await state.chatPresets(category: .model, chatKey: chatKey)
+                : await state.modelPresets(chatID: chatKey.chatID)
             guard let preset = presets.first(where: { $0.value == modelValue }) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modelNotFound)
                 return
             }
-            let effectiveFree = await state.effectiveFreeModelIDs()
-            let isPaidModel = effectiveFree.map { !$0.contains(modelValue) } ?? false
-            let access = await state.paidModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
-            if isPaidModel, case .none = access {
+            let gate = await paidModelGate(modelValue, callback: callback, chatKey: chatKey)
+            if gate.isPaid, case .none = gate.access {
                 let price = await state.starsPrice()
                 let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Это платная модель\(hint)")
@@ -179,32 +173,32 @@ extension BotMenuHandler {
             }
             _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
             let toast = "Модель: \(preset.display)" + (preset.provider.map { " · \($0)" } ?? "")
-                + Self.dailyTasteToastSuffix(access, isPaidModel: isPaidModel)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: toast)
-            try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
-            return
-        } else if parts[1] == "csel" {
-            let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
-            guard let preset = chatPresets.first(where: { $0.value == modelValue }) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
-                return
-            }
-            let effectiveFree = await state.effectiveFreeModelIDs()
-            let isPaidModel = effectiveFree.map { !$0.contains(modelValue) } ?? false
-            let access = await state.paidModelAccess(username: callback.from.username, userID: callback.from.id, chatID: chatKey.chatID)
-            if isPaidModel, case .none = access {
-                let price = await state.starsPrice()
-                let hint = price.map { " (\($0) ⭐ /buy)" } ?? ""
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "⭐ Это платная модель\(hint)")
-                return
-            }
-            _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
-            let toast = "Модель: \(preset.display)" + (preset.provider.map { " · \($0)" } ?? "")
-                + Self.dailyTasteToastSuffix(access, isPaidModel: isPaidModel)
+                + Self.dailyTasteToastSuffix(gate.access, isPaidModel: gate.isPaid)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: toast)
             try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
             return
         }
+    }
+
+    /// One answer to "may this person point the chat at this model right now".
+    ///
+    /// An unknown catalogue counts as **paid** — the same fail-closed rule the
+    /// generation gate uses. The pickers used to read it the other way round
+    /// (`?? false`), so while OpenRouter was unreachable they handed out every
+    /// model the gate would then refuse, at the owner's expense.
+    func paidModelGate(
+        _ modelID: String,
+        callback: CallbackQuery,
+        chatKey: ChatKey
+    ) async -> (isPaid: Bool, access: ChatContextStore.PaidModelAccess) {
+        let allowedFree = await state.allowedFreeModelIDs()
+        let isPaid = allowedFree.map { !$0.contains(modelID) } ?? true
+        let access = await state.paidModelAccess(
+            username: callback.from.username,
+            userID: callback.from.id,
+            chatID: chatKey.chatID
+        )
+        return (isPaid, access)
     }
 
     /// The live OpenRouter free list, fetched on demand — it is a report,
@@ -250,25 +244,25 @@ extension BotMenuHandler {
     }
 
     private func handleTempAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        if parts[1] == "custom" {
-            await state.setAdminPendingInput(.init(kind: .chatCustomTemp, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+        guard !route.sub.isEmpty else { return }
+        if route.sub == "custom" {
+            await state.setPending(.admin(.init(kind: .chatCustomTemp)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>🌡 Свой стиль ответа</b>
 
             Отправьте число от <code>0.0</code> до <code>2.0</code> одним сообщением.
             <i>0.0 — строго по фактам и предсказуемо · 2.0 — творчески и непредсказуемо</i>
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:temp")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .temp)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
         }
-        guard let temp = Float(parts[1]), (0.0...2.0).contains(temp) else { return }
+        guard let temp = Float(route.sub), (0.0...2.0).contains(temp) else { return }
         await state.setTemperature(chatKey: chatKey, value: temp)
         try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Стиль ответа: \(Self.tempBucket(temp))")
         try await showPage(.temp, chatKey: chatKey, callback: callback, message: message)
@@ -276,21 +270,21 @@ extension BotMenuHandler {
     }
 
     private func handleStatsAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        if parts[1] == "usage-reset" {
+        guard !route.sub.isEmpty else { return }
+        if route.sub == "usage-reset" {
             await state.resetUsage(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Статистика сброшена")
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
             return
         }
-        guard parts.count >= 3, parts[1] == "toggle" else { return }
+        guard route.sub == "toggle" else { return }
         let toastText: String
-        switch parts[2] {
+        switch route.arg(2) ?? "" {
         case "tokens":
             let on = await state.toggleShowStats(chatKey: chatKey)
             toastText = on ? "🟢 Объём текста показываю" : "⚪️ Объём текста не показываю"
@@ -319,32 +313,39 @@ extension BotMenuHandler {
     }
 
     private func handleHistoryAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        if parts[1] == "clear" {
+        guard !route.sub.isEmpty else { return }
+        if route.sub == "clear" {
             await state.clearHistory(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Переписка очищена")
             try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
             return
-        } else if parts[1] == "dump" {
+        } else if route.sub == "dump" {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             await sendHistoryDump(chatKey: chatKey)
             return
-        } else if parts[1] == "custom" {
-            await state.setAdminPendingInput(.init(kind: .chatCustomHistory, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+        }
+        // Changing the memory length is the owner's call: it re-sends every
+        // remembered message on every turn, so it multiplies the cost of each
+        // answer. The buttons are already hidden from users — this is the gate
+        // for a callback that arrives anyway (an old menu message, a crafted
+        // payload).
+        guard await requireOperator(callback, chatKey: chatKey, refusal: "🔒 Память настраивает владелец бота") else { return }
+        if route.sub == "custom" {
+            await state.setPending(.admin(.init(kind: .chatCustomHistory)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>📝 Своё значение памяти</b>
 
             Отправьте число от <code>1</code> до <code>50</code> одним сообщением — сколько последних сообщений бот держит в голове.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:history")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .history)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
-        } else if parts.count >= 3, parts[1] == "length", let length = Int(parts[2]), (1...50).contains(length) {
+        } else if route.sub == "length", let length = route.int(2), (1...50).contains(length) {
             await state.setMaxHistory(chatKey: chatKey, newMax: length)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Память: \(length) сообщ.")
             try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
@@ -353,13 +354,13 @@ extension BotMenuHandler {
     }
 
     private func handleProviderAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        if let provider = ServiceProvider.parse(parts[1]) {
+        guard !route.sub.isEmpty else { return }
+        if let provider = ServiceProvider.parse(route.sub) {
             _ = await state.changeProvider(chatKey: chatKey, newProvider: provider)
             let gateway = try gateways.gateway(for: provider)
             if await state.reasoningEnabled(chatKey: chatKey), !gateway.capabilities.supportsReasoning {
@@ -377,19 +378,19 @@ extension BotMenuHandler {
     }
 
     private func handleReasoningAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 3, parts[1] == "set" else { return }
+        guard route.sub == "set" else { return }
         let provider = await state.provider(chatKey: chatKey)
         let gateway = try gateways.gateway(for: provider)
         if gateway.capabilities.supportsReasoning {
-            if parts[2] == "off" {
+            if route.arg(2) == "off" {
                 await state.setReasoningEffort(chatKey: chatKey, effort: nil)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Обдумывание выключено")
-            } else if let effort = ReasoningEffort(rawValue: parts[2]) {
+            } else if let effort = route.arg(2).flatMap(ReasoningEffort.init(rawValue:)) {
                 await state.setReasoningEffort(chatKey: chatKey, effort: effort)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Обдумывание: \(effort.displayName)")
             }

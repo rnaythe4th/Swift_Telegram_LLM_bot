@@ -103,6 +103,10 @@ struct ChatContext: Sendable {
     /// keep answering on the fallback model until someone reopened the model
     /// menu. Cleared the moment the model is chosen again, by anyone.
     var downgradedFromModel: String? = nil
+    /// Reference mode this chat was last switched into. Cleared by any manual
+    /// edit of a setting the mode owns, so the settings page can honestly say
+    /// whether the chat still matches the mode or has drifted off it.
+    var activeModeID: String? = nil
 }
 
 struct GenerationSnapshot: Sendable {

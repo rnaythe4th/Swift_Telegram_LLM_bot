@@ -7,32 +7,32 @@ extension BotMenuHandler {
     /// comes from the sender, not from the chat, so it is correct even when the
     /// command is used somewhere unexpected.
     func sendReferral(chatKey: ChatKey, userID: Int) async {
-        let (text, markup) = await renderReferral(chatKey: chatKey, userID: userID)
+        let screen = await renderReferral(chatKey: chatKey, userID: userID)
         _ = try? await telegram.sendMessage(
             .init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
-                text: text,
-                replyMarkup: markup
+                text: screen.text,
+                replyMarkup: screen.markup
             )
         )
     }
 
     /// Personal referral page (roadmap step 10). Private chats only — the link
     /// identifies its owner by userID and the rewards land on their wallet.
-    func renderReferral(chatKey: ChatKey, userID: Int) async -> (String, InlineKeyboardMarkup) {
+    func renderReferral(chatKey: ChatKey, userID: Int) async -> MenuScreen {
         let config = await state.referralConfig()
         let stats = await state.referralUserStats(userID: userID)
         let link = ReferralLink.url(botUsername: botUsername, userID: userID)
 
         var lines: [String] = ["<b>🎁 Пригласите друга</b>", ""]
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
 
         guard config.enabled, !botUsername.isEmpty else {
             lines.append("Программа приглашений сейчас <b>выключена</b>.")
-            rows.append(navButtons())
-            return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+            rows.row(navButtons())
+            return MenuScreen(lines.joined(separator: "\n"), rows)
         }
 
         if config.paysOnSignup {
@@ -90,22 +90,22 @@ extension BotMenuHandler {
         let shareText = config.inviteeRewardCents > 0
             ? "Умный ИИ прямо в Telegram — отвечает на текст, фото и голос. По моей ссылке тебе сразу зачислят \(ReferralConfig.formatUsd(cents: config.inviteeRewardCents)) на баланс:"
             : "Умный ИИ прямо в Telegram — отвечает на текст, фото и голос. Заходи по моей ссылке:"
-        rows.append([InlineKeyboardButton(
+        rows.row([InlineKeyboardButton(
             text: "📤 Поделиться ссылкой",
             url: ReferralLink.shareURL(link: link, text: shareText)
         )])
         // Wallets are keyed by account, not by nick — resolve through the
         // userID so someone without a @username still sees their balance.
         if await state.balance(username: state.userKey(userID: userID)) != nil {
-            rows.append([menuButton("💰 Баланс и оплата", action: "nav:pay:\(PurchaseSource.referral.rawValue)")])
+            rows.row([buyButton("💰 Баланс и оплата", source: .referral)])
         }
-        rows.append(navButtons())
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        rows.row(navButtons())
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 
     /// Referral control + monitoring for the super-admin (roadmap step 10):
     /// rewards, the anti-farming cap, live program numbers and the top inviters.
-    func renderSuperReferrals(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperReferrals(chatKey: ChatKey) async -> MenuScreen {
         let config = await state.referralConfig()
         let overview = await state.referralOverview()
         let report = await state.funnelReport()
@@ -117,20 +117,20 @@ extension BotMenuHandler {
             return String(format: "%.0f%%", Double(num) / Double(den) * 100)
         }
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton(config.enabled ? "🟢 Программа включена" : "⚪️ Программа выключена", action: "sref:toggle")],
-            [menuButton("👤 Пригласившему · \(ReferralConfig.formatUsd(cents: config.inviterRewardCents))", action: "sref:inviter"),
-             menuButton("🎁 Другу · \(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))", action: "sref:invitee")],
-            [menuButton("💎 За оплату друга · \(config.payingFriendBonusCents > 0 ? ReferralConfig.formatUsd(cents: config.payingFriendBonusCents) : "выкл")", action: "sref:paidbonus")],
+        var rows: Keyboard = [
+            [menuButton(config.enabled ? "🟢 Программа включена" : "⚪️ Программа выключена", .sref, "toggle")],
+            [menuButton("👤 Пригласившему · \(ReferralConfig.formatUsd(cents: config.inviterRewardCents))", .sref, "inviter"),
+             menuButton("🎁 Другу · \(ReferralConfig.formatUsd(cents: config.inviteeRewardCents))", .sref, "invitee")],
+            [menuButton("💎 За оплату друга · \(config.payingFriendBonusCents > 0 ? ReferralConfig.formatUsd(cents: config.payingFriendBonusCents) : "выкл")", .sref, "paidbonus")],
             [menuButton(config.maxRewardsPerInviter > 0
                 ? "🛡 Лимит наград · \(config.maxRewardsPerInviter)"
-                : "🛡 Лимит наград · без лимита", action: "sref:cap")],
+                : "🛡 Лимит наград · без лимита", .sref, "cap")],
         ]
         if overview.bound > 0 {
-            rows.append([menuButton("🗑 Очистить журнал приглашений", action: "sref:clear")])
+            rows.row([menuButton("🗑 Очистить журнал приглашений", .sref, "clear")])
         }
-        rows.append([menuButton("📊 Воронка", action: "nav:superfunnel"),
-                     menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([menuButton("📊 Воронка", page: .superFunnel),
+                     backButton(to: .superAdmin)])
 
         var lines: [String] = [
             "<b>🎁 Приглашения (реферальная программа)</b>",
@@ -176,18 +176,18 @@ extension BotMenuHandler {
             """)
         lines.append("<i>Команда — /ref (юзерам — своя ссылка, суперадмину — управление).</i>")
 
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 
     // MARK: - Referral admin actions (roadmap step 10)
 
     func handleReferralAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else {
+        guard !route.sub.isEmpty else {
             try await showPage(.superReferrals, chatKey: chatKey, callback: callback, message: message)
             return
         }
@@ -195,12 +195,12 @@ extension BotMenuHandler {
 
         /// Asks for a value; the answer is applied in `processTextInput`.
         func ask(kind: AdminPendingInputKind, text: String) async throws {
-            await state.setAdminPendingInput(.init(kind: kind, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superref")]])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            await state.setPending(.admin(.init(kind: kind)), menuMessageID: message.message_id, chatKey: chatKey)
+            let markup: Keyboard = [[cancelButton(to: .superReferrals)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
         }
 
-        switch parts[1] {
+        switch route.sub {
         case "toggle":
             config.enabled.toggle()
             await state.setReferralConfig(config)
@@ -257,11 +257,11 @@ extension BotMenuHandler {
 
                 ⚠️ Уже начисленные балансы останутся, но защита «одна привязка на человека» обнулится: ранее приглашённые смогут быть привязаны заново, если ещё не писали боту. Счётчики воронки не меняются.
                 """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("🗑 Да, очистить", action: "sref:clearyes")],
-                [menuButton("❌ Отмена", action: "nav:superref")],
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [menuButton("🗑 Да, очистить", .sref, "clearyes")],
+                [cancelButton(to: .superReferrals)],
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "clearyes":
             let removed = await state.clearReferralLedger()

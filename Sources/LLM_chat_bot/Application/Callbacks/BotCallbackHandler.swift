@@ -28,7 +28,7 @@ final class BotCallbackHandler: @unchecked Sendable {
 
         guard let action = BotCallbackAction(rawData: data) else {
             logger.warning("callback parse failed, raw=\(data)")
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Кнопка устарела — откройте меню заново: /menu")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.staleButton)
             return
         }
 
@@ -58,7 +58,7 @@ final class BotCallbackHandler: @unchecked Sendable {
             await menuHandler.handle(action: action, callback: callback)
         case .faq:
             guard let message = callback.message else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Кнопка устарела — откройте меню заново: /menu")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.staleButton)
                 return
             }
             let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
@@ -88,6 +88,11 @@ final class BotCallbackHandler: @unchecked Sendable {
 
 <b>━━━ ⚙️ Как настроить бота под себя ━━━</b>
 
+<b>Режимы</b> — готовые связки настроек. Один тап меняет всё сразу: и модель, и стиль ответа, и память. Не нужно ни в чём разбираться — выберите, что подходит задаче.
+/menu → кнопка режима
+🆓 — работает у всех · ⭐ — с премиумом или балансом
+Не понравилось — «↺ Рабочий режим» вернёт проверенный.
+
 <b>🎭 Роль</b> — кем бот себя считает и как разговаривает. Нужен строгий редактор или весёлый собеседник — опишите словами.
 /menu → 🎭 Роль · команда <code>/setrole &lt;текст&gt;</code>
 <blockquote>/setrole Ты — эксперт по математике, отвечай кратко.</blockquote>
@@ -95,17 +100,8 @@ final class BotCallbackHandler: @unchecked Sendable {
 <b>🤖 Модель</b> — какой именно ИИ отвечает. Бесплатные (🆓) доступны всем, умные (⭐) — по премиуму или с баланса.
 /menu → 🤖 Модель · команда <code>/model &lt;id&gt;</code>
 
-<b>🌡 Стиль ответа</b> — строго по фактам или свободно и творчески.
-/menu → 🌡 Стиль ответа · команда <code>/settemp 0.0–2.0</code>
-
-<b>📝 Память</b> — сколько прошлых сообщений бот держит в голове. Больше памяти — лучше контекст, но ответ медленнее и дороже.
-/menu → 📝 Память · команда <code>/historylength 1–50</code>
-
-<b>🧠 Обдумывание</b> — модель думает перед ответом: точнее, но медленнее и дороже. Умеют не все модели.
-/menu → 🧠 Обдумывание · команда <code>/reasoning быстро|средне|глубоко|выкл</code>
-
-<b>🔌 Сервис ИИ</b> — через кого бот ходит к моделям. Не знаете, что выбрать, — не трогайте.
-/menu → 🔌 Сервис ИИ · команда <code>/provider openrouter|deepseek|yandex</code>
+<b>⚙️ Тонкая настройка</b> — стиль ответа и обдумывание по отдельности, если готовых режимов мало. Открывается с премиумом или балансом.
+/menu → ⚙️ Тонкая настройка · команды <code>/settemp 0.0–2.0</code>, <code>/reasoning быстро|средне|глубоко|выкл</code>
 
 Начать заново: <code>/clear_history</code> — забыть переписку · <code>/reset</code> — вернуть стандартные настройки · <code>/history</code> — что бот помнит.
 

@@ -208,7 +208,7 @@ actor SubscriptionReminderService {
     }
 
     private func walletWinbackMarkup() -> InlineKeyboardMarkup {
-        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.reminder.rawValue)").rawData
+        let payAction = BotCallbackAction.menu(action: MenuRoute.purchase(from: .reminder)).rawData
         return InlineKeyboardMarkup(inline_keyboard: [[
             InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction),
             InlineKeyboardButton(text: "⚡ Премиум на месяц", callback_data: payAction),
@@ -356,7 +356,7 @@ actor SubscriptionReminderService {
     }()
 
     private func buyMarkup(pricing: SubscriptionPricing, notice: SubscriptionNotice) -> InlineKeyboardMarkup {
-        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.reminder.rawValue)").rawData
+        let payAction = BotCallbackAction.menu(action: MenuRoute.purchase(from: .reminder)).rawData
         let priceSuffix = pricing.stars.map { " · \($0) ⭐" } ?? ""
         let label = notice.isWinback
             ? "⚡ Вернуть премиум\(priceSuffix)"

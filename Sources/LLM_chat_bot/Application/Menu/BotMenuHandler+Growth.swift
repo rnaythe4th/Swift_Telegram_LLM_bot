@@ -5,33 +5,25 @@ import Foundation
 extension BotMenuHandler {
     /// Growth & retention: funnel, self-promo, reminders, onboarding, referral, traffic.
     func processGrowthAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "funnel":
+        switch route.command {
+        case .funnel:
             // Period switcher on the analytics page (roadmap step 7).
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            guard parts.count >= 3, parts[1] == "p" else { return }
-            let period = FunnelPeriod(rawValue: parts[2]) ?? .week
-            let (funnelText, funnelMarkup) = await renderSuperFunnel(chatKey: chatKey, period: period)
-            try await editOrAnswer(callback: callback, message: message, text: funnelText, markup: funnelMarkup)
+            guard await requireSuperAdmin(callback) else { return }
+            guard route.sub == "p" else { return }
+            let period = FunnelPeriod(rawValue: route.arg(2) ?? "") ?? .week
+            try await editOrAnswer(callback: callback, message: message, screen: await renderSuperFunnel(chatKey: chatKey, period: period))
             return
 
-        case "promo":
+        case .promo:
             // Built-in self-promo that fills the free ad slot (roadmap step 5).
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            guard parts.count >= 2 else { return }
-            switch parts[1] {
+            guard await requireSuperAdmin(callback) else { return }
+            guard !route.sub.isEmpty else { return }
+            switch route.sub {
             case "toggle":
                 var promo = await state.selfPromoConfig()
                 promo.enabled.toggle()
@@ -42,7 +34,7 @@ extension BotMenuHandler {
                 )
                 try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
             case "text":
-                await state.setAdminPendingInput(.init(kind: .selfPromoText, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                await state.setPending(.admin(.init(kind: .selfPromoText)), menuMessageID: message.message_id, chatKey: chatKey)
                 let current = await state.selfPromoConfig()
                 let prompt = """
                 <b>📣 Текст само-рекламы</b>
@@ -54,10 +46,10 @@ extension BotMenuHandler {
 
                 Отправьте новый текст одним сообщением (HTML разрешён, до \(SelfPromoConfig.maxTextLength) символов). Счётчик показов сохранится.
                 """
-                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
-                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+                let markup: Keyboard = [[cancelButton(to: .superAds)]]
+                try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             case "every":
-                await state.setAdminPendingInput(.init(kind: .selfPromoEvery, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                await state.setPending(.admin(.init(kind: .selfPromoEvery)), menuMessageID: message.message_id, chatKey: chatKey)
                 let current = await state.selfPromoConfig()
                 let prompt = """
                 <b>📣 Частота само-рекламы</b>
@@ -66,10 +58,10 @@ extension BotMenuHandler {
 
                 Отправьте число от <code>\(SelfPromoConfig.repliesRange.lowerBound)</code> до <code>\(SelfPromoConfig.repliesRange.upperBound)</code>. Пауза между показами настраивается отдельно и действует одновременно с частотой.
                 """
-                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
-                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+                let markup: Keyboard = [[cancelButton(to: .superAds)]]
+                try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             case "pause":
-                await state.setAdminPendingInput(.init(kind: .selfPromoPause, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                await state.setPending(.admin(.init(kind: .selfPromoPause)), menuMessageID: message.message_id, chatKey: chatKey)
                 let current = await state.selfPromoConfig()
                 let prompt = """
                 <b>📣 Пауза между показами</b>
@@ -78,8 +70,8 @@ extension BotMenuHandler {
 
                 Отправьте число минут от <code>0</code> до <code>\(SelfPromoConfig.pauseMinutesRange.upperBound)</code>.
                 """
-                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
-                try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+                let markup: Keyboard = [[cancelButton(to: .superAds)]]
+                try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             case "reset":
                 await state.resetSelfPromoStats()
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Счётчик показов обнулён")
@@ -95,15 +87,12 @@ extension BotMenuHandler {
             }
             return
 
-        case "rem":
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            try await handleReminderAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .rem:
+            guard await requireSuperAdmin(callback) else { return }
+            try await handleReminderAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
-        case "examples":
+        case .examples:
             // Open to everyone: posts the example buttons as a fresh message so
             // the settings menu stays where it is (roadmap step 9).
             let onboarding = await state.onboardingConfig()
@@ -123,28 +112,19 @@ extension BotMenuHandler {
             await state.bumpFunnel(.onboardingShown)
             return
 
-        case "onb":
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            try await handleOnboardingAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .onb:
+            guard await requireSuperAdmin(callback) else { return }
+            try await handleOnboardingAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
-        case "sref":
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            try await handleReferralAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .sref:
+            guard await requireSuperAdmin(callback) else { return }
+            try await handleReferralAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
-        case "strf":
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            try await handleTrafficAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .strf:
+            guard await requireSuperAdmin(callback) else { return }
+            try await handleTrafficAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
         default:
@@ -160,7 +140,7 @@ extension BotMenuHandler {
     func renderSuperFunnel(
         chatKey: ChatKey,
         period: FunnelPeriod = .week
-    ) async -> (String, InlineKeyboardMarkup) {
+    ) async -> MenuScreen {
         let report = await state.funnelReport()
         func n(_ e: FunnelEvent) -> Int { report.count(e, in: period) }
         func total(_ e: FunnelEvent) -> Int { report.count(e) }
@@ -243,23 +223,23 @@ extension BotMenuHandler {
         let periodRow = FunnelPeriod.allCases.map { option in
             menuButton(
                 (option == period ? "· " : "") + option.buttonLabel + (option == period ? " ·" : ""),
-                action: "funnel:p:\(option.rawValue)"
+                .funnel, "p", option.rawValue
             )
         }
-        let rows: [[InlineKeyboardButton]] = [
+        let rows: Keyboard = [
             Array(periodRow.prefix(2)),
             Array(periodRow.suffix(from: 2)),
-            [menuButton("🔄 Обновить", action: "funnel:p:\(period.rawValue)")],
-            [menuButton("⏳ Напоминания и winback", action: "nav:superreminders")],
-            [menuButton("💡 Примеры-запросы", action: "nav:superonboarding"),
-             menuButton("📣 Реклама", action: "nav:superads")],
-            [menuButton("📈 Источники трафика", action: "nav:supersrc")],
+            [menuButton("🔄 Обновить", .funnel, "p", "\(period.rawValue)")],
+            [menuButton("⏳ Напоминания и winback", page: .superReminders)],
+            [menuButton("💡 Примеры-запросы", page: .superOnboarding),
+             menuButton("📣 Реклама", page: .superAds)],
+            [menuButton("📈 Источники трафика", page: .superTraffic)],
             // Every other super* page goes back to the super menu; "← Назад"
             // here used to drop the reader into the chat settings instead.
-            [menuButton("← К супер-админу", action: "nav:superadmin"),
-             menuButton("✕ Закрыть", action: "close")],
+            [backButton(to: .superAdmin),
+             menuButton(Texts.close, command: .close)],
         ]
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 
     // MARK: - Paid-traffic sources (`src_` deep links)
@@ -267,15 +247,15 @@ extension BotMenuHandler {
     /// Where the ad money went. Reading this page is the whole point of the
     /// `src_` links: spend ÷ payers is CAC, and without a per-campaign number
     /// the budget goes to whichever channel *felt* like it worked.
-    func renderSuperTraffic(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperTraffic(chatKey: ChatKey) async -> MenuScreen {
         let overview = await state.trafficSourceOverview()
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         if overview.campaigns > 0 {
-            rows.append([menuButton("🗑 Очистить статистику источников", action: "strf:clear")])
+            rows.row([menuButton("🗑 Очистить статистику источников", .strf, "clear")])
         }
-        rows.append([menuButton("📊 Воронка", action: "nav:superfunnel"),
-                     menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([menuButton("📊 Воронка", page: .superFunnel),
+                     backButton(to: .superAdmin)])
 
         var lines: [String] = ["<b>📈 Источники трафика (реклама)</b>", ""]
 
@@ -323,16 +303,16 @@ extension BotMenuHandler {
             <i>Метка — латиница, цифры, «_» и «-», до \(TrafficSourceLink.maxTagLength) символов. Своя метка на каждый канал: тогда «потратил ÷ оплатили» и есть цена клиента (CAC) этого канала. Засчитывается первый переход человека — канал не может присвоить клиента, которого привёл другой; те, кто уже пользовался ботом, в «пришло» не попадают.</i>
             """)
 
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 
     private func handleTrafficAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch parts.count >= 2 ? parts[1] : "" {
+        switch route.sub {
         case "clear":
             let overview = await state.trafficSourceOverview()
             let text = """
@@ -342,11 +322,11 @@ extension BotMenuHandler {
 
                 ⚠️ Цифры уже закупленной рекламы восстановить будет нельзя. Счётчики воронки и деньги пользователей не меняются.
                 """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("🗑 Да, очистить", action: "strf:clearyes")],
-                [menuButton("❌ Отмена", action: "nav:supersrc")],
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [menuButton("🗑 Да, очистить", .strf, "clearyes")],
+                [cancelButton(to: .superTraffic)],
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "clearyes":
             await state.clearTrafficSources()
@@ -360,37 +340,33 @@ extension BotMenuHandler {
 
     /// `ads:*` — paid campaigns (the self-promo knobs sit under `promo:*`).
     func handleAdCampaignAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        guard parts.count >= 2 else { return }
-        switch parts[1] {
+        guard await requireSuperAdmin(callback) else { return }
+        guard !route.sub.isEmpty else { return }
+        switch route.sub {
         case "add":
-            await state.setAdminPendingInput(.init(kind: .adAddText, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .adAddText)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>📣 Новое объявление</b>
 
             Отправьте текст объявления одним сообщением (HTML разрешён).
             Частота по умолчанию: каждые 10 ответов, пауза 60 минут. Настроить точнее — /ads.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superads")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .superAds)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
         case "toggle":
-            guard parts.count >= 3 else { return }
-            let id = parts[2]
+            guard let id = route.arg(2) else { return }
             let enabled = await state.adCampaign(id: id)?.enabled ?? false
             _ = await state.setAdCampaignEnabled(id: id, enabled: !enabled)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: enabled ? "⏸ Выключена" : "▶️ Включена")
             try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
         case "rm":
-            guard parts.count >= 3 else { return }
-            _ = await state.removeAdCampaign(id: parts[2])
+            guard let id = route.arg(2) else { return }
+            _ = await state.removeAdCampaign(id: id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Удалена")
             try await showPage(.superAds, chatKey: chatKey, callback: callback, message: message)
         default:
@@ -398,7 +374,7 @@ extension BotMenuHandler {
         }
     }
 
-    func renderSuperAds(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperAds(chatKey: ChatKey) async -> MenuScreen {
         let campaigns = await state.adCampaigns()
 
         var lines = ["<b>📣 Реклама</b> (\(campaigns.count))", ""]
@@ -440,27 +416,27 @@ extension BotMenuHandler {
         lines.append("")
         lines.append("<i>Тонкая настройка кампаний — команда /ads (частота, лимиты с пейсингом, кнопка-ссылка). Проверить показ: /simulate user и написать боту.</i>")
 
-        var rows: [[InlineKeyboardButton]] = [[menuButton("➕ Новое объявление", action: "ads:add")]]
+        var rows: Keyboard = [[menuButton("➕ Новое объявление", .ads, "add")]]
         for c in campaigns.prefix(15) {
-            rows.append([
-                menuButton("\(c.enabled ? "⏸" : "▶️") \(c.id)", action: "ads:toggle:\(c.id)"),
-                menuButton("🗑 \(c.id)", action: "ads:rm:\(c.id)"),
+            rows.row([
+                menuButton("\(c.enabled ? "⏸" : "▶️") \(c.id)", .ads, "toggle", "\(c.id)"),
+                menuButton("🗑 \(c.id)", .ads, "rm", "\(c.id)"),
             ])
         }
-        rows.append([menuButton(promo.enabled ? "🟢 Само-реклама включена" : "⚪️ Само-реклама выключена", action: "promo:toggle")])
-        rows.append([
-            menuButton("✏️ Текст", action: "promo:text"),
-            menuButton("✏️ Раз в \(promo.everyNReplies) отв.", action: "promo:every"),
+        rows.row([menuButton(promo.enabled ? "🟢 Само-реклама включена" : "⚪️ Само-реклама выключена", .promo, "toggle")])
+        rows.row([
+            menuButton("✏️ Текст", .promo, "text"),
+            menuButton("✏️ Раз в \(promo.everyNReplies) отв.", .promo, "every"),
         ])
-        rows.append([
-            menuButton("✏️ Пауза · \(promo.minIntervalSeconds / 60) мин", action: "promo:pause"),
-            menuButton("↺ Текст по умолчанию", action: "promo:default"),
+        rows.row([
+            menuButton("✏️ Пауза · \(promo.minIntervalSeconds / 60) мин", .promo, "pause"),
+            menuButton("↺ Текст по умолчанию", .promo, "default"),
         ])
         if promo.impressions > 0 {
-            rows.append([menuButton("🗑 Обнулить показы · \(promo.impressions)", action: "promo:reset")])
+            rows.row([menuButton("🗑 Обнулить показы · \(promo.impressions)", .promo, "reset")])
         }
-        rows.append([menuButton("📊 Воронка", action: "nav:superfunnel"),
-                     menuButton("← К супер-админу", action: "nav:superadmin")])
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        rows.row([menuButton("📊 Воронка", page: .superFunnel),
+                     backButton(to: .superAdmin)])
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 }

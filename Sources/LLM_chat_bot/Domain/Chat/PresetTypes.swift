@@ -40,7 +40,9 @@ struct ModelPriceInfo: Sendable {
     let outputPerToken: Double
 }
 
-struct PendingInput: Sendable {
+/// Which preset the editor is about to write. Carried by `PendingKind.preset`,
+/// which also holds the menu message this belongs to.
+struct PresetInput: Sendable {
     enum Scope: Sendable {
         case global
         case chat
@@ -52,7 +54,6 @@ struct PendingInput: Sendable {
     let category: PresetCategory
     let scope: Scope
     let kind: Kind
-    let menuMessageID: Int
 }
 
 enum AdminPendingInputKind: Sendable {
@@ -96,6 +97,12 @@ enum AdminPendingInputKind: Sendable {
     // Greeting example prompts (roadmap step 9); edit carries the example id.
     case onboardingAdd
     case onboardingEdit
+    // Reference modes; edit carries the mode id.
+    case modeAdd
+    case modeEdit
+    /// The role a mode applies, edited on its own — it is a paragraph, not a
+    /// field in a one-line form.
+    case modeRole
     // Two-sided referral economics (roadmap step 10).
     case referralInviterReward
     case referralInviteeReward
@@ -104,8 +111,14 @@ enum AdminPendingInputKind: Sendable {
     case referralPaidBonus
 }
 
+/// An admin/super-admin value request. The menu message it redraws lives on
+/// the enclosing `PendingRequest`.
 struct AdminPendingInput: Sendable {
     let kind: AdminPendingInputKind
-    let menuMessageID: Int
     let payload: String?
+
+    init(kind: AdminPendingInputKind, payload: String? = nil) {
+        self.kind = kind
+        self.payload = payload
+    }
 }

@@ -7,15 +7,15 @@ extension BotMenuHandler {
     // MARK: - Card admin actions
 
     func handleCardAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        switch parts[1] {
+        guard !route.sub.isEmpty else { return }
+        switch route.sub {
         case "settoken":
-            await state.setAdminPendingInput(.init(kind: .cardProviderToken, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .cardProviderToken)), menuMessageID: message.message_id, chatKey: chatKey)
             let card = await state.cardConfig()
             let currentLine = card.maskedToken.map { "Текущий: <code>\($0)</code>" } ?? "Токен ещё не задан."
             let text = """
@@ -29,10 +29,10 @@ extension BotMenuHandler {
 
             Отправьте <code>-</code> чтобы удалить токен.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:supercard")]
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [cancelButton(to: .superCard)]
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "deltoken":
             await state.setCardProviderToken(nil)
@@ -40,7 +40,7 @@ extension BotMenuHandler {
             try await showPage(.superCard, chatKey: chatKey, callback: callback, message: message)
 
         case "setprice":
-            await state.setAdminPendingInput(.init(kind: .cardPrice, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .cardPrice)), menuMessageID: message.message_id, chatKey: chatKey)
             let card = await state.cardConfig()
             let label = card.priceLabel ?? "не задана"
             let text = """
@@ -50,15 +50,15 @@ extension BotMenuHandler {
 
             Введите сумму (например <code>499</code> или <code>4.99</code>) или <b>0</b> для отключения продаж.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:supercard")]
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [cancelButton(to: .superCard)]
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "setrate":
             // Credit packs carry a USD face value; selling them on a card in
             // RUB/EUR needs an explicit rate (roadmap step 2).
-            await state.setAdminPendingInput(.init(kind: .cardUsdRate, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .cardUsdRate)), menuMessageID: message.message_id, chatKey: chatKey)
             let rateCard = await state.cardConfig()
             var preview = ""
             for cents in CreditPack.centsOptions {
@@ -75,13 +75,13 @@ extension BotMenuHandler {
 
             <i>Пакеты пополнения имеют номинал в долларах: сколько заплатили — столько и легло на баланс. Курс должен покрывать вашу комиссию эквайринга.</i>
             """
-            let rateMarkup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:supercard")]
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: rateText, markup: rateMarkup)
+            let rateMarkup: Keyboard = [
+                [cancelButton(to: .superCard)]
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(rateText, rateMarkup))
 
         case "currency":
-            guard parts.count >= 3, let currency = CardCurrency(rawValue: parts[2]) else { return }
+            guard let currency = route.arg(2).flatMap(CardCurrency.init(rawValue:)) else { return }
             await state.setCardCurrency(currency)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Валюта: \(currency.rawValue)")
             try await showPage(.superCard, chatKey: chatKey, callback: callback, message: message)
@@ -99,15 +99,15 @@ extension BotMenuHandler {
     // MARK: - Crypto admin actions
 
     func handleCryptoAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        switch parts[1] {
+        guard !route.sub.isEmpty else { return }
+        switch route.sub {
         case "setprice":
-            await state.setPendingCryptoPriceInput(menuMessageID: message.message_id, chatKey: chatKey)
+            await state.setPending(.cryptoPrice, menuMessageID: message.message_id, chatKey: chatKey)
             let cents = await state.cryptoPriceUsdCents()
             let label = cents.map { String(format: "$%.2f", Double($0) / 100.0) } ?? "отключена"
             let text = """
@@ -117,10 +117,10 @@ extension BotMenuHandler {
 
             Введите сумму в долларах (например <code>9.99</code>) или <b>0</b> для отключения.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:supercrypto")]
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [cancelButton(to: .superCrypto)]
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "disableprice":
             await state.setCryptoPriceUsdCents(nil)
@@ -128,8 +128,8 @@ extension BotMenuHandler {
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "setaddr":
-            guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
-            await state.setPendingCryptoAddressInput(menuMessageID: message.message_id, chain: chain, chatKey: chatKey)
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
+            await state.setPending(.cryptoAddress(chain: chain), menuMessageID: message.message_id, chatKey: chatKey)
             let current = await state.cryptoAddress(chain) ?? "<i>не задан</i>"
             let text = """
             <b>🪙 Адрес для приёма · \(chain.displayName)</b>
@@ -138,13 +138,13 @@ extension BotMenuHandler {
 
             Отправьте новый адрес одним сообщением. Отправьте <code>-</code> чтобы удалить.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:supercrypto")]
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [cancelButton(to: .superCrypto)]
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "deladdr":
-            guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
             await state.setCryptoAddress(chain, address: nil)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Адрес удалён")
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
@@ -157,8 +157,8 @@ extension BotMenuHandler {
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "pooladd":
-            guard parts.count >= 3, let chain = CryptoChain(rawValue: parts[2]) else { return }
-            await state.setPendingCryptoPoolAddInput(menuMessageID: message.message_id, chain: chain, chatKey: chatKey)
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
+            await state.setPending(.cryptoPoolAdd(chain: chain), menuMessageID: message.message_id, chatKey: chatKey)
             let pool = await state.cryptoAddressPool(chain)
             let listing = pool.isEmpty ? "<i>пусто</i>" : pool.enumerated().map { "\($0.offset + 1). <code>\($0.element)</code>" }.joined(separator: "\n")
             let text = """
@@ -169,13 +169,13 @@ extension BotMenuHandler {
 
             Отправьте новый адрес одним сообщением.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("❌ Отмена", action: "nav:supercrypto")]
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [cancelButton(to: .superCrypto)]
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "poolrm":
-            guard parts.count >= 4, let chain = CryptoChain(rawValue: parts[2]), let index = Int(parts[3]) else { return }
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)), let index = route.int(3) else { return }
             let removed = await state.removeCryptoPoolAddress(chain, at: index)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалено" : "Не найдено")
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
@@ -196,18 +196,18 @@ extension BotMenuHandler {
                     text += "\n\n<i>Показаны первые 20 из \(invoices.count) — полный список /tenant cryptoinvoices.</i>"
                 }
             }
-            let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("🪙 К настройкам крипты", action: "nav:supercrypto")],
-                [menuButton("← К супер-админу", action: "nav:superadmin")],
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            let markup: Keyboard = [
+                [menuButton("🪙 К настройкам крипты", page: .superCrypto)],
+                [backButton(to: .superAdmin)],
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         default:
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
         }
     }
 
-    func renderSuperStars(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperStars(chatKey: ChatKey) async -> MenuScreen {
         let price = await state.starsPrice()
         let priceLabel = price.map { "<b>\($0) ⭐</b>" } ?? "<b>отключена</b>"
         let rate = await state.starsPerUsd()
@@ -217,14 +217,14 @@ extension BotMenuHandler {
         }
         let packLine = packParts.joined(separator: " · ")
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton("✏️ Изменить цену подписки", action: "stars:setprice")],
-            [menuButton("✏️ Курс кредитов (Stars за $1)", action: "stars:setrate")],
+        var rows: Keyboard = [
+            [menuButton("✏️ Изменить цену подписки", .stars, "setprice")],
+            [menuButton("✏️ Курс кредитов (Stars за $1)", .stars, "setrate")],
         ]
         if price != nil {
-            rows.append([menuButton("⛔ Отключить продажи", action: "stars:disable")])
+            rows.row([menuButton("⛔ Отключить продажи", .stars, "disable")])
         }
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([backButton(to: .superAdmin)])
 
         let text = """
         <b>💫 Stars — продажа доступа</b>
@@ -239,10 +239,10 @@ extension BotMenuHandler {
         от цены подписки (0 = не продавать пополнения через Stars). \
         Telegram платит ~$0.013/⭐, поэтому 77⭐/$ покрывает себестоимость и маржу.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderSuperCrypto(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperCrypto(chatKey: ChatKey) async -> MenuScreen {
         let cryptoCents = await state.cryptoPriceUsdCents()
         let cryptoLabel = cryptoCents.map { String(format: "<b>$%.2f</b>", Double($0) / 100.0) } ?? "<b>отключена</b>"
         let cryptoAddrs = await state.cryptoAddresses()
@@ -250,37 +250,37 @@ extension BotMenuHandler {
         let cryptoPools = await state.cryptoAddressPools()
         let openInvoices = await state.openCryptoInvoices()
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton("✏️ Изменить цену в USDT", action: "crypto:setprice")],
+        var rows: Keyboard = [
+            [menuButton("✏️ Изменить цену в USDT", .crypto, "setprice")],
         ]
         if cryptoCents != nil {
-            rows.append([menuButton("⛔ Отключить крипто-оплату", action: "crypto:disableprice")])
+            rows.row([menuButton("⛔ Отключить крипто-оплату", .crypto, "disableprice")])
         }
-        rows.append([menuButton("🔀 Режим: \(cryptoMode.displayName)", action: "crypto:togglemode")])
+        rows.row([menuButton("🔀 Режим: \(cryptoMode.displayName)", .crypto, "togglemode")])
 
         switch cryptoMode {
         case .amountDelta:
             for chain in CryptoChain.allCases {
                 let addr = cryptoAddrs[chain]
                 let label = addr.map { _ in "✏️ \(chain.displayName) ✓" } ?? "✏️ \(chain.displayName)"
-                var row: [InlineKeyboardButton] = [menuButton(label, action: "crypto:setaddr:\(chain.rawValue)")]
+                var row: [InlineKeyboardButton] = [menuButton(label, .crypto, "setaddr", "\(chain.rawValue)")]
                 if addr != nil {
-                    row.append(menuButton("🗑", action: "crypto:deladdr:\(chain.rawValue)"))
+                    row.append(menuButton("🗑", .crypto, "deladdr", "\(chain.rawValue)"))
                 }
-                rows.append(row)
+                rows.row(row)
             }
         case .uniqueAddress:
             for chain in CryptoChain.allCases {
                 let pool = cryptoPools[chain] ?? []
-                rows.append([menuButton("➕ \(chain.displayName) (\(pool.count))", action: "crypto:pooladd:\(chain.rawValue)")])
+                rows.row([menuButton("➕ \(chain.displayName) (\(pool.count))", .crypto, "pooladd", "\(chain.rawValue)")])
                 for (i, addr) in pool.enumerated() {
                     let short = addr.count > 22 ? String(addr.prefix(10)) + "…" + String(addr.suffix(8)) : addr
-                    rows.append([menuButton("🗑 \(short)", action: "crypto:poolrm:\(chain.rawValue):\(i)")])
+                    rows.row([menuButton("🗑 \(short)", .crypto, "poolrm", "\(chain.rawValue)", "\(i)")])
                 }
             }
         }
-        rows.append([menuButton("🪙 Открытые счета (\(openInvoices.count))", action: "crypto:invoices")])
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([menuButton("🪙 Открытые счета (\(openInvoices.count))", .crypto, "invoices")])
+        rows.row([backButton(to: .superAdmin)])
 
         var addrLines: [String] = []
         switch cryptoMode {
@@ -320,35 +320,35 @@ extension BotMenuHandler {
 
         Открытых счетов: <b>\(openInvoices.count)</b>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderSuperCard(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperCard(chatKey: ChatKey) async -> MenuScreen {
         let card = await state.cardConfig()
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         let tokenLabel = card.maskedToken.map { _ in "🔑 Токен провайдера ✓" } ?? "🔑 Ввести токен провайдера"
-        var tokenRow: [InlineKeyboardButton] = [menuButton(tokenLabel, action: "card:settoken")]
+        var tokenRow: [InlineKeyboardButton] = [menuButton(tokenLabel, .card, "settoken")]
         if card.providerToken != nil {
-            tokenRow.append(menuButton("🗑", action: "card:deltoken"))
+            tokenRow.append(menuButton("🗑", .card, "deltoken"))
         }
-        rows.append(tokenRow)
-        rows.append([
-            menuButton("✏️ Цена подписки", action: "card:setprice"),
-            menuButton("💱 Курс пополнений", action: "card:setrate"),
+        rows.row(tokenRow)
+        rows.row([
+            menuButton("✏️ Цена подписки", .card, "setprice"),
+            menuButton("💱 Курс пополнений", .card, "setrate"),
         ])
 
         var currencyRow: [InlineKeyboardButton] = []
         for currency in CardCurrency.allCases {
             let mark = currency == card.currency ? "✅ " : ""
-            currencyRow.append(menuButton("\(mark)\(currency.rawValue)", action: "card:currency:\(currency.rawValue)"))
+            currencyRow.append(menuButton("\(mark)\(currency.rawValue)", .card, "currency", "\(currency.rawValue)"))
         }
-        rows.append(currencyRow)
+        rows.row(currencyRow)
 
         if card.priceMinorUnits != nil {
-            rows.append([menuButton("⛔ Отключить продажи", action: "card:disable")])
+            rows.row([menuButton("⛔ Отключить продажи", .card, "disable")])
         }
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([backButton(to: .superAdmin)])
 
         let tokenLine = card.maskedToken.map { masked in
             "<code>\(masked)</code>" + (card.isTestToken ? " · <b>ТЕСТОВЫЙ</b>" : "")
@@ -384,38 +384,40 @@ extension BotMenuHandler {
         (ЮKassa, Stripe, Smart Glocal…): Bot Settings → Payments. \
         Инструкция — PAYMENTS_SETUP.md в репозитории.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderSuperFreeModels(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperFreeModels(chatKey: ChatKey) async -> MenuScreen {
         let pinned = Set(await state.freeModelIDs())
         let pinnedList = await state.freeModelIDs()
         let modelPresets = await state.modelPresets(chatID: chatKey.chatID)
         let chatModelPresets = await state.chatPresets(category: .model, chatKey: chatKey)
         let allPresets = modelPresets + chatModelPresets
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton("➕ Добавить по ID", action: "freemodels:add")],
+        var rows: Keyboard = [
+            [menuButton("➕ Добавить по ID", .freemodels, "add")],
         ]
         if modelPriceMonitor != nil {
-            rows.append([menuButton("🌐 Список бесплатных OpenRouter", action: "model:freemodels")])
+            rows.row([menuButton("🌐 Список бесплатных OpenRouter", .model, "freemodels")])
         }
 
         if !allPresets.isEmpty {
             for preset in allPresets {
                 let isPinned = pinned.contains(preset.value)
                 let mark = isPinned ? "🆓" : "☐"
-                let action = isPinned ? "model:unmarkfree:\(preset.value)" : "model:markfree:\(preset.value)"
-                rows.append([menuButton("\(mark) \(preset.display)", action: action)])
+                rows.row([menuButton(
+                    "\(mark) \(preset.display)",
+                    .model, isPinned ? "unmarkfree" : "markfree", preset.value
+                )])
             }
         }
 
         for (i, modelID) in pinnedList.enumerated() where !allPresets.contains(where: { $0.value == modelID }) {
             let shortID = modelID.count > 28 ? "…" + modelID.suffix(25) : modelID
-            rows.append([menuButton("🗑 \(shortID)", action: "freemodels:remove:\(i)")])
+            rows.row([menuButton("🗑 \(shortID)", .freemodels, "remove", "\(i)")])
         }
 
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([backButton(to: .superAdmin)])
 
         let pinnedText = pinnedList.isEmpty
             ? "<i>не закреплены — пользователи без доступа видят все модели как бесплатные</i>"
@@ -431,26 +433,23 @@ extension BotMenuHandler {
         Нажмите ☐ напротив пресета чтобы закрепить, 🆓 — открепить. \
         Модели не из пресетов добавляйте по ID.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
     // MARK: - Actions behind the Stars and free-model buttons
 
     /// `stars:*` — subscription price and the credit-pack rate.
     func handleStarsAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        if parts.count >= 2 {
-            switch parts[1] {
+        guard await requireSuperAdmin(callback) else { return }
+        if !route.sub.isEmpty {
+            switch route.sub {
             case "setprice":
-                await state.setPendingStarsPriceInput(menuMessageID: message.message_id, chatKey: chatKey)
+                await state.setPending(.starsPrice, menuMessageID: message.message_id, chatKey: chatKey)
                 let currentPrice = await state.starsPrice()
                 let currentLabel = currentPrice.map { "\($0) ⭐" } ?? "отключена"
                 let promptText = """
@@ -460,12 +459,12 @@ extension BotMenuHandler {
 
                 Введите количество Stars (целое число ≥ 1) или <b>0</b> для отключения продаж.
                 """
-                let markup = InlineKeyboardMarkup(inline_keyboard: [
-                    [menuButton("❌ Отмена", action: "nav:superstars")]
-                ])
-                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+                let markup: Keyboard = [
+                    [cancelButton(to: .superStars)]
+                ]
+                try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(promptText, markup))
             case "setrate":
-                await state.setPendingStarsPerUsdInput(menuMessageID: message.message_id, chatKey: chatKey)
+                await state.setPending(.starsPerUsd, menuMessageID: message.message_id, chatKey: chatKey)
                 let currentRate = await state.starsPerUsd()
                 let promptText = """
                 <b>💫 Курс кредитов — Stars за $1</b>
@@ -476,10 +475,10 @@ extension BotMenuHandler {
                 поэтому 77⭐/$ покрывает себестоимость ответа и оставляет маржу (30% сверху берётся при списании). \
                 Меньше — дешевле для покупателя, но режет маржу.
                 """
-                let markup = InlineKeyboardMarkup(inline_keyboard: [
-                    [menuButton("❌ Отмена", action: "nav:superstars")]
-                ])
-                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+                let markup: Keyboard = [
+                    [cancelButton(to: .superStars)]
+                ]
+                try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(promptText, markup))
             case "disable":
                 await state.setStarsPrice(nil)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продажи отключены")
@@ -494,33 +493,30 @@ extension BotMenuHandler {
 
     /// `freemodels:*` — the models pinned as free regardless of the catalogue.
     func handleFreeModelsAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        if parts.count >= 2 {
-            switch parts[1] {
+        guard await requireSuperAdmin(callback) else { return }
+        if !route.sub.isEmpty {
+            switch route.sub {
             case "add":
-                await state.setPendingFreeModelInput(menuMessageID: message.message_id, chatKey: chatKey)
+                await state.setPending(.freeModel, menuMessageID: message.message_id, chatKey: chatKey)
                 let promptText = """
                 <b>🆓 Добавить бесплатную модель</b>
 
                 Введите ID модели (например: <code>openai/gpt-4o-mini</code>)
                 """
-                let markup = InlineKeyboardMarkup(inline_keyboard: [
-                    [menuButton("❌ Отмена", action: "nav:superfreemodels")]
-                ])
-                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+                let markup: Keyboard = [
+                    [cancelButton(to: .superFreeModels)]
+                ]
+                try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(promptText, markup))
             case "remove":
-                guard parts.count >= 3, let index = Int(parts[2]) else { return }
+                guard let index = route.int(2) else { return }
                 let ids = await state.freeModelIDs()
                 guard index >= 0, index < ids.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Модель не найдена")
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modelNotFound)
                     return
                 }
                 await state.removeFreeModel(ids[index])

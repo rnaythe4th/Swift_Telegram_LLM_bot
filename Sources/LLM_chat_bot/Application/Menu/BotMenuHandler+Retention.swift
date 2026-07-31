@@ -6,12 +6,12 @@ extension BotMenuHandler {
     // MARK: - Reminder / winback admin actions (roadmap step 8)
 
     func handleReminderAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else {
+        guard !route.sub.isEmpty else {
             try await showPage(.superReminders, chatKey: chatKey, callback: callback, message: message)
             return
         }
@@ -19,12 +19,12 @@ extension BotMenuHandler {
 
         /// Asks for a value with the standard pending-input flow.
         func prompt(_ kind: AdminPendingInputKind, title: String, body: String) async throws {
-            await state.setAdminPendingInput(.init(kind: kind, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superreminders")]])
-            try await editOrAnswer(callback: callback, message: message, text: "<b>\(title)</b>\n\n\(body)", markup: markup)
+            await state.setPending(.admin(.init(kind: kind)), menuMessageID: message.message_id, chatKey: chatKey)
+            let markup: Keyboard = [[cancelButton(to: .superReminders)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen("<b>\(title)</b>\n\n\(body)", markup))
         }
 
-        switch parts[1] {
+        switch route.sub {
         case "toggle":
             config.enabled.toggle()
             await state.setReminderConfig(config)
@@ -158,7 +158,7 @@ extension BotMenuHandler {
     /// Renewal reminders & winback (roadmap step 8): the whole schedule is
     /// editable here, plus the monitoring the super-admin needs to trust it —
     /// who is about to lapse, who just did, live offers, last sweep result.
-    func renderSuperReminders(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperReminders(chatKey: ChatKey) async -> MenuScreen {
         let config = await state.reminderConfig()
         let stats = await state.subscriptionLifecycleStats()
         let sweep = await reminderService?.status()
@@ -173,21 +173,21 @@ extension BotMenuHandler {
             ? "выкл"
             : config.expiryReminderDays.map { "\($0)д" }.joined(separator: ", ")
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton(config.enabled ? "🟢 Напоминания включены" : "⚪️ Напоминания выключены", action: "rem:toggle")],
-            [menuButton("✏️ До конца · \(expiryLabel)", action: "rem:days"),
-             menuButton("✏️ Winback · \(winbackLabel)", action: "rem:winback")],
-            [menuButton("✏️ Скидка · \(config.winbackDiscountPercent)%", action: "rem:discount"),
-             menuButton("✏️ Срок скидки · \(config.winbackOfferHours) ч", action: "rem:hours")],
-            [menuButton("✏️ Проверка каждые \(config.sweepIntervalMinutes) мин", action: "rem:interval")],
-            [menuButton("💰 Возврат по балансу · \(config.walletWinbackDays > 0 ? "\(config.walletWinbackDays) дн." : "выкл")", action: "rem:wallet")],
-            [menuButton(config.notifyChats ? "🟢 Уведомлять чаты спонсора" : "⚪️ Только личка спонсора", action: "rem:chats")],
-            [menuButton("🔄 Проверить сейчас", action: "rem:run"),
-             menuButton("👁 Предпросмотр", action: "rem:preview")],
-            [menuButton("← К супер-админу", action: "nav:superadmin")],
+        var rows: Keyboard = [
+            [menuButton(config.enabled ? "🟢 Напоминания включены" : "⚪️ Напоминания выключены", .rem, "toggle")],
+            [menuButton("✏️ До конца · \(expiryLabel)", .rem, "days"),
+             menuButton("✏️ Winback · \(winbackLabel)", .rem, "winback")],
+            [menuButton("✏️ Скидка · \(config.winbackDiscountPercent)%", .rem, "discount"),
+             menuButton("✏️ Срок скидки · \(config.winbackOfferHours) ч", .rem, "hours")],
+            [menuButton("✏️ Проверка каждые \(config.sweepIntervalMinutes) мин", .rem, "interval")],
+            [menuButton("💰 Возврат по балансу · \(config.walletWinbackDays > 0 ? "\(config.walletWinbackDays) дн." : "выкл")", .rem, "wallet")],
+            [menuButton(config.notifyChats ? "🟢 Уведомлять чаты спонсора" : "⚪️ Только личка спонсора", .rem, "chats")],
+            [menuButton("🔄 Проверить сейчас", .rem, "run"),
+             menuButton("👁 Предпросмотр", .rem, "preview")],
+            [backButton(to: .superAdmin)],
         ]
         if !stats.activeDiscounts.isEmpty {
-            rows.insert([menuButton("🗑 Снять все скидки · \(stats.activeDiscounts.count)", action: "rem:cleardiscounts")], at: rows.count - 1)
+            rows.insertBeforeLast([menuButton("🗑 Снять все скидки · \(stats.activeDiscounts.count)", .rem, "cleardiscounts")])
         }
 
         let sweepLine: String
@@ -246,6 +246,6 @@ extension BotMenuHandler {
         lines.append("")
         lines.append("<i>Каждое напоминание уходит один раз за срок подписки: продление обнуляет отметки. Спонсор может отключить их у себя в «⚡ Мой премиум». Счётчики — на странице «📊 Воронка» и в /metrics.</i>")
 
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 }

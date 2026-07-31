@@ -25,6 +25,9 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: "🧹 Переписка очищена — бот забыл, о чём был разговор.")
 
         case .setTemp:
+            // Same line as the menu: hand-tuning is what premium unlocks, and a
+            // command must not be the back door around it.
+            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
             guard let temp = Float(parsed.argument), (0.0...2.0).contains(temp) else {
                 let hint = "<i>Нужно число от 0.0 (строго по фактам) до 2.0 (творчески).</i>\n<i>Пример:</i> <code>/settemp 1.0</code>"
                 try await sendUserFeedback(chatKey: chatKey, text: hint)
@@ -56,8 +59,11 @@ extension BotCommandHandler {
             // A free-tier chat may still pick a paid model while today's premium
             // taste has units left — the cap enforces itself at generation time.
             let access = await state.paidModelAccess(username: fromUser?.username, userID: fromUser?.id, chatID: chatKey.chatID)
-            let effectiveFree = await state.effectiveFreeModelIDs()
-            let isPaidModel = effectiveFree.map { !$0.contains(modelID) } ?? false
+            // Unknown catalogue counts as paid, like the generation gate: while
+            // OpenRouter is unreachable this must not become a way to run any
+            // model for free.
+            let allowedFree = await state.allowedFreeModelIDs()
+            let isPaidModel = allowedFree.map { !$0.contains(modelID) } ?? true
             if isPaidModel, case .none = access {
                 let price = await state.starsPrice()
                 let buyHint = price.map { "\n\nОткрыть премиум для этого чата (\($0) ⭐) — /buy, или пополните баланс и платите за ответы — /balance" } ?? "\n\nОткрыть премиум для этого чата — /buy, или пополните баланс и платите за ответы — /balance"
@@ -94,6 +100,11 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль сброшена к стандартной. Переписка очищена.")
 
         case .historyLength:
+            // The owner's lever, not a per-user preference: every remembered
+            // message is re-sent on every turn, so this multiplies the cost of
+            // each answer.
+            guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
+                                                 refusal: "🔒 Длину памяти настраивает владелец бота.") else { return }
             guard let newMax = Int(parsed.argument), (1...50).contains(newMax) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50 — сколько прошлых сообщений бот держит в голове.</i>\n<i>Пример:</i> <code>/historylength 11</code>")
                 return
@@ -154,9 +165,13 @@ extension BotCommandHandler {
     }
 
     /// Which AI service answers, and whether it thinks before answering.
-    func handleAiServiceCommand(_ parsed: ParsedBotCommand, chatKey: ChatKey) async throws {
+    func handleAiServiceCommand(_ parsed: ParsedBotCommand, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         switch parsed.name {
         case .provider:
+            // Plumbing: the wrong service silently removes reasoning and most
+            // of the model catalogue. Owner-only, like the menu page.
+            guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
+                                                 refusal: "🔒 Сервис ИИ настраивает владелец бота.") else { return }
             if let provider = ServiceProvider.parse(parsed.argument) {
                 let old = await state.changeProvider(chatKey: chatKey, newProvider: provider)
                 var lines = ["✓ Сервис ИИ: <b>\(provider.commandValue)</b>"]
@@ -176,6 +191,7 @@ extension BotCommandHandler {
             }
 
         case .reasoning:
+            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
             let provider = await state.provider(chatKey: chatKey)
             let gateway = try gateways.gateway(for: provider)
 
@@ -204,5 +220,38 @@ extension BotCommandHandler {
         default:
             break
         }
+    }
+
+    // MARK: - Gates shared with the menu
+
+    /// Hand-tuning a setting a reference mode owns. The same line the menu
+    /// draws (`MenuPage.requiresFullAccess`): a free chat picks a mode, a
+    /// paying one takes the settings apart. Without this the commands are a
+    /// back door around the paywall — and around the cost controls behind it.
+    func requireFullAccessForTuning(chatKey: ChatKey, fromUser: TelegramUser?) async -> Bool {
+        let allowed = await state.hasFullModelAccess(
+            username: actorKey(fromUser),
+            userID: fromUser?.id,
+            chatID: chatKey.chatID
+        )
+        guard allowed else {
+            try? await sendUserFeedback(
+                chatKey: chatKey,
+                text: "⭐ Тонкая настройка — с премиумом или балансом.\nСейчас доступны готовые режимы: /menu"
+            )
+            return false
+        }
+        return true
+    }
+
+    /// Whoever runs the bot here: super-admin, or the admin whose licence pays
+    /// for this chat.
+    func requireOperatorForTuning(chatKey: ChatKey, fromUser: TelegramUser?, refusal: String) async -> Bool {
+        let allowed = await state.isAdmin(username: actorKey(fromUser), chatID: chatKey.chatID)
+        guard allowed else {
+            try? await sendUserFeedback(chatKey: chatKey, text: refusal)
+            return false
+        }
+        return true
     }
 }

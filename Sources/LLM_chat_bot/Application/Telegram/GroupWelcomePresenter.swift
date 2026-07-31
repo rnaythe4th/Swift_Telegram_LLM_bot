@@ -46,12 +46,12 @@ enum GroupWelcomePresenter {
         if sponsor == nil {
             rows.append([InlineKeyboardButton(
                 text: "⚡ Премиум для чата",
-                callback_data: BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.welcome.rawValue)").rawData
+                callback_data: BotCallbackAction.menu(action: MenuRoute.purchase(from: .welcome)).rawData
             )])
         }
         rows.append([InlineKeyboardButton(
             text: "⚙️ Настройки",
-            callback_data: BotCallbackAction.menu(action: "open").rawData
+            callback_data: BotCallbackAction.menu(action: MenuRoute.link(.open)).rawData
         )])
 
         return Welcome(text: text, markup: InlineKeyboardMarkup(inline_keyboard: rows), showsExamples: showsExamples)

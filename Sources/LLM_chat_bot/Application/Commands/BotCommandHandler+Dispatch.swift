@@ -28,14 +28,14 @@ extension BotCommandHandler {
 
         case .tenant:
             guard await isAdmin(fromUser, chatID: chatKey.chatID) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для администратора.")
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.adminOnlyCommand)
                 return
             }
             try await handleTenant(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
         case .superadmin:
             guard await state.isRootSuperAdmin(username: actorKey(fromUser)) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для главного суперадмина.")
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.rootSuperAdminOnlyCommand)
                 return
             }
             try await handleSuperAdminCmd(chatKey: chatKey, argument: parsed.argument)
@@ -45,7 +45,7 @@ extension BotCommandHandler {
 
         case .simulate:
             guard await state.isActuallySuperAdmin(username: actorKey(fromUser)) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
                 return
             }
             try await handleSimulate(chatKey: chatKey, fromUser: fromUser, argument: parsed.argument)
@@ -58,14 +58,14 @@ extension BotCommandHandler {
 
         case .inspect:
             guard await isSuperAdmin(fromUser) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
                 return
             }
             try await handleInspect(chatKey: chatKey, argument: parsed.argument)
 
         case .ads:
             guard await isSuperAdmin(fromUser) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
                 return
             }
             try await handleAds(chatKey: chatKey, argument: parsed.argument)
@@ -75,7 +75,7 @@ extension BotCommandHandler {
 
         case .reminders:
             guard await isSuperAdmin(fromUser) else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
                 return
             }
             try await handleReminders(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
@@ -93,11 +93,11 @@ extension BotCommandHandler {
             try await handleChatToggleCommand(parsed, chatKey: chatKey)
 
         case .provider, .reasoning:
-            try await handleAiServiceCommand(parsed, chatKey: chatKey)
+            try await handleAiServiceCommand(parsed, chatKey: chatKey, fromUser: fromUser)
 
         case .help:
             let markup = InlineKeyboardMarkup(inline_keyboard: [
-                [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)],
+                [InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: MenuRoute.link(.open)).rawData)],
             ])
             _ = try await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,

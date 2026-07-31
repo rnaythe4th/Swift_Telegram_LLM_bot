@@ -8,57 +8,50 @@ import Foundation
 extension BotMenuHandler {
     /// Super-admin actions: prices, payment methods, tenants, wallets, ads.
     func processSuperAdminAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "sa":
-            try await handleSuperAdminRosterAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        switch route.command {
+        case .sa:
+            try await handleSuperAdminRosterAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "stenant":
-            try await handleSuperTenantAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .stenant:
+            try await handleSuperTenantAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "sim":
-            try await handleSimulationAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .sim:
+            try await handleSimulationAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "sinspect":
-            try await handleInspectChatAction(parts: parts, callback: callback, message: message)
+        case .sinspect:
+            try await handleInspectChatAction(route: route, callback: callback, message: message)
 
-        case "ads":
-            try await handleAdCampaignAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .ads:
+            try await handleAdCampaignAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "markup":
-            try await handleMarkupAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .markup:
+            try await handleMarkupAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "dailylimit":
-            try await handleDailyLimitAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .dailylimit:
+            try await handleDailyLimitAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "stars":
-            try await handleStarsAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .stars:
+            try await handleStarsAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "freemodels":
-            try await handleFreeModelsAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .freemodels:
+            try await handleFreeModelsAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "sbal":
-            try await handleWalletAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .sbal:
+            try await handleWalletAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "crypto":
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            try await handleCryptoAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .crypto:
+            guard await requireSuperAdmin(callback) else { return }
+            try await handleCryptoAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
-        case "card":
-            guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                return
-            }
-            try await handleCardAdminAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        case .card:
+            guard await requireSuperAdmin(callback) else { return }
+            try await handleCardAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
         default:
@@ -69,17 +62,14 @@ extension BotMenuHandler {
     // MARK: - Markup and the daily premium taste
 
     private func handleMarkupAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        guard parts.count >= 2, parts[1] == "set" else { return }
-        await state.setAdminPendingInput(.init(kind: .markupPercent, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+        guard await requireSuperAdmin(callback) else { return }
+        guard route.sub == "set" else { return }
+        await state.setPending(.admin(.init(kind: .markupPercent)), menuMessageID: message.message_id, chatKey: chatKey)
         let currentPct = await state.markupPercent()
         let markupPrompt = """
         <b>💹 Наценка на цены моделей</b>
@@ -88,22 +78,19 @@ extension BotMenuHandler {
 
         Отправьте число от <code>0</code> до <code>500</code> — процент наценки к ценам провайдера. Применяется ко всем ценам, которые видят пользователи (футер, меню, /model), и к списаниям с балансов.
         """
-        let markupMarkup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superadmin")]])
-        try await editOrAnswer(callback: callback, message: message, text: markupPrompt, markup: markupMarkup)
+        let markupMarkup: Keyboard = [[cancelButton(to: .superAdmin)]]
+        try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(markupPrompt, markupMarkup))
     }
 
     private func handleDailyLimitAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        guard parts.count >= 2, parts[1] == "set" else { return }
-        await state.setAdminPendingInput(.init(kind: .dailyPremiumLimit, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+        guard await requireSuperAdmin(callback) else { return }
+        guard route.sub == "set" else { return }
+        await state.setPending(.admin(.init(kind: .dailyPremiumLimit)), menuMessageID: message.message_id, chatKey: chatKey)
         let currentLimit = await state.dailyPremiumLimit()
         let limitPrompt = """
         <b>🎁 Дневной премиум-вкус (free-tier)</b>
@@ -112,11 +99,11 @@ extension BotMenuHandler {
 
         Отправьте число от <code>0</code> до <code>100</code> — сколько ответов платной модели в день получает бесплатный чат (в группе — общий на чат, в личке — на пользователя), прежде чем бот переключится на бесплатную модель и предложит премиум. <code>0</code> — совсем без премиум-вкуса. Бесплатные модели всегда без лимита.
         """
-        let limitMarkup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superadmin")]])
-        try await editOrAnswer(callback: callback, message: message, text: limitPrompt, markup: limitMarkup)
+        let limitMarkup: Keyboard = [[cancelButton(to: .superAdmin)]]
+        try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(limitPrompt, limitMarkup))
     }
 
-    func renderSuperAdmin(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperAdmin(chatKey: ChatKey) async -> MenuScreen {
         let starsPrice = await state.starsPrice()
         let starsLabel = starsPrice.map { "<b>\($0) ⭐</b>" } ?? "<b>отключена</b>"
 
@@ -155,30 +142,34 @@ extension BotMenuHandler {
         let balancesTotal = balances.reduce(0.0) { $0 + $1.wallet.balanceUsd }
         let marginTotal = balances.reduce(0.0) { $0 + ($1.wallet.spentBilledUsd - $1.wallet.spentRealUsd) }
 
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton(starsButtonLabel, action: "nav:superstars")],
-            [menuButton(cryptoButtonLabel, action: "nav:supercrypto")],
-            [menuButton(cardButtonLabel, action: "nav:supercard")],
-            [menuButton("🆓 Бесплатные модели · \(freeCount)", action: "nav:superfreemodels")],
-            [menuButton("🏢 Тенанты и статистика · \(totalTenants)", action: "nav:supertenants")],
-            [menuButton("👁 Чаты бота", action: "nav:superchats"),
-             menuButton("📣 Реклама", action: "nav:superads")],
-            [menuButton("🛡 Суперадмины", action: "nav:superadmins"),
-             menuButton("🎭 Симуляция", action: "nav:supersim")],
-            [menuButton("💰 Балансы · \(balances.count)", action: "nav:superbal"),
-             menuButton("💹 Наценка · \(markupPct)%", action: "markup:set")],
-            [menuButton("🎁 Премиум-лимит/день · \(dailyLimit)", action: "dailylimit:set")],
-            [menuButton("⏳ Напоминания и winback · \(reminders.enabled ? "вкл" : "выкл")", action: "nav:superreminders")],
-            [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.enabledExamples.count)" : "выкл")", action: "nav:superonboarding")],
-            [menuButton("🎁 Приглашения · \(referral.enabled ? ReferralConfig.formatUsd(cents: referral.inviterRewardCents) : "выкл")", action: "nav:superref")],
-            [menuButton("📊 Воронка и аналитика", action: "nav:superfunnel"),
-             menuButton("📈 Источники · \(traffic.campaigns)", action: "nav:supersrc")],
-            [menuButton("🪙 Открытые счета · \(openInvoices.count)", action: "crypto:invoices")],
-            [menuButton("📋 Общие заготовки · 🤖 Модели", action: "pm:model"),
-             menuButton("🎭 Роли", action: "pm:role")],
-            [menuButton("🌡 Стили ответа", action: "pm:temp"),
-             menuButton("📝 Память", action: "pm:history")],
-            [menuButton("ℹ️ Справка по командам", action: "nav:superadminhelp")],
+        let modes = await state.modeConfig()
+        let freeModeCount = modes.activeModes.filter { $0.tier == .free }.count
+
+        let rows: Keyboard = [
+            [menuButton("🎛 Режимы бота · \(modes.enabled ? "\(modes.activeModes.count)" : "выкл")", page: .superModes)],
+            [menuButton(starsButtonLabel, page: .superStars)],
+            [menuButton(cryptoButtonLabel, page: .superCrypto)],
+            [menuButton(cardButtonLabel, page: .superCard)],
+            [menuButton("🆓 Бесплатные модели · \(freeCount)", page: .superFreeModels)],
+            [menuButton("🏢 Тенанты и статистика · \(totalTenants)", page: .superTenants)],
+            [menuButton("👁 Чаты бота", page: .superChats),
+             menuButton("📣 Реклама", page: .superAds)],
+            [menuButton("🛡 Суперадмины", page: .superAdmins),
+             menuButton("🎭 Симуляция", page: .superSimulate)],
+            [menuButton("💰 Балансы · \(balances.count)", page: .superBalances),
+             menuButton("💹 Наценка · \(markupPct)%", .markup, "set")],
+            [menuButton("🎁 Премиум-лимит/день · \(dailyLimit)", .dailylimit, "set")],
+            [menuButton("⏳ Напоминания и winback · \(reminders.enabled ? "вкл" : "выкл")", page: .superReminders)],
+            [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.enabledExamples.count)" : "выкл")", page: .superOnboarding)],
+            [menuButton("🎁 Приглашения · \(referral.enabled ? ReferralConfig.formatUsd(cents: referral.inviterRewardCents) : "выкл")", page: .superReferrals)],
+            [menuButton("📊 Воронка и аналитика", page: .superFunnel),
+             menuButton("📈 Источники · \(traffic.campaigns)", page: .superTraffic)],
+            [menuButton("🪙 Открытые счета · \(openInvoices.count)", .crypto, "invoices")],
+            [menuButton("📋 Общие заготовки · 🤖 Модели", .pm, "model"),
+             menuButton("🎭 Роли", .pm, "role")],
+            [menuButton("🌡 Стили ответа", .pm, "temp"),
+             menuButton("📝 Память", .pm, "history")],
+            [menuButton("ℹ️ Справка по командам", page: .superAdminHelp)],
             navButtons(),
         ]
 
@@ -189,6 +180,7 @@ extension BotMenuHandler {
         🪙 Крипто · \(cryptoLabel) · режим <b>\(cryptoMode.displayName)</b>
         💳 Карта · \(cardLabel)
         💹 Наценка · <b>\(markupPct)%</b> · /tenant markup
+        🎛 Режимы · <b>\(modes.enabled ? "вкл" : "выкл")</b> · всего <b>\(modes.activeModes.count)</b> · бесплатных <b>\(freeModeCount)</b> · рабочий <b>\(modes.defaultMode?.title ?? "—")</b>
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
         💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · в личке <b>\(onboarding.activeExamples(inGroup: false).count)</b> · в группах <b>\(onboarding.showInGroups ? onboarding.activeExamples(inGroup: true).count : 0)</b>
         ⏳ Напоминания · <b>\(reminders.enabled ? "вкл" : "выкл")</b> · скоро истекут <b>\(lifecycle.expiringSoon.count)</b> · winback-офферов <b>\(lifecycle.activeDiscounts.count)</b>
@@ -202,6 +194,6 @@ extension BotMenuHandler {
         🤖 Моделей · <b>\(globalModels)</b> · 🎭 Ролей · <b>\(globalRoles)</b>
         🌡 Стилей ответа · <b>\(globalTemps)</b> · 📝 Памяти · <b>\(globalHist)</b>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 }

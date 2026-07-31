@@ -20,6 +20,7 @@ enum GlobalConfigKey: String, CaseIterable, Sendable {
     case dailyPremiumLimit = "daily_premium_limit"
     case dailyPremiumUsage = "daily_premium_usage"
     case selfPromo = "self_promo"
+    case modes = "modes"
     case reminders = "reminders"
     case onboarding = "onboarding"
     case referrals = "referrals"
@@ -72,6 +73,9 @@ enum GlobalConfigValue: Sendable {
     case dailyPremiumUsage([String: DailyPremiumUsage])
     /// Built-in self-promo filling the free-tier ad slot (roadmap step 5).
     case selfPromo(SelfPromoConfig)
+    /// Reference modes: the settings bundles a user picks in one tap, and which
+    /// of them the free tier may reach.
+    case modes(ModePresetConfig)
     /// Renewal-reminder / winback schedule (roadmap step 8).
     case reminders(SubscriptionReminderConfig)
     /// Greeting example prompts + their tap counters (roadmap step 9).
@@ -105,6 +109,7 @@ enum GlobalConfigValue: Sendable {
         case .dailyPremiumLimit: return .dailyPremiumLimit
         case .dailyPremiumUsage: return .dailyPremiumUsage
         case .selfPromo: return .selfPromo
+        case .modes: return .modes
         case .reminders: return .reminders
         case .onboarding: return .onboarding
         case .referrals: return .referrals
@@ -201,6 +206,7 @@ struct PersistedGlobalConfigs: Sendable {
     var dailyPremiumLimit: Int?
     var dailyPremiumUsage: [String: DailyPremiumUsage]?
     var selfPromo: SelfPromoConfig?
+    var modes: ModePresetConfig?
     var reminders: SubscriptionReminderConfig?
     var onboarding: OnboardingConfig?
     var referrals: ReferralConfig?
@@ -214,6 +220,7 @@ struct PersistedGlobalConfigs: Sendable {
             || chatMeta != nil || invites != nil || ads != nil
             || markup != nil || balances != nil || funnel != nil || funnelDaily != nil
             || dailyPremiumLimit != nil || dailyPremiumUsage != nil || selfPromo != nil
+            || modes != nil
             || reminders != nil || onboarding != nil || referrals != nil || referralLedger != nil
             || trafficSources != nil || userDirectory != nil
     }

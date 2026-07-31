@@ -10,8 +10,13 @@ import Foundation
 private typealias AdminInputOutcome = (toast: String, page: MenuPage)
 
 extension BotMenuHandler {
-    func processAdminPendingInput(text: String, chatKey: ChatKey, username: String?) async -> Bool {
-        guard let pending = await state.consumeAdminPendingInput(chatKey: chatKey) else { return true }
+    func processAdminPendingInput(
+        _ pending: AdminPendingInput,
+        menuMessageID: Int,
+        text: String,
+        chatKey: ChatKey,
+        username: String?
+    ) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let isAdmin = await state.isAdmin(username: username, chatID: chatKey.chatID)
         let isSuper = await state.isSuperAdmin(username: username)
@@ -63,13 +68,15 @@ extension BotMenuHandler {
              .referralInviteeReward, .referralPaidBonus, .referralCap:
             outcome = await applyGrowthInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
 
+        case .modeAdd, .modeEdit, .modeRole:
+            outcome = await applyModeInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
+
         case .simulateAs:
             // The simulation page acts on buttons only — nothing to apply.
             outcome = (toast: "", page: .adminPanel)
         }
 
-        let (menuText, markup) = await renderPage(outcome.page, chatKey: chatKey, username: username)
-        try? await telegram.editMessage(.init(chatID: chatKey.chatID, messageID: pending.menuMessageID, text: menuText, replyMarkup: markup))
+        await refreshMenu(chatKey: chatKey, menuMessageID: menuMessageID, screen: await renderPage(outcome.page, chatKey: chatKey, username: username))
         if !outcome.toast.isEmpty {
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
@@ -102,7 +109,7 @@ extension BotMenuHandler {
 
         switch pending.kind {
         case .whitelistAdd:
-            guard isAdmin else { toast = "🔒 Только администратор"; resumePage = .adminPanel; break }
+            guard isAdmin else { toast = Texts.adminOnly; resumePage = .adminPanel; break }
             if let id = Int(trimmed) {
                 await state.addToWhitelist(userID: id, chatID: chatKey.chatID)
                 toast = "✓ \(id) добавлен в гости"
@@ -151,7 +158,7 @@ extension BotMenuHandler {
             } else {
                 let target = normalizeUsername(trimmed)
                 if target.isEmpty {
-                    toast = "⚠️ Нужен @username"
+                    toast = Texts.usernameRequired
                 } else {
                     let ok = await state.addLicensedUser(ownerUsername: owner, target: target)
                     toast = ok ? "✓ @\(target) добавлен в гости премиума" : "Уже в списке или премиум неактивен"
@@ -179,10 +186,10 @@ extension BotMenuHandler {
 
         switch pending.kind {
         case .tenantRegister:
-            guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superTenants; break }
+            guard isSuper else { toast = Texts.superAdminOnly; resumePage = .superTenants; break }
             let target = normalizeUsername(trimmed)
             if target.isEmpty {
-                toast = "⚠️ Нужен @username"
+                toast = Texts.usernameRequired
             } else {
                 await state.registerTenant(username: target)
                 toast = "✓ Тенант @\(target) создан"
@@ -190,17 +197,17 @@ extension BotMenuHandler {
             resumePage = .superTenants
 
         case .tenantRemove:
-            guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superTenants; break }
+            guard isSuper else { toast = Texts.superAdminOnly; resumePage = .superTenants; break }
             let target = normalizeUsername(trimmed)
             let removed = await state.removeTenant(username: target)
-            toast = removed ? "✓ Тенант @\(target) удалён" : "Нельзя удалить"
+            toast = removed ? "✓ Тенант @\(target) удалён" : Texts.cannotRemove
             resumePage = .superTenants
 
         case .superAdminAdd:
-            guard isRoot else { toast = "🔒 Только главный суперадмин"; resumePage = .superAdmins; break }
+            guard isRoot else { toast = Texts.rootSuperAdminOnly; resumePage = .superAdmins; break }
             let target = normalizeUsername(trimmed)
             if target.isEmpty {
-                toast = "⚠️ Нужен @username"
+                toast = Texts.usernameRequired
             } else {
                 let ok = await state.addSuperAdmin(target: target)
                 toast = ok ? "✓ @\(target) — суперадмин" : "Уже суперадмин"
@@ -208,10 +215,10 @@ extension BotMenuHandler {
             resumePage = .superAdmins
 
         case .superAdminRemove:
-            guard isRoot else { toast = "🔒 Только главный суперадмин"; resumePage = .superAdmins; break }
+            guard isRoot else { toast = Texts.rootSuperAdminOnly; resumePage = .superAdmins; break }
             let target = normalizeUsername(trimmed)
             let ok = await state.removeSuperAdmin(target: target)
-            toast = ok ? "✓ @\(target) больше не суперадмин" : "Нельзя удалить"
+            toast = ok ? "✓ @\(target) больше не суперадмин" : Texts.cannotRemove
             resumePage = .superAdmins
 
         default:
@@ -233,7 +240,7 @@ extension BotMenuHandler {
 
         switch pending.kind {
         case .adAddText:
-            guard isSuper else { toast = "🔒 Только суперадмин"; resumePage = .superAdmin; break }
+            guard isSuper else { toast = Texts.superAdminOnly; resumePage = .superAdmin; break }
             guard !trimmed.isEmpty else { toast = "⚠️ Пустой текст"; resumePage = .superAds; break }
             let campaign = AdCampaign.new(text: trimmed)
             await state.upsertAdCampaign(campaign)
@@ -242,7 +249,7 @@ extension BotMenuHandler {
 
         case .selfPromoText:
             resumePage = .superAds
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             guard !trimmed.isEmpty else { toast = "⚠️ Пустой текст"; break }
             var promoText = await state.selfPromoConfig()
             promoText.text = trimmed
@@ -251,7 +258,7 @@ extension BotMenuHandler {
 
         case .selfPromoEvery:
             resumePage = .superAds
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), SelfPromoConfig.repliesRange.contains(n) {
                 var promo = await state.selfPromoConfig()
                 promo.everyNReplies = n
@@ -263,7 +270,7 @@ extension BotMenuHandler {
 
         case .selfPromoPause:
             resumePage = .superAds
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), SelfPromoConfig.pauseMinutesRange.contains(n) {
                 var promo = await state.selfPromoConfig()
                 promo.minIntervalSeconds = n * 60
@@ -309,8 +316,17 @@ extension BotMenuHandler {
             if modelID.isEmpty {
                 toast = "⚠️ ID модели пуст"
             } else {
-                let hasAccess = await state.hasFullModelAccess(username: username, chatID: chatKey.chatID)
-                if !hasAccess, let eff = await state.effectiveFreeModelIDs(), !eff.contains(modelID) {
+                // The same gate as the preset buttons and /model: a free-tier
+                // user with today's taste left may type a paid model too. This
+                // used to ask `hasFullModelAccess`, so the box refused exactly
+                // what the buttons next to it allowed. `username` here is
+                // already the storage key (`processTextInput` resolves it from
+                // the userID), so the wallet of someone without a @username is
+                // found too.
+                let access = await state.paidModelAccess(username: username, userID: nil, chatID: chatKey.chatID)
+                let allowedFree = await state.allowedFreeModelIDs()
+                let isPaidModel = allowedFree.map { !$0.contains(modelID) } ?? true
+                if isPaidModel, case .none = access {
                     toast = "⭐ <b>\(modelID)</b> — платная модель. Открыть премиум — /buy, или пополнить баланс — /balance"
                 } else {
                     _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelID, providerRouting: providerRouting)
@@ -357,7 +373,7 @@ extension BotMenuHandler {
         switch pending.kind {
         case .markupPercent:
             resumePage = .superAdmin
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let pct = Int(trimmed), (0...500).contains(pct) {
                 await state.setMarkupPercent(pct)
                 toast = "✓ Наценка: <b>\(pct)%</b> (множитель ×\(String(format: "%.2f", 1.0 + Double(pct) / 100.0)))"
@@ -367,7 +383,7 @@ extension BotMenuHandler {
 
         case .dailyPremiumLimit:
             resumePage = .superAdmin
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), (0...100).contains(n) {
                 await state.setDailyPremiumLimit(n)
                 toast = n == 0
@@ -379,13 +395,13 @@ extension BotMenuHandler {
 
         case .balanceTopUp:
             resumePage = .superBalances
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             let comps = trimmed.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
             if comps.count >= 2,
                let amount = Double(comps[1].replacingOccurrences(of: ",", with: ".")) {
                 let target = normalizeUsername(comps[0])
                 if target.isEmpty {
-                    toast = "⚠️ Нужен @username"
+                    toast = Texts.usernameRequired
                 } else {
                     let wallet = await state.creditBalance(username: target, amountUsd: amount)
                     toast = "✓ Баланс @\(target.lowercased()) · <b>\(String(format: "$%.4f", wallet.balanceUsd))</b>"
@@ -414,7 +430,7 @@ extension BotMenuHandler {
         switch pending.kind {
         case .cardProviderToken:
             resumePage = .superCard
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if trimmed == "-" {
                 await state.setCardProviderToken(nil)
                 toast = "✓ Токен удалён"
@@ -430,7 +446,7 @@ extension BotMenuHandler {
 
         case .cardUsdRate:
             resumePage = .superCard
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             let rateInput = trimmed.replacingOccurrences(of: ",", with: ".")
             if let value = Double(rateInput), value >= 0 {
                 if value == 0 {
@@ -447,7 +463,7 @@ extension BotMenuHandler {
 
         case .cardPrice:
             resumePage = .superCard
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
             if let value = Double(normalized), value >= 0 {
                 if value == 0 {
@@ -487,7 +503,7 @@ extension BotMenuHandler {
         switch pending.kind {
         case .reminderDaysBefore:
             resumePage = .superReminders
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             var expiryConfig = await state.reminderConfig()
             if trimmed == "-" || trimmed == "0" {
                 expiryConfig.expiryReminderDays = []
@@ -510,7 +526,7 @@ extension BotMenuHandler {
 
         case .reminderWinbackDays:
             resumePage = .superReminders
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             var config = await state.reminderConfig()
             if trimmed == "-" || trimmed == "0" {
                 config.winbackDays = []
@@ -533,7 +549,7 @@ extension BotMenuHandler {
 
         case .reminderDiscount:
             resumePage = .superReminders
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), SubscriptionReminderConfig.discountRange.contains(n) {
                 var config = await state.reminderConfig()
                 config.winbackDiscountPercent = n
@@ -547,7 +563,7 @@ extension BotMenuHandler {
 
         case .reminderOfferHours:
             resumePage = .superReminders
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), SubscriptionReminderConfig.offerHoursRange.contains(n) {
                 var config = await state.reminderConfig()
                 config.winbackOfferHours = n
@@ -559,7 +575,7 @@ extension BotMenuHandler {
 
         case .reminderInterval:
             resumePage = .superReminders
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), SubscriptionReminderConfig.sweepIntervalRange.contains(n) {
                 var config = await state.reminderConfig()
                 config.sweepIntervalMinutes = n
@@ -571,7 +587,7 @@ extension BotMenuHandler {
 
         case .reminderWalletDays:
             resumePage = .superReminders
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), SubscriptionReminderConfig.walletWinbackRange.contains(n) {
                 var config = await state.reminderConfig()
                 config.walletWinbackDays = n
@@ -592,6 +608,104 @@ extension BotMenuHandler {
 
     // MARK: - Growth: onboarding examples and referral economics
 
+    // MARK: - Reference modes
+
+    /// `Название | Подпись | модель | стиль | память | обдумывание`, plus the
+    /// role on its own line-less form. Tier, role and tap counter are *not* in
+    /// the text form: they have their own buttons, and re-typing them on every
+    /// wording fix is how a mode silently loses its tier.
+    private func applyModeInput(
+        pending: AdminPendingInput,
+        trimmed: String,
+        isSuper: Bool
+    ) async -> AdminInputOutcome {
+        let resumePage: MenuPage = .superModes
+        guard isSuper else { return (Texts.superAdminOnly, resumePage) }
+
+        if pending.kind == .modeRole {
+            guard let id = pending.payload, var mode = await state.mode(id: id) else {
+                return ("⚠️ Режим не найден — возможно, он был удалён", resumePage)
+            }
+            mode.role = trimmed == "-" ? nil : trimmed
+            await state.upsertMode(mode)
+            return (
+                mode.role == nil
+                    ? "✓ Режим <b>\(OnboardingPresenter.escape(mode.title))</b> больше не меняет роль чата"
+                    : "✓ Роль режима <b>\(OnboardingPresenter.escape(mode.title))</b> обновлена",
+                resumePage
+            )
+        }
+
+        let comps = trimmed.split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard comps.count >= 5, !comps[0].isEmpty else {
+            return ("⚠️ Формат: <code>Название | Подпись | модель | стиль | память | обдумывание</code>", resumePage)
+        }
+        guard let temp = Float(comps[3].replacingOccurrences(of: ",", with: ".")),
+              ModePresetConfig.tempRange.contains(temp) else {
+            return ("⚠️ Стиль — число от 0.0 до 2.0", resumePage)
+        }
+        guard let maxHistory = Int(comps[4]), ModePresetConfig.historyRange.contains(maxHistory) else {
+            return ("⚠️ Память — число от \(ModePresetConfig.historyRange.lowerBound) до \(ModePresetConfig.historyRange.upperBound)", resumePage)
+        }
+        // `-` means "any free model", resolved at apply time. Model IDs never
+        // contain `@`, so it is safe as the provider-pin separator.
+        let modelField = comps[2]
+        var model: String? = (modelField.isEmpty || modelField == "-") ? nil : modelField
+        var routing: String? = nil
+        if let value = model, let at = value.firstIndex(of: "@") {
+            routing = String(value[value.index(after: at)...])
+            model = String(value[value.startIndex..<at])
+            if model?.isEmpty == true { model = nil }
+            if routing?.isEmpty == true { routing = nil }
+        }
+        let reasoningField = comps.count > 5 ? comps[5] : "-"
+        let reasoning = (reasoningField.isEmpty || reasoningField == "-")
+            ? nil
+            : ReasoningEffort(userInput: reasoningField)
+        if reasoning == nil, !(reasoningField.isEmpty || reasoningField == "-") {
+            return ("⚠️ Обдумывание — <code>-</code>, быстро, средне или глубоко", resumePage)
+        }
+
+        let config = await state.modeConfig()
+        if pending.kind == .modeEdit {
+            guard let id = pending.payload, var mode = config.mode(id: id) else {
+                return ("⚠️ Режим не найден — возможно, он был удалён", resumePage)
+            }
+            mode.title = comps[0]
+            mode.subtitle = comps[1]
+            mode.model = model
+            mode.modelProviderRouting = routing
+            mode.temp = temp
+            mode.maxHistory = maxHistory
+            mode.reasoning = reasoning
+            await state.upsertMode(mode)
+            if let model { await modelPriceMonitor?.refreshPricesIfNeeded(for: model) }
+            return ("✓ Режим обновлён · <b>\(OnboardingPresenter.escape(mode.title))</b>", resumePage)
+        }
+
+        guard config.modes.count < ModePresetConfig.maxModes else {
+            return ("⚠️ Не добавлен: максимум \(ModePresetConfig.maxModes) режимов", resumePage)
+        }
+        let mode = ModePreset(
+            id: ModePresetConfig.makeID(existing: config.modes),
+            title: comps[0],
+            subtitle: comps[1],
+            model: model,
+            modelProviderRouting: routing,
+            temp: temp,
+            maxHistory: maxHistory,
+            reasoning: reasoning,
+            // New modes start paid: a mode added by mistake must not hand the
+            // owner's most expensive model to every free user until somebody
+            // notices. Making it 🆓 is one tap.
+            tier: .premium
+        )
+        await state.upsertMode(mode)
+        await modelPriceMonitor?.refreshPricesIfNeeded(for: model ?? "")
+        return ("✓ Режим добавлен · <b>\(OnboardingPresenter.escape(mode.title))</b> · тариф ⭐, поменяйте кнопкой", resumePage)
+    }
+
     private func applyGrowthInput(
         pending: AdminPendingInput,
         trimmed: String,
@@ -603,7 +717,7 @@ extension BotMenuHandler {
         switch pending.kind {
         case .onboardingAdd, .onboardingEdit:
             resumePage = .superOnboarding
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             // "Кнопка | Текст запроса" — same shape as preset input, so the
             // super-admin learns one format for the whole menu.
             let comps = trimmed.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -626,7 +740,7 @@ extension BotMenuHandler {
 
         case .referralInviterReward, .referralInviteeReward, .referralPaidBonus:
             resumePage = .superReferrals
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
             if let usd = Double(normalized), usd >= 0 {
                 let cents = Int((usd * 100).rounded())
@@ -657,7 +771,7 @@ extension BotMenuHandler {
 
         case .referralCap:
             resumePage = .superReferrals
-            guard isSuper else { toast = "🔒 Только суперадмин"; break }
+            guard isSuper else { toast = Texts.superAdminOnly; break }
             if let n = Int(trimmed), ReferralConfig.capRange.contains(n) {
                 var config = await state.referralConfig()
                 config.maxRewardsPerInviter = n

@@ -90,6 +90,11 @@ actor ChatContextStore {
     /// GlobalConfigKey.selfPromo.
     var selfPromoConfigValue: SelfPromoConfig = .default
 
+    /// Reference modes: the settings bundles a user picks in one tap, and which
+    /// of them the free tier may reach. Super-admin knob, persisted via
+    /// GlobalConfigKey.modes.
+    var modeConfigValue: ModePresetConfig = .default
+
     /// Daily free "taste" of premium for free-tier chats/users (roadmap step 6).
     /// Group chats share one counter (`c<chatID>`); private chats count per user
     /// (`u<userID>`). Persisted via GlobalConfigKey.dailyPremiumUsage — see
@@ -107,16 +112,15 @@ actor ChatContextStore {
     /// reads as the sponsor's standing credit.
     static let sponsorCreditCooldown: TimeInterval = 60 * 60
 
-    var _pendingInputs: [ChatKey: PendingInput] = [:]
+    /// The one typed-value wait a chat can hold, whatever asked for it.
+    /// See `PendingRequest` for why it is a single slot and not eight maps.
+    var _pendingRequests: [ChatKey: PendingRequest] = [:]
     // Internal (not private): restored by ChatContextStore+Persistence.swift.
     var _starsPrice: Int? = nil
     /// Stars charged per $1 when buying credit packs. Telegram pays devs
     /// ~$0.013/⭐, so 77⭐/$ recovers the pack's face value; the 30% spend
     /// markup on top is the margin. Tunable live from the super-admin menu.
     var _starsPerUsd: Int = 77
-    var _pendingStarsPriceInputs: [ChatKey: Int] = [:]
-    var _pendingStarsPerUsdInputs: [ChatKey: Int] = [:]
-    var _pendingFreeModelInputs: [ChatKey: Int] = [:]
     var _freeModelIDs: [String] = []
     var _openRouterFreeModelIDs: Set<String>? = nil
     var _openRouterModelPrices: [String: ModelPriceInfo] = [:]
@@ -131,18 +135,8 @@ actor ChatContextStore {
     var _cryptoAddressPools: [CryptoChain: [String]] = [:]
     /// Explorer scan positions, `"<asset>:<address>"` → unix seconds.
     var _explorerCursors: [String: Int] = [:]
-    var _pendingCryptoPriceInputs: [ChatKey: Int] = [:]
-    var _pendingCryptoAddressInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
-    var _pendingCryptoPoolAddInputs: [ChatKey: (menuMessageID: Int, chain: CryptoChain)] = [:]
 
     var _simulatedRoles: [String: SimulatedRole] = [:]
-
-    var _pendingAdminInputs: [ChatKey: AdminPendingInput] = [:]
-
-    /// Who armed the chat's current "waiting for a value" state. The waits
-    /// themselves are keyed by chat (the menu message they belong to lives
-    /// there), but in a group the next message can come from anyone.
-    var _pendingInputOwners: [ChatKey: String] = [:]
 
     init(
         ownerUsername: String,

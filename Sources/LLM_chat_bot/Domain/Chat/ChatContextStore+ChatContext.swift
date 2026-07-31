@@ -159,7 +159,10 @@ extension ChatContextStore {
     }
 
     func setReasoningEffort(chatKey: ChatKey, effort: ReasoningEffort?) {
-        mutate(chatKey: chatKey) { $0.reasoningEffort = effort }
+        mutate(chatKey: chatKey) {
+            $0.reasoningEffort = effort
+            $0.activeModeID = nil
+        }
     }
 
     func reasoningEnabled(chatKey: ChatKey) -> Bool {
@@ -174,6 +177,8 @@ extension ChatContextStore {
         mutate(chatKey: chatKey) { context in
             context.maxHistory = max(1, newMax)
             context.history = trimHistory(context.history, limit: context.maxHistory)
+            // Hand-edited: the chat no longer matches the mode it was in.
+            context.activeModeID = nil
         }
     }
 
@@ -195,7 +200,10 @@ extension ChatContextStore {
     }
 
     func setTemperature(chatKey: ChatKey, value: Float) {
-        mutate(chatKey: chatKey) { $0.temp = value }
+        mutate(chatKey: chatKey) {
+            $0.temp = value
+            $0.activeModeID = nil
+        }
     }
 
     func temperature(chatKey: ChatKey) -> Float {
@@ -212,6 +220,7 @@ extension ChatContextStore {
             // An explicit choice supersedes the cap fallback: nothing left to
             // restore later (roadmap step 6).
             context.downgradedFromModel = nil
+            context.activeModeID = nil
         }
         return (old, newModel)
     }
@@ -369,9 +378,16 @@ extension ChatContextStore {
         ensure(chatKey: chatKey).history
     }
 
+    /// "↺ Сбросить": back to the settings the bot ships with.
+    ///
+    /// Deliberately *not* a wipe. The chat's own presets and its usage totals
+    /// are not settings — they are things the chat accumulated, and the button
+    /// says "сбросить настройки", not "стереть всё" (`/reset_stats` exists for
+    /// the totals). Throwing them away silently is what this used to do.
     func resetChat(chatKey: ChatKey) {
         let tenant = tenantState(for: chatKey.chatID)
         let role = roleWithCompanyMembers(chatID: chatKey.chatID, role: tenant.defaultRole + formatOptions)
+        let previous = contexts[chatKey]
         contexts[chatKey] = ChatContext(
             role: role,
             history: [.init(role: "system", content: role)],
@@ -387,12 +403,18 @@ extension ChatContextStore {
             suffix: defaultSuffix,
             reasoningEffort: nil,
             backupNotify: false,
-            cumulativeUsage: .zero,
-            chatModelPresets: [],
-            chatTempPresets: [],
-            chatHistoryLengthPresets: [],
-            chatRolePresets: []
+            cumulativeUsage: previous?.cumulativeUsage ?? .zero,
+            chatModelPresets: previous?.chatModelPresets ?? [],
+            chatTempPresets: previous?.chatTempPresets ?? [],
+            chatHistoryLengthPresets: previous?.chatHistoryLengthPresets ?? [],
+            chatRolePresets: previous?.chatRolePresets ?? []
         )
         dirtyContexts.insert(chatKey)
+        // "Стандартные настройки" means the working mode, when there is one:
+        // the tenant defaults are a bare model id, the mode is the combination
+        // the owner actually vouches for.
+        if let working = modeConfigValue.defaultMode {
+            applyMode(chatKey: chatKey, modeID: working.id)
+        }
     }
 }

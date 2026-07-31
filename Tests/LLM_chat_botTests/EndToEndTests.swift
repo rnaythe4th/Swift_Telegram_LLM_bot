@@ -95,9 +95,9 @@ final class EndToEndTests: XCTestCase {
         )
     }
 
-    private func callback(_ data: String, chatID: Int? = nil, userID: Int? = nil) -> TelegramUpdate {
+    private func callback(_ data: String, chatID: Int? = nil, userID: Int? = nil, isGroup: Bool = false) -> TelegramUpdate {
         let sender = userID ?? self.userID
-        let chat = TelegramChat(id: chatID ?? sender, type: "private")
+        let chat = TelegramChat(id: chatID ?? sender, type: isGroup ? "supergroup" : "private")
         return TelegramUpdate(
             update_id: Int.random(in: 1...1_000_000),
             message: nil,
@@ -196,17 +196,83 @@ final class EndToEndTests: XCTestCase {
         XCTAssertEqual(report.counters[PurchaseSource.menu.counterKey], 1)
     }
 
-    /// A `super*` page must refuse a normal user — the gate lives in the menu
-    /// handler, and the whole point is that it cannot be reached by guessing a
-    /// callback_data.
-    func testSuperAdminPageRefusesANormalUser() async throws {
-        await orchestrator.dispatch(update: callback("menu:nav:superadmin"))
+    /// **Every** `super*` page must refuse a normal user — not just the one
+    /// that happened to get a test. The gate names its pages one by one
+    /// (CLAUDE.md §13), and a page left out of that list falls through to
+    /// `default: break` and opens for anyone who guesses its callback_data.
+    /// One page per loop iteration, so a new page joins the check for free.
+    func testEverySuperAdminPageRefusesANormalUser() async throws {
+        for page in MenuPage.allCases where page.rawValue.hasPrefix("super") {
+            await telegram.reset()
+            let data = BotCallbackAction.menu(action: MenuRoute.navigation(to: page)).rawData
+            await orchestrator.dispatch(update: callback(data))
 
-        let refusalCall = await telegram.waitForCall("answerCallbackQuery")
-        let refusal = try XCTUnwrap(refusalCall)
-        XCTAssertTrue(refusal.body.contains("Только"), "expected a refusal toast, got: \(refusal.body)")
-        let edits = await telegram.calls("editMessageText")
-        XCTAssertTrue(edits.isEmpty, "the page was rendered to a non-super-admin")
+            let refusalCall = await telegram.waitForCall("answerCallbackQuery")
+            let refusal = try XCTUnwrap(refusalCall, "\(page): no answer to the tap at all")
+            XCTAssertTrue(
+                refusal.body.contains("Только"),
+                "\(page): expected a refusal toast, got: \(refusal.body)"
+            )
+            let edits = await telegram.calls("editMessageText")
+            XCTAssertTrue(edits.isEmpty, "\(page) was rendered to a non-super-admin")
+        }
+    }
+
+    /// A ⭐ mode tapped without access sells instead of refusing: the tap lands
+    /// on the purchase page, tagged with the surface it came from, and the
+    /// chat's settings are left exactly as they were.
+    func testLockedModeTapOpensPurchaseAndChangesNothing() async throws {
+        let chat = ChatKey(chatID: userID, threadID: 0)
+        await store.setModeConfig(ModePresetConfig(
+            enabled: true,
+            modes: [
+                ModePreset(id: "free", title: "⚡ Быстрый", subtitle: "быстро",
+                           model: "free/model", temp: 1.0, maxHistory: 12, tier: .free),
+                ModePreset(id: "smart", title: "🧠 Умный", subtitle: "умно",
+                           model: "paid/smart", temp: 0.4, maxHistory: 40, tier: .premium),
+            ],
+            defaultModeID: "free"
+        ))
+        // Someone has to be on the free tier for the gate to fire.
+        await store.setDailyPremiumLimit(0)
+        let before = await store.fetchHelp(chatKey: chat)
+
+        await orchestrator.dispatch(update: callback("menu:mode:pick:smart"))
+
+        let pageCall = await telegram.waitForCall("editMessageText")
+        let page = try XCTUnwrap(pageCall, "no page was rendered")
+        XCTAssertTrue(page.body.contains("премиум") || page.contains("credits"),
+                      "expected the purchase page, got: \(page.body)")
+
+        let after = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(after.model, before.model, "a locked mode changed the chat's model")
+        XCTAssertEqual(after.maxHistory, before.maxHistory)
+
+        let report = await store.funnelReport()
+        XCTAssertEqual(report.counters[PurchaseSource.mode.counterKey], 1,
+                       "the mode paywall did not record its own surface")
+    }
+
+    /// A 🆓 mode applies the whole bundle in one tap — that is the difference
+    /// between a mode and a model picker.
+    func testFreeModeAppliesEverySettingAtOnce() async throws {
+        let chat = ChatKey(chatID: userID, threadID: 0)
+        await store.setModeConfig(ModePresetConfig(
+            enabled: true,
+            modes: [
+                ModePreset(id: "free", title: "⚡ Быстрый", subtitle: "быстро",
+                           model: "free/model", temp: 1.3, maxHistory: 12, tier: .free),
+            ],
+            defaultModeID: "free"
+        ))
+
+        await orchestrator.dispatch(update: callback("menu:mode:pick:free"))
+        _ = await telegram.waitForCall("editMessageText")
+
+        try await waitUntil { await self.store.fetchHelp(chatKey: chat).model == "free/model" }
+        let help = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(help.temp, 1.3)
+        XCTAssertEqual(help.maxHistory, 12)
     }
 
     /// The owner gets the page, and it carries the super-admin controls.
@@ -302,6 +368,87 @@ final class EndToEndTests: XCTestCase {
 
         let updated = await store.onboardingConfig().example(id: example.id)
         XCTAssertEqual(updated?.taps, 1)
+    }
+
+    /// A "type me a value" prompt armed in a group belongs to whoever tapped.
+    /// Anyone else's message must go on to be answered normally instead of
+    /// being eaten by the wait (and answered with "🔒 Только суперадмин…").
+    func testPendingInputInAGroupDoesNotSwallowSomeoneElsesMessage() async throws {
+        let group = -4_600
+
+        // The owner (super-admin) taps "✏️ Изменить цену" in the group.
+        await orchestrator.dispatch(update: callback("menu:stars:setprice", chatID: group, userID: ownerID, isGroup: true))
+        try await waitUntil { await self.store.hasAnyPendingInput(chatKey: ChatKey(chatID: group, threadID: 0)) }
+        await telegram.reset()
+
+        // Another member speaks. The wait is not theirs to spend. In a group
+        // the answer lands as an edit of the placeholder, not a new message.
+        await orchestrator.dispatch(update: message("@testbot привет", chatID: group, userID: userID, isGroup: true))
+        let answer = await telegram.waitForCall("editMessageText", containing: "ответ модели")
+        XCTAssertNotNil(answer, "the other member's question was swallowed by someone else's prompt")
+
+        let stillPending = await store.hasAnyPendingInput(chatKey: ChatKey(chatID: group, threadID: 0))
+        XCTAssertTrue(stillPending, "the wait must survive a stranger's message")
+        let priceUntouched = await store.starsPrice()
+        XCTAssertNil(priceUntouched)
+
+        // The owner's value lands.
+        await telegram.reset()
+        await orchestrator.dispatch(update: message("50", chatID: group, userID: ownerID, username: "owner", isGroup: true))
+        try await waitUntil { await self.store.starsPrice() == 50 }
+
+        let spent = await store.hasAnyPendingInput(chatKey: ChatKey(chatID: group, threadID: 0))
+        XCTAssertFalse(spent, "an applied value must leave the slot empty")
+    }
+
+    /// An invalid value re-arms the same wait — and it must stay the owner's,
+    /// otherwise the retry prompt starts eating the group's messages.
+    func testInvalidValueRearmsTheWaitForTheSameOwner() async throws {
+        let group = -4_601
+        let chatKey = ChatKey(chatID: group, threadID: 0)
+
+        await orchestrator.dispatch(update: callback("menu:stars:setprice", chatID: group, userID: ownerID, isGroup: true))
+        try await waitUntil { await self.store.hasAnyPendingInput(chatKey: chatKey) }
+
+        await telegram.reset()
+        await orchestrator.dispatch(update: message("не число", chatID: group, userID: ownerID, username: "owner", isGroup: true))
+        _ = await telegram.waitForCall("sendMessage", containing: "⚠️")
+
+        let stillPending = await store.hasAnyPendingInput(chatKey: chatKey)
+        XCTAssertTrue(stillPending, "a rejected value must leave the prompt armed")
+        let owner = await store.pendingInputOwner(chatKey: chatKey)
+        XCTAssertEqual(owner, UserKey.forUserID(ownerID), "the retry prompt lost its owner")
+    }
+
+    /// Buttons the bot sends outside the menu — the greeting, the daily-limit
+    /// offer, the referral nudge — carry the same `menu:` payloads and are just
+    /// as easy to mistype. Every one of them must route somewhere.
+    func testEveryMenuButtonTheBotSendsRoutesSomewhere() async throws {
+        await store.setDailyPremiumLimit(1)
+        await store.setFreeModelIDs(["free/model"])
+
+        let freeUserID = 4_700
+        await orchestrator.dispatch(update: message("/start", userID: freeUserID, username: "free"))
+        _ = await telegram.waitForCall("sendMessage")
+        await orchestrator.dispatch(update: message("/menu", userID: freeUserID, username: "free"))
+        _ = await telegram.waitForCalls("sendMessage", count: 2)
+        await orchestrator.dispatch(update: message("/buy", userID: freeUserID, username: "free"))
+        _ = await telegram.waitForCalls("sendMessage", count: 3)
+        // Burn the allowance so the cap offer (and its buttons) is sent too.
+        await orchestrator.dispatch(update: message("первый", userID: freeUserID, username: "free"))
+        _ = await telegram.waitForCalls("sendMessage", count: 4)
+        await orchestrator.dispatch(update: message("второй", userID: freeUserID, username: "free"))
+        _ = await telegram.waitForCalls("sendMessage", count: 6)
+
+        var checked = 0
+        for call in await telegram.calls("sendMessage") + telegram.calls("editMessageText") {
+            for data in call.buttonActions {
+                guard case .menu(let action)? = BotCallbackAction(rawData: data) else { continue }
+                checked += 1
+                XCTAssertNotNil(MenuRoute(action: action), "dead button sent to the user: \(action)")
+            }
+        }
+        XCTAssertGreaterThan(checked, 5, "no menu buttons were exercised — the check would pass vacuously")
     }
 
     /// Unknown callback data must not crash or go silent — the user gets a toast.

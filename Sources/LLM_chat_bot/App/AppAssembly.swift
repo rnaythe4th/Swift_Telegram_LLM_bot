@@ -125,7 +125,10 @@ struct AppAssembly {
             formatOptions: formatOptions,
             companyChatId: config.companyChatId,
             companyMembers: companyMembers,
-            defaultHistoryLength: 11,
+            // 20 messages: enough for the bot to follow a real conversation.
+            // The value is the owner's lever (it re-sends every remembered
+            // message on every turn), so users no longer set it themselves.
+            defaultHistoryLength: 20,
             defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil
         )
 

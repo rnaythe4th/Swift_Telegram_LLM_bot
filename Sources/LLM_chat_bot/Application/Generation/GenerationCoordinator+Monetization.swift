@@ -18,14 +18,14 @@ extension GenerationCoordinator {
             var rows: [[InlineKeyboardButton]] = [[
                 InlineKeyboardButton(
                     text: "⚡ Открыть премиум",
-                    callback_data: BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.promo.rawValue)").rawData
+                    callback_data: BotCallbackAction.menu(action: MenuRoute.purchase(from: .promo)).rawData
                 )
             ]]
             let referral = await state.referralConfig()
             if isPrivate, referral.enabled, referral.inviterRewardCents > 0 {
                 rows.append([InlineKeyboardButton(
                     text: "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))",
-                    callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
+                    callback_data: BotCallbackAction.menu(action: MenuRoute.navigation(to: .referral)).rawData
                 )])
             }
             markup = InlineKeyboardMarkup(inline_keyboard: rows)
@@ -53,7 +53,7 @@ extension GenerationCoordinator {
     /// With the taste switched off (limit 0) nothing "ran out" — say what is
     /// actually true instead of "0 из 0".
     func sendDailyLimitOffer(chatKey: ChatKey, isGroup: Bool, limit: Int, freeModel: String) async throws {
-        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.cap.rawValue)").rawData
+        let payAction = BotCallbackAction.menu(action: MenuRoute.purchase(from: .cap)).rawData
         let spent = limit > 0
             ? "🚦 Ответы умных моделей на сегодня закончились (\(limit) из \(limit)). Завтра будут снова — счётчик обнуляется каждый день."
             : "🚦 Эта модель — из умных, они доступны с премиумом."
@@ -76,7 +76,7 @@ extension GenerationCoordinator {
             if referral.enabled, referral.inviterRewardCents > 0 {
                 rows.append([InlineKeyboardButton(
                     text: "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))",
-                    callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
+                    callback_data: BotCallbackAction.menu(action: MenuRoute.navigation(to: .referral)).rawData
                 )])
             }
             markup = InlineKeyboardMarkup(inline_keyboard: rows)
@@ -95,7 +95,7 @@ extension GenerationCoordinator {
     /// countdown into a visible one — and the offer lands while the person is
     /// still getting the good answer, not after it was taken away.
     func sendLastPremiumCallNotice(chatKey: ChatKey, isGroup: Bool, limit: Int) async {
-        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.cap.rawValue)").rawData
+        let payAction = BotCallbackAction.menu(action: MenuRoute.purchase(from: .cap)).rawData
         let text = isGroup
             ? "⏳ Это был последний умный ответ для этого чата на сегодня (\(limit) из \(limit)). Дальше отвечаю на бесплатной модели — до завтра. Снять лимит для всех:"
             : "⏳ Это был ваш последний умный ответ на сегодня (\(limit) из \(limit)). Дальше отвечаю на бесплатной модели — до завтра. Снять лимит:"
@@ -117,7 +117,7 @@ extension GenerationCoordinator {
     /// finds out by noticing worse answers (roadmap step 5: sell at the pain
     /// point, and only there — `chargeBalance` reports the crossing once).
     func sendBalanceEmptyNotice(chatKey: ChatKey) async {
-        let payAction = BotCallbackAction.menu(action: "nav:pay:\(PurchaseSource.balance.rawValue)").rawData
+        let payAction = BotCallbackAction.menu(action: MenuRoute.purchase(from: .balance)).rawData
         _ = try? await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
@@ -177,14 +177,15 @@ extension GenerationCoordinator {
                 )
             }
         } else {
-            // Which models are free comes from OpenRouter's catalogue plus the
-            // super-admin's pins. When neither is available the set is unknown —
-            // and an unknown set must not mean "everything is free": that is the
-            // one failure mode that hands every paid model to every user at the
-            // owner's expense, silently, for as long as the catalogue is
-            // unreachable. Unknown is therefore treated as "assume paid": the
-            // daily allowance still applies, and only the fallback is missing.
-            let effectiveFree = await state.effectiveFreeModelIDs()
+            // What a free-tier chat may run comes from OpenRouter's catalogue,
+            // the super-admin's pins and the models behind 🆓 modes. When none
+            // of them is available the set is unknown — and an unknown set must
+            // not mean "everything is free": that is the one failure mode that
+            // hands every paid model to every user at the owner's expense,
+            // silently, for as long as the catalogue is unreachable. Unknown is
+            // therefore treated as "assume paid": the daily allowance still
+            // applies, and only the fallback is missing.
+            let effectiveFree = await state.allowedFreeModelIDs()
             if effectiveFree == nil {
                 logger.warning("free-model set unknown (OpenRouter catalogue unavailable) — treating paid models as capped")
             }
@@ -225,7 +226,7 @@ extension GenerationCoordinator {
                     // allowance is spent: a turn that stays inside the daily
                     // quota needs no fallback at all, so an unreachable
                     // catalogue must not cost the user a unit for nothing.
-                    guard let firstFree = await state.firstFreeModel() else {
+                    guard let firstFree = await state.fallbackFreeModel() else {
                         // Nothing free to fall back to. Refusing is the only
                         // honest option — the alternative is answering on a paid
                         // model, for free, to someone who has spent their quota.
@@ -284,7 +285,7 @@ extension GenerationCoordinator {
         guard let payout = await state.redeemReferralIfDue(userID: userID, username: username) else { return }
         let refButton = InlineKeyboardButton(
             text: "🎁 Пригласить друга",
-            callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
+            callback_data: BotCallbackAction.menu(action: MenuRoute.navigation(to: .referral)).rawData
         )
 
         if payout.inviteeRewardUsd > 0 {

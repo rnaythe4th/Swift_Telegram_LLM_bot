@@ -5,26 +5,22 @@ import Foundation
 extension BotMenuHandler {
     /// Tenant-owner actions: licence, guests, defaults.
     func processAdminAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "tenant":
-            try await handleTenantAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        switch route.command {
+        case .tenant:
+            try await handleTenantAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
-        case "wl":
-            guard await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
-                return
-            }
-            guard parts.count >= 2 else { return }
-            switch parts[1] {
+        case .wl:
+            guard await requireAdmin(callback, chatKey: chatKey) else { return }
+            guard !route.sub.isEmpty else { return }
+            switch route.sub {
             case "add":
-                await state.setAdminPendingInput(.init(kind: .whitelistAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+                await state.setPending(.admin(.init(kind: .whitelistAdd)), menuMessageID: message.message_id, chatKey: chatKey)
                 let promptText = """
                 <b>👤 Добавить гостя</b>
 
@@ -32,10 +28,10 @@ extension BotMenuHandler {
 
                 <i>Ваш премиум заработает для него в этом чате. Свой номер человек узнаёт командой /chatid в личке с ботом.</i>
                 """
-                let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminwl")]])
-                try await editOrAnswer(callback: callback, message: message, text: promptText, markup: markup)
+                let markup: Keyboard = [[cancelButton(to: .adminWhitelist)]]
+                try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(promptText, markup))
             case "remove":
-                guard parts.count >= 3, let id = Int(parts[2]) else { return }
+                guard let id = route.int(2) else { return }
                 await state.removeFromWhitelist(userID: id, chatID: chatKey.chatID)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Убрано")
                 try await showPage(.adminWhitelist, chatKey: chatKey, callback: callback, message: message)
@@ -44,16 +40,13 @@ extension BotMenuHandler {
             }
             return
 
-        case "def":
-            guard await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
-                return
-            }
-            guard parts.count >= 2 else { return }
+        case .def:
+            guard await requireAdmin(callback, chatKey: chatKey) else { return }
+            guard !route.sub.isEmpty else { return }
             let defs = await state.getDefaults(chatID: chatKey.chatID)
             let kind: AdminPendingInputKind
             let prompt: String
-            switch parts[1] {
+            switch route.sub {
             case "model":
                 kind = .defaultsModel
                 prompt = "<b>⚙️ Модель в новых чатах</b>\n\nСейчас: <code>\(defs.model)</code>\n\nОтправьте ID модели одним сообщением (названия — на openrouter.ai)."
@@ -66,9 +59,9 @@ extension BotMenuHandler {
             default:
                 return
             }
-            await state.setAdminPendingInput(.init(kind: kind, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:admindef")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            await state.setPending(.admin(.init(kind: kind)), menuMessageID: message.message_id, chatKey: chatKey)
+            let markup: Keyboard = [[cancelButton(to: .adminDefaults)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
 
         default:
@@ -76,7 +69,7 @@ extension BotMenuHandler {
         }
     }
 
-    func renderAdminPanel(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+    func renderAdminPanel(chatKey: ChatKey, username: String?) async -> MenuScreen {
         let defaults = await state.getDefaults(chatID: chatKey.chatID)
         let whitelist = await state.listWhitelisted(chatID: chatKey.chatID)
         let admins = await state.listAdmins(chatID: chatKey.chatID)
@@ -109,27 +102,27 @@ extension BotMenuHandler {
             usage = .zero
         }
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         if isOwnChat {
-            rows.append([menuButton("📌 Выключить премиум в этом чате", action: "tenant:release")])
+            rows.row([menuButton("📌 Выключить премиум в этом чате", .tenant, "release")])
         } else if chatOwner == nil {
-            rows.append([menuButton("📌 Включить премиум в этом чате", action: "tenant:claim")])
+            rows.row([menuButton("📌 Включить премиум в этом чате", .tenant, "claim")])
         }
-        rows.append([menuButton("🔗 Ссылка-приглашение", action: "nav:admininvite")])
-        rows.append([
-            menuButton("📋 Чаты с премиумом · \(licensedChats.count)", action: "nav:adminchats"),
-            menuButton("👥 Гости премиума · \(licensedUsers.count)", action: "nav:adminusers"),
+        rows.row([menuButton("🔗 Ссылка-приглашение", page: .adminInvite)])
+        rows.row([
+            menuButton("📋 Чаты с премиумом · \(licensedChats.count)", page: .adminChats),
+            menuButton("👥 Гости премиума · \(licensedUsers.count)", page: .adminUsers),
         ])
-        rows.append([
-            menuButton("⚙️ Новые чаты", action: "nav:admindef"),
-            menuButton("👤 Гости этого чата · \(whitelist.count)", action: "nav:adminwl"),
+        rows.row([
+            menuButton("⚙️ Новые чаты", page: .adminDefaults),
+            menuButton("👤 Гости этого чата · \(whitelist.count)", page: .adminWhitelist),
         ])
-        rows.append([menuButton("🤖 Заготовки моделей · \(globalModels)", action: "pm:model"),
-                     menuButton("🎭 Ролей · \(globalRoles)", action: "pm:role")])
-        rows.append([menuButton("🌡 Стилей · \(globalTemps)", action: "pm:temp"),
-                     menuButton("📝 Памяти · \(globalHist)", action: "pm:history")])
-        rows.append([menuButton("ℹ️ Справка", action: "nav:adminhelp")])
-        rows.append(navButtons())
+        rows.row([menuButton("🤖 Заготовки моделей · \(globalModels)", .pm, "model"),
+                     menuButton("🎭 Ролей · \(globalRoles)", .pm, "role")])
+        rows.row([menuButton("🌡 Стилей · \(globalTemps)", .pm, "temp"),
+                     menuButton("📝 Памяти · \(globalHist)", .pm, "history")])
+        rows.row([menuButton("ℹ️ Справка", page: .adminHelp)])
+        rows.row(navButtons())
 
         let adminsLine = admins.isEmpty
             ? "<i>только вы</i>"
@@ -174,10 +167,10 @@ extension BotMenuHandler {
                     subscriptionLine += "\n🎁 Скидка <b>−\(discount.percent)%</b> действует до <b>\(df.string(from: discount.expiresAt))</b>"
                 }
                 // Keep the nav row last.
-                rows.insert([menuButton(
+                rows.insertBeforeLast([menuButton(
                     optedOut ? "🔕 Напоминания о продлении: выкл" : "🔔 Напоминания о продлении: вкл",
-                    action: "tenant:remtoggle"
-                )], at: max(0, rows.count - 1))
+                    .tenant, "remtoggle"
+                )])
             } else {
                 subscriptionLine = "💳 Премиум · <b>бессрочный</b>"
             }
@@ -208,17 +201,17 @@ extension BotMenuHandler {
         <b>📋 Общие заготовки</b>
         Кнопки ниже задают готовые варианты для всех ваших чатов.
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderAdminChats(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+    func renderAdminChats(chatKey: ChatKey, username: String?) async -> MenuScreen {
         guard let invoker = await state.userKey(username: username) else {
-            return (Self.unknownAccountNotice, InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+            return MenuScreen(Self.unknownAccountNotice, [[backButton(to: .adminPanel)]])
         }
         let invokerLabel = await state.displayLabel(forKey: invoker)
         let chats = await state.chatsOwnedBy(invoker).sorted()
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         var listLines: [String] = []
         // A bare `-1001234567890` says nothing about which chat it is: the
         // owner has to guess which of their groups they are switching off.
@@ -226,9 +219,9 @@ extension BotMenuHandler {
             let kind = chatID < 0 ? "👥" : "👤"
             let label = await state.chatDisplayLabel(chatID: chatID)
             let named = label != String(chatID)
-            rows.append([
-                menuButton("\(kind) \(label)", action: "noop"),
-                menuButton("🗑 Выключить", action: "tenant:rmchat:\(chatID)"),
+            rows.row([
+                menuButton("\(kind) \(label)", command: .noop),
+                menuButton("🗑 Выключить", .tenant, "rmchat", "\(chatID)"),
             ])
             listLines.append(named
                 ? "\(kind) <b>\(label)</b> · <code>\(chatID)</code>"
@@ -239,10 +232,10 @@ extension BotMenuHandler {
         }
         let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
         if chatOwner != invoker {
-            rows.append([menuButton("📌 Включить премиум здесь", action: "tenant:claim")])
+            rows.row([menuButton("📌 Включить премиум здесь", .tenant, "claim")])
         }
-        rows.append([menuButton("📥 Добавить чат по номеру", action: "tenant:assignprompt")])
-        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
+        rows.row([menuButton("📥 Добавить чат по номеру", .tenant, "assignprompt")])
+        rows.row([backButton(to: .adminPanel)])
 
         let listText = chats.isEmpty ? "<i>пока ни одного</i>" : listLines.joined(separator: "\n")
         let text = """
@@ -253,13 +246,13 @@ extension BotMenuHandler {
         <i>Чтобы премиум заработал ещё в одном чате — просто добавьте туда бота, он подхватит доступ сам. \
         Или откройте нужный чат и нажмите «Включить премиум здесь». Ещё можно ввести номер чата кнопкой ниже.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderAdminWhitelist(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderAdminWhitelist(chatKey: ChatKey) async -> MenuScreen {
         let ids = await state.listWhitelisted(chatID: chatKey.chatID).sorted()
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton("➕ Добавить гостя", action: "wl:add")],
+        var rows: Keyboard = [
+            [menuButton("➕ Добавить гостя", .wl, "add")],
         ]
         var listLines: [String] = []
         // Guests are stored by numeric ID, but the owner recognises people by
@@ -267,16 +260,16 @@ extension BotMenuHandler {
         for id in ids.prefix(40) {
             let label = await state.displayLabel(forUserID: id)
             let named = label != "id \(id)"
-            rows.append([
-                menuButton(label, action: "noop"),
-                menuButton("🗑 Убрать", action: "wl:remove:\(id)"),
+            rows.row([
+                menuButton(label, command: .noop),
+                menuButton("🗑 Убрать", .wl, "remove", "\(id)"),
             ])
             listLines.append(named ? "• <b>\(label)</b> · <code>\(id)</code>" : "• <code>\(id)</code>")
         }
         if ids.count > 40 {
             listLines.append("<i>…и ещё \(ids.count - 40)</i>")
         }
-        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
+        rows.row([backButton(to: .adminPanel)])
 
         let listText = ids.isEmpty ? "<i>пусто</i>" : listLines.joined(separator: "\n")
         let text = """
@@ -286,16 +279,16 @@ extension BotMenuHandler {
 
         <i>Люди, которым вы открыли умные модели в этом чате бесплатно. Добавляются по номеру пользователя в Telegram — его можно узнать, переслав сюда его сообщение любому ID-боту.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderAdminDefaults(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderAdminDefaults(chatKey: ChatKey) async -> MenuScreen {
         let defs = await state.getDefaults(chatID: chatKey.chatID)
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton("✏️ Модель", action: "def:model")],
-            [menuButton("✏️ Память", action: "def:hist")],
-            [menuButton("✏️ Роль", action: "def:role")],
-            [menuButton("← К моему премиуму", action: "nav:admin")],
+        let rows: Keyboard = [
+            [menuButton("✏️ Модель", .def, "model")],
+            [menuButton("✏️ Память", .def, "hist")],
+            [menuButton("✏️ Роль", .def, "role")],
+            [backButton(to: .adminPanel)],
         ]
         let text = """
         <b>⚙️ Что включается в новых чатах</b>
@@ -307,27 +300,27 @@ extension BotMenuHandler {
 
         <i>С этими настройками бот стартует в каждом новом чате. Они же возвращаются по команде /reset.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderAdminUsers(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+    func renderAdminUsers(chatKey: ChatKey, username: String?) async -> MenuScreen {
         guard let invoker = await state.userKey(username: username) else {
-            return (Self.unknownAccountNotice, InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+            return MenuScreen(Self.unknownAccountNotice, [[backButton(to: .adminPanel)]])
         }
         let invokerLabel = await state.displayLabel(forKey: invoker)
         let users = await state.licensedUsers(ownerUsername: invoker)
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton("🔗 Ссылка-приглашение", action: "nav:admininvite")],
-            [menuButton("➕ Добавить по @username", action: "tenant:adduserprompt")],
+        var rows: Keyboard = [
+            [menuButton("🔗 Ссылка-приглашение", page: .adminInvite)],
+            [menuButton("➕ Добавить по @username", .tenant, "adduserprompt")],
         ]
         for (i, user) in users.prefix(40).enumerated() {
-            rows.append([
-                menuButton(user.label, action: "noop"),
-                menuButton("🗑 Удалить", action: "tenant:rmuser:\(i)"),
+            rows.row([
+                menuButton(user.label, command: .noop),
+                menuButton("🗑 Удалить", .tenant, "rmuser", "\(i)"),
             ])
         }
-        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
+        rows.row([backButton(to: .adminPanel)])
 
         let listText: String
         if users.isEmpty {
@@ -342,32 +335,32 @@ extension BotMenuHandler {
 
         <i>Этим людям умные модели доступны за ваш счёт в любом чате с ботом. Проще всего — дать им ссылку-приглашение (кнопка выше). Командой: <code>/tenant adduser @username</code>.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderAdminInvite(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+    func renderAdminInvite(chatKey: ChatKey, username: String?) async -> MenuScreen {
         // The invite is filed under the caller's storage key, like every other
         // per-person record — a raw handle would miss anyone without one.
         guard let invoker = await state.userKey(username: username) else {
-            return (Self.unknownAccountNotice, InlineKeyboardMarkup(inline_keyboard: [[menuButton("← Назад", action: "nav:admin")]]))
+            return MenuScreen(Self.unknownAccountNotice, [[backButton(to: .adminPanel)]])
         }
         guard await state.isTenant(username: invoker) else {
-            return (
+            return MenuScreen(
                 "🔗 <b>Ссылка-приглашение</b>\n\nОна появится, как только у вас будет активный премиум: по ссылке умные модели работают за ваш счёт.",
-                InlineKeyboardMarkup(inline_keyboard: [
-                    [menuButton("⚡ Открыть премиум", action: "nav:pay:\(PurchaseSource.menu.rawValue)")],
-                    [menuButton("← К моему премиуму", action: "nav:admin")],
-                ])
+                [
+                    [buyButton("⚡ Открыть премиум", source: .menu)],
+                    [backButton(to: .adminPanel)],
+                ]
             )
         }
 
         let token = await state.inviteToken(owner: invoker)
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         let text: String
         if let token {
             let link = "https://t.me/\(botUsername)?start=inv_\(token)"
-            rows.append([InlineKeyboardButton(text: "📨 Открыть ссылку", url: link)])
-            rows.append([menuButton("♻️ Перевыпустить (старая сгорит)", action: "tenant:newinvite")])
+            rows.row([InlineKeyboardButton(text: "📨 Открыть ссылку", url: link)])
+            rows.row([menuButton("♻️ Перевыпустить (старая сгорит)", .tenant, "newinvite")])
             text = """
             <b>🔗 Ссылка-приглашение</b>
 
@@ -376,14 +369,14 @@ extension BotMenuHandler {
             Отправьте её кому угодно: он откроет ссылку, нажмёт «Начать» — и умные модели заработают у него за ваш счёт. Появится в списке «Гости премиума».
             """
         } else {
-            rows.append([menuButton("➕ Создать ссылку", action: "tenant:newinvite")])
+            rows.row([menuButton("➕ Создать ссылку", .tenant, "newinvite")])
             text = """
             <b>🔗 Ссылка-приглашение</b>
 
             Ссылки пока нет. Нажмите кнопку ниже — бот создаст вашу личную ссылку, по которой друзья и коллеги получат умные модели за ваш счёт.
             """
         }
-        rows.append([menuButton("← К моему премиуму", action: "nav:admin")])
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        rows.row([backButton(to: .adminPanel)])
+        return MenuScreen(text, rows)
     }
 }

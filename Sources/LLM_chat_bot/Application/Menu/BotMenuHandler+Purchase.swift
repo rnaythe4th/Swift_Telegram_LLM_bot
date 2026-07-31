@@ -28,11 +28,11 @@ extension BotMenuHandler {
             ))
             return
         }
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         for asset in assets {
-            rows.append([menuButton(asset.displayLabel, action: "buy:asset:\(asset.rawValue)")])
+            rows.row([menuButton(asset.displayLabel, .buy, "asset", "\(asset.rawValue)")])
         }
-        rows.append([menuButton("✕ Отмена", action: "close")])
+        rows.row([menuButton("✕ Отмена", command: .close)])
 
         let pricing = await state.subscriptionPricing(username: username)
         let cents = pricing.cryptoCents ?? 0
@@ -56,21 +56,20 @@ extension BotMenuHandler {
             threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
             replyTo: nil,
             text: text,
-            replyMarkup: InlineKeyboardMarkup(inline_keyboard: rows)
+            replyMarkup: rows.markup
         ))
     }
 
     /// Buy flow: subscription and credit packs.
     func processPurchaseAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "buy":
-            try await handleBuyAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+        switch route.command {
+        case .buy:
+            try await handleBuyAction(route: route, chatKey: chatKey, callback: callback, message: message)
             return
 
         default:
@@ -78,7 +77,7 @@ extension BotMenuHandler {
         }
     }
 
-    func renderPay(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+    func renderPay(chatKey: ChatKey, username: String?) async -> MenuScreen {
         // The purchase page itself makes sense in a group (anyone can open
         // premium for the chat), but the menu message there is shared: balance,
         // subscription dates and a personal winback discount would become public
@@ -100,7 +99,7 @@ extension BotMenuHandler {
         let card = await state.cardConfig()
 
         var lines: [String] = ["<b>⚡ Премиум-доступ для этого чата</b>", ""]
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         var unlimited = false
 
         if isGroup {
@@ -197,13 +196,13 @@ extension BotMenuHandler {
 
             if starsAvailable, let starsPrice {
                 let suffix = pricing.hasDiscount && pricing.starsFull != starsPrice ? " (−\(pricing.discount?.percent ?? 0)%)" : ""
-                rows.append([menuButton("💫 Оплатить Stars · \(starsPrice) ⭐\(suffix)", action: "buy:stars")])
+                rows.row([menuButton("💫 Оплатить Stars · \(starsPrice) ⭐\(suffix)", .buy, "stars")])
             }
             if cryptoAvailable, let cents = cryptoCents {
-                rows.append([menuButton(String(format: "🪙 Криптовалюта · $%.2f", Double(cents) / 100.0), action: "buy:crypto")])
+                rows.row([menuButton(String(format: "🪙 Криптовалюта · $%.2f", Double(cents) / 100.0), .buy, "crypto")])
             }
             if card.isEnabled, let minorUnits = pricing.cardMinorUnits {
-                rows.append([menuButton("💳 Картой · \(card.currency.format(minorUnits: minorUnits))", action: "buy:card")])
+                rows.row([menuButton("💳 Картой · \(card.currency.format(minorUnits: minorUnits))", .buy, "card")])
             }
             if !starsAvailable, !cryptoAvailable, !card.isEnabled {
                 lines.append("")
@@ -221,9 +220,9 @@ extension BotMenuHandler {
                 lines.append("")
                 lines.append("💰 <b>Не готовы на месяц?</b> Пополните баланс — с него списывается стоимость каждого ответа, обычно доли цента. Доступны любые модели, подписка не нужна.")
                 let packRow = CreditPack.centsOptions.map {
-                    menuButton(CreditPack.label(cents: $0), action: "buy:credits:\($0)")
+                    menuButton(CreditPack.label(cents: $0), .buy, "credits", "\($0)")
                 }
-                rows.append(packRow)
+                rows.row(packRow)
             }
 
             // Free way to get a balance: bring a friend (roadmap step 10).
@@ -231,37 +230,37 @@ extension BotMenuHandler {
             if referral.enabled, referral.inviterRewardCents > 0, !botUsername.isEmpty, chatKey.chatID > 0 {
                 lines.append("")
                 lines.append("🎁 <b>Не хотите платить?</b> Пригласите друга — как только он задаст боту первый вопрос, вы оба получите на баланс (\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents)) вам, \(ReferralConfig.formatUsd(cents: referral.inviteeRewardCents)) ему).")
-                rows.append([menuButton("🎁 Пригласить друга", action: "nav:ref")])
+                rows.row([menuButton("🎁 Пригласить друга", page: .referral)])
             }
         }
-        rows.append(navButtons())
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        rows.row(navButtons())
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 
     // MARK: - Buy flow (user-facing)
 
     private func handleBuyAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
-        switch parts[1] {
+        guard !route.sub.isEmpty else { return }
+        switch route.sub {
         case "credits":
-            try await showCreditPackMethods(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            try await showCreditPackMethods(route: route, chatKey: chatKey, callback: callback, message: message)
 
         case "cstars", "ccard":
-            try await sendCreditPackInvoice(parts: parts, chatKey: chatKey, callback: callback)
+            try await sendCreditPackInvoice(route: route, chatKey: chatKey, callback: callback)
 
         case "stars", "card":
-            try await sendSubscriptionInvoice(parts: parts, chatKey: chatKey, callback: callback)
+            try await sendSubscriptionInvoice(route: route, chatKey: chatKey, callback: callback)
 
         case "crypto", "ccrypto", "asset", "casset":
-            try await handleCryptoPurchase(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            try await handleCryptoPurchase(route: route, chatKey: chatKey, callback: callback, message: message)
 
         case "refresh", "cancel":
-            try await handleInvoiceControl(parts: parts, callback: callback, message: message)
+            try await handleInvoiceControl(route: route, callback: callback, message: message)
 
         default:
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
@@ -270,33 +269,33 @@ extension BotMenuHandler {
 
     /// A pack was chosen → offer the payment methods that can top up a balance.
     private func showCreditPackMethods(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
         // Pack chosen → offer the payment methods available for credits.
-        guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
+        guard let cents = route.int(2), CreditPack.isValid(cents: cents) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.unknownPack)
             return
         }
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         if await state.starsCreditsEnabled() {
             let stars = await state.starsForCents(cents)
-            rows.append([menuButton("💫 Stars · \(stars) ⭐", action: "buy:cstars:\(cents)")])
+            rows.row([menuButton("💫 Stars · \(stars) ⭐", .buy, "cstars", "\(cents)")])
         }
         let cryptoAssets: [CryptoAsset]
         if let service = cryptoService { cryptoAssets = await service.availableAssets() } else { cryptoAssets = [] }
         // Only addresses are needed here — the pack is invoiced at its own
         // face value, so the subscription price has no say.
         if !cryptoAssets.isEmpty {
-            rows.append([menuButton("🪙 Криптой", action: "buy:ccrypto:\(cents)")])
+            rows.row([menuButton("🪙 Криптой", .buy, "ccrypto", "\(cents)")])
         }
         let creditCard = await state.cardConfig()
         if let minorUnits = creditCard.creditMinorUnits(cents: cents), creditCard.creditsEnabled {
-            rows.append([menuButton("💳 Картой · \(creditCard.currency.format(minorUnits: minorUnits))", action: "buy:ccard:\(cents)")])
+            rows.row([menuButton("💳 Картой · \(creditCard.currency.format(minorUnits: minorUnits))", .buy, "ccard", "\(cents)")])
         }
-        rows.append(navButtons())
+        rows.row(navButtons())
         let text = """
         💰 <b>Пополнить баланс на \(CreditPack.label(cents: cents))</b>
 
@@ -306,21 +305,21 @@ extension BotMenuHandler {
 
         Выберите способ оплаты:
         """
-        try await editOrAnswer(callback: callback, message: message, text: text, markup: InlineKeyboardMarkup(inline_keyboard: rows))
+        try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, rows))
     }
 
     /// Invoice for a credit pack: Stars or card, priced by its own knob.
     private func sendCreditPackInvoice(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery
     ) async throws {
-        switch parts[1] {
+        switch route.sub {
         case "ccard":
             // Credit pack on the card. The pack's USD face value is converted
             // with the super-admin's FX rate (roadmap step 2).
-            guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
+            guard let cents = route.int(2), CreditPack.isValid(cents: cents) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.unknownPack)
                 return
             }
             let packCard = await state.cardConfig()
@@ -341,8 +340,8 @@ extension BotMenuHandler {
 
         case "cstars":
             // Credit pack via Stars.
-            guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
+            guard let cents = route.int(2), CreditPack.isValid(cents: cents) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.unknownPack)
                 return
             }
             guard await state.starsCreditsEnabled() else {
@@ -368,11 +367,11 @@ extension BotMenuHandler {
     /// Invoice for the 30-day subscription. Prices come from
     /// `subscriptionPricing`, so a winback discount is charged as quoted.
     private func sendSubscriptionInvoice(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery
     ) async throws {
-        switch parts[1] {
+        switch route.sub {
         case "stars":
             // Identity is the userID; a @username is not needed to buy.
             let starsKey = state.userKey(userID: callback.from.id)
@@ -434,24 +433,24 @@ extension BotMenuHandler {
 
     /// Crypto: pick the asset, then create (or refresh) the invoice.
     private func handleCryptoPurchase(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch parts[1] {
+        switch route.sub {
         case "crypto":
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             await sendCryptoAssetChoice(chatKey: chatKey, username: state.userKey(userID: callback.from.id))
 
         case "ccrypto":
             // Credit pack via crypto → pick asset (cents carried in callback).
-            guard parts.count >= 3, let cents = Int(parts[2]), CreditPack.isValid(cents: cents) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестный пакет")
+            guard let cents = route.int(2), CreditPack.isValid(cents: cents) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.unknownPack)
                 return
             }
             guard let service = cryptoService else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Крипто-оплата недоступна")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.cryptoUnavailable)
                 return
             }
             let assets = await service.availableAssets()
@@ -459,25 +458,25 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Адреса не настроены")
                 return
             }
-            var assetRows: [[InlineKeyboardButton]] = assets.map {
-                [menuButton($0.displayLabel, action: "buy:casset:\($0.rawValue):\(cents)")]
-            }
-            assetRows.append(navButtons())
+            var assetRows = Keyboard(assets.map {
+                [menuButton($0.displayLabel, .buy, "casset", "\($0.rawValue)", "\(cents)")]
+            })
+            assetRows.row(navButtons())
             let assetText = """
             🪙 <b>Пополнение баланса на \(CreditPack.label(cents: cents))</b>
 
             Выберите монету и сеть для оплаты:
             """
-            try await editOrAnswer(callback: callback, message: message, text: assetText, markup: InlineKeyboardMarkup(inline_keyboard: assetRows))
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(assetText, assetRows))
 
         case "casset":
-            guard parts.count >= 4, let asset = CryptoAsset(rawValue: parts[2]),
-                  let cents = Int(parts[3]), CreditPack.isValid(cents: cents) else {
+            guard let asset = route.arg(2).flatMap(CryptoAsset.init(rawValue:)),
+                  let cents = route.int(3), CreditPack.isValid(cents: cents) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестная монета")
                 return
             }
             guard let service = cryptoService else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Крипто-оплата недоступна")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.cryptoUnavailable)
                 return
             }
             let creditKey = state.userKey(userID: callback.from.id)
@@ -488,8 +487,7 @@ extension BotMenuHandler {
                     asset: asset,
                     purpose: .credit(cents: cents)
                 )
-                let (text, markup) = renderInvoice(invoice)
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+                try await editOrAnswer(callback: callback, message: message, screen: renderInvoice(invoice))
             } catch {
                 logger.error("crypto credit invoice creation failed: \(error)")
                 try? await telegram.answerCallback(
@@ -499,12 +497,12 @@ extension BotMenuHandler {
             }
 
         case "asset":
-            guard parts.count >= 3, let asset = CryptoAsset(rawValue: parts[2]) else {
+            guard let asset = route.arg(2).flatMap(CryptoAsset.init(rawValue:)) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестная монета")
                 return
             }
             guard let service = cryptoService else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Крипто-оплата недоступна")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.cryptoUnavailable)
                 return
             }
             let cryptoKey = state.userKey(userID: callback.from.id)
@@ -519,8 +517,7 @@ extension BotMenuHandler {
                     userChatID: chatKey.chatID,
                     asset: asset
                 )
-                let (text, markup) = renderInvoice(invoice)
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+                try await editOrAnswer(callback: callback, message: message, screen: renderInvoice(invoice))
             } catch {
                 logger.error("crypto invoice creation failed: \(error)")
                 try? await telegram.answerCallback(
@@ -536,14 +533,13 @@ extension BotMenuHandler {
 
     /// An open invoice belongs to one person: refresh and cancel check that.
     private func handleInvoiceControl(
-        parts: [String],
+        route: MenuRoute,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch parts[1] {
+        switch route.sub {
         case "refresh":
-            guard parts.count >= 3 else { return }
-            let invoiceID = parts[2]
+            guard let invoiceID = route.arg(2) else { return }
             guard let invoice = await state.cryptoInvoice(id: invoiceID) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Счёт не найден")
                 return
@@ -551,16 +547,14 @@ extension BotMenuHandler {
             // An invoice names an address and an exact amount — a hand-made
             // callback should not be able to read someone else's.
             guard invoice.username == invokerKey(callback) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш счёт")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notYourInvoice)
                 return
             }
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
-            let (text, markup) = renderInvoice(invoice)
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            try await editOrAnswer(callback: callback, message: message, screen: renderInvoice(invoice))
 
         case "cancel":
-            guard parts.count >= 3 else { return }
-            let invoiceID = parts[2]
+            guard let invoiceID = route.arg(2) else { return }
             guard let invoice = await state.cryptoInvoice(id: invoiceID) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Счёт не найден")
                 return
@@ -568,7 +562,7 @@ extension BotMenuHandler {
             // Invoices are filed under a UserKey (`#12345`), so comparing a raw
             // handle was true for everyone — nobody could cancel their own.
             guard invoice.username == invokerKey(callback) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш счёт")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notYourInvoice)
                 return
             }
             await cryptoService?.cancelInvoice(id: invoiceID)
@@ -585,7 +579,7 @@ extension BotMenuHandler {
         }
     }
 
-    private func renderInvoice(_ invoice: CryptoInvoice) -> (String, InlineKeyboardMarkup) {
+    private func renderInvoice(_ invoice: CryptoInvoice) -> MenuScreen {
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
         let received = CryptoAmountFormatter.format(atomic: invoice.accumulatedAtomic, decimals: invoice.asset.decimals)
         let remaining = CryptoAmountFormatter.format(atomic: invoice.remainingAtomic, decimals: invoice.asset.decimals)
@@ -632,13 +626,13 @@ extension BotMenuHandler {
         lines.append("Срок: <b>\(expiresMin) мин</b>")
         lines.append(statusLine)
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         if invoice.status == .open || invoice.status == .partial {
-            rows.append([menuButton("🔄 Обновить статус", action: "buy:refresh:\(invoice.id)")])
-            rows.append([menuButton("❌ Отменить счёт", action: "buy:cancel:\(invoice.id)")])
+            rows.row([menuButton("🔄 Обновить статус", .buy, "refresh", "\(invoice.id)")])
+            rows.row([menuButton("❌ Отменить счёт", .buy, "cancel", "\(invoice.id)")])
         }
-        rows.append([menuButton("✕ Закрыть", action: "close")])
+        rows.row([menuButton(Texts.close, command: .close)])
 
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 }

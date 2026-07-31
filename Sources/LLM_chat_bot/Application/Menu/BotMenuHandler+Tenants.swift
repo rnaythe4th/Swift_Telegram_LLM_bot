@@ -4,23 +4,23 @@ import Foundation
 
 extension BotMenuHandler {
     func handleTenantAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else { return }
+        guard !route.sub.isEmpty else { return }
         // Storage key, not the raw handle: everything below compares against
         // stored owners, which are keyed by userID.
         let invoker = invokerKey(callback)
         let isSuper = await state.isSuperAdmin(username: invoker)
         let isAdmin = await state.isAdmin(username: invoker, chatID: chatKey.chatID)
         guard isAdmin || isSuper else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только админ")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
             return
         }
 
-        switch parts[1] {
+        switch route.sub {
         case "claim":
             let ok = await state.assignChat(chatID: chatKey.chatID, to: invoker)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Чат привязан" : "Премиум неактивен")
@@ -29,7 +29,7 @@ extension BotMenuHandler {
         case "release":
             let owner = await state.chatOwner(chatID: chatKey.chatID)
             if !isSuper, owner != invoker {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш чат")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notYourChat)
                 return
             }
             _ = await state.unassignChat(chatID: chatKey.chatID)
@@ -47,10 +47,10 @@ extension BotMenuHandler {
             try await showPage(.adminPanel, chatKey: chatKey, callback: callback, message: message)
 
         case "rmchat":
-            guard parts.count >= 3, let chatID = Int(parts[2]) else { return }
+            guard let chatID = route.int(2) else { return }
             let owner = await state.chatOwner(chatID: chatID)
             if !isSuper, owner != invoker {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Не ваш чат")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notYourChat)
                 return
             }
             _ = await state.unassignChat(chatID: chatID)
@@ -58,25 +58,25 @@ extension BotMenuHandler {
             try await showPage(.adminChats, chatKey: chatKey, callback: callback, message: message)
 
         case "assignprompt":
-            await state.setAdminPendingInput(.init(kind: .tenantAssignChat, menuMessageID: message.message_id, payload: invoker), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .tenantAssignChat, payload: invoker)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>📥 Привязать чат по ID</b>
 
             Отправьте chatID одним сообщением (целое число; для групп — отрицательное).
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminchats")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .adminChats)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
 
         case "adduserprompt":
-            await state.setAdminPendingInput(.init(kind: .tenantAddUser, menuMessageID: message.message_id, payload: invoker), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .tenantAddUser, payload: invoker)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = "<b>➕ Добавить гостя премиума</b>\n\nОтправьте @username одним сообщением — этот человек будет пользоваться умными моделями за ваш счёт."
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:adminusers")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .adminUsers)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
 
         case "rmuser":
-            guard parts.count >= 3, let index = Int(parts[2]) else { return }
+            guard let index = route.int(2) else { return }
             let users = await state.licensedUsers(ownerUsername: invoker)
             guard index >= 0, index < users.count else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Не найдено")
@@ -99,7 +99,7 @@ extension BotMenuHandler {
         }
     }
 
-    func renderSuperTenants(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperTenants(chatKey: ChatKey) async -> MenuScreen {
         let rows = await state.tenantStats()
 
         // A message Telegram cannot fit is trimmed without a word, so the tail
@@ -127,26 +127,26 @@ extension BotMenuHandler {
             lines.append("\n<i>Нажмите на тенанта — подписка и управление.</i>")
         }
 
-        var buttons: [[InlineKeyboardButton]] = [[menuButton("➕ Зарегистрировать тенанта", action: "stenant:add")]]
+        var buttons: Keyboard = [[menuButton("➕ Зарегистрировать тенанта", .stenant, "add")]]
         for row in rows.prefix(pageLimit) {
-            var btnRow = [menuButton("\(row.isSuperAdmin ? "🛡" : "🛠") \(row.label)", action: "stenant:info:\(row.username)")]
+            var btnRow = [menuButton("\(row.isSuperAdmin ? "🛡" : "🛠") \(row.label)", .stenant, "info", "\(row.username)")]
             if !row.isSuperAdmin {
-                btnRow.append(menuButton("🗑", action: "stenant:rm:\(row.username)"))
+                btnRow.append(menuButton("🗑", .stenant, "rm", "\(row.username)"))
             }
-            buttons.append(btnRow)
+            buttons.row(btnRow)
         }
-        buttons.append([menuButton("🛡 Суперадмины", action: "nav:superadmins")])
-        buttons.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        buttons.row([menuButton("🛡 Суперадмины", page: .superAdmins)])
+        buttons.row([backButton(to: .superAdmin)])
 
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: buttons))
+        return MenuScreen(lines.joined(separator: "\n"), buttons)
     }
 
-    func renderSuperTenantInfo(username: String) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperTenantInfo(username: String) async -> MenuScreen {
         let target = username.lowercased()
         guard let row = await state.tenantStats().first(where: { $0.username == target }) else {
-            return (
+            return MenuScreen(
                 "Тенант @\(target) не найден.",
-                InlineKeyboardMarkup(inline_keyboard: [[menuButton("← К тенантам", action: "nav:supertenants")]])
+                [[backButton(to: .superTenants)]]
             )
         }
 
@@ -171,19 +171,19 @@ extension BotMenuHandler {
         💵 реально <b>\(realStr)</b> · клиентам <b>\(billedStr)</b>
         """
 
-        var buttons: [[InlineKeyboardButton]] = [
-            [menuButton("⏳ Продлить +\(ChatContextStore.subscriptionDays) дн.", action: "stenant:ext:\(row.username)")],
-            [menuButton("♾ Бессрочно", action: "stenant:unlim:\(row.username)"),
-             menuButton("⛔ Истечь сейчас", action: "stenant:exp:\(row.username)")],
+        var buttons: Keyboard = [
+            [menuButton("⏳ Продлить +\(ChatContextStore.subscriptionDays) дн.", .stenant, "ext", "\(row.username)")],
+            [menuButton("♾ Бессрочно", .stenant, "unlim", "\(row.username)"),
+             menuButton("⛔ Истечь сейчас", .stenant, "exp", "\(row.username)")],
         ]
         if !row.isSuperAdmin {
-            buttons.append([menuButton("🗑 Удалить тенанта", action: "stenant:rm:\(row.username)")])
+            buttons.row([menuButton("🗑 Удалить тенанта", .stenant, "rm", "\(row.username)")])
         }
-        buttons.append([menuButton("← К тенантам", action: "nav:supertenants")])
-        return (text, InlineKeyboardMarkup(inline_keyboard: buttons))
+        buttons.row([backButton(to: .superTenants)])
+        return MenuScreen(text, buttons)
     }
 
-    func renderSuperBalances(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperBalances(chatKey: ChatKey) async -> MenuScreen {
         let balances = await state.allBalances()
         let markupPct = await state.markupPercent()
         func usd(_ v: Double) -> String { String(format: "$%.4f", v) }
@@ -212,33 +212,33 @@ extension BotMenuHandler {
             lines.append("<b>Итого</b> · остатки \(usd(totalBalance)) · маржа <b>\(usd(totalBilled - totalReal))</b>")
         }
 
-        var buttons: [[InlineKeyboardButton]] = [[menuButton("➕ Начислить / списать", action: "sbal:add")]]
+        var buttons: Keyboard = [[menuButton("➕ Начислить / списать", .sbal, "add")]]
         for entry in balances.prefix(30) {
-            buttons.append([
-                menuButton("\(entry.label) · \(usd(entry.wallet.balanceUsd))", action: "noop"),
-                menuButton("🗑", action: "sbal:rm:\(entry.key)"),
+            buttons.row([
+                menuButton("\(entry.label) · \(usd(entry.wallet.balanceUsd))", command: .noop),
+                menuButton("🗑", .sbal, "rm", "\(entry.key)"),
             ])
         }
-        buttons.append([menuButton("💹 Наценка · \(markupPct)%", action: "markup:set")])
-        buttons.append([menuButton("← К супер-админу", action: "nav:superadmin")])
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: buttons))
+        buttons.row([menuButton("💹 Наценка · \(markupPct)%", .markup, "set")])
+        buttons.row([backButton(to: .superAdmin)])
+        return MenuScreen(lines.joined(separator: "\n"), buttons)
     }
 
-    func renderSuperAdmins(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperAdmins(chatKey: ChatKey, username: String?) async -> MenuScreen {
         let supers = await state.listSuperAdmins()
         let isRoot = await state.isRootSuperAdmin(username: username)
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         if isRoot {
-            rows.append([menuButton("➕ Добавить @username", action: "sa:add")])
+            rows.row([menuButton("➕ Добавить @username", .sa, "add")])
             for admin in supers {
-                rows.append([
-                    menuButton(admin.label, action: "noop"),
-                    menuButton("🗑 Удалить", action: "sa:rm:\(admin.key)"),
+                rows.row([
+                    menuButton(admin.label, command: .noop),
+                    menuButton("🗑 Удалить", .sa, "rm", "\(admin.key)"),
                 ])
             }
         }
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([backButton(to: .superAdmin)])
 
         let listText = supers.isEmpty ? "<i>нет</i>" : supers.map { "• \($0.label)" }.joined(separator: "\n")
         let footer = isRoot
@@ -249,10 +249,10 @@ extension BotMenuHandler {
 
         \(listText)\(footer)
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderSuperSimulate(chatKey: ChatKey, username: String?) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperSimulate(chatKey: ChatKey, username: String?) async -> MenuScreen {
         let role = await state.simulatedRole(username: username)
         let label: String
         switch role {
@@ -261,12 +261,12 @@ extension BotMenuHandler {
         case nil: label = "выкл (суперадмин)"
         }
 
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton((role == .admin ? "✓ " : "") + "🛠 Админ", action: "sim:admin")],
-            [menuButton((role == .regularUser ? "✓ " : "") + "👤 Обычный пользователь", action: "sim:user")],
-            [menuButton((role == nil ? "✓ " : "") + "⛔ Выключить", action: "sim:off")],
-            [menuButton("🧪 Тест покупки", action: "sim:buy")],
-            [menuButton("← К супер-админу", action: "nav:superadmin")],
+        let rows: Keyboard = [
+            [menuButton((role == .admin ? "✓ " : "") + "🛠 Админ", .sim, "admin")],
+            [menuButton((role == .regularUser ? "✓ " : "") + "👤 Обычный пользователь", .sim, "user")],
+            [menuButton((role == nil ? "✓ " : "") + "⛔ Выключить", .sim, "off")],
+            [menuButton("🧪 Тест покупки", .sim, "buy")],
+            [backButton(to: .superAdmin)],
         ]
 
         let text = """
@@ -276,25 +276,25 @@ extension BotMenuHandler {
 
         <i>Только в текущем процессе бота, не сохраняется при рестарте.</i>
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderSuperChats(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperChats(chatKey: ChatKey) async -> MenuScreen {
         let groups = await state.groupChats()
         let privates = await state.privateChats()
         let uniqueGroupIDs = Array(Set(groups.map(\.chatID))).sorted()
         let uniquePrivateIDs = Array(Set(privates.map(\.chatID))).sorted()
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
         for chatID in uniqueGroupIDs.prefix(20) {
             let label = await state.chatDisplayLabel(chatID: chatID)
-            rows.append([menuButton("👥 \(label)", action: "sinspect:\(chatID)")])
+            rows.row([menuButton("👥 \(label)", .sinspect, "\(chatID)")])
         }
         for chatID in uniquePrivateIDs.prefix(20) {
             let label = await state.chatDisplayLabel(chatID: chatID)
-            rows.append([menuButton("👤 \(label)", action: "sinspect:\(chatID)")])
+            rows.row([menuButton("👤 \(label)", .sinspect, "\(chatID)")])
         }
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([backButton(to: .superAdmin)])
 
         let truncated = uniqueGroupIDs.count > 20 || uniquePrivateIDs.count > 20
         let text = """
@@ -304,10 +304,10 @@ extension BotMenuHandler {
 
         Нажмите на чат — откроются его настройки, роль и статистика.\(truncated ? "\nПоказаны первые 20 каждого типа; полный список — /chats, детали — /inspect <chatID>." : "")
         """
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    func renderInspect(chatID: Int) async -> (String, InlineKeyboardMarkup) {
+    func renderInspect(chatID: Int) async -> MenuScreen {
         let label = await state.chatDisplayLabel(chatID: chatID)
         let owner = await state.chatOwnerLabel(chatID: chatID)
         let keys = await state.existingContextKeys(chatID: chatID)
@@ -333,43 +333,33 @@ extension BotMenuHandler {
             lines.append("\n<i>…и ещё \(keys.count - 5) топиков — /inspect \(chatID)</i>")
         }
 
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton("← К списку чатов", action: "nav:superchats")],
+        let rows: Keyboard = [
+            [backButton(to: .superChats)],
         ]
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 
     // MARK: - Actions behind the buttons on those pages
 
     /// `sa:*` — the super-admin roster. Only root adds or removes.
     func handleSuperAdminRosterAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        guard parts.count >= 2 else { return }
-        switch parts[1] {
+        guard await requireSuperAdmin(callback) else { return }
+        guard !route.sub.isEmpty else { return }
+        switch route.sub {
         case "add":
-            guard await state.isRootSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
-                return
-            }
-            await state.setAdminPendingInput(.init(kind: .superAdminAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            guard await requireRootSuperAdmin(callback) else { return }
+            await state.setPending(.admin(.init(kind: .superAdminAdd)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = "<b>🛡 Добавить суперадмина</b>\n\nОтправьте @username одним сообщением."
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superadmins")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .superAdmins)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
         case "rm":
-            guard await state.isRootSuperAdmin(username: invokerKey(callback)) else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только главный суперадмин")
-                return
-            }
-            guard parts.count >= 3 else { return }
-            let target = parts[2]
+            guard await requireRootSuperAdmin(callback) else { return }
+            guard let target = route.arg(2) else { return }
             let ok = await state.removeSuperAdmin(target: target)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Удалён" : "Не удалось")
             try await showPage(.superAdmins, chatKey: chatKey, callback: callback, message: message)
@@ -380,28 +370,24 @@ extension BotMenuHandler {
 
     /// `stenant:*` — tenant list, one tenant's card and its subscription.
     func handleSuperTenantAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        guard parts.count >= 2 else { return }
-        switch parts[1] {
+        guard await requireSuperAdmin(callback) else { return }
+        guard !route.sub.isEmpty else { return }
+        switch route.sub {
         case "add":
-            await state.setAdminPendingInput(.init(kind: .tenantRegister, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .tenantRegister)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = "<b>🏢 Зарегистрировать тенанта</b>\n\nОтправьте @username одним сообщением."
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:supertenants")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .superTenants)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
         case "rm":
             // Deleting a tenant throws away a paid subscription, their
             // chats and their guest list — a mis-tap in a list of names
             // must not be able to do that silently.
-            guard parts.count >= 3 else { return }
-            let target = parts[2]
+            guard let target = route.arg(2) else { return }
             let label = await state.displayLabel(forKey: target)
             let row = await state.tenantStats().first { $0.username == target }
             let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
@@ -419,43 +405,39 @@ extension BotMenuHandler {
 
             ⚠️ Подписка, привязанные чаты и список гостей пропадут. Их чаты вернутся на бесплатные модели. Отменить нельзя — только оформить заново.
             """
-            let confirmMarkup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("🗑 Да, удалить", action: "stenant:rmyes:\(target)")],
-                [menuButton("❌ Отмена", action: "nav:supertenants")],
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: confirmText, markup: confirmMarkup)
+            let confirmMarkup: Keyboard = [
+                [menuButton("🗑 Да, удалить", .stenant, "rmyes", "\(target)")],
+                [cancelButton(to: .superTenants)],
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(confirmText, confirmMarkup))
         case "rmyes":
-            guard parts.count >= 3 else { return }
-            let removed = await state.removeTenant(username: parts[2])
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалён" : "Нельзя удалить")
+            guard let target = route.arg(2) else { return }
+            let removed = await state.removeTenant(username: target)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалён" : Texts.cannotRemove)
             try await showPage(.superTenants, chatKey: chatKey, callback: callback, message: message)
         case "info":
-            guard parts.count >= 3 else { return }
+            guard let target = route.arg(2) else { return }
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
-            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         case "ext":
-            guard parts.count >= 3 else { return }
-            if let until = await state.extendTenantSubscription(username: parts[2], days: ChatContextStore.subscriptionDays) {
+            guard let target = route.arg(2) else { return }
+            if let until = await state.extendTenantSubscription(username: target, days: ChatContextStore.subscriptionDays) {
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продлена до \(f.string(from: until))")
             } else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Тенант не найден")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.tenantNotFound)
             }
-            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         case "unlim":
-            guard parts.count >= 3 else { return }
-            let ok = await state.setTenantUnlimited(username: parts[2])
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Подписка бессрочная" : "Тенант не найден")
-            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            guard let target = route.arg(2) else { return }
+            let ok = await state.setTenantUnlimited(username: target)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Подписка бессрочная" : Texts.tenantNotFound)
+            try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         case "exp":
-            guard parts.count >= 3 else { return }
-            let ok = await state.expireTenantSubscription(username: parts[2])
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "⛔ Подписка завершена" : "Тенант не найден")
-            let (text, markup) = await renderSuperTenantInfo(username: parts[2])
-            try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+            guard let target = route.arg(2) else { return }
+            let ok = await state.expireTenantSubscription(username: target)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "⛔ Подписка завершена" : Texts.tenantNotFound)
+            try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         default:
             try await showPage(.superTenants, chatKey: chatKey, callback: callback, message: message)
         }
@@ -463,19 +445,19 @@ extension BotMenuHandler {
 
     /// `sim:*` — pretend to be an admin or a regular user (CLAUDE.md §6).
     func handleSimulationAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
         guard await state.isActuallySuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.superAdminOnly)
             return
         }
-        guard parts.count >= 2 else { return }
+        guard !route.sub.isEmpty else { return }
         // Simulation is filed under the same key as the role it shadows.
         let username = invokerKey(callback)
-        switch parts[1] {
+        switch route.sub {
         case "admin":
             _ = await state.setSimulatedRole(username: username, role: .admin)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Симуляция: админ")
@@ -504,34 +486,27 @@ extension BotMenuHandler {
 
     /// `sinspect:<chatID>` — one chat's settings and usage.
     func handleInspectChatAction(
-        parts: [String],
+        route: MenuRoute,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        guard parts.count >= 2, let targetChatID = Int(parts[1]) else { return }
-        let (text, markup) = await renderInspect(chatID: targetChatID)
-        try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        guard await requireSuperAdmin(callback) else { return }
+        guard let targetChatID = route.int(1) else { return }
+        try await editOrAnswer(callback: callback, message: message, screen: await renderInspect(chatID: targetChatID))
     }
 
     /// `sbal:*` — wallets: top-up prompt and deletion (with confirmation).
     func handleWalletAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-            return
-        }
-        guard parts.count >= 2 else { return }
-        switch parts[1] {
+        guard await requireSuperAdmin(callback) else { return }
+        guard !route.sub.isEmpty else { return }
+        switch route.sub {
         case "add":
-            await state.setAdminPendingInput(.init(kind: .balanceTopUp, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .balanceTopUp)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>💰 Начислить / списать баланс</b>
 
@@ -540,13 +515,12 @@ extension BotMenuHandler {
             <i>Пример:</i> <code>@user 5</code> — начислить $5
             Отрицательная сумма — списать. Кошелёк создаётся автоматически.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superbal")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .superBalances)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
         case "rm":
             // The wallet holds money the person paid for: confirm before
             // it disappears from a one-tap row in a list.
-            guard parts.count >= 3 else { return }
-            let target = parts[2]
+            guard let target = route.arg(2) else { return }
             let label = await state.displayLabel(forKey: target)
             let wallet = await state.balance(username: target)
             let amount = wallet.map { String(format: "$%.4f", $0.balanceUsd) } ?? "—"
@@ -557,14 +531,14 @@ extension BotMenuHandler {
 
             ⚠️ Остаток пропадёт вместе с историей списаний. Если человек пополнял баланс деньгами, это его деньги. Отменить нельзя.
             """
-            let confirmMarkup = InlineKeyboardMarkup(inline_keyboard: [
-                [menuButton("🗑 Да, удалить", action: "sbal:rmyes:\(target)")],
-                [menuButton("❌ Отмена", action: "nav:superbal")],
-            ])
-            try await editOrAnswer(callback: callback, message: message, text: confirmText, markup: confirmMarkup)
+            let confirmMarkup: Keyboard = [
+                [menuButton("🗑 Да, удалить", .sbal, "rmyes", "\(target)")],
+                [cancelButton(to: .superBalances)],
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(confirmText, confirmMarkup))
         case "rmyes":
-            guard parts.count >= 3 else { return }
-            let removed = await state.removeBalance(username: parts[2])
+            guard let target = route.arg(2) else { return }
+            let removed = await state.removeBalance(username: target)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Кошелёк удалён" : "Кошелёк не найден")
             try await showPage(.superBalances, chatKey: chatKey, callback: callback, message: message)
         default:

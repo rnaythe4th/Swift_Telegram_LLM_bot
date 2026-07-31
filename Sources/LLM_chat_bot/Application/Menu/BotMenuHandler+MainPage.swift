@@ -5,7 +5,7 @@ import Foundation
 extension BotMenuHandler {
     // MARK: - Main page
 
-    func renderMain(chatKey: ChatKey, username: String? = nil) async -> (String, InlineKeyboardMarkup) {
+    func renderMain(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
         let gateway = try? gateways.gateway(for: provider)
@@ -64,37 +64,80 @@ extension BotMenuHandler {
             dailyPremiumLeft: dailyPremium.remaining
         )
 
+        // Reference modes (§ modes): the page leads with what the chat *is*,
+        // not with six technical fields. The old summary listed "Сервис ИИ",
+        // "Стиль ответа" and a raw model id — five lines nobody without an ML
+        // background can act on.
+        let modeConfig = await state.modeConfig()
+        let activeMode = await state.activeMode(chatKey: chatKey)
+        // In a group this decides which modes are shown as locked, and the menu
+        // is one message everyone reads — so it must be a fact about the chat,
+        // not about whoever tapped (CLAUDE.md §13). A member's own balance is
+        // theirs to know.
+        let hasFullAccess = await state.hasFullModelAccess(
+            username: isGroupChat ? nil : username,
+            chatID: chatKey.chatID
+        )
+        let modesOn = !modeConfig.activeModes.isEmpty
+
+        var settingsSummary: String
+        if modesOn {
+            let name = activeMode?.title ?? "изменён вручную"
+            let subtitle = activeMode.map { $0.subtitle.isEmpty ? "" : "\n<i>\($0.subtitle)</i>" }
+                ?? "\n<i>\(help.model)</i>"
+            settingsSummary = "Режим · <b>\(name)</b>\(subtitle)"
+        } else {
+            settingsSummary = """
+            🤖 Модель · <b>\(help.model)</b>
+            🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
+            📝 Память · <b>\(help.maxHistory) сообщ.</b>\
+            \(reasoningSupported ? "\n🧠 Обдумывание · <b>\(reasoningLabel)</b>" : "")
+            """
+        }
+
         let text = """
         <b>⚙️ Настройки чата</b>
 
         \(accessLine)
 
-        🔌 Сервис ИИ · <b>\(help.provider.commandValue)</b>
-        🤖 Модель · <b>\(help.model)</b>
-        🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
-        📝 Память · <b>\(help.maxHistory) сообщ.</b>\
-        \(reasoningSupported ? "\n🧠 Обдумывание · <b>\(reasoningLabel)</b>" : "")
+        \(settingsSummary)
 
         \(usageLine)\(balanceLine)
         🆔 <code>\(chatKey.chatID)</code>
         """
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton("🤖 Модель", action: "nav:model"), menuButton("🎭 Роль", action: "nav:role")],
-            [menuButton("🌡 Стиль ответа", action: "nav:temp"), menuButton("📝 Память", action: "nav:history")],
-            [menuButton("🔌 Сервис ИИ", action: "nav:provider")],
-        ]
-        if reasoningSupported {
-            rows[2].append(menuButton("🧠 Обдумывание", action: "nav:reasoning"))
+        var rows: Keyboard = []
+        if modesOn {
+            rows = modeRows(config: modeConfig, activeID: activeMode?.id, hasFullAccess: hasFullAccess)
+            // "↺ Рабочий режим" only once the chat is actually off it —
+            // otherwise it is a button that does nothing.
+            let working = modeConfig.defaultMode
+            let onWorkingMode = activeMode != nil && activeMode?.id == working?.id
+            rows.row([
+                menuButton("🎭 Роль", page: .role),
+                onWorkingMode || working == nil
+                    ? menuButton("↺ Сбросить", command: .reset)
+                    : menuButton("↺ Рабочий режим", .mode, "reset"),
+            ])
+        } else {
+            rows.row([menuButton("🤖 Модель", page: .model), menuButton("🎭 Роль", page: .role)])
+            rows.row([menuButton("🌡 Стиль ответа", page: .temp), menuButton("📝 Память", page: .history)])
+            rows.row([menuButton("↺ Сбросить", command: .reset)])
         }
-        rows.append([menuButton("📊 Что показывать под ответом", action: "nav:stats")])
-        if usage.generationCount > 0 {
-            rows.append([menuButton("🗑 Сбросить статистику", action: "stats:usage-reset")])
-        }
+        // The modes are a shortlist, not a cage: the model page lists every
+        // free model with its price and lets anyone pick one. Without this a
+        // free user has no way to see that the list exists.
+        rows.row([menuButton("⚙️ Тонкая настройка", page: .tuning)])
+
+        // Everything below is a different job — money and growth, not settings.
+        // Telegram has no separators, so a dead button draws the line; without
+        // it the page is fourteen buttons of equal weight and reads as noise.
+        rows.row([menuButton("· · · · ·", command: .noop)])
+
         // Onboarding (roadmap step 9): a way back to the ready-made prompts
         // after the greeting has scrolled away.
         if !(await state.onboardingConfig().activeExamples(inGroup: chatKey.chatID < 0).isEmpty) {
-            rows.append([menuButton("💡 Примеры-запросы", action: "examples")])
+            rows.row([menuButton("💡 Примеры-запросы", command: .examples)])
         }
         // Monetization entry point: shown whenever there is something to buy
         // or an existing subscription/wallet to inspect.
@@ -108,11 +151,11 @@ extension BotMenuHandler {
         if (starsPrice ?? 0) > 0 || cryptoCents != nil || card.isEnabled || isTenant || wallet != nil {
             // "Продлить" would out the tapper as a paying customer in a group.
             let payLabel = isTenant ? "🔄 Продлить премиум" : "⚡ Премиум-доступ"
-            rows.append([menuButton(payLabel, action: "nav:pay")])
+            rows.row([menuButton(payLabel, page: .pay)])
         }
         // Viral loop: one tap opens Telegram's group picker and adds the bot.
         if !botUsername.isEmpty {
-            rows.append([InlineKeyboardButton(text: "➕ Добавить в свой чат", url: "https://t.me/\(botUsername)?startgroup=add")])
+            rows.row([InlineKeyboardButton(text: "➕ Добавить в свой чат", url: "https://t.me/\(botUsername)?startgroup=add")])
         }
         // Referral (roadmap step 10): personal link, so private chats only.
         let referral = await state.referralConfig()
@@ -120,20 +163,20 @@ extension BotMenuHandler {
             let label = referral.inviterRewardCents > 0
                 ? "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))"
                 : "🎁 Пригласить друга"
-            rows.append([menuButton(label, action: "nav:ref")])
+            rows.row([menuButton(label, page: .referral)])
         }
-        rows.append([menuButton("❓ Справка", action: "nav:help"), menuButton("↺ Сбросить", action: "reset")])
+        rows.row([menuButton("❓ Справка", page: .helpPage)])
         if await state.isSuperAdmin(username: username) {
-            rows.append([
-                menuButton("⚡ Мой премиум", action: "nav:admin"),
-                menuButton("🛡 Супер-админ", action: "nav:superadmin"),
+            rows.row([
+                menuButton("⚡ Мой премиум", page: .adminPanel),
+                menuButton("🛡 Супер-админ", page: .superAdmin),
             ])
         } else if await state.isAdmin(username: username, chatID: chatKey.chatID) {
-            rows.append([menuButton("⚡ Мой премиум", action: "nav:admin")])
+            rows.row([menuButton("⚡ Мой премиум", page: .adminPanel)])
         }
-        rows.append([menuButton("✕ Закрыть", action: "close")])
+        rows.row([menuButton(Texts.close, command: .close)])
 
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
     /// One line naming who pays for smart models in this chat. Shown on the

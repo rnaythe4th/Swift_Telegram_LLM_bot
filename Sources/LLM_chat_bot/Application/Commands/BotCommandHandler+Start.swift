@@ -188,7 +188,7 @@ extension BotCommandHandler {
         if !botUsername.isEmpty {
             rows.append([InlineKeyboardButton(text: "➕ Добавить в свой чат", url: "https://t.me/\(botUsername)?startgroup=add")])
         }
-        rows.append([InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: "open").rawData)])
+        rows.append([InlineKeyboardButton(text: "⚙️ Открыть меню", callback_data: BotCallbackAction.menu(action: MenuRoute.link(.open)).rawData)])
         rows.append([InlineKeyboardButton(text: "📘 Инструкция", callback_data: BotCallbackAction.faq.rawData)])
         let markup = InlineKeyboardMarkup(inline_keyboard: rows)
         _ = try await telegram.sendMessage(.init(

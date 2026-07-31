@@ -64,11 +64,15 @@ final class BotMenuHandler: @unchecked Sendable {
         }
 
         let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
-        let action = rawAction.isEmpty ? "open" : rawAction
-        let parts = action.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard let route = MenuRoute(action: rawAction) else {
+            // An unknown command never reaches a handler. Answering is not
+            // optional: a button that does nothing reads as a broken bot.
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестное действие")
+            return
+        }
 
         do {
-            try await processAction(parts: parts, chatKey: chatKey, callback: callback, message: message)
+            try await processAction(route: route, chatKey: chatKey, callback: callback, message: message)
         } catch {
             logger.error("menu action failed: \(error)")
             let alertText = UserFacingError.shortMessage(error, context: "Ошибка")
@@ -81,152 +85,98 @@ final class BotMenuHandler: @unchecked Sendable {
 
     func sendMenu(chatKey: ChatKey, userID: Int? = nil, username: String? = nil) async {
         let username = userID.map { self.state.userKey(userID: $0) } ?? username
-        await clearAllPendingInputs(chatKey: chatKey)
-        let (text, markup) = await renderPage(.main, chatKey: chatKey, username: username)
+        await state.clearPending(chatKey: chatKey)
+        let screen = await renderPage(.main, chatKey: chatKey, username: username)
         _ = try? await telegram.sendMessage(
             .init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
                 replyTo: nil,
-                text: text,
-                replyMarkup: markup
+                text: screen.text,
+                replyMarkup: screen.markup
             )
         )
     }
 
     private func processAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard let command = parts.first, !command.isEmpty else {
-            try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
-            return
-        }
+        switch route.command {
+        case .open, .close, .nav, .noop:
+            try await processNavigationAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        switch command {
-        case "open", "close", "nav", "noop":
-            try await processNavigationAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
+        case .role, .model, .temp, .stats, .history, .provider, .reasoning, .reset, .help:
+            try await processChatSettingsAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "role", "model", "temp", "stats", "history", "provider", "reasoning", "reset", "help":
-            try await processChatSettingsAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
+        case .mode, .smode:
+            try await processModeAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "pm":
-            try await processPresetAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
+        case .pm:
+            try await processPresetAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "buy":
-            try await processPurchaseAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
+        case .buy:
+            try await processPurchaseAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "tenant", "wl", "def":
-            try await processAdminAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
+        case .tenant, .wl, .def:
+            try await processAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "sa", "stenant", "sim", "sinspect", "ads", "markup", "dailylimit", "stars", "freemodels", "sbal", "crypto", "card":
-            try await processSuperAdminAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
+        case .sa, .stenant, .sim, .sinspect, .ads, .markup, .dailylimit,
+             .stars, .freemodels, .sbal, .crypto, .card:
+            try await processSuperAdminAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "funnel", "promo", "rem", "examples", "onb", "sref", "strf":
-            try await processGrowthAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
+        case .funnel, .promo, .rem, .examples, .onb, .sref, .strf:
+            try await processGrowthAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case "sahelp":
-            try await processHelpAction(
-                command: command,
-                parts: parts,
-                chatKey: chatKey,
-                callback: callback,
-                message: message
-            )
-
-        default:
-            try await telegram.answerCallback(callbackQueryID: callback.id, text: "Неизвестное действие")
+        case .sahelp:
+            try await processHelpAction(route: route, chatKey: chatKey, callback: callback, message: message)
         }
     }
 
     /// Menu navigation: open, close, page jumps.
     private func processNavigationAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "open":
-            await clearAllPendingInputs(chatKey: chatKey)
+        switch route.command {
+        case .open:
+            await state.clearPending(chatKey: chatKey)
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
 
-        case "close":
-            await clearAllPendingInputs(chatKey: chatKey)
+        case .close:
+            await state.clearPending(chatKey: chatKey)
             try await closeMenu(callback: callback, message: message)
 
-        case "nav":
+        case .nav:
             // Navigating away abandons any text-input prompt (incl. the
             // "❌ Отмена" buttons, which all point at nav:*).
-            await clearAllPendingInputs(chatKey: chatKey)
-            guard parts.count >= 2 else {
+            await state.clearPending(chatKey: chatKey)
+            guard let menuPage = route.page(1) else {
                 try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
                 return
             }
-            let page = parts[1].lowercased()
-            guard let menuPage = MenuPage(rawValue: page) else {
-                try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+            if menuPage.requiresOperator {
+                guard await requireOperator(callback, chatKey: chatKey, refusal: menuPage.restrictedNotice) else { return }
+            } else if menuPage.requiresFullAccess, !(await hasFullAccess(callback, chatKey: chatKey)) {
+                // Sell rather than refuse. This is somebody actively reaching
+                // for something premium includes, which is the one moment a
+                // paywall is welcome instead of annoying (GROWTH.md P0.4).
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: menuPage.restrictedNotice)
+                try await showPage(.pay, chatKey: chatKey, callback: callback, message: message, purchaseSource: .tuning)
                 return
             }
             switch menuPage {
             // Every `super*` page belongs here — the buttons inside them are
             // gated separately, but the pages themselves show the owner's
             // configuration and numbers.
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superReferrals, .superTraffic:
-                guard await state.isSuperAdmin(username: invokerKey(callback)) else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только суперадмин")
-                    return
-                }
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superModes, .superReferrals, .superTraffic:
+                guard await requireSuperAdmin(callback) else { return }
             case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults, .adminInvite:
-                guard await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID) else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
-                    return
-                }
+                guard await requireAdmin(callback, chatKey: chatKey) else { return }
             default:
                 break
             }
@@ -237,10 +187,10 @@ final class BotMenuHandler: @unchecked Sendable {
                 chatKey: chatKey,
                 callback: callback,
                 message: message,
-                purchaseSource: PurchaseSource.parse(parts.count >= 3 ? parts[2] : nil)
+                purchaseSource: PurchaseSource.parse(route.arg(2))
             )
 
-        case "noop":
+        case .noop:
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             return
 
@@ -266,20 +216,24 @@ final class BotMenuHandler: @unchecked Sendable {
         // the button that led here is counted separately — that is how the
         // pain-point upsells get compared with the plain menu (steps 5 and 7).
         if page == .pay { await state.bumpPurchaseOpen(source: purchaseSource) }
-        let (text, markup) = await renderPage(page, chatKey: chatKey, username: state.userKey(userID: callback.from.id))
-        try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        let screen = await renderPage(page, chatKey: chatKey, username: state.userKey(userID: callback.from.id))
+        warnIfOversized(screen, page: page)
+        try await editOrAnswer(callback: callback, message: message, screen: screen)
+    }
+
+    /// A page that outgrew one message comes back with its tail cut off — and
+    /// nothing says so, because `editMessage` cannot be split in two. The lists
+    /// on `super*` pages are already capped for exactly this reason; this turns
+    /// the remaining cases from an invisible truncation into a log line naming
+    /// the page.
+    private func warnIfOversized(_ screen: MenuScreen, page: MenuPage) {
+        guard !screen.fitsInOneMessage else { return }
+        logger.warning("menu page \(page.rawValue) is \(screen.text.count) chars and will be truncated")
     }
 
     private func closeMenu(callback: CallbackQuery, message: MaybeInaccessibleMessage) async throws {
         let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
-        await state.clearPendingInput(chatKey: chatKey)
-        await state.clearPendingStarsPriceInput(chatKey: chatKey)
-        await state.clearPendingStarsPerUsdInput(chatKey: chatKey)
-        await state.clearPendingFreeModelInput(chatKey: chatKey)
-        await state.clearPendingCryptoPriceInput(chatKey: chatKey)
-        await state.clearPendingCryptoAddressInput(chatKey: chatKey)
-        await state.clearPendingCryptoPoolAddInput(chatKey: chatKey)
-        await state.clearAdminPendingInput(chatKey: chatKey)
+        await state.clearPending(chatKey: chatKey)
         try await telegram.editMessage(
             .init(
                 chatID: message.chat.id,
@@ -291,19 +245,20 @@ final class BotMenuHandler: @unchecked Sendable {
         try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
     }
 
+    /// Redraws the tapped menu message in place, falling back to a new message
+    /// when the old one can no longer be edited, and always answers the tap.
     func editOrAnswer(
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage,
-        text: String,
-        markup: InlineKeyboardMarkup
+        screen: MenuScreen
     ) async throws {
         do {
             try await telegram.editMessage(
                 .init(
                     chatID: message.chat.id,
                     messageID: message.message_id,
-                    text: text,
-                    replyMarkup: markup
+                    text: screen.text,
+                    replyMarkup: screen.markup
                 )
             )
         } catch {
@@ -312,25 +267,51 @@ final class BotMenuHandler: @unchecked Sendable {
                     chatID: message.chat.id,
                     threadID: message.message_thread_id,
                     replyTo: nil,
-                    text: text,
-                    replyMarkup: markup
+                    text: screen.text,
+                    replyMarkup: screen.markup
                 )
             )
         }
         try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
     }
 
-    func renderPage(_ page: MenuPage, chatKey: ChatKey, username: String? = nil) async -> (String, InlineKeyboardMarkup) {
+    /// Refreshes the menu message a text-input prompt came from. Its id was
+    /// stored when the wait was armed, so there is no callback to answer here —
+    /// the person replied with a message, not a tap.
+    func refreshMenu(chatKey: ChatKey, menuMessageID: Int, screen: MenuScreen) async {
+        try? await telegram.editMessage(
+            .init(
+                chatID: chatKey.chatID,
+                messageID: menuMessageID,
+                text: screen.text,
+                replyMarkup: screen.markup
+            )
+        )
+    }
+
+    func renderPage(_ page: MenuPage, chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
         // Second line of defence for the paths that render without a callback
         // (a menu refreshed after text input): a personal page never draws its
         // contents into a group message.
         if page.isPersonal, chatKey.chatID < 0 {
-            var rows: [[InlineKeyboardButton]] = []
+            var rows: Keyboard = []
             if !botUsername.isEmpty {
-                rows.append([InlineKeyboardButton(text: "💬 Открыть бота", url: "https://t.me/\(botUsername)")])
+                rows.row([InlineKeyboardButton(text: "💬 Открыть бота", url: "https://t.me/\(botUsername)")])
             }
-            rows.append(navButtons())
-            return (page.privateOnlyNotice, InlineKeyboardMarkup(inline_keyboard: rows))
+            rows.row(navButtons())
+            return MenuScreen(page.privateOnlyNotice, rows)
+        }
+        // Same second line of defence for the restricted settings pages: this
+        // path renders without a callback (a menu redrawn after a typed value),
+        // so the nav gate above has not run.
+        if page.requiresOperator, !(await state.isAdmin(username: username, chatID: chatKey.chatID)) {
+            return MenuScreen(page.restrictedNotice, [navButtons()])
+        }
+        if page.requiresFullAccess,
+           !(await state.hasFullModelAccess(username: username, chatID: chatKey.chatID)) {
+            var rows: Keyboard = [[buyButton("⚡ Открыть тонкую настройку", source: .tuning)]]
+            rows.row(navButtons())
+            return MenuScreen(page.restrictedNotice, rows)
         }
         switch page {
         case .main:
@@ -344,11 +325,13 @@ final class BotMenuHandler: @unchecked Sendable {
         case .stats:
             return await renderStats(chatKey: chatKey, username: username)
         case .history:
-            return await renderHistory(chatKey: chatKey)
+            return await renderHistory(chatKey: chatKey, username: username)
         case .provider:
             return await renderProvider(chatKey: chatKey)
         case .reasoning:
             return await renderReasoning(chatKey: chatKey)
+        case .tuning:
+            return await renderTuning(chatKey: chatKey, username: username)
         case .helpPage:
             return await renderHelp(chatKey: chatKey)
         case .pay:
@@ -395,6 +378,8 @@ final class BotMenuHandler: @unchecked Sendable {
             return await renderSuperReminders(chatKey: chatKey)
         case .superOnboarding:
             return await renderSuperOnboarding(chatKey: chatKey)
+        case .superModes:
+            return await renderSuperModes(chatKey: chatKey)
         case .superReferrals:
             return await renderSuperReferrals(chatKey: chatKey)
         case .superTraffic:
@@ -406,7 +391,7 @@ final class BotMenuHandler: @unchecked Sendable {
         case .adminInvite:
             return await renderAdminInvite(chatKey: chatKey, username: username)
         case .close:
-            return ("Меню закрыто. Откройте снова — /menu", InlineKeyboardMarkup(inline_keyboard: []))
+            return MenuScreen("Меню закрыто. Откройте снова — /menu", [])
         }
     }
 
@@ -469,14 +454,54 @@ final class BotMenuHandler: @unchecked Sendable {
     static let unknownAccountNotice =
         "Не удалось определить ваш аккаунт. Напишите боту любое сообщение в личке и откройте меню снова."
 
-    func menuButton(_ text: String, action: String) -> InlineKeyboardButton {
+    private func menuButton(_ text: String, action: String) -> InlineKeyboardButton {
         .init(text: text, callback_data: BotCallbackAction.menu(action: action).rawData)
+    }
+
+    /// A button that only names a command — no arguments to mistype.
+    func menuButton(_ text: String, command: MenuCommand) -> InlineKeyboardButton {
+        menuButton(text, action: command.rawValue)
+    }
+
+    /// A button carrying a command and its arguments. The payload format lives
+    /// here and nowhere else: call sites pass values, not a string they glued
+    /// together, so an argument cannot land in the wrong position or bring a
+    /// stray separator with it.
+    func menuButton(_ text: String, _ command: MenuCommand, _ arguments: String...) -> InlineKeyboardButton {
+        menuButton(text, action: ([command.rawValue] + arguments).joined(separator: ":"))
+    }
+
+    /// A link to another page. The destination is a `MenuPage`, so a button
+    /// cannot point at a page that does not exist — the old `"nav:superstars"`
+    /// string was checked by nothing until somebody tapped it.
+    func menuButton(_ text: String, page: MenuPage) -> InlineKeyboardButton {
+        menuButton(text, action: MenuRoute.navigation(to: page))
+    }
+
+    /// A link to the purchase page. The surface that sent the person there is
+    /// required by the type (CLAUDE.md §17): a new upsell that forgets it would
+    /// silently merge into "Меню" in the funnel.
+    func buyButton(_ text: String, source: PurchaseSource) -> InlineKeyboardButton {
+        menuButton(text, action: MenuRoute.purchase(from: source))
+    }
+
+    /// "← К супер-админу", "← К моему премиуму", … — the label comes from the
+    /// destination (`MenuPage.backLabel`), so it cannot name one page and lead
+    /// to another.
+    func backButton(to page: MenuPage) -> InlineKeyboardButton {
+        menuButton(page.backLabel, page: page)
+    }
+
+    /// "❌ Отмена" — abandons a text-input prompt by navigating back to the
+    /// page that armed it (`nav:` clears the pending wait on the way).
+    func cancelButton(to page: MenuPage) -> InlineKeyboardButton {
+        menuButton(Texts.cancel, page: page)
     }
 
     func navButtons() -> [InlineKeyboardButton] {
         [
-            menuButton("← Назад", action: "open"),
-            menuButton("✕ Закрыть", action: "close"),
+            menuButton(Texts.back, command: .open),
+            menuButton(Texts.close, command: .close),
         ]
     }
 

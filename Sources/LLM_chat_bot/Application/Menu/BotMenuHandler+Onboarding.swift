@@ -4,12 +4,12 @@ import Foundation
 
 extension BotMenuHandler {
     func handleOnboardingAdminAction(
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard parts.count >= 2 else {
+        guard !route.sub.isEmpty else {
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
             return
         }
@@ -18,13 +18,13 @@ extension BotMenuHandler {
         /// The example a positional action refers to; nil answers the callback.
         func example(at index: Int) async -> OnboardingExample? {
             guard index >= 0, index < config.examples.count else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пример не найден")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.exampleNotFound)
                 return nil
             }
             return config.examples[index]
         }
 
-        switch parts[1] {
+        switch route.sub {
         case "toggle":
             config.enabled.toggle()
             await state.setOnboardingConfig(config)
@@ -45,7 +45,7 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Максимум \(OnboardingConfig.maxExamples) примеров")
                 return
             }
-            await state.setAdminPendingInput(.init(kind: .onboardingAdd, menuMessageID: message.message_id, payload: nil), chatKey: chatKey)
+            await state.setPending(.admin(.init(kind: .onboardingAdd)), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>➕ Новый пример-запрос</b>
 
@@ -56,13 +56,14 @@ extension BotMenuHandler {
 
             Кнопка — до \(OnboardingConfig.maxLabelLength) символов, запрос — до \(OnboardingConfig.maxPromptLength). Запрос должен быть самодостаточным: по тапу он уходит модели как есть.
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superonboarding")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .superOnboarding)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
 
         case "edit":
-            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
-            await state.setAdminPendingInput(
-                .init(kind: .onboardingEdit, menuMessageID: message.message_id, payload: item.id),
+            guard let index = route.int(2), let item = await example(at: index) else { return }
+            await state.setPending(
+                .admin(.init(kind: .onboardingEdit, payload: item.id)),
+                menuMessageID: message.message_id,
                 chatKey: chatKey
             )
             let prompt = """
@@ -76,34 +77,34 @@ extension BotMenuHandler {
 
             <i>Счётчик тапов (\(item.taps)) сохранится.</i>
             """
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[menuButton("❌ Отмена", action: "nav:superonboarding")]])
-            try await editOrAnswer(callback: callback, message: message, text: prompt, markup: markup)
+            let markup: Keyboard = [[cancelButton(to: .superOnboarding)]]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
 
         case "on":
-            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            guard let index = route.int(2), let item = await example(at: index) else { return }
             let newValue = await state.toggleOnboardingExample(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: newValue == true ? "🟢 Показывается" : "⚪️ Скрыт")
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "place":
-            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            guard let index = route.int(2), let item = await example(at: index) else { return }
             let placement = await state.cycleOnboardingExamplePlacement(id: item.id)
             try? await telegram.answerCallback(
                 callbackQueryID: callback.id,
-                text: placement.map { "📍 Показывать: \($0.shortLabel)" } ?? "Пример не найден"
+                text: placement.map { "📍 Показывать: \($0.shortLabel)" } ?? Texts.exampleNotFound
             )
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "up":
-            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            guard let index = route.int(2), let item = await example(at: index) else { return }
             let moved = await state.moveOnboardingExampleUp(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: moved ? "↑ Выше" : "Уже первый")
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "del":
-            guard parts.count >= 3, let index = Int(parts[2]), let item = await example(at: index) else { return }
+            guard let index = route.int(2), let item = await example(at: index) else { return }
             let removed = await state.removeOnboardingExample(id: item.id)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "🗑 Удалён" : "Пример не найден")
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "🗑 Удалён" : Texts.exampleNotFound)
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "preview":
@@ -146,7 +147,7 @@ extension BotMenuHandler {
     /// Onboarding examples (roadmap step 9): the whole set is edited here — no
     /// example text lives in code — plus the monitoring that says which prompt
     /// actually gets tapped (taps per example, share of the total).
-    func renderSuperOnboarding(chatKey: ChatKey) async -> (String, InlineKeyboardMarkup) {
+    func renderSuperOnboarding(chatKey: ChatKey) async -> MenuScreen {
         let config = await state.onboardingConfig()
         let report = await state.funnelReport()
         let shown = report.count(.onboardingShown)
@@ -158,33 +159,33 @@ extension BotMenuHandler {
             return String(format: "%.0f%%", Double(num) / Double(den) * 100)
         }
 
-        var rows: [[InlineKeyboardButton]] = [
-            [menuButton(config.enabled ? "🟢 Примеры включены" : "⚪️ Примеры выключены", action: "onb:toggle")],
-            [menuButton(config.showInGroups ? "🟢 Показывать в группах" : "⚪️ Только в личке", action: "onb:groups")],
+        var rows: Keyboard = [
+            [menuButton(config.enabled ? "🟢 Примеры включены" : "⚪️ Примеры выключены", .onb, "toggle")],
+            [menuButton(config.showInGroups ? "🟢 Показывать в группах" : "⚪️ Только в личке", .onb, "groups")],
         ]
         // Two rows per example: five buttons squeezed into one row left the
         // example's own name unreadable, which is the one thing you need to
         // see to know which row you are editing.
         for (index, example) in config.examples.enumerated() {
-            rows.append([
-                menuButton("\(example.enabled ? "🟢" : "⚪️") \(example.label)", action: "onb:on:\(index)"),
+            rows.row([
+                menuButton("\(example.enabled ? "🟢" : "⚪️") \(example.label)", .onb, "on", "\(index)"),
             ])
-            rows.append([
-                menuButton("📍 \(example.placement.shortLabel)", action: "onb:place:\(index)"),
-                menuButton("✏️ Изменить", action: "onb:edit:\(index)"),
-                menuButton("↑ Выше", action: "onb:up:\(index)"),
-                menuButton("❌ Удалить", action: "onb:del:\(index)"),
+            rows.row([
+                menuButton("📍 \(example.placement.shortLabel)", .onb, "place", "\(index)"),
+                menuButton("✏️ Изменить", .onb, "edit", "\(index)"),
+                menuButton("↑ Выше", .onb, "up", "\(index)"),
+                menuButton("❌ Удалить", .onb, "del", "\(index)"),
             ])
         }
         if config.examples.count < OnboardingConfig.maxExamples {
-            rows.append([menuButton("➕ Добавить пример", action: "onb:add")])
+            rows.row([menuButton("➕ Добавить пример", .onb, "add")])
         }
-        rows.append([menuButton("👁 Предпросмотр", action: "onb:preview"),
-                     menuButton("↺ Стандартные", action: "onb:reset")])
+        rows.row([menuButton("👁 Предпросмотр", .onb, "preview"),
+                     menuButton("↺ Стандартные", .onb, "reset")])
         if totalTaps > 0 {
-            rows.append([menuButton("🗑 Обнулить счётчики тапов", action: "onb:clearstats")])
+            rows.row([menuButton("🗑 Обнулить счётчики тапов", .onb, "clearstats")])
         }
-        rows.append([menuButton("← К супер-админу", action: "nav:superadmin")])
+        rows.row([backButton(to: .superAdmin)])
 
         var lines: [String] = [
             "<b>💡 Примеры-запросы (онбординг)</b>",
@@ -211,6 +212,6 @@ extension BotMenuHandler {
         lines.append("")
         lines.append("<i>Тап по примеру = обычный запрос: работают лимиты, биллинг и история чата. 📍 задаёт, где кнопка видна: личка, группы или везде — в общем чате и в личке нужны разные примеры. Тексты и порядок правятся здесь, без передеплоя. Команда — /examples.</i>")
 
-        return (lines.joined(separator: "\n"), InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 }

@@ -30,7 +30,8 @@ extension ChatContextStore {
             adReplyCounter: context.adReplyCounter == 0 ? nil : context.adReplyCounter,
             adLastShownAt: context.adLastShownAt,
             funnelCounted: context.funnelFirstMessageCounted ? true : nil,
-            downgradedFrom: context.downgradedFromModel
+            downgradedFrom: context.downgradedFromModel,
+            activeMode: context.activeModeID
         )
     }
 
@@ -81,7 +82,8 @@ extension ChatContextStore {
             adReplyCounter: snapshot.adReplyCounter ?? 0,
             adLastShownAt: snapshot.adLastShownAt,
             funnelFirstMessageCounted: snapshot.funnelCounted ?? false,
-            downgradedFromModel: snapshot.downgradedFrom
+            downgradedFromModel: snapshot.downgradedFrom,
+            activeModeID: snapshot.activeMode
         )
     }
 
@@ -185,6 +187,8 @@ extension ChatContextStore {
             return .dailyPremiumUsage(premiumDailyUsage)
         case .selfPromo:
             return .selfPromo(selfPromoConfigValue)
+        case .modes:
+            return .modes(modeConfigValue)
         case .reminders:
             return .reminders(reminderConfigValue)
         case .onboarding:
@@ -292,6 +296,7 @@ extension ChatContextStore {
         premiumDailyUsage = (state.configs.dailyPremiumUsage ?? [:])
             .filter { $0.value.day == FunnelDailyLog.dayNumber() }
         selfPromoConfigValue = (state.configs.selfPromo ?? .default).normalized
+        modeConfigValue = (state.configs.modes ?? .default).normalized
         reminderConfigValue = (state.configs.reminders ?? .default).normalized
         onboardingConfigValue = (state.configs.onboarding ?? .default).normalized
         referralConfigValue = (state.configs.referrals ?? .default).normalized

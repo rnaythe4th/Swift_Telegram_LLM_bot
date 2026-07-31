@@ -78,6 +78,8 @@ enum PurchaseSource: String, CaseIterable, Sendable {
     case balance    // "balance ran out" notice (step 5)
     case referral   // referral page
     case model      // model picker, where a paid model is out of reach
+    case mode       // a ⭐ reference mode tapped without access
+    case tuning     // "⚙️ Тонкая настройка" opened without access
 
     var label: String {
         switch self {
@@ -90,6 +92,8 @@ enum PurchaseSource: String, CaseIterable, Sendable {
         case .balance: return "Баланс закончился"
         case .referral: return "Приглашения"
         case .model: return "Выбор модели"
+        case .mode: return "Режим со звёздочкой"
+        case .tuning: return "Тонкая настройка"
         }
     }
 

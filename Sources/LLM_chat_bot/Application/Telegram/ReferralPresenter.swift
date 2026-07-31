@@ -14,7 +14,7 @@ enum ReferralPresenter {
 
     static let inviteButton = InlineKeyboardButton(
         text: "🎁 Пригласить ещё",
-        callback_data: BotCallbackAction.menu(action: "nav:ref").rawData
+        callback_data: BotCallbackAction.menu(action: MenuRoute.navigation(to: .referral)).rawData
     )
 
     static func paymentBonusMarkup() -> InlineKeyboardMarkup {

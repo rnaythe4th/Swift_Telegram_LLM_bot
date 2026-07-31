@@ -95,6 +95,7 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         configs.dailyPremiumLimit = try await fetchConfig(.dailyPremiumLimit, as: Int.self)
         configs.dailyPremiumUsage = try await fetchConfig(.dailyPremiumUsage, as: [String: DailyPremiumUsage].self)
         configs.selfPromo = try await fetchConfig(.selfPromo, as: SelfPromoConfig.self)
+        configs.modes = try await fetchConfig(.modes, as: ModePresetConfig.self)
         configs.reminders = try await fetchConfig(.reminders, as: SubscriptionReminderConfig.self)
         configs.onboarding = try await fetchConfig(.onboarding, as: OnboardingConfig.self)
         configs.referrals = try await fetchConfig(.referrals, as: ReferralConfig.self)
@@ -247,6 +248,8 @@ final class SupabaseStatePersistence: StatePersistencePort, @unchecked Sendable 
         case .dailyPremiumUsage(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .selfPromo(let value):
+            body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
+        case .modes(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])
         case .reminders(let value):
             body = AnyEncodable([ConfigDBRow(key: config.key.rawValue, data: Envelope(value: value))])

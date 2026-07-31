@@ -13,22 +13,6 @@ extension ChatContextStore {
         dirtyConfigs.insert(.starsPrice)
     }
 
-    func setPendingStarsPriceInput(menuMessageID: Int, chatKey: ChatKey) {
-        _pendingStarsPriceInputs[chatKey] = menuMessageID
-    }
-
-    func consumePendingStarsPriceInput(chatKey: ChatKey) -> Int? {
-        _pendingStarsPriceInputs.removeValue(forKey: chatKey)
-    }
-
-    func hasPendingStarsPriceInput(chatKey: ChatKey) -> Bool {
-        _pendingStarsPriceInputs[chatKey] != nil
-    }
-
-    func clearPendingStarsPriceInput(chatKey: ChatKey) {
-        _pendingStarsPriceInputs.removeValue(forKey: chatKey)
-    }
-
     // MARK: - Stars-per-USD rate (credit packs)
 
     func starsPerUsd() -> Int { _starsPerUsd }
@@ -46,22 +30,6 @@ extension ChatContextStore {
     /// Stars to charge for a credit pack worth `cents` USD.
     func starsForCents(_ cents: Int) -> Int {
         max(1, Int((Double(cents) / 100.0 * Double(_starsPerUsd)).rounded()))
-    }
-
-    func setPendingStarsPerUsdInput(menuMessageID: Int, chatKey: ChatKey) {
-        _pendingStarsPerUsdInputs[chatKey] = menuMessageID
-    }
-
-    func consumePendingStarsPerUsdInput(chatKey: ChatKey) -> Int? {
-        _pendingStarsPerUsdInputs.removeValue(forKey: chatKey)
-    }
-
-    func hasPendingStarsPerUsdInput(chatKey: ChatKey) -> Bool {
-        _pendingStarsPerUsdInputs[chatKey] != nil
-    }
-
-    func clearPendingStarsPerUsdInput(chatKey: ChatKey) {
-        _pendingStarsPerUsdInputs.removeValue(forKey: chatKey)
     }
 
     // MARK: - Card payment config
@@ -211,38 +179,6 @@ extension ChatContextStore {
         guard _explorerCursors.contains(where: { !keys.contains($0.key) }) else { return }
         _explorerCursors = _explorerCursors.filter { keys.contains($0.key) }
         dirtyConfigs.insert(.crypto)
-    }
-
-    func setPendingCryptoPriceInput(menuMessageID: Int, chatKey: ChatKey) {
-        _pendingCryptoPriceInputs[chatKey] = menuMessageID
-    }
-
-    func consumePendingCryptoPriceInput(chatKey: ChatKey) -> Int? {
-        _pendingCryptoPriceInputs.removeValue(forKey: chatKey)
-    }
-
-    func hasPendingCryptoPriceInput(chatKey: ChatKey) -> Bool {
-        _pendingCryptoPriceInputs[chatKey] != nil
-    }
-
-    func clearPendingCryptoPriceInput(chatKey: ChatKey) {
-        _pendingCryptoPriceInputs.removeValue(forKey: chatKey)
-    }
-
-    func setPendingCryptoAddressInput(menuMessageID: Int, chain: CryptoChain, chatKey: ChatKey) {
-        _pendingCryptoAddressInputs[chatKey] = (menuMessageID, chain)
-    }
-
-    func consumePendingCryptoAddressInput(chatKey: ChatKey) -> (menuMessageID: Int, chain: CryptoChain)? {
-        _pendingCryptoAddressInputs.removeValue(forKey: chatKey)
-    }
-
-    func hasPendingCryptoAddressInput(chatKey: ChatKey) -> Bool {
-        _pendingCryptoAddressInputs[chatKey] != nil
-    }
-
-    func clearPendingCryptoAddressInput(chatKey: ChatKey) {
-        _pendingCryptoAddressInputs.removeValue(forKey: chatKey)
     }
 
     func cryptoMatchMode() -> CryptoMatchMode { _cryptoMatchMode }

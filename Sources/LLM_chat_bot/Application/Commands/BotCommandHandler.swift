@@ -92,7 +92,7 @@ final class BotCommandHandler: @unchecked Sendable {
 
     func requireAdmin(_ user: TelegramUser?, chatKey: ChatKey) async throws -> Bool {
         guard await isAdmin(user, chatID: chatKey.chatID) else {
-            try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для администратора.")
+            try await sendUserFeedback(chatKey: chatKey, text: Texts.adminOnlyCommand)
             return false
         }
         return true

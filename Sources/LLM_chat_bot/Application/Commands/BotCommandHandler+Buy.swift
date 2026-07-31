@@ -91,20 +91,20 @@ extension BotCommandHandler {
         if let starsAmount = pricing.stars, starsAmount > 0 {
             rows.append([InlineKeyboardButton(
                 text: "💫 Stars · \(starsAmount) ⭐\(discountNote)",
-                callback_data: BotCallbackAction.menu(action: "buy:stars").rawData
+                callback_data: BotCallbackAction.menu(action: MenuRoute.link(.buy, "stars")).rawData
             )])
         }
         if cryptoAvailable, let cents = pricing.cryptoCents {
             let label = String(format: "🪙 Криптовалюта · $%.2f", Double(cents) / 100.0)
             rows.append([InlineKeyboardButton(
                 text: label,
-                callback_data: BotCallbackAction.menu(action: "buy:crypto").rawData
+                callback_data: BotCallbackAction.menu(action: MenuRoute.link(.buy, "crypto")).rawData
             )])
         }
         if cardAvailable, let minorUnits = pricing.cardMinorUnits {
             rows.append([InlineKeyboardButton(
                 text: "💳 Картой · \(card.currency.format(minorUnits: minorUnits))",
-                callback_data: BotCallbackAction.menu(action: "buy:card").rawData
+                callback_data: BotCallbackAction.menu(action: MenuRoute.link(.buy, "card")).rawData
             )])
         }
         // Lower entry point right next to the monthly price: a top-up is the
@@ -114,7 +114,7 @@ extension BotCommandHandler {
             rows.append(CreditPack.centsOptions.map {
                 InlineKeyboardButton(
                     text: "💰 \(CreditPack.label(cents: $0))",
-                    callback_data: BotCallbackAction.menu(action: "buy:credits:\($0)").rawData
+                    callback_data: BotCallbackAction.menu(action: MenuRoute.link(.buy, "credits", "\($0)")).rawData
                 )
             })
             creditsNote = "\n\n💰 <b>Не готовы на месяц?</b> Пополните баланс — с него списывается стоимость каждого ответа, обычно доли цента. Подписка при этом не нужна."

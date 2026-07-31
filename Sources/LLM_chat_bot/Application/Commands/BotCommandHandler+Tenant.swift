@@ -22,7 +22,7 @@ extension BotCommandHandler {
             "extend", "unlimited", "expire", "markup"
         ]
         if superOnlySubs.contains(subcommand.lowercased()), !invokerIsSuper {
-            try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+            try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
             return
         }
 
@@ -100,7 +100,7 @@ extension BotCommandHandler {
         switch sub {
         case "add":
             guard invokerIsSuper else {
-                try await sendUserFeedback(chatKey: chatKey, text: "🔒 Команда только для суперадминистратора.")
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
                 return
             }
             let username = normalizeUsername(arg1)

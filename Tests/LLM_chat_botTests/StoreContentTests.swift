@@ -134,9 +134,11 @@ final class StoreFreeModelTests: XCTestCase {
         let store = Fixtures.makeStore()
         let effective = await store.effectiveFreeModelIDs()
         XCTAssertNil(effective, "no pins and no catalogue yet")
-        // `isFreeModel` answers optimistically only because the gate above it
-        // treats a nil set as "charge for it".
-        let firstFree = await store.firstFreeModel()
+        // Nil is the signal every gate reads as "assume paid"; the default
+        // modes add nothing here because the free one runs on "any free model".
+        let allowed = await store.allowedFreeModelIDs()
+        XCTAssertNil(allowed)
+        let firstFree = await store.fallbackFreeModel()
         XCTAssertNil(firstFree)
     }
 
@@ -147,10 +149,9 @@ final class StoreFreeModelTests: XCTestCase {
 
         let effective = await store.effectiveFreeModelIDs()
         XCTAssertEqual(effective, ["pinned/one", "vendor/free"])
-        let isFree = await store.isFreeModel("vendor/free")
-        XCTAssertTrue(isFree)
-        let isPaid = await store.isFreeModel("vendor/paid")
-        XCTAssertFalse(isPaid)
+        let allowed = await store.allowedFreeModelIDs()
+        XCTAssertEqual(allowed?.contains("vendor/free"), true)
+        XCTAssertEqual(allowed?.contains("vendor/paid"), false)
     }
 
     /// `Set.first` is arbitrary: the fallback model must not change between
@@ -158,11 +159,11 @@ final class StoreFreeModelTests: XCTestCase {
     func testFallbackModelIsDeterministic() async {
         let store = Fixtures.makeStore()
         await store.updateOpenRouterFreeModelIDs(["z/model", "a/model", "m/model"])
-        let first = await store.firstFreeModel()
+        let first = await store.fallbackFreeModel()
         XCTAssertEqual(first, "a/model")
 
         await store.setFreeModelIDs(["chosen/backup"])
-        let pinned = await store.firstFreeModel()
+        let pinned = await store.fallbackFreeModel()
         XCTAssertEqual(pinned, "chosen/backup", "a super-admin pin wins over the catalogue")
     }
 

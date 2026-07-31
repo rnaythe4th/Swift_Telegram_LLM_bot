@@ -91,6 +91,9 @@ struct ChatContextSnapshot: Codable, Sendable {
     // Paid model parked by the daily-cap fallback, restored once the chat has
     // full access again; absent when nothing was downgraded.
     var downgradedFrom: String?
+    // Reference mode the chat currently sits on; absent when its settings were
+    // hand-edited or the chat predates modes.
+    var activeMode: String?
 }
 
 struct BotStateSnapshot: Codable, Sendable {

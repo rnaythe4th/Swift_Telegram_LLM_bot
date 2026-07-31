@@ -5,116 +5,101 @@ import Foundation
 extension BotMenuHandler {
     /// Preset management (заготовки) for the four categories.
     func processPresetAction(
-        command: String,
-        parts: [String],
+        route: MenuRoute,
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        switch command {
-        case "pm":
-            guard parts.count >= 2, let category = PresetCategory(rawValue: parts[1]) else { return }
-            await state.clearPendingInput(chatKey: chatKey)
-            let canManageGlobal = await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID)
+        guard route.command == .pm else { return }
+        guard let category = PresetCategory(rawValue: route.sub) else { return }
+        await state.clearPending(chatKey: chatKey)
+        let canManageGlobal = await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID)
 
-            if parts.count == 2 {
-                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
+        guard let subAction = route.arg(2) else {
+            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
+            return
+        }
+
+        switch subAction {
+        // Per-chat actions (anyone)
+        case "add":
+            let pending = PresetInput(category: category, scope: .chat, kind: .add)
+            await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil))
+        case "edit":
+            guard let index = route.int(3) else { return }
+            let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
+            guard index >= 0, index < chatPresets.count else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
+            let pending = PresetInput(category: category, scope: .chat, kind: .edit(index: index))
+            await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .edit(index: index), preset: chatPresets[index]))
+        case "del":
+            guard let index = route.int(3) else { return }
+            let removed = await state.removeChatPresetByIndex(category: category, chatKey: chatKey, index: index)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : Texts.presetNotFound)
+            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
 
-            switch parts[2] {
-            // Per-chat actions (anyone)
-            case "add":
-                let pending = PendingInput(category: category, scope: .chat, kind: .add, menuMessageID: message.message_id)
-                await state.setPendingInput(pending, chatKey: chatKey)
-                let (text, markup) = renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil)
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
-            case "edit":
-                guard parts.count >= 4, let index = Int(parts[3]) else { return }
-                let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
-                guard index >= 0, index < chatPresets.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
-                    return
-                }
-                let pending = PendingInput(category: category, scope: .chat, kind: .edit(index: index), menuMessageID: message.message_id)
-                await state.setPendingInput(pending, chatKey: chatKey)
-                let (text, markup) = renderAwaitingInput(category: category, scope: .chat, kind: .edit(index: index), preset: chatPresets[index])
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
-            case "del":
-                guard parts.count >= 4, let index = Int(parts[3]) else { return }
-                let removed = await state.removeChatPresetByIndex(category: category, chatKey: chatKey, index: index)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : "Заготовка не найдена")
-                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
-
-            // Scope picker shown to admins when clicking "Add preset"
-            case "scopesel":
-                guard canManageGlobal else {
-                    let pending = PendingInput(category: category, scope: .chat, kind: .add, menuMessageID: message.message_id)
-                    await state.setPendingInput(pending, chatKey: chatKey)
-                    let (text, markup) = renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil)
-                    try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
-                    return
-                }
-                let scopeText = "<b>➕ Добавить заготовку · \(category.displayName)</b>\n\nКуда добавить?"
-                let scopeMarkup = InlineKeyboardMarkup(inline_keyboard: [
-                    [menuButton("🌐 Глобальный (для всех чатов)", action: "pm:\(category.rawValue):gadd")],
-                    [menuButton("💬 Только этот чат", action: "pm:\(category.rawValue):add")],
-                    [menuButton("❌ Отмена", action: "pm:\(category.rawValue)")],
-                ])
-                try await editOrAnswer(callback: callback, message: message, text: scopeText, markup: scopeMarkup)
-                return
-
-            // Global actions (admin+)
-            case "gadd":
-                guard canManageGlobal else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
-                    return
-                }
-                let pending = PendingInput(category: category, scope: .global, kind: .add, menuMessageID: message.message_id)
-                await state.setPendingInput(pending, chatKey: chatKey)
-                let (text, markup) = renderAwaitingInput(category: category, scope: .global, kind: .add, preset: nil)
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
-            case "gedit":
-                guard canManageGlobal else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
-                    return
-                }
-                guard parts.count >= 4, let index = Int(parts[3]) else { return }
-                let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
-                guard index >= 0, index < globalPresets.count else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Заготовка не найдена")
-                    return
-                }
-                let pending = PendingInput(category: category, scope: .global, kind: .edit(index: index), menuMessageID: message.message_id)
-                await state.setPendingInput(pending, chatKey: chatKey)
-                let (text, markup) = renderAwaitingInput(category: category, scope: .global, kind: .edit(index: index), preset: globalPresets[index])
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
-            case "gdel":
-                guard canManageGlobal else {
-                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Только администратор")
-                    return
-                }
-                guard parts.count >= 4, let index = Int(parts[3]) else { return }
-                let removed = await state.removePresetByIndex(category: category, index: index, chatID: chatKey.chatID)
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : "Заготовка не найдена")
-                let (text, markup) = await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal)
-                try await editOrAnswer(callback: callback, message: message, text: text, markup: markup)
-
-            default:
+        // Scope picker shown to admins when clicking "Add preset"
+        case "scopesel":
+            guard canManageGlobal else {
+                let pending = PresetInput(category: category, scope: .chat, kind: .add)
+                await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
+                try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil))
                 return
             }
+            let scopeText = "<b>➕ Добавить заготовку · \(category.displayName)</b>\n\nКуда добавить?"
+            let scopeMarkup: Keyboard = [
+                [menuButton("🌐 Глобальный (для всех чатов)", .pm, "\(category.rawValue)", "gadd")],
+                [menuButton("💬 Только этот чат", .pm, "\(category.rawValue)", "add")],
+                [menuButton(Texts.cancel, .pm, "\(category.rawValue)")],
+            ]
+            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(scopeText, scopeMarkup))
             return
 
+        // Global actions (admin+)
+        case "gadd":
+            guard canManageGlobal else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
+                return
+            }
+            let pending = PresetInput(category: category, scope: .global, kind: .add)
+            await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .global, kind: .add, preset: nil))
+        case "gedit":
+            guard canManageGlobal else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
+                return
+            }
+            guard let index = route.int(3) else { return }
+            let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
+            guard index >= 0, index < globalPresets.count else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
+                return
+            }
+            let pending = PresetInput(category: category, scope: .global, kind: .edit(index: index))
+            await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .global, kind: .edit(index: index), preset: globalPresets[index]))
+        case "gdel":
+            guard canManageGlobal else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
+                return
+            }
+            guard let index = route.int(3) else { return }
+            let removed = await state.removePresetByIndex(category: category, index: index, chatID: chatKey.chatID)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : Texts.presetNotFound)
+            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
+
         default:
-            break
+            return
         }
     }
 
     // MARK: - Preset management renderers
 
-    func renderPresetManagement(category: PresetCategory, chatKey: ChatKey, canManageGlobal: Bool) async -> (String, InlineKeyboardMarkup) {
+    func renderPresetManagement(category: PresetCategory, chatKey: ChatKey, canManageGlobal: Bool) async -> MenuScreen {
         let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
         let modelPrices = category == .model ? await state.openRouterModelPrices() : [:]
@@ -164,36 +149,38 @@ extension BotMenuHandler {
             }
         }
 
-        var rows: [[InlineKeyboardButton]] = []
+        var rows: Keyboard = []
 
         if canManageGlobal {
             for (i, preset) in globalPresets.enumerated() {
-                rows.append([
-                    menuButton("🌐 ✏️ \(preset.display)", action: "pm:\(category.rawValue):gedit:\(i)"),
-                    menuButton("❌", action: "pm:\(category.rawValue):gdel:\(i)"),
+                rows.row([
+                    menuButton("🌐 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "gedit", "\(i)"),
+                    menuButton("❌", .pm, "\(category.rawValue)", "gdel", "\(i)"),
                 ])
             }
         }
 
         for (i, preset) in chatPresets.enumerated() {
-            rows.append([
-                menuButton("💬 ✏️ \(preset.display)", action: "pm:\(category.rawValue):edit:\(i)"),
-                menuButton("❌", action: "pm:\(category.rawValue):del:\(i)"),
+            rows.row([
+                menuButton("💬 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "edit", "\(i)"),
+                menuButton("❌", .pm, "\(category.rawValue)", "del", "\(i)"),
             ])
         }
 
-        let addAction = canManageGlobal ? "pm:\(category.rawValue):scopesel" : "pm:\(category.rawValue):add"
-        rows.append([menuButton("➕ Добавить заготовку", action: addAction)])
+        rows.row([menuButton(
+            "➕ Добавить заготовку",
+            .pm, category.rawValue, canManageGlobal ? "scopesel" : "add"
+        )])
 
-        rows.append([
-            menuButton("← К выбору", action: "nav:\(category.rawValue)"),
-            menuButton("✕ Закрыть", action: "close"),
+        rows.row([
+            backButton(to: MenuPage(category: category)),
+            menuButton(Texts.close, command: .close),
         ])
 
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 
-    private func renderAwaitingInput(category: PresetCategory, scope: PendingInput.Scope, kind: PendingInput.Kind, preset: Preset?) -> (String, InlineKeyboardMarkup) {
+    private func renderAwaitingInput(category: PresetCategory, scope: PresetInput.Scope, kind: PresetInput.Kind, preset: Preset?) -> MenuScreen {
         let scopeLabel = scope == .global ? "🌐 Общая" : "💬 Только этот чат"
         let text: String
         let formatLine = category == .model
@@ -222,9 +209,9 @@ extension BotMenuHandler {
             """
         }
 
-        let rows: [[InlineKeyboardButton]] = [
-            [menuButton("❌ Отмена", action: "pm:\(category.rawValue)")],
+        let rows: Keyboard = [
+            [menuButton(Texts.cancel, .pm, "\(category.rawValue)")],
         ]
-        return (text, InlineKeyboardMarkup(inline_keyboard: rows))
+        return MenuScreen(text, rows)
     }
 }

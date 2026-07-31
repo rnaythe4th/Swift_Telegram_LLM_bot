@@ -1,0 +1,227 @@
+import XCTest
+@testable import LLM_chat_bot
+
+/// Renders every page of the inline menu and checks the keyboards it produces.
+///
+/// This is the net under the callback refactor: a button carries a string, and
+/// until somebody taps it nothing checks that the string means anything. Here
+/// every button on every page is parsed back with the dispatcher's own rules,
+/// so a dead button fails the build instead of a user's tap.
+final class MenuPageRenderTests: XCTestCase {
+
+    private var telegram: FakeTelegram!
+    private var store: ChatContextStore!
+    private var menu: BotMenuHandler!
+
+    private let ownerID = 7_000
+    private let plainID = 7_100
+
+    override func setUp() async throws {
+        telegram = FakeTelegram()
+        let baseURL = try await telegram.start()
+        store = Fixtures.makeStore(ownerUsername: "owner", ownerUserID: ownerID, model: "paid/model")
+        menu = BotMenuHandler(
+            telegram: TelegramHTTPGateway(
+                network: NetworkClient(),
+                botToken: "test-token",
+                apiBase: baseURL,
+                rateLimiter: nil,
+                metrics: nil
+            ),
+            state: store,
+            gateways: ProviderGatewayRegistry(providers: [.openrouter: FakeProviderGateway(reply: "ok")]),
+            logger: SilentLogger(),
+            formatOptions: "",
+            botUsername: "testbot"
+        )
+    }
+
+    override func tearDown() async throws {
+        await telegram.stop()
+        telegram = nil
+        menu = nil
+        store = nil
+    }
+
+    /// Callback data as the dispatcher sees it: `menu:<action>`. Anything else
+    /// (a URL button, the stop button) is not this test's business.
+    private func menuActions(_ markup: InlineKeyboardMarkup) -> [String] {
+        markup.inline_keyboard
+            .flatMap { $0 }
+            .compactMap(\.callback_data)
+            .compactMap { data in
+                guard case .menu(let action)? = BotCallbackAction(rawData: data) else { return nil }
+                return action
+            }
+    }
+
+    /// Every page, in a DM and in a group, for the owner and for a stranger.
+    private func everyRendering() -> [(page: MenuPage, chat: ChatKey, user: String)] {
+        var cases: [(MenuPage, ChatKey, String)] = []
+        for page in MenuPage.allCases {
+            for chat in [ChatKey(chatID: plainID, threadID: 0), ChatKey(chatID: -7_200, threadID: 0)] {
+                for user in [UserKey.forUserID(ownerID), UserKey.forUserID(plainID)] {
+                    cases.append((page, chat, user))
+                }
+            }
+        }
+        return cases
+    }
+
+    // MARK: - Tests
+
+    /// No button may carry a callback the dispatcher cannot route. This is the
+    /// failure the old `[String]` handling could not catch: a mistyped literal
+    /// rendered fine and did nothing at all when tapped.
+    func testEveryButtonOnEveryPageRoutesToAKnownCommand() async {
+        for (page, chat, user) in everyRendering() {
+            let markup = await menu.renderPage(page, chatKey: chat, username: user).markup
+            for action in menuActions(markup) {
+                XCTAssertNotNil(
+                    MenuRoute(action: action),
+                    "\(page) (chat \(chat.chatID), user \(user)) has a dead button: \(action)"
+                )
+            }
+        }
+    }
+
+    /// A navigation button must point at a page that exists.
+    func testEveryNavigationButtonPointsAtARealPage() async {
+        for (page, chat, user) in everyRendering() {
+            let markup = await menu.renderPage(page, chatKey: chat, username: user).markup
+            for action in menuActions(markup) {
+                guard let route = MenuRoute(action: action), route.command == .nav else { continue }
+                XCTAssertNotNil(
+                    route.page(1),
+                    "\(page) links to a page that does not exist: \(action)"
+                )
+            }
+        }
+    }
+
+    /// Every page must render something. An empty body is a 400 from Telegram,
+    /// which reaches the user as a menu that stopped working.
+    func testEveryPageRendersText() async {
+        for (page, chat, user) in everyRendering() {
+            let text = await menu.renderPage(page, chatKey: chat, username: user).text
+            XCTAssertFalse(
+                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                "\(page) rendered an empty body (chat \(chat.chatID))"
+            )
+        }
+    }
+
+    /// One message has a hard limit, and a page cannot be split across two
+    /// (CLAUDE.md §13). Anything past the cap is silently cut off — half a page
+    /// of super-admin settings that simply is not there.
+    func testEveryPageFitsInOneMessage() async {
+        for (page, chat, user) in everyRendering() {
+            let screen = await menu.renderPage(page, chatKey: chat, username: user)
+            XCTAssertTrue(
+                screen.fitsInOneMessage,
+                "\(page) is \(screen.text.count) chars and would be cut off"
+            )
+        }
+    }
+
+    /// A "← …" button must name the page it actually opens. The label used to
+    /// be typed next to the destination at every call site, so the two could
+    /// drift apart — and had: the same page was reached by "← К моему
+    /// премиуму" from seven buttons and "← Назад" from three more.
+    func testBackButtonsNameTheirDestination() async {
+        for (page, chat, user) in everyRendering() {
+            let markup = await menu.renderPage(page, chatKey: chat, username: user).markup
+            for button in markup.inline_keyboard.flatMap({ $0 }) where button.text.hasPrefix("←") {
+                guard let data = button.callback_data,
+                      case .menu(let action)? = BotCallbackAction(rawData: data),
+                      let route = MenuRoute(action: action),
+                      route.command == .nav,
+                      let destination = route.page(1)
+                else { continue }
+                XCTAssertEqual(
+                    button.text,
+                    destination.backLabel,
+                    "\(page): button \"\(button.text)\" leads to \(destination), which is called \"\(destination.backLabel)\""
+                )
+            }
+        }
+    }
+
+    /// A personal page never draws its contents into a group: the menu is one
+    /// shared message, so whatever it renders, everyone reads.
+    func testPersonalPagesRefuseToRenderInAGroup() async {
+        let group = ChatKey(chatID: -7_300, threadID: 0)
+        await store.creditBalance(username: UserKey.forUserID(ownerID), amountUsd: 12.34)
+
+        for page in MenuPage.allCases where page.isPersonal {
+            let text = await menu.renderPage(page, chatKey: group, username: UserKey.forUserID(ownerID)).text
+            XCTAssertEqual(text, page.privateOnlyNotice, "\(page) rendered its contents into a group")
+            XCTAssertFalse(text.contains("12.34"), "\(page) leaked a wallet into a group")
+        }
+    }
+
+    /// Hand-tuning is what premium unlocks. A free chat gets the offer instead
+    /// of the controls — on the page itself, not only behind the nav gate,
+    /// because a menu redrawn after a typed value never passes that gate.
+    func testRestrictedPagesRefuseAFreeChat() async {
+        let chat = ChatKey(chatID: plainID, threadID: 0)
+        let stranger = UserKey.forUserID(plainID)
+
+        for page in MenuPage.allCases where page.requiresFullAccess {
+            let screen = await menu.renderPage(page, chatKey: chat, username: stranger)
+            XCTAssertEqual(screen.text, page.restrictedNotice, "\(page) rendered its controls for a free chat")
+        }
+
+        // A wallet is enough — the line is "pays for something", not "has a
+        // subscription" (CLAUDE.md §6, `hasFullModelAccess`).
+        await store.creditBalance(username: stranger, amountUsd: 1.0)
+        for page in MenuPage.allCases where page.requiresFullAccess {
+            let screen = await menu.renderPage(page, chatKey: chat, username: stranger)
+            XCTAssertNotEqual(screen.text, page.restrictedNotice, "\(page) still refused a paying chat")
+        }
+    }
+
+    /// Memory length re-sends every remembered message on every turn, so it is
+    /// the owner's lever. The page stays readable; the controls do not.
+    func testMemoryLengthControlsAreOwnerOnly() async {
+        let chat = ChatKey(chatID: plainID, threadID: 0)
+
+        let strangerActions = await menuActions(
+            menu.renderPage(.history, chatKey: chat, username: UserKey.forUserID(plainID)).markup
+        )
+        XCTAssertFalse(
+            strangerActions.contains { $0.hasPrefix("history:length") || $0 == "history:custom" },
+            "a regular user could change how much the bot remembers"
+        )
+
+        let ownerActions = await menuActions(
+            menu.renderPage(.history, chatKey: chat, username: UserKey.forUserID(ownerID)).markup
+        )
+        XCTAssertTrue(
+            ownerActions.contains { $0 == "history:custom" },
+            "the owner lost the control they are the only one allowed to use"
+        )
+    }
+
+    /// The settings page leads with modes, and a ⭐ one stays visible to a free
+    /// chat: a ceiling nobody can see is a ceiling nobody pays to lift.
+    func testSettingsPageOffersModesAndMarksLockedOnes() async {
+        let chat = ChatKey(chatID: plainID, threadID: 0)
+        let screen = await menu.renderPage(.main, chatKey: chat, username: UserKey.forUserID(plainID))
+
+        let picks = menuActions(screen.markup).filter { $0.hasPrefix("mode:pick:") }
+        XCTAssertFalse(picks.isEmpty, "the settings page offers no modes at all")
+
+        let labels = screen.markup.inline_keyboard.flatMap { $0 }.map(\.text)
+        XCTAssertTrue(labels.contains { $0.hasSuffix("⭐") }, "no locked mode is advertised to a free chat")
+    }
+
+    /// The purchase page in a group is a price list, not somebody's account.
+    func testGroupPurchasePageCarriesNoPersonalNumbers() async {
+        await store.creditBalance(username: UserKey.forUserID(ownerID), amountUsd: 9.87)
+        let group = ChatKey(chatID: -7_400, threadID: 0)
+
+        let text = await menu.renderPage(.pay, chatKey: group, username: UserKey.forUserID(ownerID)).text
+        XCTAssertFalse(text.contains("9.87"), "the shared purchase page showed a member's balance")
+    }
+}
