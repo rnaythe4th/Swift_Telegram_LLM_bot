@@ -267,6 +267,8 @@ extension ChatContextStore {
             return StoredConfig(Config.card, _cardConfig)
         case .superAdmins:
             return StoredConfig(Config.superAdmins, Array(superAdminKeys.subtracting([rootSuperAdminKey, configuredOwnerKey])).sorted())
+        case .rootOwner:
+            return StoredConfig(Config.rootOwner, userDirectoryValue.rootKey)
         case .pollingOffset:
             return StoredConfig(Config.pollingOffset, pollingOffsetValue ?? 0)
         case .ads:
@@ -338,6 +340,12 @@ extension ChatContextStore {
         for row in state.users {
             userDirectoryValue.restore(row.identity)
         }
+        // The owner pin is part of the directory but lives in its own row: the
+        // identities are a table, and this is the one field of the directory
+        // that is not per-person. Restored here, before anything resolves
+        // `rootSuperAdminKey` — `ensureDefaultOwnerTenant` and the super-admin
+        // set below both do.
+        userDirectoryValue.rootKey = state.configs[Config.rootOwner]
 
         contexts.removeAll()
         for row in state.contexts {

@@ -290,12 +290,27 @@ struct UserDirectory: Codable, Sendable {
     /// granularity costs them nothing.
     static let seenAtPersistInterval: TimeInterval = 15 * 60
 
-    /// Records a sighting. Returns the username this person used to hold when
-    /// it differs from the new one — the caller re-files anything still stored
-    /// under the old label — and whether `seenAt` moved far enough to be worth
-    /// writing out.
+    /// What one sighting changed, and therefore what the caller has to write
+    /// out. A named type rather than a tuple because every field drives a
+    /// different action and they are not interchangeable — an unlabelled fourth
+    /// member is where the next one gets quietly dropped.
+    struct Sighting: Sendable, Equatable {
+        /// A first sighting or a rename: this person's row has to be written.
+        var changed: Bool
+        /// The handle this person held before, when it differs from the new
+        /// one. The caller re-files anything still stored under the old label.
+        var previousUsername: String?
+        /// `seenAt` moved past the persist throttle, so the row is worth
+        /// rewriting for that alone.
+        var seenAtAdvanced: Bool
+        /// Whoever just lost this @username to the person seen. Their stored
+        /// row changed as well, and no other code path will notice.
+        var displacedUserID: UserID?
+    }
+
+    /// Records a sighting.
     @discardableResult
-    mutating func record(userID: UserID, username: String?, firstName: String?, now: Date = Date()) -> (changed: Bool, previousUsername: String?, seenAtAdvanced: Bool) {
+    mutating func record(userID: UserID, username: String?, firstName: String?, now: Date = Date()) -> Sighting {
         let normalized = UserKey.normalizedHandle(username)
         var identity = identities[userID]
             ?? UserIdentity(userID: userID, username: nil, firstName: nil, seenAt: now, firstSeenAt: now)
@@ -313,16 +328,23 @@ struct UserDirectory: Codable, Sendable {
         if previous != normalized {
             if let previous, byUsername[previous] == userID { byUsername.removeValue(forKey: previous) }
         }
+        var displaced: UserID?
         if let normalized {
             // Telegram usernames are unique at any instant, so a live sighting
             // proves whoever else held this label has let it go: drop their
             // claim to it, or lists would show two people as `@name`.
             if let formerHolder = byUsername[normalized], formerHolder != userID {
                 identities[formerHolder]?.username = nil
+                displaced = formerHolder
             }
             byUsername[normalized] = userID
         }
-        return (isNew || previous != normalized, previous, seenAtAdvanced)
+        return Sighting(
+            changed: isNew || previous != normalized,
+            previousUsername: previous,
+            seenAtAdvanced: seenAtAdvanced,
+            displacedUserID: displaced
+        )
     }
 
     /// Label for a stored key, for the interface. Identified people are shown

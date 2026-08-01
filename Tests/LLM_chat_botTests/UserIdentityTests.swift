@@ -121,9 +121,20 @@ final class UserDirectoryTests: XCTestCase {
     func testHandleTakenOverByAnotherPersonPointsAtTheNewOne() {
         var directory = UserDirectory.empty
         directory.record(userID: 7, username: "alice", firstName: nil)
-        directory.record(userID: 8, username: "alice", firstName: nil)
+        let takeover = directory.record(userID: 8, username: "alice", firstName: nil)
         XCTAssertEqual(directory.userID(forUsername: "alice"), 8)
         XCTAssertNil(directory.identity(userID: 7)?.username)
+        // The loser's row changed too, and the caller is the only one who can
+        // write it out — unreported, it comes back holding the handle.
+        XCTAssertEqual(takeover.displacedUserID, 7)
+    }
+
+    /// An ordinary sighting displaces nobody.
+    func testNoDisplacementWithoutATakeover() {
+        var directory = UserDirectory.empty
+        XCTAssertNil(directory.record(userID: 7, username: "alice", firstName: nil).displacedUserID)
+        XCTAssertNil(directory.record(userID: 7, username: "alice", firstName: nil).displacedUserID)
+        XCTAssertNil(directory.record(userID: 7, username: "alice2", firstName: nil).displacedUserID)
     }
 
     /// The directory is one JSON row; writing it on every message is not an

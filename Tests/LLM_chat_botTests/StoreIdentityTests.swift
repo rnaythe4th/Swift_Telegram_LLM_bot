@@ -110,6 +110,95 @@ final class StoreIdentityTests: XCTestCase {
         let unknown = await store.displayLabel(forKey: UserKey.identified(9_999))
         XCTAssertEqual(unknown, "id 9999")
     }
+
+    /// Losing a handle to somebody else rewrites two rows, and the loser's is
+    /// the one nothing else touches: unless it is written out, storage keeps
+    /// naming them by a handle that now belongs to the other person.
+    func testHandleTakeoverPersistsBothPeople() async {
+        let store = Fixtures.makeStore()
+        await store.identifyUser(userID: 708, username: "handle", firstName: nil)
+        _ = await store.drainDirtyBatch()
+
+        await store.identifyUser(userID: 709, username: "handle", firstName: nil)
+
+        let batch = await store.drainDirtyBatch()
+        let written = Set(batch.users.map(\.identity.userID))
+        XCTAssertTrue(written.contains(709), "the new holder")
+        XCTAssertTrue(written.contains(708), "the person who lost the handle")
+        XCTAssertNil(
+            batch.users.first { $0.identity.userID == 708 }?.identity.username,
+            "the freed handle must not be stored against them any more"
+        )
+    }
+}
+
+/// Root is an account, not a handle — and that has to survive a restart, or the
+/// pin is recomputed from the configured @username every boot and whoever picks
+/// that handle up next is seeded as super-admin (§6).
+final class StoreRootOwnerTests: XCTestCase {
+
+    /// Bots configured without `OWNER_USER_ID` are the whole point of the pin.
+    private func makeUnpinnedStore() -> ChatContextStore {
+        Fixtures.makeStore(ownerUserID: nil)
+    }
+
+    func testOwnerPinIsWrittenOutAndReadBack() async throws {
+        let store = makeUnpinnedStore()
+        await store.identifyUser(userID: 720, username: Fixtures.ownerHandle, firstName: nil)
+
+        let batch = await store.drainDirtyBatch()
+        let row = try XCTUnwrap(
+            batch.configs.first { $0.name == .rootOwner },
+            "pinning the owner must mark its row dirty"
+        )
+        // Through the real encode/decode path, not a direct field read: a row
+        // that is written but never loaded reverts on every restart.
+        let documents = ConfigDocuments(
+            rows: [.rootOwner: try JSONEncoder().encode(row)],
+            keys: Config.all,
+            onError: { name, error in XCTFail("\(name.rawValue): \(error)") }
+        )
+        XCTAssertEqual(documents[Config.rootOwner], UserKey.identified(720))
+    }
+
+    func testRestoredPinKeepsRootAfterTheHandleChangesHands() async {
+        let store = makeUnpinnedStore()
+        await store.identifyUser(userID: 721, username: Fixtures.ownerHandle, firstName: nil)
+        let batch = await store.drainDirtyBatch()
+
+        // A restart: a fresh process, the same rows.
+        let restarted = makeUnpinnedStore()
+        var stored = PersistedBotState()
+        stored.users = [UserRow(identity: UserIdentity(
+            userID: 721, username: Fixtures.ownerHandle, firstName: nil, seenAt: Date(), firstSeenAt: Date()
+        ))]
+        var configs = ConfigDocuments()
+        configs.set(Config.rootOwner, UserKey.identified(721))
+        stored.configs = configs
+        await restarted.restore(from: stored)
+        XCTAssertTrue(batch.configs.contains { $0.name == .rootOwner })
+
+        // The owner releases the handle and somebody else takes it.
+        await restarted.identifyUser(userID: 999, username: Fixtures.ownerHandle, firstName: "Impostor")
+
+        let impostorIsRoot = await restarted.isRootSuperAdmin(UserKey.identified(999))
+        XCTAssertFalse(impostorIsRoot, "a rented handle must not carry root")
+        let ownerIsRoot = await restarted.isRootSuperAdmin(UserKey.identified(721))
+        XCTAssertTrue(ownerIsRoot)
+        let supers = await restarted.listSuperAdmins().map(\.key)
+        XCTAssertFalse(supers.contains(UserKey.identified(999)), "nor a seat on the super-admin list")
+    }
+
+    /// Without a stored pin there is nothing to restore, and root falls back to
+    /// the configured handle — the boot state, and the reason the pin exists.
+    func testAbsentPinLeavesRootOnTheConfiguredHandle() async {
+        let store = makeUnpinnedStore()
+        await store.restore(from: PersistedBotState())
+        await store.identifyUser(userID: 722, username: Fixtures.ownerHandle, firstName: nil)
+
+        let isRoot = await store.isRootSuperAdmin(UserKey.identified(722))
+        XCTAssertTrue(isRoot)
+    }
 }
 
 /// Chat ownership: who a chat belongs to, and what a payment may and may not

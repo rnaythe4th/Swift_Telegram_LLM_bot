@@ -159,6 +159,20 @@ final class MoneyTests: XCTestCase {
         XCTAssertEqual(huge.multiplied(byPercent: 500), huge)
     }
 
+    /// The `Double` bridge saturates at the ceiling too. `Double(Int64.max)`
+    /// rounds up to 2^63, so an inclusive upper bound admits exactly the value
+    /// `Int64.init` traps on — and this call sits on the path of a super-admin
+    /// typing an amount and of a provider reporting a cost.
+    func testProviderCostAtTheInt64CeilingSaturatesInsteadOfTrapping() {
+        // 2^63 nanodollars exactly: the boundary case, not an approximation.
+        XCTAssertEqual(Money.usd(9_223_372_036.854775808), Money.nanos(.max))
+        XCTAssertEqual(Money.usd(1e30), Money.nanos(.max))
+        XCTAssertEqual(Money.usd(-9_223_372_036.854775808), Money.nanos(.min))
+        XCTAssertEqual(Money.usd(-1e30), Money.nanos(.min))
+        // And the largest amount that still fits comes back exact.
+        XCTAssertEqual(Money.usd(9_223_372_036.0).nanoValue, 9_223_372_036_000_000_000)
+    }
+
     func testClampAndFormatting() {
         XCTAssertEqual((Money.cents(1) - Money.cents(5)).clampedToZero, .zero)
         XCTAssertEqual(Money.usd(1.5).formatted(fractionDigits: 2), "$1.50")

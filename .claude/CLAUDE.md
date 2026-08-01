@@ -1250,13 +1250,21 @@ bot_schema_meta(id PK, version)
 изменение (и ограниченные сверху — 10 000 личностей, 5 000 привязок, 500
 платежей).
 
-В `bot_config` осталось то, что действительно документ (`ConfigName`, 20
-ключей): stars_price, stars_per_usd, free_models, crypto (адреса/режим, не
-инвойсы), card, super_admins, polling_offset, ads, markup, funnel,
-daily_premium_limit, self_promo, modes, reminders, onboarding, referrals,
-referral_totals, traffic_totals, external_payments (реквизиты, не счета),
+В `bot_config` осталось то, что действительно документ (`ConfigName`, 21
+ключ): stars_price, stars_per_usd, free_models, crypto (адреса/режим, не
+инвойсы), card, super_admins, **root_owner** (пин владельца, §6), polling_offset,
+ads, markup, funnel, daily_premium_limit, self_promo, modes, reminders,
+onboarding, referrals, referral_totals, traffic_totals,
+external_payments (реквизиты, не счета),
 **spend_policy** (§4.1). Ни один из них больше не растёт от числа
 пользователей. Значения оборачиваются в `{"value": …}`.
+
+`root_owner` — единственное поле директории, которое не «на человека»: сами
+личности стали таблицей `bot_user`, и пину владельца не осталось колонки. Без
+своей строки он жил только в памяти, а после рестарта root заново выводился из
+@ника из конфигурации — то есть ровно та подмена, ради которой пин и заведён
+(§6). Восстанавливается **до** `ensureDefaultOwnerTenant` и до сборки
+`superAdminKeys`: оба резолвят `rootSuperAdminKey`.
 
 **Миграции — в бинаре** (`PostgresSchema`), применяются на старте:
 
@@ -2038,8 +2046,8 @@ Free-план даёт только бесплатные модели. Плат�
 
 ## 19. Тесты
 
-`swift test` — цель `LLM_chat_botTests` (`Tests/LLM_chat_botTests/`), 364 теста.
-347 из них — чистая логика без сети: стор поднимается в памяти
+`swift test` — цель `LLM_chat_botTests` (`Tests/LLM_chat_botTests/`), 370 тестов.
+353 из них — чистая логика без сети: стор поднимается в памяти
 (`Fixtures.makeStore()`), база, Telegram и провайдеры не участвуют. Оставшиеся
 17 (`PostgresIntegrationTests`) требуют настоящий Postgres и **сами себя
 пропускают** без `TEST_DATABASE_URL`:
@@ -2095,7 +2103,13 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 - `CommandParserTests`, `MessageRoutingPolicyTests` — `/cmd@bot`+суффикс,
   «`/buying` — не `/buy`», реакция в группе только на reply/@-упоминание.
 - `UserIdentityTests` — `UserKey` (в т.ч. что типизированный текст не может
-  подделать `#<id>`), директория, adoption, retention (§6).
+  подделать `#<id>`), директория, adoption, retention (§6); плюс перехват ника:
+  сместившийся владелец назван в `Sighting.displacedUserID`, иначе его строку
+  никто не перезапишет.
+- `StoreRootOwnerTests` — пин владельца переживает рестарт (§6/§10.3): строка
+  `root_owner` пишется и **читается обратно**, а после restore перехвативший
+  @ник не становится ни root, ни суперадмином. Тест закрывает регрессию, при
+  которой пин жил только в памяти.
 - `SubscriptionScheduleTests` — `dueNotice`: волны, дедуп, legacy-ключ,
   catch-up окно winback; нормализация и декод конфига (§7/§14).
 - `Store*Tests` — доступ и роли, подписки и цены со скидкой, кошельки и дневная

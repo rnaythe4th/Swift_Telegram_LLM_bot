@@ -39,7 +39,13 @@ struct Money: Hashable, Sendable, Comparable, AdditiveArithmetic, Codable, Custo
     static func usd(_ value: Double) -> Money {
         guard value.isFinite else { return .zero }
         let scaled = (value * Double(nanosPerUsd)).rounded()
-        guard scaled >= Double(Int64.min), scaled <= Double(Int64.max) else {
+        // The upper bound is strict on purpose: `Double(Int64.max)` rounds *up*
+        // to 2^63, which no `Int64` holds, so `<=` would admit exactly the one
+        // value `Int64.init` traps on — and trapping is what this guard exists
+        // to prevent. The strict form loses nothing: the largest `Double` below
+        // 2^63 is 2^63 − 1024, comfortably inside the range. `Int64.min` is
+        // exactly representable, so its bound stays inclusive.
+        guard scaled >= Double(Int64.min), scaled < Double(Int64.max) else {
             return Money(nanos: scaled < 0 ? .min : .max)
         }
         return Money(nanos: Int64(scaled))

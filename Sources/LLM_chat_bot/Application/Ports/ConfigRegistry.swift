@@ -13,6 +13,12 @@ enum ConfigName: String, CaseIterable, Sendable {
     case crypto = "crypto"
     case card = "card"
     case superAdmins = "super_admins"
+    /// The account root belongs to, pinned the first time the configured owner
+    /// talks to the bot. A row of its own because the directory it lives in is
+    /// a table now: without somewhere to write it, root would be recomputed
+    /// from the configured @username on every restart — and a handle is rented,
+    /// so whoever picked it up next would be seeded as super-admin (§6).
+    case rootOwner = "root_owner"
     case pollingOffset = "polling_offset"
     case ads = "ads"
     case markup = "markup"
@@ -87,6 +93,9 @@ struct ConfigRegistry: Sendable {
     let crypto = ConfigKey(.crypto, default: CryptoConfigSnapshot.empty)
     let card = ConfigKey(.card, default: CardPaymentConfig.empty)
     let superAdmins = ConfigKey(.superAdmins, default: [UserKey]())
+    /// Absent until the owner has been seen once; nil then means "fall back to
+    /// the configured handle", which is exactly the boot state.
+    let rootOwner = ConfigKey<UserKey?>(.rootOwner, default: nil)
     let pollingOffset = ConfigKey(.pollingOffset, default: 0)
     let ads = ConfigKey(.ads, default: [AdCampaign]())
     let markup = ConfigKey(.markup, default: 30)

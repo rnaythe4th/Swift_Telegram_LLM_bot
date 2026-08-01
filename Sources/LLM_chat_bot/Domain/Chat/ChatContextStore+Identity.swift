@@ -119,6 +119,12 @@ extension ChatContextStore {
         // somebody else's rename it would roll back to a stale value on restart
         // — and an active person would be told «давно вас не было».
         if outcome.seenAtAdvanced { dirtyUsers.insert(userID) }
+        // The person who just lost this @username had their row rewritten too,
+        // and nothing else will ever touch it: without this their stored record
+        // keeps a handle that now belongs to somebody else, and comes back
+        // holding it on the next restart — under which `displayLabel` and
+        // `username(forKey:)` name the wrong person.
+        if let displaced = outcome.displacedUserID { dirtyUsers.insert(displaced) }
         guard outcome.changed else { return }
         dirtyUsers.insert(userID)
 
@@ -133,6 +139,7 @@ extension ChatContextStore {
         // account, not a handle.
         if userDirectoryValue.rootKey == nil, pendingKeys.contains(configuredOwnerKey) {
             userDirectoryValue.rootKey = key
+            dirtyConfigs.insert(.rootOwner)
         }
         for pending in Set(pendingKeys) where pending != key {
             adoptRecords(from: pending, to: key)
@@ -166,6 +173,9 @@ extension ChatContextStore {
         // An open crypto invoice is money in flight: lose the identity and
         // `openCryptoInvoiceForUser` stops finding it.
         keys.formUnion(_cryptoInvoices.values.map(\.ownerKey))
+        // A hosted-checkout order is money in flight for the same reason: the
+        // vendor's notification arrives minutes later and has to name a payer.
+        keys.formUnion(_externalOrders.values.map(\.payerKey))
         keys.formUnion(_simulatedRoles.keys)
         keys.formUnion(userTenantMap.values)
         return keys
