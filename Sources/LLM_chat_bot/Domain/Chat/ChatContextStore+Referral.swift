@@ -16,17 +16,17 @@ extension ChatContextStore {
     /// The program's scalar counters are a document; every record and every
     /// tally is a row of its own, so a payout writes two rows instead of the
     /// whole journal.
-    private func markReferralLedgerDirty(record invitedUserID: Int? = nil, tally inviterUserID: Int? = nil) {
+    private func markReferralLedgerDirty(record invitedUserID: UserID? = nil, tally inviterUserID: UserID? = nil) {
         let recordsBefore = Set(referralLedgerValue.records.keys)
         let talliesBefore = Set(referralLedgerValue.tallies.keys)
         referralLedgerValue.prune()
         for gone in recordsBefore.subtracting(referralLedgerValue.records.keys) {
-            guard let id = Int(gone) else { continue }
+            guard let id = Int(gone).map(UserID.init) else { continue }
             dirtyReferrals.remove(id)
             deletedReferrals.insert(id)
         }
         for gone in talliesBefore.subtracting(referralLedgerValue.tallies.keys) {
-            guard let id = Int(gone) else { continue }
+            guard let id = Int(gone).map(UserID.init) else { continue }
             dirtyReferralTallies.remove(id)
             deletedReferralTallies.insert(id)
         }
@@ -45,31 +45,31 @@ extension ChatContextStore {
     /// touched an unknown number of them (a rename refreshing labels).
     func markWholeReferralLedgerDirty() {
         for key in referralLedgerValue.records.keys {
-            if let id = Int(key) { dirtyReferrals.insert(id) }
+            if let id = Int(key).map(UserID.init) { dirtyReferrals.insert(id) }
         }
         for key in referralLedgerValue.tallies.keys {
-            if let id = Int(key) { dirtyReferralTallies.insert(id) }
+            if let id = Int(key).map(UserID.init) { dirtyReferralTallies.insert(id) }
         }
         dirtyConfigs.insert(.referralTotals)
     }
 
     /// Display label of a user we know by ID — for referral texts, which name
     /// the other side of the pair.
-    func displayLabel(forUserID userID: Int) -> String {
+    func displayLabel(forUserID userID: UserID) -> String {
         userDirectoryValue.displayLabel(forKey: UserKey.identified(userID))
     }
 
     /// Whether we have ever met this person. Used to refuse a referral link
     /// carrying a userID that was never seen (a made-up or mistyped one).
-    private func isKnownUser(_ userID: Int) -> Bool {
-        userDirectoryValue.identity(userID: userID) != nil || chatMetaByID[userID] != nil
+    private func isKnownUser(_ userID: UserID) -> Bool {
+        userDirectoryValue.identity(userID: userID) != nil || chatMetaByID[userID.privateChat] != nil
     }
 
     /// True when this person has used the bot before — the "new user only"
     /// anti-fraud rule. Signals: a private chat that already produced turns, an
     /// owned licence, or a wallet.
-    func hasPriorBotActivity(userID: Int, username: String?) -> Bool {
-        if let context = contexts[ChatKey(chatID: userID, threadID: 0)] {
+    func hasPriorBotActivity(userID: UserID, username: String?) -> Bool {
+        if let context = contexts[ChatKey(chatID: userID.privateChat, threadID: 0)] {
             // `ensure` seeds history with the system message, so "used before"
             // means more than that one entry.
             if context.funnelFirstMessageCounted
@@ -91,7 +91,7 @@ extension ChatContextStore {
     /// Attributes a new user to the inviter behind a `ref_` deep link. Pays
     /// nothing yet: the reward lands after the friend's first real answer
     /// (`redeemReferralIfDue`), which is what makes farming expensive.
-    func bindReferral(invitedUserID: Int, invitedUsername: String?, inviterUserID: Int) -> ReferralBindOutcome {
+    func bindReferral(invitedUserID: UserID, invitedUsername: String?, inviterUserID: UserID) -> ReferralBindOutcome {
         let config = referralConfigValue
         guard config.enabled else { return .disabled }
         guard invitedUserID != inviterUserID else {
@@ -100,7 +100,7 @@ extension ChatContextStore {
             return .selfInvite
         }
 
-        let invitedKey = String(invitedUserID)
+        let invitedKey = String(invitedUserID.value)
         if let existing = referralLedgerValue.records[invitedKey] {
             referralLedgerValue.refusedRepeat += 1
             markReferralLedgerDirty()
@@ -129,10 +129,10 @@ extension ChatContextStore {
             inviterUsername: inviterLabel,
             invitedUsername: invited
         )
-        var tally = referralLedgerValue.tallies[String(inviterUserID)] ?? ReferralTally(username: inviterLabel)
+        var tally = referralLedgerValue.tallies[String(inviterUserID.value)] ?? ReferralTally(username: inviterLabel)
         tally.username = inviterLabel
         tally.invited += 1
-        referralLedgerValue.tallies[String(inviterUserID)] = tally
+        referralLedgerValue.tallies[String(inviterUserID.value)] = tally
         markReferralLedgerDirty(record: invitedUserID, tally: inviterUserID)
         bumpFunnel(.referralJoined)
 
@@ -150,10 +150,10 @@ extension ChatContextStore {
     /// first real answer. Credits both wallets and resolves the record in one
     /// actor step, so a crash can never leave money credited twice or a pair
     /// half-paid. Returns nil when there is nothing to pay.
-    func redeemReferralIfDue(userID: Int, username: String?) -> ReferralPayout? {
+    func redeemReferralIfDue(userID: UserID, username: String?) -> ReferralPayout? {
         let config = referralConfigValue
         guard config.enabled else { return nil }
-        let key = String(userID)
+        let key = String(userID.value)
         guard var record = referralLedgerValue.records[key], record.isPending else { return nil }
 
         // Both wallets are addressed by userID, so a missing or changed
@@ -163,7 +163,7 @@ extension ChatContextStore {
         if let invited { record.invitedUsername = invited }
         record.inviterUsername = displayLabel(forUserID: record.inviterUserID)
 
-        var tally = referralLedgerValue.tallies[String(record.inviterUserID)]
+        var tally = referralLedgerValue.tallies[String(record.inviterUserID.value)]
             ?? ReferralTally(username: record.inviterUsername)
         tally.username = record.inviterUsername
 
@@ -175,7 +175,7 @@ extension ChatContextStore {
             record.blocked = true
             tally.blocked += 1
             referralLedgerValue.records[key] = record
-            referralLedgerValue.tallies[String(record.inviterUserID)] = tally
+            referralLedgerValue.tallies[String(record.inviterUserID.value)] = tally
             markReferralLedgerDirty(record: userID, tally: record.inviterUserID)
             return nil
         }
@@ -193,7 +193,7 @@ extension ChatContextStore {
         tally.earned += inviterReward
         referralLedgerValue.paidOut += inviterReward + inviteeReward
         referralLedgerValue.records[key] = record
-        referralLedgerValue.tallies[String(record.inviterUserID)] = tally
+        referralLedgerValue.tallies[String(record.inviterUserID.value)] = tally
         markReferralLedgerDirty(record: userID, tally: record.inviterUserID)
         bumpFunnel(.referralRewarded)
 
@@ -216,15 +216,15 @@ extension ChatContextStore {
     /// The anti-farming cap deliberately does not apply: it exists to make
     /// farming *free* signups pointless, and this bonus only fires on money
     /// that already came in.
-    func redeemReferralPaymentBonus(payerUserID: Int) -> ReferralPaymentBonus? {
+    func redeemReferralPaymentBonus(payerUserID: UserID) -> ReferralPaymentBonus? {
         let config = referralConfigValue
         guard config.enabled, config.payingFriendBonusCents > 0 else { return nil }
-        let key = String(payerUserID)
+        let key = String(payerUserID.value)
         guard var record = referralLedgerValue.records[key], record.paidBonusAt == nil else { return nil }
 
         let bonus = config.payingFriendBonus
         record.inviterUsername = displayLabel(forUserID: record.inviterUserID)
-        var tally = referralLedgerValue.tallies[String(record.inviterUserID)]
+        var tally = referralLedgerValue.tallies[String(record.inviterUserID.value)]
             ?? ReferralTally(username: record.inviterUsername)
         tally.username = record.inviterUsername
 
@@ -236,7 +236,7 @@ extension ChatContextStore {
         tally.earned += bonus
         referralLedgerValue.paidOut += bonus
         referralLedgerValue.records[key] = record
-        referralLedgerValue.tallies[String(record.inviterUserID)] = tally
+        referralLedgerValue.tallies[String(record.inviterUserID.value)] = tally
         markReferralLedgerDirty(record: payerUserID, tally: record.inviterUserID)
         bumpFunnel(.referralPaidBonus)
 
@@ -250,8 +250,8 @@ extension ChatContextStore {
     }
 
     /// Personal referral state for the `/ref` page.
-    func referralUserStats(userID: Int) -> ReferralUserStats {
-        let tally = referralLedgerValue.tallies[String(userID)]
+    func referralUserStats(userID: UserID) -> ReferralUserStats {
+        let tally = referralLedgerValue.tallies[String(userID.value)]
         let pending = referralLedgerValue.records.values
             .filter { $0.inviterUserID == userID && $0.isPending }
             .count
@@ -263,7 +263,7 @@ extension ChatContextStore {
             earned: tally?.earned ?? .zero,
             paidConversions: tally?.paidConversions ?? 0,
             capRemaining: cap > 0 ? max(0, cap - (tally?.rewarded ?? 0)) : nil,
-            incoming: referralLedgerValue.records[String(userID)]
+            incoming: referralLedgerValue.records[String(userID.value)]
         )
     }
 
@@ -293,10 +293,10 @@ extension ChatContextStore {
     func clearReferralLedger() -> Int {
         let count = referralLedgerValue.records.count
         for key in referralLedgerValue.records.keys {
-            if let id = Int(key) { dirtyReferrals.remove(id); deletedReferrals.insert(id) }
+            if let id = Int(key).map(UserID.init) { dirtyReferrals.remove(id); deletedReferrals.insert(id) }
         }
         for key in referralLedgerValue.tallies.keys {
-            if let id = Int(key) { dirtyReferralTallies.remove(id); deletedReferralTallies.insert(id) }
+            if let id = Int(key).map(UserID.init) { dirtyReferralTallies.remove(id); deletedReferralTallies.insert(id) }
         }
         referralLedgerValue = .empty
         dirtyConfigs.insert(.referralTotals)

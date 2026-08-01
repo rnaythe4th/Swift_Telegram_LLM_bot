@@ -133,7 +133,7 @@ final class LedgerTests: XCTestCase {
     func testJournalAlwaysAddsUpToTheBalance() async throws {
         let ledger = InMemoryLedger()
         for step in 0..<200 {
-            let key = UserKey.identified(Int.random(in: 1...5))
+            let key = UserKey.identified(UserID(Int.random(in: 1...5)))
             let amount = Int.random(in: 1...500)
             switch step % 3 {
             case 0:

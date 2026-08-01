@@ -22,7 +22,7 @@ extension BotCommandHandler {
 
     func handleInspect(chatKey: ChatKey, argument: String) async throws {
         let parts = argument.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard let first = parts.first, let targetChatID = Int(first) else {
+        guard let first = parts.first, let targetChatID = Int(first).map(ChatID.init) else {
             try await sendUserFeedback(chatKey: chatKey, text: """
                 <b>👁 Инспекция чата</b>
 
@@ -121,7 +121,7 @@ extension BotCommandHandler {
     /// are financial records, and the person's own evidence if a charge is ever
     /// disputed. Deleting them on request would erase the proof, not the data.
     func handleForget(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
-        if chatKey.chatID < 0 {
+        if chatKey.chatID.isGroup {
             guard await isAdmin(fromUser, chatID: chatKey.chatID) else {
                 try await sendUserFeedback(
                     chatKey: chatKey,

@@ -5,7 +5,7 @@ import XCTest
 /// single source of prices every payment path reads.
 final class StoreSubscriptionTests: XCTestCase {
 
-    private func makeSponsor(_ store: ChatContextStore, userID: Int = 500, username: String = "sponsor") async -> UserKey {
+    private func makeSponsor(_ store: ChatContextStore, userID: UserID = 500, username: String = "sponsor") async -> UserKey {
         await store.identifyUser(userID: userID, username: username, firstName: nil)
         return UserKey.identified(userID)
     }

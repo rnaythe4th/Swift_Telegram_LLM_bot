@@ -5,9 +5,9 @@
 /// field is optional because most lines are about the process, not about one
 /// person.
 struct LogContext: Sendable, Equatable {
-    var chat: Int?
+    var chat: ChatID?
     var thread: Int64?
-    var user: Int?
+    var user: UserID?
     var generation: GenerationID?
 
     static let none = LogContext()
@@ -16,7 +16,7 @@ struct LogContext: Sendable, Equatable {
         chat == nil && thread == nil && user == nil && generation == nil
     }
 
-    init(chat: Int? = nil, thread: Int64? = nil, user: Int? = nil, generation: GenerationID? = nil) {
+    init(chat: ChatID? = nil, thread: Int64? = nil, user: UserID? = nil, generation: GenerationID? = nil) {
         self.chat = chat
         self.thread = thread
         self.user = user
@@ -25,7 +25,7 @@ struct LogContext: Sendable, Equatable {
 
     /// The chat a turn is happening in. `threadID == 0` is the main thread of a
     /// forum, which is not worth a field of its own in the output.
-    init(chat key: ChatKey, user: Int? = nil, generation: GenerationID? = nil) {
+    init(chat key: ChatKey, user: UserID? = nil, generation: GenerationID? = nil) {
         self.init(
             chat: key.chatID,
             thread: key.threadID == 0 ? nil : key.threadID,

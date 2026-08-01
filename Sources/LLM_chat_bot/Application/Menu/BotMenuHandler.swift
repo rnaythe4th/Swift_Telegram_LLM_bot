@@ -99,7 +99,7 @@ final class BotMenuHandler: Sendable {
         await state.notePendingInputOwner(invokerKey(callback), chatKey: chatKey)
     }
 
-    func sendMenu(chatKey: ChatKey, userID: Int? = nil) async {
+    func sendMenu(chatKey: ChatKey, userID: UserID? = nil) async {
         let invoker = userID.map { self.state.userKey(userID: $0) }
         await state.clearPending(chatKey: chatKey)
         let screen = await renderPage(.main, chatKey: chatKey, invoker: invoker)
@@ -227,7 +227,7 @@ final class BotMenuHandler: Sendable {
     ) async throws {
         // A shared menu message must never render a personal page: the answer
         // would be visible to everyone in the group, not just to whoever tapped.
-        if page.isPersonal, chatKey.chatID < 0 {
+        if page.isPersonal, chatKey.chatID.isGroup {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: page.privateOnlyNotice)
             return
         }
@@ -312,7 +312,7 @@ final class BotMenuHandler: Sendable {
         // Second line of defence for the paths that render without a callback
         // (a menu refreshed after text input): a personal page never draws its
         // contents into a group message.
-        if page.isPersonal, chatKey.chatID < 0 {
+        if page.isPersonal, chatKey.chatID.isGroup {
             var rows: Keyboard = []
             if !botUsername.isEmpty {
                 rows.row([InlineKeyboardButton(text: "💬 Открыть бота", url: "https://t.me/\(botUsername)")])
@@ -408,9 +408,9 @@ final class BotMenuHandler: Sendable {
         case .superSpend:
             return await renderSpendPolicy()
         case .referral:
-            // Private chats only (guarded at the nav gate), where chatID == the
-            // user's ID — that is whose link and wallet the page is about.
-            return await renderReferral(chatKey: chatKey, userID: chatKey.chatID)
+            // Private chats only (guarded at the nav gate): the DM's id names
+            // the person whose link and wallet the page is about.
+            return await renderReferral(chatKey: chatKey, userID: chatKey.chatID.asUserID ?? UserID(chatKey.chatID.value))
         case .adminInvite:
             return await renderAdminInvite(chatKey: chatKey, invoker: invoker)
         case .close:

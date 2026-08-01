@@ -105,14 +105,14 @@ struct TelegramFile: Codable, Sendable {
 }
 
 struct TelegramUser: Codable, Sendable {
-    let id: Int
+    let id: UserID
     let is_bot: Bool
     let first_name: String
     let username: String?
 }
 
 struct TelegramChat: Codable, Sendable {
-    let id: Int
+    let id: ChatID
     let type: String
     /// Group/channel title (nil for private chats).
     let title: String?
@@ -121,7 +121,7 @@ struct TelegramChat: Codable, Sendable {
     /// Peer first name for private chats.
     let first_name: String?
 
-    init(id: Int, type: String, title: String? = nil, username: String? = nil, first_name: String? = nil) {
+    init(id: ChatID, type: String, title: String? = nil, username: String? = nil, first_name: String? = nil) {
         self.id = id
         self.type = type
         self.title = title
@@ -192,18 +192,18 @@ struct SendInvoiceRequest: Sendable {
         case fiat(currency: String, amountMinorUnits: Int, providerToken: String)
     }
 
-    let chatID: Int
+    let chatID: ChatID
     let title: String
     let description: String
     let payload: String
     let kind: PaymentKind
 
     /// Backward-compatible convenience for Stars invoices.
-    init(chatID: Int, title: String, description: String, payload: String, starsAmount: Int) {
+    init(chatID: ChatID, title: String, description: String, payload: String, starsAmount: Int) {
         self.init(chatID: chatID, title: title, description: description, payload: payload, kind: .stars(amount: starsAmount))
     }
 
-    init(chatID: Int, title: String, description: String, payload: String, kind: PaymentKind) {
+    init(chatID: ChatID, title: String, description: String, payload: String, kind: PaymentKind) {
         self.chatID = chatID
         self.title = title
         self.description = description

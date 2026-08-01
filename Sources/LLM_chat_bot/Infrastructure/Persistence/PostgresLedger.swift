@@ -154,7 +154,7 @@ final class PostgresLedger: LedgerPort, Sendable {
                 """
                 insert into bot_payment (idempotency_key, user_key, purpose, amount_cents, chat_id, method)
                 values (\(receipt.idempotencyKey), \(receipt.payerKey), \(purpose), \(amountCents),
-                        \(Int64(receipt.chatID)), \(receipt.method.rawValue))
+                        \(Int64(receipt.chatID.value)), \(receipt.method.rawValue))
                 on conflict (idempotency_key) do nothing
                 returning idempotency_key
                 """,

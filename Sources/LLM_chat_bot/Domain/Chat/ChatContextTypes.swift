@@ -17,7 +17,7 @@ struct TenantState: Sendable {
     var tempPresets: [Preset]
     var historyLengthPresets: [Preset]
     var rolePresets: [Preset]
-    var whitelistedUserIDs: Set<Int>
+    var whitelistedUserIDs: Set<UserID>
     var adminKeys: Set<UserKey>
     var licensedKeys: Set<UserKey>
     var cumulativeUsage: CumulativeUsage

@@ -100,7 +100,7 @@ final class BotCommandHandler: Sendable {
         await state.isSuperAdmin(actorKey(user))
     }
 
-    func isAdmin(_ user: TelegramUser?, chatID: Int) async -> Bool {
+    func isAdmin(_ user: TelegramUser?, chatID: ChatID) async -> Bool {
         await state.isAdmin(actorKey(user), chatID: chatID)
     }
 

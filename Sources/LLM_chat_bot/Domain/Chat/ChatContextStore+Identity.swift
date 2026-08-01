@@ -25,7 +25,7 @@ extension ChatContextStore {
     }
 
     /// Storage key for a person we have in front of us — always identified.
-    nonisolated func userKey(userID: Int) -> UserKey { UserKey.identified(userID) }
+    nonisolated func userKey(userID: UserID) -> UserKey { UserKey.identified(userID) }
 
     /// Variant for call sites that already hold a non-optional username; a
     /// blank one can only key itself, which no real record ever uses.
@@ -62,7 +62,7 @@ extension ChatContextStore {
     /// their permanent `#<userID>`, then anything still pending under the
     /// username they are using. A userID alone is enough — which is what lets
     /// someone with no @username at all own a subscription and a wallet.
-    func userKeys(key: UserKey?, userID: Int?) -> [UserKey] {
+    func userKeys(key: UserKey?, userID: UserID?) -> [UserKey] {
         var keys: [UserKey] = []
         if let userID { keys.append(UserKey.identified(userID)) }
         if let key {
@@ -111,7 +111,7 @@ extension ChatContextStore {
     /// still filed under their bare username is re-filed under `#<userID>`; on
     /// a rename the stored display names are refreshed. After this, the
     /// person's username can change freely — no state is attached to it.
-    func identifyUser(userID: Int, username: String?, firstName: String? = nil) {
+    func identifyUser(userID: UserID, username: String?, firstName: String? = nil) {
         let outcome = userDirectoryValue.record(userID: userID, username: username, firstName: firstName)
         // A moved `seenAt` is worth persisting on its own (throttled inside the
         // directory): the wallet win-back sweep and the retention proxy both
@@ -160,7 +160,7 @@ extension ChatContextStore {
         // aggregates are not), so an inviter with no live record still holds
         // state — their reward cap and client count hang off this key.
         for tally in referralLedgerValue.tallies.keys {
-            guard let userID = Int(tally) else { continue }
+            guard let userID = Int(tally).map(UserID.init) else { continue }
             keys.insert(UserKey.identified(userID))
         }
         // An open crypto invoice is money in flight: lose the identity and
@@ -261,14 +261,14 @@ extension ChatContextStore {
         var ledger = referralLedgerValue
         var ledgerTouched = false
         if let userID = key.userID {
-            if var tally = ledger.tallies[String(userID)], tally.username != label {
+            if var tally = ledger.tallies[String(userID.value)], tally.username != label {
                 tally.username = label
-                ledger.tallies[String(userID)] = tally
+                ledger.tallies[String(userID.value)] = tally
                 ledgerTouched = true
             }
-            if var record = ledger.records[String(userID)], record.invitedUsername != label {
+            if var record = ledger.records[String(userID.value)], record.invitedUsername != label {
                 record.invitedUsername = label
-                ledger.records[String(userID)] = record
+                ledger.records[String(userID.value)] = record
                 ledgerTouched = true
             }
             for (invitedID, var record) in ledger.records where record.inviterUserID == userID {

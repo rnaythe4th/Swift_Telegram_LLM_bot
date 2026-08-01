@@ -6,16 +6,16 @@ import Foundation
 extension ChatContextStore {
     // MARK: - Chat listings
 
-    func privateChats(ownedBy owner: UserKey? = nil) -> [(chatID: Int, threadID: Int64)] {
+    func privateChats(ownedBy owner: UserKey? = nil) -> [(chatID: ChatID, threadID: Int64)] {
         contexts.keys
-            .filter { $0.chatID > 0 }
+            .filter { $0.chatID.isPrivate }
             .filter { owner == nil || chatOwnership[$0.chatID] == owner }
             .map { (chatID: $0.chatID, threadID: $0.threadID) }
     }
 
-    func groupChats(ownedBy owner: UserKey? = nil) -> [(chatID: Int, threadID: Int64)] {
+    func groupChats(ownedBy owner: UserKey? = nil) -> [(chatID: ChatID, threadID: Int64)] {
         contexts.keys
-            .filter { $0.chatID < 0 }
+            .filter { $0.chatID.isGroup }
             .filter { owner == nil || chatOwnership[$0.chatID] == owner }
             .map { (chatID: $0.chatID, threadID: $0.threadID) }
     }
@@ -43,26 +43,26 @@ extension ChatContextStore {
 
     // MARK: - Chat metadata (titles / usernames for admin tooling)
 
-    func recordChatMeta(chatID: Int, info: ChatMetaInfo) {
+    func recordChatMeta(chatID: ChatID, info: ChatMetaInfo) {
         guard chatMetaByID[chatID] != info else { return }
         chatMetaByID[chatID] = info
         dirtyChats.insert(chatID)
         deletedChats.remove(chatID)
     }
 
-    func chatMeta(chatID: Int) -> ChatMetaInfo? {
+    func chatMeta(chatID: ChatID) -> ChatMetaInfo? {
         chatMetaByID[chatID]
     }
 
     /// "Title" / "@username" when known, bare ID otherwise.
-    func chatDisplayLabel(chatID: Int) -> String {
-        chatMetaByID[chatID]?.displayLabel ?? String(chatID)
+    func chatDisplayLabel(chatID: ChatID) -> String {
+        chatMetaByID[chatID]?.displayLabel ?? String(chatID.value)
     }
 
     /// Records that the bot joined or left a chat (roadmap step 4). A chat the
     /// bot was removed from still owns its licence and history — it just stops
     /// being a delivery channel until the bot is back.
-    func setBotPresence(chatID: Int, isMember: Bool, type: String? = nil, title: String? = nil) {
+    func setBotPresence(chatID: ChatID, isMember: Bool, type: String? = nil, title: String? = nil) {
         var info = chatMetaByID[chatID]
             ?? ChatMetaInfo(type: type ?? "group", title: title, username: nil, firstName: nil)
         if let type { info.type = type }
@@ -75,7 +75,7 @@ extension ChatContextStore {
     }
 
     /// True when the bot is known to have been removed from this chat.
-    func isBotRemoved(chatID: Int) -> Bool {
+    func isBotRemoved(chatID: ChatID) -> Bool {
         chatMetaByID[chatID]?.botRemoved == true
     }
 
@@ -85,16 +85,19 @@ extension ChatContextStore {
     /// licence covers, and every DM belonging to somebody who pays. They are
     /// customers, and losing their history would be a downgrade of what they
     /// bought.
-    func chatsWorthKeeping() -> Set<Int> {
+    func chatsWorthKeeping() -> Set<ChatID> {
         var keep = Set(chatOwnership.keys)
+        // A paying person's own DM. `ChatID.privateChat(with:)` is the one
+        // place the "a private chat's id is the user's id" convention lives,
+        // so here it is named rather than assumed.
         for (owner, tenant) in tenants where tenant.isActive {
-            if let userID = owner.userID { keep.insert(userID) }
+            if let account = owner.userID { keep.insert(account.privateChat) }
         }
         for (key, wallet) in userBalances where wallet.balance.isPositive {
-            if let userID = key.userID { keep.insert(userID) }
+            if let account = key.userID { keep.insert(account.privateChat) }
         }
         for key in superAdminKeys {
-            if let userID = key.userID { keep.insert(userID) }
+            if let account = key.userID { keep.insert(account.privateChat) }
         }
         return keep
     }
@@ -127,7 +130,7 @@ extension ChatContextStore {
     /// different paths, so whichever lands first claims the greeting. The
     /// window is short enough that a genuine re-add (or a `/start` typed much
     /// later) still gets one.
-    func claimGroupGreeting(chatID: Int, now: Date = Date()) -> Bool {
+    func claimGroupGreeting(chatID: ChatID, now: Date = Date()) -> Bool {
         if let last = _groupGreetedAt[chatID], now.timeIntervalSince(last) < Self.groupGreetingCooldown {
             return false
         }

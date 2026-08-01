@@ -250,7 +250,7 @@ extension BotOrchestrator {
     /// `?startgroup=` link makes Telegram deliver a join twice (as
     /// `my_chat_member` and as a `/start <payload>` message), and the two race
     /// on different paths.
-    private func sendGroupWelcome(chatID: Int) async {
+    private func sendGroupWelcome(chatID: ChatID) async {
         guard await state.claimGroupGreeting(chatID: chatID) else { return }
         let sponsor = await state.chatSponsor(chatID: chatID, asker: nil)
         let welcome = GroupWelcomePresenter.welcome(

@@ -108,7 +108,7 @@ struct CryptoInvoice: Codable, Sendable, Identifiable {
     /// Whose invoice it is (§6 `UserKey`), so a rename never orphans money
     /// already in flight.
     var ownerKey: UserKey
-    var userChatID: Int
+    var userChatID: ChatID
     var asset: CryptoAsset
     var receivingAddress: String
     /// Atomic units (e.g. micro-USDT or nano-TON) the user must send in total.

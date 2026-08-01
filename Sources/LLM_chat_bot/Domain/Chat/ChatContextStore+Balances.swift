@@ -52,7 +52,7 @@ extension ChatContextStore {
     /// "Has money" means at least `minimumBillableBalance`, not "more than
     /// zero": sub-cent dust cannot pay for an answer, and billing against it
     /// means the answer costs more than the wallet held (§4.4).
-    func billingKey(key: UserKey?, userID: Int?) -> UserKey? {
+    func billingKey(key: UserKey?, userID: UserID?) -> UserKey? {
         userKeys(key: key, userID: userID)
             .first { (userBalances[$0]?.balance ?? .zero) >= Self.minimumBillableBalance }
     }

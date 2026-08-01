@@ -242,11 +242,11 @@ struct SubscriptionNoticeTarget: Sendable {
     let paidUntil: Date
     /// The sponsor's DM with the bot — known only if they ever wrote to it
     /// (Telegram forbids bot-initiated conversations).
-    let privateChatID: Int?
+    let privateChatID: ChatID?
     /// Group chats this sponsor covers; any member there can renew. Always
     /// filled (the text quotes the count); whether they are actually notified
     /// is the sender's decision, per `notifyChats`.
-    let groupChatIDs: [Int]
+    let groupChatIDs: [ChatID]
 }
 
 /// Subscription prices for one user with any active winback discount applied.

@@ -47,7 +47,7 @@ extension BotMenuHandler {
             try await showPage(.adminPanel, chatKey: chatKey, callback: callback, message: message)
 
         case "rmchat":
-            guard let chatID = route.int(2) else { return }
+            guard let chatID = route.chatID(2) else { return }
             let owner = await state.chatOwner(chatID: chatID)
             if !isSuper, owner != invoker {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notYourChat)
@@ -306,7 +306,7 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
-    func renderInspect(chatID: Int) async -> MenuScreen {
+    func renderInspect(chatID: ChatID) async -> MenuScreen {
         let label = await state.chatDisplayLabel(chatID: chatID)
         let owner = await state.chatOwnerLabel(chatID: chatID)
         let keys = await state.existingContextKeys(chatID: chatID)
@@ -490,7 +490,7 @@ extension BotMenuHandler {
         message: MaybeInaccessibleMessage
     ) async throws {
         guard await requireSuperAdmin(callback) else { return }
-        guard let targetChatID = route.int(1) else { return }
+        guard let targetChatID = route.chatID(1) else { return }
         try await editOrAnswer(callback: callback, message: message, screen: await renderInspect(chatID: targetChatID))
     }
 

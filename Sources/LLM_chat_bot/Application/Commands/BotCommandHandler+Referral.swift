@@ -108,7 +108,7 @@ extension BotCommandHandler {
         }
 
         guard let user = fromUser else { return }
-        guard chatKey.chatID > 0 else {
+        guard chatKey.chatID.isPrivate else {
             // Personal link in a shared chat would be meaningless — send them
             // to the DM instead.
             var rows: [[InlineKeyboardButton]] = []

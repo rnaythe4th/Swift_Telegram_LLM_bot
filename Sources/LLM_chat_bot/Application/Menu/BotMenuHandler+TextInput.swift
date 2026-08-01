@@ -10,7 +10,7 @@ extension BotMenuHandler {
     /// caller's **storage key**, not their raw handle: store lookups are keyed
     /// by userID, and keys round-trip through the invoker-taking APIs
     /// unchanged. Anything a person reads is resolved through `displayLabel`.
-    func processTextInput(text: String, chatKey: ChatKey, userID: Int?) async -> Bool {
+    func processTextInput(text: String, chatKey: ChatKey, userID: UserID?) async -> Bool {
         let invoker = userID.map { self.state.userKey(userID: $0) }
         if text.hasPrefix("/") { return false }
 

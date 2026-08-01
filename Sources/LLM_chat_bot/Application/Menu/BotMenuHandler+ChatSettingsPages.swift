@@ -61,7 +61,7 @@ extension BotMenuHandler {
         // Group menus are one shared message, so the legend and the upsell
         // describe the chat's access, never the tapper's own (CLAUDE.md §13).
         let hasFullAccess = await state.hasFullModelAccess(
-            key: chatKey.chatID < 0 ? nil : invoker,
+            key: chatKey.chatID.isGroup ? nil : invoker,
             chatID: chatKey.chatID
         )
         let restrictionsActive = effectiveFreeModels != nil
@@ -118,8 +118,8 @@ extension BotMenuHandler {
                 // loses everyone who is not ready to type.
                 let taste = await state.remainingDailyPremium(
                     chatID: chatKey.chatID,
-                    userID: chatKey.chatID > 0 ? chatKey.chatID : nil,
-                    isGroup: chatKey.chatID < 0
+                    userID: chatKey.chatID.asUserID,
+                    isGroup: chatKey.chatID.isGroup
                 )
                 accessLine = taste.limit > 0
                     ? "\n\n<i>Умные модели (⭐) можно попробовать бесплатно: сегодня осталось \(taste.remaining) из \(taste.limit). Дальше — премиум или баланс.</i>"

@@ -31,7 +31,7 @@ extension BotMenuHandler {
                 let markup: Keyboard = [[cancelButton(to: .adminWhitelist)]]
                 try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(promptText, markup))
             case "remove":
-                guard let id = route.int(2) else { return }
+                guard let id = route.userID(2) else { return }
                 await state.removeFromWhitelist(userID: id, chatID: chatKey.chatID)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Убрано")
                 try await showPage(.adminWhitelist, chatKey: chatKey, callback: callback, message: message)
@@ -88,7 +88,7 @@ extension BotMenuHandler {
             chatStatusLine = "⚪ в этом чате премиум ещё никто не открыл"
         }
 
-        let licensedChats: [Int]
+        let licensedChats: [ChatID]
         let licensedUsers: [(key: UserKey, label: String)]
         let usage: CumulativeUsage
         if let invoker {
@@ -221,9 +221,9 @@ extension BotMenuHandler {
         // A bare `-1001234567890` says nothing about which chat it is: the
         // owner has to guess which of their groups they are switching off.
         for chatID in chats.prefix(40) {
-            let kind = chatID < 0 ? "👥" : "👤"
+            let kind = chatID.isGroup ? "👥" : "👤"
             let label = await state.chatDisplayLabel(chatID: chatID)
-            let named = label != String(chatID)
+            let named = label != String(chatID.value)
             rows.row([
                 menuButton("\(kind) \(label)", command: .noop),
                 menuButton("🗑 Выключить", .tenant, "rmchat", "\(chatID)"),

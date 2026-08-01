@@ -14,7 +14,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
     private var store: ChatContextStore!
     private var service: ExternalPaymentService!
 
-    private let payerID = 5_555
+    private let payerID: UserID = 5_555
     private let merchantID = "7012"
     private let secretWord = "linksecret"
     private let callbackSecret = "callbacksecret"
@@ -81,7 +81,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         let checkout = try await service.createCheckout(
             payerKey: store.userKey(userID: payerID),
             payerUserID: payerID,
-            chatID: payerID,
+            chatID: payerID.privateChat,
             threadID: nil,
             purpose: .subscription,
             methodCode: "44"
@@ -113,7 +113,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         let checkout = try await service.createCheckout(
             payerKey: store.userKey(userID: payerID),
             payerUserID: payerID,
-            chatID: payerID,
+            chatID: payerID.privateChat,
             threadID: nil,
             purpose: .subscription,
             methodCode: nil
@@ -134,7 +134,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         let checkout = try await service.createCheckout(
             payerKey: store.userKey(userID: payerID),
             payerUserID: payerID,
-            chatID: payerID,
+            chatID: payerID.privateChat,
             threadID: nil,
             purpose: .credit(cents: 500),
             methodCode: nil
@@ -158,7 +158,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         let checkout = try await service.createCheckout(
             payerKey: store.userKey(userID: payerID),
             payerUserID: payerID,
-            chatID: payerID,
+            chatID: payerID.privateChat,
             threadID: nil,
             purpose: .subscription,
             methodCode: nil
@@ -180,7 +180,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         let checkout = try await service.createCheckout(
             payerKey: store.userKey(userID: payerID),
             payerUserID: payerID,
-            chatID: payerID,
+            chatID: payerID.privateChat,
             threadID: nil,
             purpose: .subscription,
             methodCode: nil

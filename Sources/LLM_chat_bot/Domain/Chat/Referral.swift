@@ -8,14 +8,14 @@ enum ReferralLink {
     /// prefix (`inv_`): those grant licence access, these pay a bonus.
     static let payloadPrefix = "ref_"
 
-    static func url(botUsername: String, userID: Int) -> String {
-        "https://t.me/\(botUsername)?start=\(payloadPrefix)\(userID)"
+    static func url(botUsername: String, userID: UserID) -> String {
+        "https://t.me/\(botUsername)?start=\(payloadPrefix)\(userID.value)"
     }
 
     /// Inviter userID from a `/start` payload; nil when it is not a referral one.
-    static func inviterUserID(payload: String) -> Int? {
+    static func inviterUserID(payload: String) -> UserID? {
         guard payload.hasPrefix(payloadPrefix) else { return nil }
-        return Int(payload.dropFirst(payloadPrefix.count))
+        return Int(payload.dropFirst(payloadPrefix.count)).map(UserID.init)
     }
 
     /// Telegram's native share sheet, pre-filled with the link and a pitch.
@@ -130,7 +130,7 @@ struct ReferralConfig: Codable, Sendable, Equatable {
 /// Keyed by the *invited* userID — that is the identity the anti-fraud rules
 /// key on ("one attribution per person, ever").
 struct ReferralRecord: Codable, Sendable, Equatable {
-    var inviterUserID: Int
+    var inviterUserID: UserID
     /// Display label of the inviter at the time of the last write. Wallets are
     /// keyed by userID (`UserKey`), so this is shown, never paid to — it is
     /// refreshed whenever the person is seen with a new @username.
@@ -151,7 +151,7 @@ struct ReferralRecord: Codable, Sendable, Equatable {
     var paidBonus: Money
 
     init(
-        inviterUserID: Int,
+        inviterUserID: UserID,
         inviterUsername: String,
         invitedUsername: String?,
         boundAt: Date = Date(),
@@ -189,7 +189,7 @@ struct ReferralRecord: Codable, Sendable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
-            inviterUserID: try c.decode(Int.self, forKey: .inviterUserID),
+            inviterUserID: try c.decode(UserID.self, forKey: .inviterUserID),
             inviterUsername: try c.decodeIfPresent(String.self, forKey: .inviterUsername) ?? "",
             invitedUsername: try c.decodeIfPresent(String.self, forKey: .invitedUsername),
             boundAt: try c.decodeIfPresent(Date.self, forKey: .boundAt) ?? Date(),
@@ -364,7 +364,7 @@ struct ReferralLedger: Codable, Sendable {
     func topInviters(limit: Int) -> [ReferralTopInviter] {
         tallies
             .compactMap { key, tally -> ReferralTopInviter? in
-                guard let userID = Int(key) else { return nil }
+                guard let userID = Int(key).map(UserID.init) else { return nil }
                 return ReferralTopInviter(userID: userID, tally: tally)
             }
             // Paying friends first: an inviter who brought two customers is
@@ -405,7 +405,7 @@ struct ReferralLedger: Codable, Sendable {
 }
 
 struct ReferralTopInviter: Sendable {
-    let userID: Int
+    let userID: UserID
     let tally: ReferralTally
 }
 
@@ -431,7 +431,7 @@ enum ReferralBindOutcome: Sendable, Equatable {
 
 /// A resolved pair, ready to be announced to both sides.
 struct ReferralPayout: Sendable {
-    let inviterUserID: Int
+    let inviterUserID: UserID
     let inviterUsername: String
     let inviterReward: Money
     let invitedUsername: String?
@@ -446,7 +446,7 @@ struct ReferralPayout: Sendable {
 /// An invited friend paid for the first time and their inviter earned the
 /// conversion bonus (§7 «Реферал»).
 struct ReferralPaymentBonus: Sendable {
-    let inviterUserID: Int
+    let inviterUserID: UserID
     let inviterLabel: String
     let friendLabel: String
     let amount: Money

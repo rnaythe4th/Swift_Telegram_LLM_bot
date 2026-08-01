@@ -6,7 +6,7 @@ extension BotMenuHandler {
     /// Posts the personal referral page as a fresh message (`/ref`). The userID
     /// comes from the sender, not from the chat, so it is correct even when the
     /// command is used somewhere unexpected.
-    func sendReferral(chatKey: ChatKey, userID: Int) async {
+    func sendReferral(chatKey: ChatKey, userID: UserID) async {
         let screen = await renderReferral(chatKey: chatKey, userID: userID)
         _ = try? await telegram.sendMessage(
             .init(
@@ -21,7 +21,7 @@ extension BotMenuHandler {
 
     /// Personal referral page (roadmap step 10). Private chats only — the link
     /// identifies its owner by userID and the rewards land on their wallet.
-    func renderReferral(chatKey: ChatKey, userID: Int) async -> MenuScreen {
+    func renderReferral(chatKey: ChatKey, userID: UserID) async -> MenuScreen {
         let config = await state.referralConfig()
         let stats = await state.referralUserStats(userID: userID)
         let link = ReferralLink.url(botUsername: botUsername, userID: userID)

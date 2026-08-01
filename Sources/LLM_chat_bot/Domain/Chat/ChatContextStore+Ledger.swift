@@ -28,14 +28,14 @@ extension ChatContextStore {
     /// nil. Read before the payment commits so the amount can travel in the
     /// same ledger call; the record is only *stamped* afterwards, by
     /// `redeemReferralPaymentBonus`, which is what makes it once-only.
-    func pendingReferralPaymentBonus(payerUserID: Int?) -> ReferralPaymentBonus? {
+    func pendingReferralPaymentBonus(payerUserID: UserID?) -> ReferralPaymentBonus? {
         guard let payerUserID else { return nil }
         let config = referralConfigValue
         guard config.enabled, config.payingFriendBonusCents > 0 else { return nil }
-        guard let record = referralLedgerValue.records[String(payerUserID)], record.paidBonusAt == nil else {
+        guard let record = referralLedgerValue.records[String(payerUserID.value)], record.paidBonusAt == nil else {
             return nil
         }
-        let tally = referralLedgerValue.tallies[String(record.inviterUserID)]
+        let tally = referralLedgerValue.tallies[String(record.inviterUserID.value)]
         return ReferralPaymentBonus(
             inviterUserID: record.inviterUserID,
             inviterLabel: displayLabel(forUserID: record.inviterUserID),

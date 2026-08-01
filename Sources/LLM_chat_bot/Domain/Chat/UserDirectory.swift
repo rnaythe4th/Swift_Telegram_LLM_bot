@@ -38,7 +38,7 @@ struct UserKey: Hashable, Sendable, Comparable, Codable, CustomStringConvertible
     private init(unchecked raw: String) { self.raw = raw }
 
     /// Key of somebody the bot has actually seen. Rename-proof.
-    static func identified(_ userID: Int) -> UserKey {
+    static func identified(_ userID: UserID) -> UserKey {
         UserKey(unchecked: "\(idPrefix)\(userID)")
     }
 
@@ -82,7 +82,7 @@ struct UserKey: Hashable, Sendable, Comparable, Codable, CustomStringConvertible
     /// sanitised result addresses no real record, which is the honest outcome.
     init(storageValue value: String) {
         if let identified = UserKey.parsedUserID(value) {
-            self = .identified(identified)
+            self = .identified(UserID(identified))
         } else {
             self = UserKey.pending(value) ?? .sanitizedPendingFallback(value)
         }
@@ -97,7 +97,9 @@ struct UserKey: Hashable, Sendable, Comparable, Codable, CustomStringConvertible
         return Int(digits)
     }
 
-    var userID: Int? { UserKey.parsedUserID(raw) }
+    /// The account behind an identified key. `UserID` rather than `Int`, so a
+    /// key cannot be mistaken for a chat on the way out.
+    var userID: UserID? { UserKey.parsedUserID(raw).map(UserID.init) }
 
     var isIdentified: Bool { raw.hasPrefix(UserKey.idPrefix) }
 
@@ -155,7 +157,7 @@ struct UserIdentity: Codable, Sendable, Equatable {
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    var userID: Int
+    var userID: UserID
     /// Lowercased, without `@`; nil when the person has no username set.
     var username: String?
     var firstName: String?
@@ -191,8 +193,8 @@ struct UserIdentity: Codable, Sendable, Equatable {
 /// `identities` (not stored) so a username can never point at two people: the
 /// index is rebuilt on decode and maintained on every write.
 struct UserDirectory: Codable, Sendable {
-    private(set) var identities: [Int: UserIdentity] = [:]
-    private(set) var byUsername: [String: Int] = [:]
+    private(set) var identities: [UserID: UserIdentity] = [:]
+    private(set) var byUsername: [String: UserID] = [:]
     /// Key of the bot's owner, pinned the first time the person configured as
     /// owner (`ownerKey` in env) talks to the bot. Without this the owner
     /// would be recognised only by their configured @username — and would lose
@@ -210,7 +212,7 @@ struct UserDirectory: Codable, Sendable {
         rootKey = try container.decodeIfPresent(UserKey.self, forKey: .rootKey)
         let stored = try container.decodeIfPresent([String: UserIdentity].self, forKey: .identities) ?? [:]
         for (key, identity) in stored {
-            let id = Int(key) ?? identity.userID
+            let id = Int(key).map(UserID.init) ?? identity.userID
             identities[id] = identity
         }
         rebuildIndex()
@@ -219,7 +221,7 @@ struct UserDirectory: Codable, Sendable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         var stored: [String: UserIdentity] = [:]
-        for (id, identity) in identities { stored[String(id)] = identity }
+        for (id, identity) in identities { stored[String(id.value)] = identity }
         try container.encode(stored, forKey: .identities)
         try container.encodeIfPresent(rootKey, forKey: .rootKey)
     }
@@ -242,7 +244,7 @@ struct UserDirectory: Codable, Sendable {
     /// first — losing one costs a re-identification on their next message.
     static let maxIdentities = 10_000
 
-    func identity(userID: Int) -> UserIdentity? { identities[userID] }
+    func identity(userID: UserID) -> UserIdentity? { identities[userID] }
 
     /// Loads one stored row on boot. The username index is maintained here as
     /// on every other write, so a stale duplicate in storage still cannot make
@@ -274,7 +276,7 @@ struct UserDirectory: Codable, Sendable {
         }
     }
 
-    func userID(forUsername username: String?) -> Int? {
+    func userID(forUsername username: String?) -> UserID? {
         guard let name = UserKey.pending(username) else { return nil }
         return byUsername[name.storageValue]
     }
@@ -293,7 +295,7 @@ struct UserDirectory: Codable, Sendable {
     /// under the old label — and whether `seenAt` moved far enough to be worth
     /// writing out.
     @discardableResult
-    mutating func record(userID: Int, username: String?, firstName: String?, now: Date = Date()) -> (changed: Bool, previousUsername: String?, seenAtAdvanced: Bool) {
+    mutating func record(userID: UserID, username: String?, firstName: String?, now: Date = Date()) -> (changed: Bool, previousUsername: String?, seenAtAdvanced: Bool) {
         let normalized = UserKey.normalizedHandle(username)
         var identity = identities[userID]
             ?? UserIdentity(userID: userID, username: nil, firstName: nil, seenAt: now, firstSeenAt: now)

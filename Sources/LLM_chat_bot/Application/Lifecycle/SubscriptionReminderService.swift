@@ -320,7 +320,7 @@ actor SubscriptionReminderService {
     }
 
     private func send(
-        chatID: Int,
+        chatID: ChatID,
         text: String,
         pricing: SubscriptionPricing?,
         notice: SubscriptionNotice? = nil,

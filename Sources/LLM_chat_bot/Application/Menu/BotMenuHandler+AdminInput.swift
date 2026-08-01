@@ -114,7 +114,7 @@ extension BotMenuHandler {
         switch pending.kind {
         case .whitelistAdd:
             guard isAdmin else { toast = Texts.adminOnly; resumePage = .adminPanel; break }
-            if let id = Int(trimmed) {
+            if let id = Int(trimmed).map(UserID.init) {
                 await state.addToWhitelist(userID: id, chatID: chatKey.chatID)
                 toast = "✓ \(id) добавлен в гости"
             } else {
@@ -147,7 +147,7 @@ extension BotMenuHandler {
             guard let owner = pending.payload.map(UserKey.init(storageValue:)) else { toast = "Не удалось определить владельца"; resumePage = .adminChats; break }
             if !isSuper, owner != invoker {
                 toast = "🔒 Включить премиум можно только за свой счёт"
-            } else if let chatID = Int(trimmed) {
+            } else if let chatID = Int(trimmed).map(ChatID.init) {
                 let ok = await state.assignChat(chatID: chatID, to: owner)
                 toast = ok ? "✓ Премиум включён в чате \(chatID)" : "Премиум не найден"
             } else {

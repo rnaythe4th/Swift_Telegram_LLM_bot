@@ -20,10 +20,10 @@ struct PaymentReceipt: Sendable {
     /// Referral bonuses and traffic attribution are keyed by userID. A pending
     /// record (someone the bot has only been told about) has none, and then
     /// those two steps simply have nothing to look up.
-    let payerUserID: Int?
+    let payerUserID: UserID?
     /// Chat the purchase was made from: what a subscription may claim, and
     /// where the confirmation goes.
-    let chatID: Int
+    let chatID: ChatID
     let purpose: PurchasePurpose
     /// Vendor-side identifier: Telegram charge id, tx hash, gateway payment id.
     /// The whole point of the dedup, because every one of those transports
@@ -211,7 +211,7 @@ final class PaymentFulfillmentService: Sendable {
     /// but the good news.
     private func announceReferralBonus(_ bonus: ReferralPaymentBonus) async {
         let delivered = (try? await telegram.sendMessage(.init(
-            chatID: bonus.inviterUserID,
+            chatID: bonus.inviterUserID.privateChat,
             threadID: nil,
             replyTo: nil,
             text: ReferralPresenter.paymentBonusText(bonus),

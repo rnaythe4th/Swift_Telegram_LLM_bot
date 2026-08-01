@@ -155,7 +155,7 @@ final class UserDirectoryTests: XCTestCase {
         var directory = UserDirectory.empty
         let base = Date(timeIntervalSince1970: 1_000_000)
         for id in 1...(UserDirectory.maxIdentities + 10) {
-            directory.record(userID: id, username: nil, firstName: nil, now: base.addingTimeInterval(Double(id)))
+            directory.record(userID: UserID(id), username: nil, firstName: nil, now: base.addingTimeInterval(Double(id)))
         }
         // Oldest entries are the first candidates; protect one of them.
         directory.prune(protectedKeys: [UserKey.identified(1)])

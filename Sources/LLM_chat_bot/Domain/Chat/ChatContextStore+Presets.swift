@@ -6,30 +6,30 @@ import Foundation
 extension ChatContextStore {
     // MARK: - Defaults
 
-    func defaultRole(chatID: Int) -> String {
+    func defaultRole(chatID: ChatID) -> String {
         let baseRole = tenantState(for: chatID).defaultRole
         return roleWithCompanyMembers(chatID: chatID, role: baseRole + formatOptions)
     }
 
-    func getDefaults(chatID: Int) -> (model: String, role: String, historyLength: Int) {
+    func getDefaults(chatID: ChatID) -> (model: String, role: String, historyLength: Int) {
         let t = tenantState(for: chatID)
         return (t.defaultModel, t.defaultRole, t.defaultHistoryLength)
     }
 
     @discardableResult
-    func setDefaultModel(_ model: String, chatID: Int) -> String {
+    func setDefaultModel(_ model: String, chatID: ChatID) -> String {
         mutateTenant(for: chatID) { $0.defaultModel = model }
         return model
     }
 
     @discardableResult
-    func setDefaultRole(_ role: String, chatID: Int) -> String {
+    func setDefaultRole(_ role: String, chatID: ChatID) -> String {
         mutateTenant(for: chatID) { $0.defaultRole = role }
         return role
     }
 
     @discardableResult
-    func setDefaultHistoryLength(_ length: Int, chatID: Int) -> Int {
+    func setDefaultHistoryLength(_ length: Int, chatID: ChatID) -> Int {
         let clamped = max(1, length)
         mutateTenant(for: chatID) { $0.defaultHistoryLength = clamped }
         return clamped
@@ -37,12 +37,12 @@ extension ChatContextStore {
 
     // MARK: - Presets (tenant-scoped)
 
-    func modelPresets(chatID: Int) -> [Preset] { tenantState(for: chatID).modelPresets }
-    func tempPresets(chatID: Int) -> [Preset] { tenantState(for: chatID).tempPresets }
-    func historyLengthPresets(chatID: Int) -> [Preset] { tenantState(for: chatID).historyLengthPresets }
-    func rolePresets(chatID: Int) -> [Preset] { tenantState(for: chatID).rolePresets }
+    func modelPresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).modelPresets }
+    func tempPresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).tempPresets }
+    func historyLengthPresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).historyLengthPresets }
+    func rolePresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).rolePresets }
 
-    func presets(for category: PresetCategory, chatID: Int) -> [Preset] {
+    func presets(for category: PresetCategory, chatID: ChatID) -> [Preset] {
         switch category {
         case .model: return modelPresets(chatID: chatID)
         case .temp: return tempPresets(chatID: chatID)
@@ -51,7 +51,7 @@ extension ChatContextStore {
         }
     }
 
-    func addPreset(category: PresetCategory, display: String, value: String, provider: String? = nil, chatID: Int) -> Preset {
+    func addPreset(category: PresetCategory, display: String, value: String, provider: String? = nil, chatID: ChatID) -> Preset {
         let preset = Preset(display: display, value: value, provider: provider)
         mutateTenant(for: chatID) { tenant in
             switch category {
@@ -64,7 +64,7 @@ extension ChatContextStore {
         return preset
     }
 
-    func removePresetByIndex(category: PresetCategory, index: Int, chatID: Int) -> Bool {
+    func removePresetByIndex(category: PresetCategory, index: Int, chatID: ChatID) -> Bool {
         var success = false
         mutateTenant(for: chatID) { tenant in
             switch category {
@@ -89,7 +89,7 @@ extension ChatContextStore {
         return success
     }
 
-    func editPreset(category: PresetCategory, index: Int, display: String, value: String, provider: String? = nil, chatID: Int) -> Bool {
+    func editPreset(category: PresetCategory, index: Int, display: String, value: String, provider: String? = nil, chatID: ChatID) -> Bool {
         let preset = Preset(display: display, value: value, provider: provider)
         var success = false
         mutateTenant(for: chatID) { tenant in
@@ -115,11 +115,11 @@ extension ChatContextStore {
         return success
     }
 
-    func addModelPreset(display: String, value: String, provider: String? = nil, chatID: Int) -> Preset {
+    func addModelPreset(display: String, value: String, provider: String? = nil, chatID: ChatID) -> Preset {
         addPreset(category: .model, display: display, value: value, provider: provider, chatID: chatID)
     }
 
-    func removeModelPreset(value: String, chatID: Int) -> Bool {
+    func removeModelPreset(value: String, chatID: ChatID) -> Bool {
         var removed = false
         mutateTenant(for: chatID) { tenant in
             let before = tenant.modelPresets.count
@@ -129,11 +129,11 @@ extension ChatContextStore {
         return removed
     }
 
-    func addTempPreset(display: String, value: String, chatID: Int) -> Preset {
+    func addTempPreset(display: String, value: String, chatID: ChatID) -> Preset {
         addPreset(category: .temp, display: display, value: value, chatID: chatID)
     }
 
-    func removeTempPreset(value: String, chatID: Int) -> Bool {
+    func removeTempPreset(value: String, chatID: ChatID) -> Bool {
         var removed = false
         mutateTenant(for: chatID) { tenant in
             let before = tenant.tempPresets.count
@@ -143,11 +143,11 @@ extension ChatContextStore {
         return removed
     }
 
-    func addHistoryLengthPreset(display: String, value: String, chatID: Int) -> Preset {
+    func addHistoryLengthPreset(display: String, value: String, chatID: ChatID) -> Preset {
         addPreset(category: .history, display: display, value: value, chatID: chatID)
     }
 
-    func removeHistoryLengthPreset(value: String, chatID: Int) -> Bool {
+    func removeHistoryLengthPreset(value: String, chatID: ChatID) -> Bool {
         var removed = false
         mutateTenant(for: chatID) { tenant in
             let before = tenant.historyLengthPresets.count
@@ -157,11 +157,11 @@ extension ChatContextStore {
         return removed
     }
 
-    func addRolePreset(display: String, value: String, chatID: Int) -> Preset {
+    func addRolePreset(display: String, value: String, chatID: ChatID) -> Preset {
         addPreset(category: .role, display: display, value: value, chatID: chatID)
     }
 
-    func removeRolePreset(value: String, chatID: Int) -> Bool {
+    func removeRolePreset(value: String, chatID: ChatID) -> Bool {
         var removed = false
         mutateTenant(for: chatID) { tenant in
             let before = tenant.rolePresets.count

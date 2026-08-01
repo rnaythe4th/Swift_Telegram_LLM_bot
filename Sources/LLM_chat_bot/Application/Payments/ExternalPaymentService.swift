@@ -65,8 +65,8 @@ actor ExternalPaymentService {
 
     func createCheckout(
         payerKey: UserKey,
-        payerUserID: Int?,
-        chatID: Int,
+        payerUserID: UserID?,
+        chatID: ChatID,
         threadID: Int64?,
         purpose: PurchasePurpose,
         methodCode: String?
@@ -260,8 +260,7 @@ actor ExternalPaymentService {
     ) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy"
-        // Telegram convention: negative chat IDs are groups.
-        let isGroup = order.chatID < 0
+        let isGroup = order.chatID.isGroup
         if case .keptSponsor(let sponsor) = claim {
             return """
             ✅ <b>Оплата получена!</b>
@@ -307,7 +306,7 @@ actor ExternalPaymentService {
         """)
     }
 
-    private func send(chatID: Int, threadID: Int64?, text: String) async {
+    private func send(chatID: ChatID, threadID: Int64?, text: String) async {
         _ = try? await telegram.sendMessage(.init(
             chatID: chatID,
             threadID: (threadID ?? 0) == 0 ? nil : threadID,

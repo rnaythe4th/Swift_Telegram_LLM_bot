@@ -66,9 +66,9 @@ struct ConsoleLogger: LoggerPort {
             ("level", quoted(level.tag.lowercased())),
             ("msg", quoted(message)),
         ]
-        if let chat = context.chat { fields.append(("chat", String(chat))) }
+        if let chat = context.chat { fields.append(("chat", String(chat.value))) }
         if let thread = context.thread { fields.append(("thread", String(thread))) }
-        if let user = context.user { fields.append(("user", String(user))) }
+        if let user = context.user { fields.append(("user", String(user.value))) }
         if let generation = context.generation {
             fields.append(("generation", quoted(generation.raw.uuidString)))
         }

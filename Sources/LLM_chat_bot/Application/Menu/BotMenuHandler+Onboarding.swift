@@ -111,7 +111,7 @@ extension BotMenuHandler {
             // Renders the real buttons for the room the preview is opened in;
             // tapping one runs a real generation here (that is the point — the
             // super-admin sees exactly what users get).
-            let isGroup = chatKey.chatID < 0
+            let isGroup = chatKey.chatID.isGroup
             let rows = OnboardingPresenter.exampleRows(config, inGroup: isGroup)
             guard !rows.isEmpty else {
                 try? await telegram.answerCallback(

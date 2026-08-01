@@ -10,7 +10,7 @@ extension BotCommandHandler {
 
         switch subcommand.lowercased() {
         case "add":
-            guard let userID = Int(value) else {
+            guard let userID = Int(value).map(UserID.init) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/whitelist add &lt;номер пользователя&gt;</code>")
                 return
             }
@@ -18,7 +18,7 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Пользователь <code>\(userID)</code> добавлен в гости этого чата — ваш премиум работает и для него.")
 
         case "remove":
-            guard let userID = Int(value) else {
+            guard let userID = Int(value).map(UserID.init) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/whitelist remove &lt;номер пользователя&gt;</code>")
                 return
             }

@@ -79,6 +79,10 @@ struct MenuRoute {
         arg(index).map { UserKey(storageValue: $0) }
     }
 
+    func chatID(_ index: Int) -> ChatID? { int(index).map(ChatID.init) }
+
+    func userID(_ index: Int) -> UserID? { int(index).map(UserID.init) }
+
     /// The token every handler switches on first. Missing reads as `""`, which
     /// lands in `default` — the same place a bounds guard used to send it.
     var sub: String { arg(1) ?? "" }

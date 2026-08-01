@@ -69,7 +69,7 @@ extension ChatContextStore {
         return true
     }
 
-    func isTenantOwner(_ key: UserKey?, chatID: Int) -> Bool {
+    func isTenantOwner(_ key: UserKey?, chatID: ChatID) -> Bool {
         guard let u = key.map(resolved) else { return false }
         if superAdminKeys.contains(u) {
             if _simulatedRoles[u] != nil { return false }
@@ -78,7 +78,7 @@ extension ChatContextStore {
         return effectiveOwnerKey(chatID: chatID) == u
     }
 
-    func isAdmin(_ key: UserKey?, chatID: Int) -> Bool {
+    func isAdmin(_ key: UserKey?, chatID: ChatID) -> Bool {
         guard let u = key.map(resolved) else { return false }
         if let sim = _simulatedRoles[u], superAdminKeys.contains(u) {
             return sim == .admin
@@ -89,33 +89,33 @@ extension ChatContextStore {
         return tenants[owner]?.adminKeys.contains(u) ?? false
     }
 
-    func isWhitelisted(userID: Int, chatID: Int) -> Bool {
+    func isWhitelisted(userID: UserID, chatID: ChatID) -> Bool {
         tenantState(for: chatID).whitelistedUserIDs.contains(userID)
     }
 
-    func addToWhitelist(userID: Int, chatID: Int) {
+    func addToWhitelist(userID: UserID, chatID: ChatID) {
         mutateTenant(for: chatID) { $0.whitelistedUserIDs.insert(userID) }
         userTenantMap[userID] = effectiveOwnerKey(chatID: chatID)
     }
 
-    func removeFromWhitelist(userID: Int, chatID: Int) {
+    func removeFromWhitelist(userID: UserID, chatID: ChatID) {
         mutateTenant(for: chatID) { $0.whitelistedUserIDs.remove(userID) }
         userTenantMap.removeValue(forKey: userID)
     }
 
-    func listWhitelisted(chatID: Int) -> Set<Int> {
+    func listWhitelisted(chatID: ChatID) -> Set<UserID> {
         tenantState(for: chatID).whitelistedUserIDs
     }
 
-    func addAdmin(_ u: UserKey, chatID: Int) {
+    func addAdmin(_ u: UserKey, chatID: ChatID) {
         mutateTenant(for: chatID) { $0.adminKeys.insert(u) }
     }
 
-    func removeAdmin(_ u: UserKey, chatID: Int) {
+    func removeAdmin(_ u: UserKey, chatID: ChatID) {
         mutateTenant(for: chatID) { $0.adminKeys.remove(u) }
     }
 
-    func listAdmins(chatID: Int) -> [(key: UserKey, label: String)] {
+    func listAdmins(chatID: ChatID) -> [(key: UserKey, label: String)] {
         tenantState(for: chatID).adminKeys
             .map { (key: $0, label: displayLabel(forKey: $0)) }
             .sorted { $0.label < $1.label }
@@ -140,7 +140,7 @@ extension ChatContextStore {
     /// reports *who* is paying — so the menu and the purchase page can credit
     /// the sponsor (roadmap step 3) instead of selling to someone who is
     /// already covered.
-    func chatAccessStatus(chatID: Int, key: UserKey?, userID: Int? = nil) -> ChatAccessStatus {
+    func chatAccessStatus(chatID: ChatID, key: UserKey?, userID: UserID? = nil) -> ChatAccessStatus {
         let candidates = userKeys(key: key, userID: userID)
         let simulated = candidates.contains { superAdminKeys.contains($0) && _simulatedRoles[$0] != nil }
 
@@ -174,7 +174,7 @@ extension ChatContextStore {
 
     /// Subscription/licence coverage only — the generation is paid by a
     /// tenant's subscription, not by the sender's personal balance.
-    func hasSubscriptionCoverage(key: UserKey?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
+    func hasSubscriptionCoverage(key: UserKey?, userID: UserID? = nil, chatID: ChatID? = nil) -> Bool {
         let candidates = userKeys(key: key, userID: userID)
         let simulated = candidates.contains { superAdminKeys.contains($0) && _simulatedRoles[$0] != nil }
 
@@ -208,7 +208,7 @@ extension ChatContextStore {
     /// paid access to the whole chat. Used for the hero credit under answers.
     /// Returns nil when the chat has no active-tenant owner, or when the asker
     /// is the sponsor themselves (no self-crediting).
-    func chatSponsor(chatID: Int, asker: UserKey?) -> String? {
+    func chatSponsor(chatID: ChatID, asker: UserKey?) -> String? {
         guard let owner = chatOwnership[chatID], tenants[owner]?.isActive == true else {
             return nil
         }
@@ -222,7 +222,7 @@ extension ChatContextStore {
     /// repeats at most once per `sponsorCreditCooldown` per chat. Consuming the
     /// slot here (rather than in the caller) keeps two parallel generations in
     /// one chat from both printing it.
-    func chatSponsorForCredit(chatID: Int, asker: UserKey?, now: Date = Date()) -> String? {
+    func chatSponsorForCredit(chatID: ChatID, asker: UserKey?, now: Date = Date()) -> String? {
         guard let sponsor = chatSponsor(chatID: chatID, asker: asker) else { return nil }
         if let last = _sponsorCreditShownAt[chatID], now.timeIntervalSince(last) < Self.sponsorCreditCooldown {
             return nil
@@ -237,7 +237,7 @@ extension ChatContextStore {
     /// Paid-model access: subscription coverage OR a positive personal
     /// balance. The balance path deliberately ignores role simulation so the
     /// super-admin can test pay-as-you-go end to end.
-    func hasFullModelAccess(key: UserKey?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
+    func hasFullModelAccess(key: UserKey?, userID: UserID? = nil, chatID: ChatID? = nil) -> Bool {
         if hasSubscriptionCoverage(key: key, userID: userID, chatID: chatID) {
             return true
         }

@@ -67,7 +67,7 @@ extension BotCommandHandler {
         }
 
         let onboarding = await state.onboardingConfig()
-        let rows = OnboardingPresenter.exampleRows(onboarding, inGroup: chatKey.chatID < 0)
+        let rows = OnboardingPresenter.exampleRows(onboarding, inGroup: chatKey.chatID.isGroup)
         guard !rows.isEmpty else {
             try await sendUserFeedback(chatKey: chatKey, text: "Готовых примеров сейчас нет — просто напишите свой вопрос, я отвечу.")
             return

@@ -31,7 +31,7 @@ extension BotMenuHandler {
         // reads the result. So the page only ever states facts about the chat
         // itself — a personal wallet balance (or "your subscription runs until
         // …") would be published to every member (CLAUDE.md §13/§17).
-        let isGroupChat = chatKey.chatID < 0
+        let isGroupChat = chatKey.chatID.isGroup
 
         // Pay-as-you-go users see their wallet right on the main page.
         let wallet = isGroupChat ? nil : await state.balance(invoker)
@@ -54,7 +54,7 @@ extension BotMenuHandler {
             ? (0, 0)
             : await state.remainingDailyPremium(
                 chatID: chatKey.chatID,
-                userID: chatKey.chatID > 0 ? chatKey.chatID : nil,
+                userID: chatKey.chatID.asUserID,
                 isGroup: isGroupChat
             )
         let accessLine = Self.accessStatusLine(
@@ -136,7 +136,7 @@ extension BotMenuHandler {
 
         // Onboarding (roadmap step 9): a way back to the ready-made prompts
         // after the greeting has scrolled away.
-        if !(await state.onboardingConfig().activeExamples(inGroup: chatKey.chatID < 0).isEmpty) {
+        if !(await state.onboardingConfig().activeExamples(inGroup: chatKey.chatID.isGroup).isEmpty) {
             rows.row([menuButton("💡 Примеры-запросы", command: .examples)])
         }
         // Monetization entry point: shown whenever there is something to buy
@@ -159,7 +159,7 @@ extension BotMenuHandler {
         }
         // Referral (roadmap step 10): personal link, so private chats only.
         let referral = await state.referralConfig()
-        if referral.enabled, !botUsername.isEmpty, chatKey.chatID > 0 {
+        if referral.enabled, !botUsername.isEmpty, chatKey.chatID.isPrivate {
             let label = referral.inviterRewardCents > 0
                 ? "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))"
                 : "🎁 Пригласить друга"

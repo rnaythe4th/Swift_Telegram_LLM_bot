@@ -96,7 +96,7 @@ extension BotMenuHandler {
             // Open to everyone: posts the example buttons as a fresh message so
             // the settings menu stays where it is (roadmap step 9).
             let onboarding = await state.onboardingConfig()
-            let exampleRows = OnboardingPresenter.exampleRows(onboarding, inGroup: chatKey.chatID < 0)
+            let exampleRows = OnboardingPresenter.exampleRows(onboarding, inGroup: chatKey.chatID.isGroup)
             guard !exampleRows.isEmpty else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Примеров сейчас нет")
                 return

@@ -348,9 +348,9 @@ struct ExternalPaymentOrder: Codable, Sendable, Equatable, Identifiable {
     let payerKey: UserKey
     /// Referral bonuses and traffic attribution are keyed by userID; a pending
     /// record (someone the bot has only been told about) simply has none.
-    let payerUserID: Int?
+    let payerUserID: UserID?
     /// Where to answer, and which chat a subscription may claim.
-    let chatID: Int
+    let chatID: ChatID
     /// Forum topic, when the purchase started in one (`ChatKey.threadID`).
     let threadID: Int64?
     let purpose: PurchasePurpose

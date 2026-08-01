@@ -58,7 +58,7 @@ struct TenantStateSnapshot: Codable, Sendable {
     var tempPresets: [Preset]
     var historyLengthPresets: [Preset]
     var rolePresets: [Preset]
-    var whitelistedUserIDs: [Int]
+    var whitelistedUserIDs: [UserID]
     var adminKeys: [UserKey]
     var licensedKeys: [UserKey]?
     var cumulativeUsage: CumulativeUsage?

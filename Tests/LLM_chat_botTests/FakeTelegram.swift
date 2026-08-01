@@ -14,9 +14,9 @@ struct TelegramCall: Sendable {
     }
 
     var text: String? { json["text"] as? String }
-    var chatID: Int? {
-        if let value = json["chat_id"] as? Int { return value }
-        if let value = json["chat_id"] as? String { return Int(value) }
+    var chatID: ChatID? {
+        if let value = json["chat_id"] as? Int { return ChatID(value) }
+        if let value = json["chat_id"] as? String { return Int(value).map { ChatID($0) } }
         return nil
     }
     var parseMode: String? { json["parse_mode"] as? String }

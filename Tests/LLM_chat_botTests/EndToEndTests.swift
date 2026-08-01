@@ -14,8 +14,8 @@ final class EndToEndTests: XCTestCase {
     private var baseURL = ""
 
     private let botUsername = "testbot"
-    private let ownerID = 4_000
-    private let userID = 4_100
+    private let ownerID: UserID = 4_000
+    private let userID: UserID = 4_100
 
     override func setUp() async throws {
         telegram = FakeTelegram()
@@ -77,14 +77,14 @@ final class EndToEndTests: XCTestCase {
 
     private func message(
         _ text: String,
-        chatID: Int? = nil,
-        userID: Int? = nil,
+        chatID: ChatID? = nil,
+        userID: UserID? = nil,
         username: String? = "tester",
         isGroup: Bool = false
     ) -> TelegramUpdate {
         let sender = userID ?? self.userID
         let chat = TelegramChat(
-            id: chatID ?? sender,
+            id: chatID ?? sender.privateChat,
             type: isGroup ? "supergroup" : "private",
             title: isGroup ? "Тестовая группа" : nil
         )
@@ -101,9 +101,9 @@ final class EndToEndTests: XCTestCase {
         )
     }
 
-    private func callback(_ data: String, chatID: Int? = nil, userID: Int? = nil, isGroup: Bool = false) -> TelegramUpdate {
+    private func callback(_ data: String, chatID: ChatID? = nil, userID: UserID? = nil, isGroup: Bool = false) -> TelegramUpdate {
         let sender = userID ?? self.userID
-        let chat = TelegramChat(id: chatID ?? sender, type: isGroup ? "supergroup" : "private")
+        let chat = TelegramChat(id: chatID ?? sender.privateChat, type: isGroup ? "supergroup" : "private")
         return TelegramUpdate(
             update_id: Int.random(in: 1...1_000_000),
             message: nil,
@@ -133,7 +133,7 @@ final class EndToEndTests: XCTestCase {
 
         let call = await telegram.waitForCall("sendMessage")
         let sent = try XCTUnwrap(call)
-        XCTAssertEqual(sent.chatID, userID)
+        XCTAssertEqual(sent.chatID, userID.privateChat)
         XCTAssertEqual(sent.parseMode, "HTML")
         XCTAssertFalse(sent.buttonActions.isEmpty, "the greeting must carry buttons")
         XCTAssertTrue(
@@ -156,10 +156,10 @@ final class EndToEndTests: XCTestCase {
         // stop button; the answer itself follows.
         let answerCall = await telegram.waitForCall("sendMessage", containing: "ответ модели")
         let answer = try XCTUnwrap(answerCall, "no answer was sent")
-        XCTAssertEqual(answer.chatID, userID)
+        XCTAssertEqual(answer.chatID, userID.privateChat)
 
-        try await waitUntil { await self.store.history(chatKey: ChatKey(chatID: self.userID, threadID: 0)).count == 3 }
-        let history = await store.history(chatKey: ChatKey(chatID: userID, threadID: 0))
+        try await waitUntil { await self.store.history(chatKey: ChatKey(chatID: self.userID.privateChat, threadID: 0)).count == 3 }
+        let history = await store.history(chatKey: ChatKey(chatID: userID.privateChat, threadID: 0))
         XCTAssertEqual(history.map(\.role), ["system", "user", "assistant"])
     }
 
@@ -228,7 +228,7 @@ final class EndToEndTests: XCTestCase {
     /// on the purchase page, tagged with the surface it came from, and the
     /// chat's settings are left exactly as they were.
     func testLockedModeTapOpensPurchaseAndChangesNothing() async throws {
-        let chat = ChatKey(chatID: userID, threadID: 0)
+        let chat = ChatKey(chatID: userID.privateChat, threadID: 0)
         await store.setModeConfig(ModePresetConfig(
             enabled: true,
             modes: [
@@ -262,7 +262,7 @@ final class EndToEndTests: XCTestCase {
     /// A 🆓 mode applies the whole bundle in one tap — that is the difference
     /// between a mode and a model picker.
     func testFreeModeAppliesEverySettingAtOnce() async throws {
-        let chat = ChatKey(chatID: userID, threadID: 0)
+        let chat = ChatKey(chatID: userID.privateChat, threadID: 0)
         await store.setModeConfig(ModePresetConfig(
             enabled: true,
             modes: [
@@ -300,7 +300,7 @@ final class EndToEndTests: XCTestCase {
         await orchestrator.dispatch(update: message("/start", userID: ownerID, username: "owner"))
         await telegram.reset()
 
-        let friendID = 4_300
+        let friendID: UserID = 4_300
         await orchestrator.dispatch(update: message("/start ref_\(ownerID)", userID: friendID, username: "friend"))
         _ = await telegram.waitForCall("sendMessage")
 
@@ -319,7 +319,7 @@ final class EndToEndTests: XCTestCase {
 
     /// A paid-traffic link says nothing to the user but records the campaign.
     func testTrafficSourceLinkIsSilentButCounted() async throws {
-        let visitorID = 4_400
+        let visitorID: UserID = 4_400
         await orchestrator.dispatch(update: message("/start src_vk", userID: visitorID, username: "visitor"))
         _ = await telegram.waitForCall("sendMessage")
 
@@ -342,7 +342,7 @@ final class EndToEndTests: XCTestCase {
         await store.setDailyPremiumLimit(1)
         await store.setFreeModelIDs(["free/model"])
 
-        let freeUserID = 4_500
+        let freeUserID: UserID = 4_500
         await orchestrator.dispatch(update: message("первый", userID: freeUserID, username: "free"))
         _ = await telegram.waitForCalls("sendMessage", count: 1)
 
@@ -356,7 +356,7 @@ final class EndToEndTests: XCTestCase {
         XCTAssertEqual(report.counters[FunnelEvent.capHit.rawValue], 1)
 
         // The chat is parked on a free model until access appears.
-        let help = await store.fetchHelp(chatKey: ChatKey(chatID: freeUserID, threadID: 0))
+        let help = await store.fetchHelp(chatKey: ChatKey(chatID: freeUserID.privateChat, threadID: 0))
         XCTAssertEqual(help.model, "free/model")
     }
 
@@ -380,7 +380,7 @@ final class EndToEndTests: XCTestCase {
     /// Anyone else's message must go on to be answered normally instead of
     /// being eaten by the wait (and answered with "🔒 Только суперадмин…").
     func testPendingInputInAGroupDoesNotSwallowSomeoneElsesMessage() async throws {
-        let group = -4_600
+        let group: ChatID = -4_600
 
         // The owner (super-admin) taps "✏️ Изменить цену" in the group.
         await orchestrator.dispatch(update: callback("menu:stars:setprice", chatID: group, userID: ownerID, isGroup: true))
@@ -410,7 +410,7 @@ final class EndToEndTests: XCTestCase {
     /// An invalid value re-arms the same wait — and it must stay the owner's,
     /// otherwise the retry prompt starts eating the group's messages.
     func testInvalidValueRearmsTheWaitForTheSameOwner() async throws {
-        let group = -4_601
+        let group: ChatID = -4_601
         let chatKey = ChatKey(chatID: group, threadID: 0)
 
         await orchestrator.dispatch(update: callback("menu:stars:setprice", chatID: group, userID: ownerID, isGroup: true))
@@ -433,7 +433,7 @@ final class EndToEndTests: XCTestCase {
         await store.setDailyPremiumLimit(1)
         await store.setFreeModelIDs(["free/model"])
 
-        let freeUserID = 4_700
+        let freeUserID: UserID = 4_700
         await orchestrator.dispatch(update: message("/start", userID: freeUserID, username: "free"))
         _ = await telegram.waitForCall("sendMessage")
         await orchestrator.dispatch(update: message("/menu", userID: freeUserID, username: "free"))

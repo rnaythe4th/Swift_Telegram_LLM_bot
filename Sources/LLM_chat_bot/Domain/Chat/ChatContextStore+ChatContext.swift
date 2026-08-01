@@ -6,7 +6,7 @@ import Foundation
 extension ChatContextStore {
     // MARK: - Chat context helpers
 
-    func roleWithCompanyMembers(chatID: Int, role: String) -> String {
+    func roleWithCompanyMembers(chatID: ChatID, role: String) -> String {
         chatID == companyChatId ? role + companyMembers : role
     }
 
@@ -92,7 +92,7 @@ extension ChatContextStore {
     }
 
     /// Thread keys with an existing context for the chat, main thread first.
-    func existingContextKeys(chatID: Int) -> [ChatKey] {
+    func existingContextKeys(chatID: ChatID) -> [ChatKey] {
         contexts.keys
             .filter { $0.chatID == chatID }
             .sorted { $0.threadID < $1.threadID }
@@ -117,7 +117,7 @@ extension ChatContextStore {
         )
     }
 
-    private func displayRole(_ role: String, chatID: Int) -> String {
+    private func displayRole(_ role: String, chatID: ChatID) -> String {
         var s = role
         if !companyMembers.isEmpty, chatID == companyChatId, s.hasSuffix(companyMembers) {
             s = String(s.dropLast(companyMembers.count))

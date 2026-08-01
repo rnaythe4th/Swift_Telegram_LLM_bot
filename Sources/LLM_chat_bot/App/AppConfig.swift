@@ -67,7 +67,7 @@ struct AppConfig: Sendable {
     /// Legacy operational chat id. Optional: it feeds one unused member list,
     /// and a required variable that does nothing is one more way to fail to
     /// start for no reason.
-    let companyChatId: Int
+    let companyChatId: ChatID
     /// Owner's @username, without the `@`.
     let ownerUsername: String
     let databaseURL: String?
@@ -90,7 +90,7 @@ struct AppConfig: Sendable {
     /// the bot recognises its owner by the configured @username, and a username
     /// is rented — whoever registers it after the owner drops it inherits root
     /// on their first message. A userID cannot be transferred.
-    let ownerUserID: Int?
+    let ownerUserID: UserID?
     let maxConcurrentGenerations: Int
     /// Bot API endpoint. Only ever set in tests, which point it at a local
     /// stand-in to assert what the bot actually sends (§19). Unset in
@@ -103,7 +103,7 @@ struct AppConfig: Sendable {
         let telegramToken = try env(.telegramToken)
         let deepseekKey = try env(.deepseekKey)
         let routerApiKey = try env(.routerApiKey)
-        let companyChatId = Int(optionalEnv(.companyChatId) ?? "") ?? 0
+        let companyChatId = ChatID(Int(optionalEnv(.companyChatId) ?? "") ?? 0)
 
         let healthPort = Int(optionalEnv(.healthPort) ?? "") ?? 8000
 
@@ -132,7 +132,7 @@ struct AppConfig: Sendable {
             webhookPublicURL: webhookPublicURL,
             webhookSecret: optionalEnv(.webhookSecret),
             metricsToken: optionalEnv(.metricsToken),
-            ownerUserID: optionalEnv(.ownerUserID).flatMap { Int($0) }.flatMap { $0 > 0 ? $0 : nil },
+            ownerUserID: optionalEnv(.ownerUserID).flatMap { Int($0) }.flatMap { $0 > 0 ? UserID($0) : nil },
             maxConcurrentGenerations: Int(optionalEnv(.maxConcurrentGenerations) ?? "") ?? 64,
             telegramAPIBase: optionalEnv(.telegramAPIBase) ?? TelegramHTTPGateway.defaultAPIBase,
             stateEncryptionKey: optionalEnv(.stateEncryptionKey)

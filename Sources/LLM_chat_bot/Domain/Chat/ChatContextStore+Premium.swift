@@ -19,8 +19,10 @@ extension ChatContextStore {
 
     /// Counter key: a group shares one allowance (social pressure — "кто-нибудь
     /// откройте премиум"), a private chat counts per person.
-    private func dailyPremiumKey(chatID: Int, userID: Int?, isGroup: Bool) -> String {
-        isGroup ? "c\(chatID)" : "u\(userID ?? chatID)"
+    private func dailyPremiumKey(chatID: ChatID, userID: UserID?, isGroup: Bool) -> String {
+        // A group shares one counter; a DM without a userID can only be keyed
+        // by the chat, which for a private chat is the same person anyway.
+        isGroup ? "c\(chatID)" : "u\(userID?.description ?? chatID.description)"
     }
 
     /// Drops entries from previous days. Called on every write, so the row
@@ -36,7 +38,7 @@ extension ChatContextStore {
     /// Consumes one unit of today's free premium allowance for a free-tier
     /// chat/user and reports whether a paid-model answer is allowed. Counter
     /// resets at the UTC day boundary. `.exhausted` does not consume a unit.
-    func consumeDailyPremium(chatID: Int, userID: Int?, isGroup: Bool) -> DailyPremiumDecision {
+    func consumeDailyPremium(chatID: ChatID, userID: UserID?, isGroup: Bool) -> DailyPremiumDecision {
         let limit = dailyPremiumLimitValue
         guard limit > 0 else { return .exhausted(limit: limit) }
         let key = dailyPremiumKey(chatID: chatID, userID: userID, isGroup: isGroup)
@@ -54,7 +56,7 @@ extension ChatContextStore {
     /// Gives a consumed unit back when the turn produced no answer (provider
     /// error, cancellation, empty reply). Without this a failed generation
     /// silently costs a free user one of their few smart answers of the day.
-    func refundDailyPremium(chatID: Int, userID: Int?, isGroup: Bool) {
+    func refundDailyPremium(chatID: ChatID, userID: UserID?, isGroup: Bool) {
         let key = dailyPremiumKey(chatID: chatID, userID: userID, isGroup: isGroup)
         let today = FunnelDailyLog.dayNumber()
         guard var entry = premiumDailyUsage[key], entry.day == today, entry.used > 0 else { return }
@@ -69,7 +71,7 @@ extension ChatContextStore {
     }
 
     /// Read-only view for the menu: how much of today's taste is left.
-    func remainingDailyPremium(chatID: Int, userID: Int?, isGroup: Bool) -> (remaining: Int, limit: Int) {
+    func remainingDailyPremium(chatID: ChatID, userID: UserID?, isGroup: Bool) -> (remaining: Int, limit: Int) {
         let limit = dailyPremiumLimitValue
         guard limit > 0 else { return (0, 0) }
         let key = dailyPremiumKey(chatID: chatID, userID: userID, isGroup: isGroup)
@@ -92,9 +94,9 @@ extension ChatContextStore {
     /// free-tier chat with units left today must be able to *choose* a smart
     /// model: otherwise the daily taste is reachable only by chats that happened
     /// to have a paid model set before the cap parked it, and nobody can opt in.
-    func paidModelAccess(key: UserKey?, userID: Int?, chatID: Int) -> PaidModelAccess {
+    func paidModelAccess(key: UserKey?, userID: UserID?, chatID: ChatID) -> PaidModelAccess {
         if hasFullModelAccess(key: key, userID: userID, chatID: chatID) { return .full }
-        let left = remainingDailyPremium(chatID: chatID, userID: userID, isGroup: chatID < 0)
+        let left = remainingDailyPremium(chatID: chatID, userID: userID, isGroup: chatID.isGroup)
         return left.remaining > 0 ? .dailyTaste(remaining: left.remaining, limit: left.limit) : .none
     }
 }

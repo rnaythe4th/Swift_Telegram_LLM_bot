@@ -72,7 +72,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
 
         state.users = try await map("select user_id, username, first_name, first_seen_at, seen_at from bot_user where user_id is not null") {
             UserRow(identity: UserIdentity(
-                userID: Int(try $0["user_id"].decode(Int64.self)),
+                userID: UserID(Int(try $0["user_id"].decode(Int64.self))),
                 username: try $0["username"].decode(String?.self),
                 firstName: try $0["first_name"].decode(String?.self),
                 seenAt: try $0["seen_at"].decode(Date.self),
@@ -83,7 +83,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
         state.contexts = try await map("select chat_id, thread_id, data from bot_chat_context") {
             ChatContextRow(
                 key: ChatKey(
-                    chatID: Int(try $0["chat_id"].decode(Int64.self)),
+                    chatID: ChatID(Int(try $0["chat_id"].decode(Int64.self))),
                     threadID: try $0["thread_id"].decode(Int64.self)
                 ),
                 snapshot: try $0["data"].decode(ChatContextSnapshot.self)
@@ -131,7 +131,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             let type = try row["type"].decode(String?.self)
             let removed = try row["bot_removed"].decode(Bool.self)
             return ChatRow(
-                chatID: Int(try row["chat_id"].decode(Int64.self)),
+                chatID: ChatID(Int(try row["chat_id"].decode(Int64.self))),
                 meta: type.map {
                     ChatMetaInfo(
                         type: $0,
@@ -164,14 +164,14 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
 
         state.referrals = try await map("select invited_user_id, data from bot_referral") {
             ReferralRow(
-                invitedUserID: Int(try $0["invited_user_id"].decode(Int64.self)),
+                invitedUserID: UserID(Int(try $0["invited_user_id"].decode(Int64.self))),
                 record: try $0["data"].decode(ReferralRecord.self)
             )
         }
 
         state.referralTallies = try await map("select inviter_user_id, data from bot_referral_tally") {
             ReferralTallyRow(
-                inviterUserID: Int(try $0["inviter_user_id"].decode(Int64.self)),
+                inviterUserID: UserID(Int(try $0["inviter_user_id"].decode(Int64.self))),
                 tally: try $0["data"].decode(ReferralTally.self)
             )
         }
@@ -180,7 +180,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             "select user_id, tag, joined_at, activated_at, paid_at, payments from bot_traffic_attribution"
         ) {
             TrafficAttributionRow(
-                userID: Int(try $0["user_id"].decode(Int64.self)),
+                userID: UserID(Int(try $0["user_id"].decode(Int64.self))),
                 attribution: TrafficSourceAttribution(
                     tag: try $0["tag"].decode(String.self),
                     joinedAt: try $0["joined_at"].decode(Date.self),
@@ -241,10 +241,10 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
     /// `not (chat_id = any($2))` rather than a list built in Swift: the
     /// protected set is a bind parameter like everything else, so it cannot
     /// become SQL however long it grows.
-    func pruneChatContexts(idleDays: Int, protecting: Set<Int>) async throws -> [ChatKey] {
+    func pruneChatContexts(idleDays: Int, protecting: Set<ChatID>) async throws -> [ChatKey] {
         guard idleDays > 0 else { return [] }
         let cutoff = Date().addingTimeInterval(-Double(idleDays) * 86_400)
-        let keep = protecting.map(Int64.init)
+        let keep = protecting.map { Int64($0.value) }
         return try await map(
             """
             delete from bot_chat_context
@@ -254,7 +254,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             """
         ) {
             ChatKey(
-                chatID: Int(try $0["chat_id"].decode(Int64.self)),
+                chatID: ChatID(Int(try $0["chat_id"].decode(Int64.self))),
                 threadID: try $0["thread_id"].decode(Int64.self)
             )
         }
@@ -306,7 +306,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             // created rather than deleted.
             for key in batch.deletedContexts {
                 try await db.query(
-                    "delete from bot_chat_context where chat_id = \(Int64(key.chatID)) and thread_id = \(key.threadID)",
+                    "delete from bot_chat_context where chat_id = \(Int64(key.chatID.value)) and thread_id = \(key.threadID)",
                     logger: log
                 )
             }
@@ -314,7 +314,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query("delete from bot_tenant where user_key = \(key)", logger: log)
             }
             for chatID in batch.deletedChats {
-                try await db.query("delete from bot_chat where chat_id = \(Int64(chatID))", logger: log)
+                try await db.query("delete from bot_chat where chat_id = \(Int64(chatID.value))", logger: log)
             }
             for token in batch.deletedInvites {
                 try await db.query("delete from bot_invite where token = \(token)", logger: log)
@@ -323,13 +323,13 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query("delete from bot_premium_usage where subject = \(subject)", logger: log)
             }
             for userID in batch.deletedReferrals {
-                try await db.query("delete from bot_referral where invited_user_id = \(Int64(userID))", logger: log)
+                try await db.query("delete from bot_referral where invited_user_id = \(Int64(userID.value))", logger: log)
             }
             for userID in batch.deletedReferralTallies {
-                try await db.query("delete from bot_referral_tally where inviter_user_id = \(Int64(userID))", logger: log)
+                try await db.query("delete from bot_referral_tally where inviter_user_id = \(Int64(userID.value))", logger: log)
             }
             for userID in batch.deletedTrafficAttributions {
-                try await db.query("delete from bot_traffic_attribution where user_id = \(Int64(userID))", logger: log)
+                try await db.query("delete from bot_traffic_attribution where user_id = \(Int64(userID.value))", logger: log)
             }
             for id in batch.deletedCryptoInvoices {
                 try await db.query("delete from bot_crypto_invoice where id = \(id)", logger: log)
@@ -343,7 +343,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_user (user_key, user_id, username, first_name, first_seen_at, seen_at)
-                    values (\(UserKey.identified(identity.userID)), \(Int64(identity.userID)), \(identity.username),
+                    values (\(UserKey.identified(identity.userID)), \(Int64(identity.userID.value)), \(identity.username),
                             \(identity.firstName), \(identity.firstSeenAt ?? identity.seenAt), \(identity.seenAt))
                     on conflict (user_key) do update set
                         user_id = excluded.user_id,
@@ -360,7 +360,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_chat_context (chat_id, thread_id, data, updated_at)
-                    values (\(Int64(row.key.chatID)), \(row.key.threadID), \(row.snapshot), now())
+                    values (\(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now())
                     on conflict (chat_id, thread_id) do update set
                         data = excluded.data, updated_at = excluded.updated_at
                     """,
@@ -422,7 +422,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_chat (chat_id, type, title, username, first_name, owner_key, bot_removed, updated_at)
-                    values (\(Int64(row.chatID)), \(row.meta?.type), \(row.meta?.title), \(row.meta?.username),
+                    values (\(Int64(row.chatID.value)), \(row.meta?.type), \(row.meta?.title), \(row.meta?.username),
                             \(row.meta?.firstName), \(row.ownerKey), \(row.meta?.botRemoved ?? false), now())
                     on conflict (chat_id) do update set
                         type = coalesce(excluded.type, bot_chat.type),
@@ -463,7 +463,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_referral (invited_user_id, inviter_user_id, bound_at, rewarded_at, paid_bonus_at, data)
-                    values (\(Int64(row.invitedUserID)), \(Int64(row.record.inviterUserID)), \(row.record.boundAt),
+                    values (\(Int64(row.invitedUserID.value)), \(Int64(row.record.inviterUserID.value)), \(row.record.boundAt),
                             \(row.record.rewardedAt), \(row.record.paidBonusAt), \(row.record))
                     on conflict (invited_user_id) do update set
                         inviter_user_id = excluded.inviter_user_id,
@@ -479,7 +479,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_referral_tally (inviter_user_id, data)
-                    values (\(Int64(row.inviterUserID)), \(row.tally))
+                    values (\(Int64(row.inviterUserID.value)), \(row.tally))
                     on conflict (inviter_user_id) do update set data = excluded.data
                     """,
                     logger: log
@@ -491,7 +491,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_traffic_attribution (user_id, tag, joined_at, activated_at, paid_at, payments)
-                    values (\(Int64(row.userID)), \(attribution.tag), \(attribution.joinedAt),
+                    values (\(Int64(row.userID.value)), \(attribution.tag), \(attribution.joinedAt),
                             \(attribution.activatedAt), \(attribution.paidAt), \(attribution.payments))
                     on conflict (user_id) do update set
                         activated_at = excluded.activated_at,
@@ -591,11 +591,11 @@ struct TenantPresetsDocument: Codable, Sendable, PostgresCodable {
 
 /// Who a tenant's licence covers. Same reason for the hand-written decoder.
 struct TenantLicencesDocument: Codable, Sendable, PostgresCodable {
-    var whitelistedUserIDs: [Int] = []
+    var whitelistedUserIDs: [UserID] = []
     var admins: [UserKey] = []
     var licensed: [UserKey] = []
 
-    init(whitelistedUserIDs: [Int] = [], admins: [UserKey] = [], licensed: [UserKey] = []) {
+    init(whitelistedUserIDs: [UserID] = [], admins: [UserKey] = [], licensed: [UserKey] = []) {
         self.whitelistedUserIDs = whitelistedUserIDs
         self.admins = admins
         self.licensed = licensed
@@ -603,7 +603,7 @@ struct TenantLicencesDocument: Codable, Sendable, PostgresCodable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        whitelistedUserIDs = try c.decodeIfPresent([Int].self, forKey: .whitelistedUserIDs) ?? []
+        whitelistedUserIDs = try c.decodeIfPresent([UserID].self, forKey: .whitelistedUserIDs) ?? []
         admins = try c.decodeIfPresent([UserKey].self, forKey: .admins) ?? []
         licensed = try c.decodeIfPresent([UserKey].self, forKey: .licensed) ?? []
     }
@@ -633,7 +633,7 @@ extension UserKey: PostgresEncodable, PostgresDecodable {
     static var psqlFormat: PostgresFormat { String.psqlFormat }
 
     func encode(into byteBuffer: inout ByteBuffer, context: PostgresEncodingContext<some PostgresJSONEncoder>) throws {
-        try storageValue.encode(into: &byteBuffer, context: context)
+        storageValue.encode(into: &byteBuffer, context: context)
     }
 
     init(

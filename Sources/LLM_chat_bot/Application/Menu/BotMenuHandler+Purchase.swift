@@ -94,7 +94,7 @@ extension BotMenuHandler {
         // subscription dates and a personal winback discount would become public
         // (CLAUDE.md §17). In a group we quote the price list and keep every
         // personal number for the DM.
-        let isGroup = chatKey.chatID < 0
+        let isGroup = chatKey.chatID.isGroup
         let personalKey: UserKey? = isGroup ? nil : invoker
         // Prices come from one place so a winback discount (roadmap step 8) is
         // quoted here exactly as it will be charged.
@@ -254,7 +254,7 @@ extension BotMenuHandler {
 
             // Free way to get a balance: bring a friend (roadmap step 10).
             let referral = await state.referralConfig()
-            if referral.enabled, referral.inviterRewardCents > 0, !botUsername.isEmpty, chatKey.chatID > 0 {
+            if referral.enabled, referral.inviterRewardCents > 0, !botUsername.isEmpty, chatKey.chatID.isPrivate {
                 lines.append("")
                 lines.append("🎁 <b>Не хотите платить?</b> Пригласите друга — как только он задаст боту первый вопрос, вы оба получите на баланс (\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents)) вам, \(ReferralConfig.formatUsd(cents: referral.inviteeRewardCents)) ему).")
                 rows.row([menuButton("🎁 Пригласить друга", page: .referral)])

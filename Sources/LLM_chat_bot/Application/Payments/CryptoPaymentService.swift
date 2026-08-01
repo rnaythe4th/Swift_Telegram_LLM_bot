@@ -82,7 +82,7 @@ actor CryptoPaymentService {
 
     func createOrRefreshInvoice(
         invoker: UserKey,
-        userChatID: Int,
+        userChatID: ChatID,
         asset: CryptoAsset,
         purpose: CryptoInvoicePurpose = .subscription
     ) async throws -> CryptoInvoice {
@@ -423,8 +423,7 @@ actor CryptoPaymentService {
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy"
-        // Telegram convention: negative chat IDs are groups/supergroups.
-        let isGroup = invoice.userChatID < 0
+        let isGroup = invoice.userChatID.isGroup
         let subscriptionLine: String
         // The group is still paid for by someone else — say so instead of
         // crediting the payer with access they did not open here.

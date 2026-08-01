@@ -8,8 +8,8 @@ actor ChatContextStore {
     // extensions can reach it; nothing outside the actor touches it directly.
     var contexts: [ChatKey: ChatContext] = [:]
     var tenants: [UserKey: TenantState] = [:]
-    var chatOwnership: [Int: UserKey] = [:]
-    var userTenantMap: [Int: UserKey] = [:]
+    var chatOwnership: [ChatID: UserKey] = [:]
+    var userTenantMap: [UserID: UserKey] = [:]
 
     var superAdminKeys: Set<UserKey>
     /// Owner as configured at boot (`OWNER_USER_ID` / `OWNER_USERNAME`). A seed:
@@ -17,9 +17,9 @@ actor ChatContextStore {
     let configuredOwnerKey: UserKey
     /// Owner's Telegram userID when configured (`OWNER_USER_ID`). Root is then
     /// this account and nothing else — not a stored key, not a handle.
-    let pinnedOwnerUserID: Int?
+    let pinnedOwnerUserID: UserID?
     var formatOptions: String
-    let companyChatId: Int
+    let companyChatId: ChatID
     let companyMembers: String
     let defaultSuffix: Int?
 
@@ -39,9 +39,9 @@ actor ChatContextStore {
     var deletedTenants = Set<UserKey>()
     /// Chat identity *and* which tenant's licence covers it — one row, because
     /// they describe one thing and are always read together.
-    var dirtyChats = Set<Int>()
-    var deletedChats = Set<Int>()
-    var dirtyUsers = Set<Int>()
+    var dirtyChats = Set<ChatID>()
+    var deletedChats = Set<ChatID>()
+    var dirtyUsers = Set<UserID>()
     /// Wallets are drained by the ledger, not by the write-behind batch: money
     /// is written through a transaction (§3.2). The set exists so a cache-only
     /// change (a rename adopting a wallet) still reaches storage.
@@ -51,12 +51,12 @@ actor ChatContextStore {
     var deletedInvites = Set<String>()
     var dirtyPremiumUsage = Set<String>()
     var deletedPremiumUsage = Set<String>()
-    var dirtyReferrals = Set<Int>()
-    var deletedReferrals = Set<Int>()
-    var dirtyReferralTallies = Set<Int>()
-    var deletedReferralTallies = Set<Int>()
-    var dirtyTrafficAttributions = Set<Int>()
-    var deletedTrafficAttributions = Set<Int>()
+    var dirtyReferrals = Set<UserID>()
+    var deletedReferrals = Set<UserID>()
+    var dirtyReferralTallies = Set<UserID>()
+    var deletedReferralTallies = Set<UserID>()
+    var dirtyTrafficAttributions = Set<UserID>()
+    var deletedTrafficAttributions = Set<UserID>()
     var dirtyFunnelDays = Set<FunnelDayKey>()
     var dirtyCryptoInvoices = Set<String>()
     var deletedCryptoInvoices = Set<String>()
@@ -64,7 +64,7 @@ actor ChatContextStore {
     var deletedExternalOrders = Set<String>()
     var dirtyConfigs = Set<ConfigName>()
     var pollingOffsetValue: Int? = nil
-    var chatMetaByID: [Int: ChatMetaInfo] = [:]
+    var chatMetaByID: [ChatID: ChatMetaInfo] = [:]
     var inviteRecords: [String: InviteRecord] = [:]
     var adCampaignList: [AdCampaign] = []
     /// Markup percent on provider prices for customer-facing costs and
@@ -136,8 +136,8 @@ actor ChatContextStore {
     /// When each group last got its welcome, and when each chat last showed the
     /// sponsor credit. Both are anti-noise timers whose worst case on restart is
     /// one extra line — in-memory by the same §17 rule as `_premiumDailyUsage`.
-    var _groupGreetedAt: [Int: Date] = [:]
-    var _sponsorCreditShownAt: [Int: Date] = [:]
+    var _groupGreetedAt: [ChatID: Date] = [:]
+    var _sponsorCreditShownAt: [ChatID: Date] = [:]
     static let groupGreetingCooldown: TimeInterval = 10 * 60
     /// How often a sponsored group repeats "premium here was opened by @X".
     /// Under every single answer it turns into noise; once an hour it still
@@ -178,11 +178,11 @@ actor ChatContextStore {
 
     init(
         ownerUsername: String,
-        ownerUserID: Int? = nil,
+        ownerUserID: UserID? = nil,
         model: String,
         systemPrompt: String,
         formatOptions: String,
-        companyChatId: Int,
+        companyChatId: ChatID,
         companyMembers: String,
         defaultHistoryLength: Int,
         defaultSuffix: Int?

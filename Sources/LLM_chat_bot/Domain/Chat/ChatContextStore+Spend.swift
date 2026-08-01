@@ -19,7 +19,7 @@ extension ChatContextStore {
     /// Adds what an answer really cost the owner to today's running totals.
     /// Called from `appendAssistant`, next to the usage it already records, so
     /// a new answer path cannot be billed to nobody.
-    func recordProviderSpend(chatID: Int, real: Money) {
+    func recordProviderSpend(chatID: ChatID, real: Money) {
         guard real.isPositive else { return }
         dailySpendValue.record(real, tenant: chatOwnership[chatID] ?? defaultOwnerKey)
     }
@@ -40,7 +40,7 @@ extension ChatContextStore {
     /// Whether a paid answer is still within the ceilings, and which one it hit.
     /// Free models cost nothing and are never gated: a cap that switches the bot
     /// off entirely would turn an accounting limit into an outage.
-    func spendVerdict(chatID: Int) -> SpendCapVerdict? {
+    func spendVerdict(chatID: ChatID) -> SpendCapVerdict? {
         let policy = spendPolicyValue
         guard policy.isEnabled else { return nil }
         var ledger = dailySpendValue

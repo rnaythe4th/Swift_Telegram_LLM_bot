@@ -5,7 +5,7 @@ import Foundation
 
 extension BotCommandHandler {
     func handleStart(chatKey: ChatKey, argument: String, fromUser: TelegramUser?) async throws {
-        if chatKey.chatID > 0 {
+        if chatKey.chatID.isPrivate {
             // Funnel: `.start` means a person opened the bot. A group hitting
             // /start is the `?startgroup=` link replaying the join, which the
             // funnel already counts as `.addedToGroup`.
@@ -34,7 +34,7 @@ extension BotCommandHandler {
         // Paid-traffic tag: t.me/<bot>?start=src_<кампания>. Silent by design —
         // this only labels where the person came from, so there is nothing to
         // tell them about; the greeting must look exactly like any other.
-        if let tag = TrafficSourceLink.tag(payload: payload), let user = fromUser, chatKey.chatID > 0 {
+        if let tag = TrafficSourceLink.tag(payload: payload), let user = fromUser, chatKey.chatID.isPrivate {
             await state.bindTrafficSource(userID: user.id, tag: tag, username: user.username)
         }
         try await sendStartGreeting(chatKey: chatKey)
@@ -43,10 +43,10 @@ extension BotCommandHandler {
     /// Attributes a new user to their inviter, then greets as usual. Nothing is
     /// paid here — the reward lands after the invited user's first real answer
     /// (see `GenerationCoordinator`), which is what keeps farming pointless.
-    private func handleReferralStart(inviterUserID: Int, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+    private func handleReferralStart(inviterUserID: UserID, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         // Referral links are personal: attribution only makes sense in the DM
         // the link opens.
-        guard let user = fromUser, chatKey.chatID > 0 else {
+        guard let user = fromUser, chatKey.chatID.isPrivate else {
             try await sendStartGreeting(chatKey: chatKey)
             return
         }
@@ -129,7 +129,7 @@ extension BotCommandHandler {
         }
         // Private chat: attach it to the inviter's licence too, so access holds
         // even if the guest list is later cleared.
-        if chatKey.chatID > 0, await state.chatOwner(chatID: chatKey.chatID) == nil {
+        if chatKey.chatID.isPrivate, await state.chatOwner(chatID: chatKey.chatID) == nil {
             _ = await state.assignChat(chatID: chatKey.chatID, to: owner)
             grantedLines.append("• в этом чате премиум работает за счёт \(ownerLabel)")
         }
@@ -157,7 +157,7 @@ extension BotCommandHandler {
         // DM copy ("напишите мне", "добавить в свой чат") makes no sense there,
         // and `claimGroupGreeting` inside makes sure the join event and this
         // message produce exactly one welcome between them.
-        if chatKey.chatID < 0 {
+        if chatKey.chatID.isGroup {
             try await sendGroupWelcome(chatID: chatKey.chatID)
             return
         }
@@ -203,7 +203,7 @@ extension BotCommandHandler {
     /// Group welcome (roadmap step 4). Mirrors `BotOrchestrator.sendGroupWelcome`
     /// through the same presenter and the same one-shot claim, so whichever of
     /// the two paths lands first is the one that posts.
-    private func sendGroupWelcome(chatID: Int) async throws {
+    private func sendGroupWelcome(chatID: ChatID) async throws {
         guard await state.claimGroupGreeting(chatID: chatID) else { return }
         let sponsor = await state.chatSponsor(chatID: chatID, asker: nil)
         let welcome = GroupWelcomePresenter.welcome(

@@ -133,8 +133,8 @@ extension GenerationCoordinator {
     /// Identifies the daily-premium counter this turn consumed, so a turn that
     /// ends without an answer can hand the unit back.
     struct DailyPremiumTicket: Sendable {
-        let chatID: Int
-        let userID: Int?
+        let chatID: ChatID
+        let userID: UserID?
         let isGroup: Bool
     }
 
@@ -382,7 +382,7 @@ extension GenerationCoordinator {
     /// in: the reward is personal, and announcing "вас пригласил @X" in a group
     /// tells everyone something the friend did not choose to share. The friend
     /// always has a DM — the attribution came from `/start` in one.
-    func payReferralIfDue(userID: Int, username: String?) async {
+    func payReferralIfDue(userID: UserID, username: String?) async {
         guard let payout = await state.redeemReferralIfDue(userID: userID, username: username) else { return }
         // The store decided the pair is due and stamped it; the money moves
         // here, once, guarded by its own claim (§10.2). A failure leaves the
@@ -417,7 +417,7 @@ extension GenerationCoordinator {
 
         if payout.inviteeReward.isPositive {
             _ = try? await telegram.sendMessage(.init(
-                chatID: userID,
+                chatID: userID.privateChat,
                 threadID: nil,
                 replyTo: nil,
                 text: "🎁 <b>Бонус за приглашение: \(payout.inviteeReward.formatted(fractionDigits: 2)) на баланс</b> — спасибо \(payout.inviterUsername)!"
@@ -431,7 +431,7 @@ extension GenerationCoordinator {
             // The label works without a @username (the migration to userID keys
             // made nicks optional), so a friend without one is still named.
             let notified = (try? await telegram.sendMessage(.init(
-                chatID: payout.inviterUserID,
+                chatID: payout.inviterUserID.privateChat,
                 threadID: nil,
                 replyTo: nil,
                 text: "🎉 <b>Ваше приглашение сработало: \(payout.invitedLabel) уже пишет боту.</b>"
@@ -483,7 +483,7 @@ extension GenerationCoordinator {
     /// when the asker is the sponsor themselves. Repeats at most once an hour
     /// per chat (the store owns that timer) — under every single answer the
     /// credit stops reading as status and starts reading as clutter.
-    func sponsorCreditLine(chatID: Int, asker: UserKey?, isPrivate: Bool) async -> String? {
+    func sponsorCreditLine(chatID: ChatID, asker: UserKey?, isPrivate: Bool) async -> String? {
         guard !isPrivate else { return nil }
         guard let sponsor = await state.chatSponsorForCredit(chatID: chatID, asker: asker) else {
             return nil

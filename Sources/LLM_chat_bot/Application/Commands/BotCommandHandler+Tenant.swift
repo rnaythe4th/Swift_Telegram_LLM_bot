@@ -181,7 +181,7 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "🔒 Включить премиум в чате можно только за свой счёт.")
                 return
             }
-            guard !handle.isEmpty, let chatID = Int(arg2) else {
+            guard !handle.isEmpty, let chatID = Int(arg2).map(ChatID.init) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant assign @username &lt;chatID&gt;</code>")
                 return
             }
@@ -191,7 +191,7 @@ extension BotCommandHandler {
                 : "У @\(handle) нет премиума.")
 
         case "unassign":
-            guard let chatID = Int(arg1) else {
+            guard let chatID = Int(arg1).map(ChatID.init) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant unassign &lt;chatID&gt;</code>")
                 return
             }

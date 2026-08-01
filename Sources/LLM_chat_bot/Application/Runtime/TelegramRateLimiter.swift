@@ -51,7 +51,7 @@ actor TelegramRateLimiter {
     private var globalDrafts: Bucket
     // Small shared budget for cosmetic calls (typing indicators).
     private var globalCosmetic: Bucket
-    private var perChat: [Int: Bucket] = [:]
+    private var perChat: [ChatID: Bucket] = [:]
     private static let maxTrackedChats = 4096
 
     init() {
@@ -62,12 +62,12 @@ actor TelegramRateLimiter {
         self.globalCosmetic = Bucket(capacity: 3, refillPerSecond: 3, now: now)
     }
 
-    private func chatBucket(for chatID: Int, now: ContinuousClock.Instant) -> Bucket {
+    private func chatBucket(for chatID: ChatID, now: ContinuousClock.Instant) -> Bucket {
         if let bucket = perChat[chatID] { return bucket }
         pruneIfNeeded(now: now)
         // Private chats: ~1/s sustained with a small burst.
         // Groups/channels (negative IDs): 20 per minute with a small burst.
-        let bucket = chatID > 0
+        let bucket = chatID.isPrivate
             ? Bucket(capacity: 3, refillPerSecond: 1.0, now: now)
             : Bucket(capacity: 4, refillPerSecond: 20.0 / 60.0, now: now)
         perChat[chatID] = bucket
@@ -87,7 +87,7 @@ actor TelegramRateLimiter {
     /// Waits until both the global and the per-chat budget allow one message.
     /// Used for sendMessage / editMessage / sendInvoice and similar calls whose
     /// loss would be user-visible.
-    func waitForMessageSlot(chatID: Int) async {
+    func waitForMessageSlot(chatID: ChatID) async {
         while true {
             let wait = nextMessageWait(chatID: chatID)
             guard let wait else { return }
@@ -127,7 +127,7 @@ actor TelegramRateLimiter {
         globalCosmetic.consume(now: clock.now) == nil
     }
 
-    private func nextMessageWait(chatID: Int) -> Duration? {
+    private func nextMessageWait(chatID: ChatID) -> Duration? {
         let now = clock.now
         var chat = chatBucket(for: chatID, now: now)
         // Check the per-chat budget first without consuming the global token.

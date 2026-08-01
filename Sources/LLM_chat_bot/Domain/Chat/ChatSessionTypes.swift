@@ -1,10 +1,12 @@
 import Foundation
 
-public struct ChatKey: Hashable, Codable, Sendable {
-    public let chatID: Int
-    public let threadID: Int64
-    
-    public init(chatID: Int, threadID: Int64) {
+/// One conversation context: a chat, and the forum topic inside it. Topics keep
+/// separate memory, so the pair is the key.
+struct ChatKey: Hashable, Codable, Sendable {
+    let chatID: ChatID
+    let threadID: Int64
+
+    init(chatID: ChatID, threadID: Int64) {
         self.chatID = chatID
         self.threadID = threadID
     }
@@ -15,11 +17,11 @@ public struct ChatKey: Hashable, Codable, Sendable {
 
 struct GenerationID: Hashable, Sendable {
     let raw: UUID
-    
+
     init() {
         self.raw = UUID()
     }
-    
+
     init(raw: UUID) {
         self.raw = raw
     }

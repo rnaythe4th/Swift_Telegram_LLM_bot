@@ -461,7 +461,7 @@ extension GenerationCoordinator {
 
         // Edit streaming serves groups *and* private chats on Bot API servers
         // without drafts, so the copy has to be chosen per chat, not per mode.
-        let isGroup = chatKey.chatID < 0
+        let isGroup = chatKey.chatID.isGroup
         if isCancelled {
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             await self.refundPremium(premiumTicket)

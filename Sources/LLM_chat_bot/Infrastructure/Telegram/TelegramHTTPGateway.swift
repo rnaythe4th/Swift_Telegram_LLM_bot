@@ -205,7 +205,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
 
     private func sendSingle(_ request: SendMessageRequest, html: String) async throws -> TelegramMessage {
         let body = TelegramSendMessageBody(
-            chat_id: request.chatID,
+            chat_id: request.chatID.value,
             text: html,
             reply_parameters: request.replyTo.map { ReplyParameters(message_id: $0) },
             message_thread_id: request.threadID,
@@ -247,7 +247,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
         // trimming shows most of the answer where the alternative shows none.
         let html = Self.chunkFittingHTML(request.text).html
         let body = TelegramEditMessageTextBody(
-            chat_id: request.chatID,
+            chat_id: request.chatID.value,
             message_id: request.messageID,
             text: html,
             parse_mode: "HTML",
@@ -293,7 +293,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
             }
         }
         let body = TelegramSendMessageDraftBody(
-            chat_id: request.chatID,
+            chat_id: request.chatID.value,
             message_thread_id: request.threadID,
             draft_id: request.draftID,
             text: request.text.isEmpty ? "" : TelegramHTMLFormatter.helper(text: request.text),
@@ -314,8 +314,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
         try validateTelegramEnvelope(action: "sendMessageDraft", statusCode: raw.statusCode, data: raw.data)
     }
 
-    func deleteMessage(chatID: Int, messageID: Int) async throws {
-        let body = TelegramDeleteMessageBody(chat_id: chatID, message_id: messageID)
+    func deleteMessage(chatID: ChatID, messageID: Int) async throws {
+        let body = TelegramDeleteMessageBody(chat_id: chatID.value, message_id: messageID)
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/deleteMessage",
             method: .post,
@@ -332,7 +332,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
         }
     }
 
-    func sendChatAction(chatID: Int, threadID: Int64?, action: String) async throws {
+    func sendChatAction(chatID: ChatID, threadID: Int64?, action: String) async throws {
         // Typing indicators are cosmetic: skip silently under load.
         if let rateLimiter {
             guard await rateLimiter.tryTakeCosmeticSlot() else { return }
@@ -342,7 +342,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
             let action: String
             let message_thread_id: Int64?
         }
-        let body = Body(chat_id: chatID, action: action, message_thread_id: threadID)
+        let body = Body(chat_id: chatID.value, action: action, message_thread_id: threadID)
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/sendChatAction",
             method: .post,
@@ -465,7 +465,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
             providerToken = token
         }
         let body = TelegramSendInvoiceBody(
-            chat_id: request.chatID,
+            chat_id: request.chatID.value,
             title: request.title,
             description: request.description,
             payload: request.payload,
@@ -626,7 +626,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
     
     private func map(_ user: TelegramAPIUser) -> TelegramUser {
         TelegramUser(
-            id: user.id,
+            id: UserID(user.id),
             is_bot: user.is_bot,
             first_name: user.first_name,
             username: user.username
@@ -635,7 +635,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
     
     private func map(_ chat: TelegramAPIChat) -> TelegramChat {
         TelegramChat(
-            id: chat.id,
+            id: ChatID(chat.id),
             type: chat.type,
             title: chat.title,
             username: chat.username,

@@ -6,7 +6,7 @@ import Foundation
 extension ChatContextStore {
     // MARK: - Tenant routing helpers
 
-    func tenantState(for chatID: Int) -> TenantState {
+    func tenantState(for chatID: ChatID) -> TenantState {
         let owner = chatOwnership[chatID] ?? defaultOwnerKey
         if let tenant = tenants[owner] { return tenant }
         if let fallback = tenants[defaultOwnerKey] { return fallback }
@@ -33,7 +33,7 @@ extension ChatContextStore {
         return seeded
     }
 
-    func mutateTenant(for chatID: Int, _ block: (inout TenantState) -> Void) {
+    func mutateTenant(for chatID: ChatID, _ block: (inout TenantState) -> Void) {
         let owner = chatOwnership[chatID] ?? defaultOwnerKey
         guard var tenant = tenants[owner] else { return }
         block(&tenant)
@@ -111,21 +111,21 @@ extension ChatContextStore {
     }
 
     /// Storage key of whoever opened premium in this chat.
-    func chatOwner(chatID: Int) -> UserKey? {
+    func chatOwner(chatID: ChatID) -> UserKey? {
         chatOwnership[chatID]
     }
 
     /// Same, ready to print: `@username` / name / `id <n>`.
-    func chatOwnerLabel(chatID: Int) -> String? {
+    func chatOwnerLabel(chatID: ChatID) -> String? {
         chatOwnership[chatID].map { displayLabel(forKey: $0) }
     }
 
-    func effectiveOwnerKey(chatID: Int) -> UserKey {
+    func effectiveOwnerKey(chatID: ChatID) -> UserKey {
         chatOwnership[chatID] ?? defaultOwnerKey
     }
 
     @discardableResult
-    func assignChat(chatID: Int, to ownerKey: UserKey) -> Bool {
+    func assignChat(chatID: ChatID, to ownerKey: UserKey) -> Bool {
         let u = resolved(ownerKey)
         guard tenants[u] != nil else { return false }
         chatOwnership[chatID] = u
@@ -152,10 +152,10 @@ extension ChatContextStore {
     /// (so renewal reminders stopped mentioning it) and from the "premium opened
     /// by @X" credit — while still paying for it. Private chats are unaffected:
     /// the payer's own DM always follows the payer.
-    func claimChatForPayment(chatID: Int, payerKey: UserKey) -> ChatClaimOutcome {
+    func claimChatForPayment(chatID: ChatID, payerKey: UserKey) -> ChatClaimOutcome {
         let key = resolved(payerKey)
         guard tenants[key] != nil else { return .unknownTenant }
-        if chatID < 0,
+        if chatID.isGroup,
            let current = chatOwnership[chatID],
            current != key,
            tenants[current]?.isActive == true {
@@ -168,7 +168,7 @@ extension ChatContextStore {
     }
 
     @discardableResult
-    func unassignChat(chatID: Int) -> UserKey? {
+    func unassignChat(chatID: ChatID) -> UserKey? {
         let removed = chatOwnership.removeValue(forKey: chatID)
         if removed != nil {
             dirtyChats.insert(chatID)
@@ -177,12 +177,12 @@ extension ChatContextStore {
         return removed
     }
 
-    func chatsOwnedBy(_ ownerKey: UserKey) -> [Int] {
+    func chatsOwnedBy(_ ownerKey: UserKey) -> [ChatID] {
         let u = resolved(ownerKey)
         return chatOwnership.compactMap { $0.value == u ? $0.key : nil }
     }
 
-    func autoAssignIfNeeded(chatID: Int, senderKey: UserKey?, senderUserID: Int?) {
+    func autoAssignIfNeeded(chatID: ChatID, senderKey: UserKey?, senderUserID: UserID?) {
         guard chatOwnership[chatID] == nil else { return }
         let lowered = senderKey.map(resolved)
         // A super-admin simulating a regular user must be able to keep a chat
@@ -257,7 +257,7 @@ extension ChatContextStore {
         .sorted { $0.key < $1.key }
     }
 
-    func accumulateTenantUsage(chatID: Int, usage: StreamUsageSummary?) {
+    func accumulateTenantUsage(chatID: ChatID, usage: StreamUsageSummary?) {
         let owner = chatOwnership[chatID] ?? defaultOwnerKey
         let markup = markupPercentValue
         mutateTenantByOwner(owner) {

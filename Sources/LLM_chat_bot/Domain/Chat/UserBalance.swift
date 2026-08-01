@@ -64,7 +64,7 @@ struct WalletWinbackTarget: Sendable {
     let label: String
     /// The person's DM with the bot; a wallet is personal, so this is the only
     /// channel. Never nil — the store only lists reachable wallets.
-    let privateChatID: Int
+    let privateChatID: ChatID
     /// What they have already paid in, for the copy ("вы уже вложили $X").
     let toppedUp: Money
     /// Days since the bot last saw them.

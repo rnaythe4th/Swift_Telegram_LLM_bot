@@ -13,8 +13,8 @@ final class MenuPageRenderTests: XCTestCase {
     private var store: ChatContextStore!
     private var menu: BotMenuHandler!
 
-    private let ownerID = 7_000
-    private let plainID = 7_100
+    private let ownerID: UserID = 7_000
+    private let plainID: UserID = 7_100
 
     override func setUp() async throws {
         telegram = FakeTelegram()
@@ -59,7 +59,7 @@ final class MenuPageRenderTests: XCTestCase {
     private func everyRendering() -> [(page: MenuPage, chat: ChatKey, user: UserKey)] {
         var cases: [(MenuPage, ChatKey, UserKey)] = []
         for page in MenuPage.allCases {
-            for chat in [ChatKey(chatID: plainID, threadID: 0), ChatKey(chatID: -7_200, threadID: 0)] {
+            for chat in [ChatKey(chatID: plainID.privateChat, threadID: 0), ChatKey(chatID: -7_200, threadID: 0)] {
                 for user in [UserKey.identified(ownerID), UserKey.identified(plainID)] {
                     cases.append((page, chat, user))
                 }
@@ -164,7 +164,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// of the controls — on the page itself, not only behind the nav gate,
     /// because a menu redrawn after a typed value never passes that gate.
     func testRestrictedPagesRefuseAFreeChat() async {
-        let chat = ChatKey(chatID: plainID, threadID: 0)
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
         let stranger = UserKey.identified(plainID)
 
         for page in MenuPage.allCases where page.requiresFullAccess {
@@ -184,7 +184,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// Memory length re-sends every remembered message on every turn, so it is
     /// the owner's lever. The page stays readable; the controls do not.
     func testMemoryLengthControlsAreOwnerOnly() async {
-        let chat = ChatKey(chatID: plainID, threadID: 0)
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
 
         let strangerActions = await menuActions(
             menu.renderPage(.history, chatKey: chat, invoker: UserKey.identified(plainID)).markup
@@ -206,7 +206,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// The settings page leads with modes, and a ⭐ one stays visible to a free
     /// chat: a ceiling nobody can see is a ceiling nobody pays to lift.
     func testSettingsPageOffersModesAndMarksLockedOnes() async {
-        let chat = ChatKey(chatID: plainID, threadID: 0)
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
         let screen = await menu.renderPage(.main, chatKey: chat, invoker: UserKey.identified(plainID))
 
         let picks = menuActions(screen.markup).filter { $0.hasPrefix("mode:pick:") }

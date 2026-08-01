@@ -83,11 +83,11 @@ extension ChatContextStore {
     /// The campaign totals are a document; the attribution that changed is a
     /// row. Pruning drops per-person records only, so the rows it removes are
     /// named here and the aggregates they rolled into stay untouched.
-    private func markTrafficSourcesDirty(userID: Int? = nil) {
+    private func markTrafficSourcesDirty(userID: UserID? = nil) {
         let before = Set(trafficSourceLedgerValue.attributions.keys)
         trafficSourceLedgerValue.prune()
         for gone in before.subtracting(trafficSourceLedgerValue.attributions.keys) {
-            guard let id = Int(gone) else { continue }
+            guard let id = Int(gone).map(UserID.init) else { continue }
             dirtyTrafficAttributions.remove(id)
             deletedTrafficAttributions.insert(id)
         }
@@ -106,9 +106,9 @@ extension ChatContextStore {
     /// not an acquisition at all — they are counted separately so a channel
     /// cannot inflate its arrivals with people it did not bring.
     @discardableResult
-    func bindTrafficSource(userID: Int, tag rawTag: String, username: String?) -> TrafficSourceBindOutcome {
+    func bindTrafficSource(userID: UserID, tag rawTag: String, username: String?) -> TrafficSourceBindOutcome {
         guard let tag = TrafficSourceLink.sanitize(rawTag) else { return .knownUser }
-        let key = String(userID)
+        let key = String(userID.value)
 
         if let existing = trafficSourceLedgerValue.attributions[key] {
             trafficSourceLedgerValue.repeatOpens += 1
@@ -135,8 +135,8 @@ extension ChatContextStore {
 
     /// Marks that an attributed person got a real answer. Idempotent — the
     /// caller runs on every turn.
-    func markTrafficSourceActivation(userID: Int) {
-        let key = String(userID)
+    func markTrafficSourceActivation(userID: UserID) {
+        let key = String(userID.value)
         guard var record = trafficSourceLedgerValue.attributions[key], record.activatedAt == nil else { return }
         let now = Date()
         record.activatedAt = now
@@ -151,8 +151,8 @@ extension ChatContextStore {
     /// Credits a payment to the campaign that brought the payer. `payers` counts
     /// distinct people (the CAC denominator), `payments` counts every purchase,
     /// so repeat buyers show up without distorting the acquisition cost.
-    func recordTrafficSourcePayment(userID: Int) {
-        let key = String(userID)
+    func recordTrafficSourcePayment(userID: UserID) {
+        let key = String(userID.value)
         guard var record = trafficSourceLedgerValue.attributions[key] else { return }
         let now = Date()
         let isFirstPayment = record.paidAt == nil
@@ -182,7 +182,7 @@ extension ChatContextStore {
 
     func clearTrafficSources() {
         for key in trafficSourceLedgerValue.attributions.keys {
-            guard let id = Int(key) else { continue }
+            guard let id = Int(key).map(UserID.init) else { continue }
             dirtyTrafficAttributions.remove(id)
             deletedTrafficAttributions.insert(id)
         }

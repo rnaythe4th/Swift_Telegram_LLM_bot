@@ -14,7 +14,7 @@ import Foundation
 /// final result via `sendMessage`.
 actor DraftStreamer {
     private let telegram: TelegramGatewayPort
-    private let chatID: Int
+    private let chatID: ChatID
     private let threadID: Int64?
     private let logger: LoggerPort
     // Log only the first send failure per draft to avoid flooding.
@@ -40,7 +40,7 @@ actor DraftStreamer {
     // models can stall well past the 30-second draft TTL).
     private static let keepaliveInterval: Duration = .seconds(15)
 
-    private init(telegram: TelegramGatewayPort, chatID: Int, threadID: Int64?, logger: LoggerPort) {
+    private init(telegram: TelegramGatewayPort, chatID: ChatID, threadID: Int64?, logger: LoggerPort) {
         self.telegram = telegram
         self.chatID = chatID
         self.threadID = threadID
@@ -53,7 +53,7 @@ actor DraftStreamer {
     /// back to edit-based streaming).
     static func begin(
         telegram: TelegramGatewayPort,
-        chatID: Int,
+        chatID: ChatID,
         threadID: Int64?,
         logger: LoggerPort
     ) async -> DraftStreamer? {

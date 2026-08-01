@@ -157,19 +157,19 @@ extension ChatContextStore {
         }
         batch.deletedPremiumUsage = Array(deletedPremiumUsage)
         for userID in dirtyReferrals {
-            if let record = referralLedgerValue.records[String(userID)] {
+            if let record = referralLedgerValue.records[String(userID.value)] {
                 batch.referrals.append(ReferralRow(invitedUserID: userID, record: record))
             }
         }
         batch.deletedReferrals = Array(deletedReferrals)
         for userID in dirtyReferralTallies {
-            if let tally = referralLedgerValue.tallies[String(userID)] {
+            if let tally = referralLedgerValue.tallies[String(userID.value)] {
                 batch.referralTallies.append(ReferralTallyRow(inviterUserID: userID, tally: tally))
             }
         }
         batch.deletedReferralTallies = Array(deletedReferralTallies)
         for userID in dirtyTrafficAttributions {
-            if let attribution = trafficSourceLedgerValue.attributions[String(userID)] {
+            if let attribution = trafficSourceLedgerValue.attributions[String(userID.value)] {
                 batch.trafficAttributions.append(TrafficAttributionRow(userID: userID, attribution: attribution))
             }
         }
@@ -307,9 +307,9 @@ extension ChatContextStore {
         dirtyInvites.formUnion(inviteRecords.keys)
         dirtyPremiumUsage.formUnion(premiumDailyUsage.keys)
         dirtyWallets.formUnion(userBalances.keys)
-        dirtyReferrals.formUnion(referralLedgerValue.records.keys.compactMap(Int.init))
-        dirtyReferralTallies.formUnion(referralLedgerValue.tallies.keys.compactMap(Int.init))
-        dirtyTrafficAttributions.formUnion(trafficSourceLedgerValue.attributions.keys.compactMap(Int.init))
+        dirtyReferrals.formUnion(referralLedgerValue.records.keys.compactMap { Int($0).map(UserID.init) })
+        dirtyReferralTallies.formUnion(referralLedgerValue.tallies.keys.compactMap { Int($0).map(UserID.init) })
+        dirtyTrafficAttributions.formUnion(trafficSourceLedgerValue.attributions.keys.compactMap { Int($0).map(UserID.init) })
         dirtyFunnelDays.formUnion(funnelDailyValue.allCells)
         dirtyCryptoInvoices.formUnion(_cryptoInvoices.keys)
         dirtyExternalOrders.formUnion(_externalOrders.keys)
@@ -407,13 +407,13 @@ extension ChatContextStore {
 
         referralLedgerValue = .empty
         referralLedgerValue.totals = state.configs[Config.referralTotals]
-        for row in state.referrals { referralLedgerValue.records[String(row.invitedUserID)] = row.record }
-        for row in state.referralTallies { referralLedgerValue.tallies[String(row.inviterUserID)] = row.tally }
+        for row in state.referrals { referralLedgerValue.records[String(row.invitedUserID.value)] = row.record }
+        for row in state.referralTallies { referralLedgerValue.tallies[String(row.inviterUserID.value)] = row.tally }
 
         trafficSourceLedgerValue = .empty
         trafficSourceLedgerValue.totals = state.configs[Config.trafficTotals]
         for row in state.trafficAttributions {
-            trafficSourceLedgerValue.attributions[String(row.userID)] = row.attribution
+            trafficSourceLedgerValue.attributions[String(row.userID.value)] = row.attribution
             var tally = trafficSourceLedgerValue.tallies[row.attribution.tag]
                 ?? TrafficSourceTally(firstSeenAt: row.attribution.joinedAt)
             tally.joined += 1

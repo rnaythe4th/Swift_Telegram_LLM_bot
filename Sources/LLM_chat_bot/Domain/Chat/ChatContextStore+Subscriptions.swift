@@ -266,13 +266,14 @@ extension ChatContextStore {
     /// A DM the person blocked (`my_chat_member` → kicked) is not a channel:
     /// every send there fails with 403, so returning it would make the sweep
     /// retry the same dead address on every pass.
-    func privateChatID(forKey key: UserKey) -> Int? {
-        if let userID = key.userID {
-            guard let meta = chatMetaByID[userID], meta.type == "private", meta.botRemoved != true else { return nil }
-            return userID
+    func privateChatID(forKey key: UserKey) -> ChatID? {
+        if let account = key.userID {
+            let chat = account.privateChat
+            guard let meta = chatMetaByID[chat], meta.type == "private", meta.botRemoved != true else { return nil }
+            return chat
         }
         for (chatID, meta) in chatMetaByID
-        where chatID > 0 && meta.type == "private"
+        where chatID.isPrivate && meta.type == "private"
             && meta.botRemoved != true
             && meta.username.flatMap(UserKey.pending) == key {
             return chatID
@@ -283,10 +284,10 @@ extension ChatContextStore {
     /// Group chats the owner's licence covers *and* the bot can still post to.
     /// A chat it was kicked out of stays owned (re-adding restores it) but is
     /// not a delivery channel, so broadcasts skip it instead of burning a send.
-    func ownedGroupChatIDs(owner: UserKey) -> [Int] {
+    func ownedGroupChatIDs(owner: UserKey) -> [ChatID] {
         let u = resolved(owner)
         return chatOwnership
-            .filter { $0.key < 0 && $0.value == u && chatMetaByID[$0.key]?.botRemoved != true }
+            .filter { $0.key.isGroup && $0.value == u && chatMetaByID[$0.key]?.botRemoved != true }
             .map(\.key)
             .sorted()
     }

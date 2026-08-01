@@ -22,7 +22,7 @@ struct UserRow: Sendable {
 /// Metadata and ownership used to be two config documents; they are one row
 /// because they describe one thing and are read together everywhere.
 struct ChatRow: Sendable {
-    let chatID: Int
+    let chatID: ChatID
     let meta: ChatMetaInfo?
     let ownerKey: UserKey?
 }
@@ -40,7 +40,7 @@ struct PremiumUsageRow: Sendable {
 
 /// One referral attribution.
 struct ReferralRow: Sendable {
-    let invitedUserID: Int
+    let invitedUserID: UserID
     let record: ReferralRecord
 }
 
@@ -48,13 +48,13 @@ struct ReferralRow: Sendable {
 /// records they were computed from, so pruning attributions can never reset an
 /// inviter's reward cap or their "friends who paid" count.
 struct ReferralTallyRow: Sendable {
-    let inviterUserID: Int
+    let inviterUserID: UserID
     let tally: ReferralTally
 }
 
 /// One `src_` attribution: who arrived from which campaign and how far they got.
 struct TrafficAttributionRow: Sendable {
-    let userID: Int
+    let userID: UserID
     let attribution: TrafficSourceAttribution
 }
 
@@ -88,17 +88,17 @@ struct PersistenceBatch: Sendable {
     var tenants: [TenantRow] = []
     var deletedTenants: [UserKey] = []
     var chats: [ChatRow] = []
-    var deletedChats: [Int] = []
+    var deletedChats: [ChatID] = []
     var invites: [InviteRow] = []
     var deletedInvites: [String] = []
     var premiumUsage: [PremiumUsageRow] = []
     var deletedPremiumUsage: [String] = []
     var referrals: [ReferralRow] = []
-    var deletedReferrals: [Int] = []
+    var deletedReferrals: [UserID] = []
     var referralTallies: [ReferralTallyRow] = []
-    var deletedReferralTallies: [Int] = []
+    var deletedReferralTallies: [UserID] = []
     var trafficAttributions: [TrafficAttributionRow] = []
-    var deletedTrafficAttributions: [Int] = []
+    var deletedTrafficAttributions: [UserID] = []
     var funnelDays: [FunnelDayRow] = []
     var cryptoInvoices: [CryptoInvoiceRow] = []
     var deletedCryptoInvoices: [String] = []
@@ -245,5 +245,5 @@ protocol StatePersistencePort: Sendable {
     /// answer to "how long do you keep this", and "forever, with no way to
     /// erase it" is not one. The query is cheap because `bot_chat_context` is
     /// indexed on `updated_at` (§10.3).
-    func pruneChatContexts(idleDays: Int, protecting: Set<Int>) async throws -> [ChatKey]
+    func pruneChatContexts(idleDays: Int, protecting: Set<ChatID>) async throws -> [ChatKey]
 }

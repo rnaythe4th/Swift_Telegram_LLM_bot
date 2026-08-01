@@ -8,16 +8,16 @@ enum Fixtures {
     /// The @username the bot is configured with, and the key that handle
     /// resolves to once the owner has been seen.
     static let ownerHandle = "owner"
-    static let ownerUserID = 1_000
+    static let ownerUserID: UserID = 1_000
     static var ownerKey: UserKey { .identified(ownerUserID) }
 
     /// Any key, for tests that only need "somebody".
-    static func key(_ userID: Int) -> UserKey { .identified(userID) }
+    static func key(_ userID: UserID) -> UserKey { .identified(userID) }
 
     /// A store wired the way `main` wires it, minus the ports.
     static func makeStore(
         ownerUsername: String = Fixtures.ownerHandle,
-        ownerUserID: Int? = Fixtures.ownerUserID,
+        ownerUserID: UserID? = Fixtures.ownerUserID,
         model: String = "test/model",
         defaultHistoryLength: Int = 10
     ) -> ChatContextStore {
@@ -34,11 +34,11 @@ enum Fixtures {
         )
     }
 
-    static func user(id: Int, username: String? = nil, firstName: String = "Name") -> TelegramUser {
+    static func user(id: UserID, username: String? = nil, firstName: String = "Name") -> TelegramUser {
         TelegramUser(id: id, is_bot: false, first_name: firstName, username: username)
     }
 
-    static func chat(id: Int, type: String = "private", title: String? = nil) -> TelegramChat {
+    static func chat(id: ChatID, type: String = "private", title: String? = nil) -> TelegramChat {
         TelegramChat(id: id, type: type, title: title)
     }
 
@@ -67,4 +67,18 @@ enum Fixtures {
     }
 
     static func days(_ count: Double) -> TimeInterval { count * 86_400 }
+}
+
+// Integer literals for ids, in the test target only.
+//
+// `ChatID(-7_200)` at three hundred call sites reads as ceremony, not as
+// meaning. The conformance lives here rather than next to the types on
+// purpose: production code has to say which kind of id it means, and a bare
+// number must stay unassignable there — that is the whole point of the types.
+extension ChatID: ExpressibleByIntegerLiteral {
+    public init(integerLiteral value: Int) { self.init(value) }
+}
+
+extension UserID: ExpressibleByIntegerLiteral {
+    public init(integerLiteral value: Int) { self.init(value) }
 }

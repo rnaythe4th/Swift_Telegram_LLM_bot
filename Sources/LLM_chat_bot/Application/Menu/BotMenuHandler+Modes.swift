@@ -122,7 +122,7 @@ extension BotMenuHandler {
         // A fact about the chat, not about the tapper: in a group this page is
         // one shared message (CLAUDE.md §13).
         let hasFullAccess = await state.hasFullModelAccess(
-            key: chatKey.chatID < 0 ? nil : invoker,
+            key: chatKey.chatID.isGroup ? nil : invoker,
             chatID: chatKey.chatID
         )
         let lock = hasFullAccess ? "" : " ⭐"
