@@ -142,7 +142,7 @@ extension GenerationCoordinator {
                        let retryAfter = telegramError.retryAfter, attempt < 2 {
                         try? await Task.sleep(nanoseconds: UInt64(retryAfter) * 1_000_000_000)
                     } else {
-                        logger.error("draft persist failed: \(error)")
+                        logger.error("draft persist failed: \(error)", context: LogContext(chat: chatKey, generation: generationID))
                         return false
                     }
                 }
@@ -195,7 +195,7 @@ extension GenerationCoordinator {
         } catch is CancellationError {
             isCancelled = true
         } catch {
-            logger.error("stream failed: \(error)")
+            logger.error("stream failed: \(error)", context: LogContext(chat: chatKey, generation: generationID))
             await draft.finish()
             _ = await persist("⚠️ <b>Не получилось ответить</b>\n" + UserFacingError.message(error))
             await removeControlMessage()
@@ -401,7 +401,7 @@ extension GenerationCoordinator {
         } catch is CancellationError {
             isCancelled = true
         } catch {
-            logger.error("stream failed: \(error)")
+            logger.error("stream failed: \(error)", context: LogContext(chat: chatKey, generation: generationID))
             let userText = "⚠️ <b>Не получилось ответить</b>\n" + UserFacingError.message(error)
             try? await self.telegram.editMessage(
                 .init(

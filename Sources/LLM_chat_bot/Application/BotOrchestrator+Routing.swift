@@ -55,7 +55,7 @@ extension BotOrchestrator {
             do {
                 try await route(message: message, chatKey: chatKey)
             } catch {
-                logger.error("routeMessage failed: \(error)")
+                logger.error("routeMessage failed: \(error)", context: LogContext(chat: chatKey, user: message.from?.id))
                 if !(error is CancellationError) {
                     let text = "⚠️ " + UserFacingError.message(error)
                     _ = try? await telegram.sendMessage(
@@ -73,7 +73,7 @@ extension BotOrchestrator {
 
         if case .rejected(let shouldNotify) = result {
             await metrics.increment(MetricName.updatesDropped)
-            logger.warning("chat \(chatKey.chatID) queue full, update dropped")
+            logger.warning("queue full, update dropped", context: LogContext(chat: chatKey))
             if shouldNotify {
                 // Fire-and-forget: dispatch() runs on the intake path and must
                 // not wait for a rate-limiter slot.
@@ -160,7 +160,7 @@ extension BotOrchestrator {
                     origin: origin
                 )
             } catch {
-                logger.error("onboarding example failed: \(error)")
+                logger.error("onboarding example failed: \(error)", context: LogContext(chat: chatKey, user: callback.from.id))
                 if !(error is CancellationError) {
                     _ = try? await telegram.sendMessage(.init(
                         chatID: chatKey.chatID,
@@ -200,7 +200,7 @@ extension BotOrchestrator {
             if isBlocked || isIn {
                 await state.identifyUser(userID: update.from.id, username: update.from.username, firstName: update.from.first_name)
                 await state.setBotPresence(chatID: update.chat.id, isMember: !isBlocked, type: "private")
-                logger.info("private chat \(update.chat.id) \(isBlocked ? "blocked" : "unblocked") the bot")
+                logger.info("private chat \(isBlocked ? "blocked" : "unblocked") the bot", context: LogContext(chat: update.chat.id, user: update.from.id))
             }
             // The DM greeting is the job of /start, not of this event.
             return
@@ -215,7 +215,7 @@ extension BotOrchestrator {
         let isOut = update.newStatus == "left" || update.newStatus == "kicked"
         if !wasOut, isOut {
             await state.setBotPresence(chatID: update.chat.id, isMember: false, type: type, title: update.chat.title)
-            logger.info("removed from group \(update.chat.id) (by @\(update.from.username ?? String(update.from.id)))")
+            logger.info("removed from group", context: LogContext(chat: update.chat.id, user: update.from.id))
             return
         }
 
@@ -243,7 +243,7 @@ extension BotOrchestrator {
         )
 
         await sendGroupWelcome(chatID: update.chat.id)
-        logger.info("greeted new group \(update.chat.id) (added by @\(update.from.username ?? String(update.from.id)))")
+        logger.info("greeted new group", context: LogContext(chat: update.chat.id, user: update.from.id))
     }
 
     /// Sends the group welcome unless this chat was greeted moments ago — the

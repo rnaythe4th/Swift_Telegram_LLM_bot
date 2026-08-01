@@ -97,8 +97,8 @@ actor ModelPriceMonitor {
                     }
                 } else {
                     // Not pinned — OpenRouter cache update restricts access automatically; notify active chats
-                    logger.info("ModelPriceMonitor: \(modelID) became paid on OpenRouter, notifying \(await state.chatsUsing(model: modelID).count) active chats")
                     let affectedChats = await state.chatsUsing(model: modelID)
+                    logger.info("ModelPriceMonitor: \(modelID) became paid on OpenRouter, notifying \(affectedChats.count) active chats")
                     for chatKey in affectedChats {
                         _ = try? await telegram.sendMessage(.init(
                             chatID: chatKey.chatID,

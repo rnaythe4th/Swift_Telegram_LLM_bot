@@ -210,7 +210,5 @@ struct FakeMediaResolver: MediaResolverPort {
 
 /// Keeps test output readable; failures still surface through assertions.
 struct SilentLogger: LoggerPort {
-    func info(_ message: String) {}
-    func warning(_ message: String) {}
-    func error(_ message: String) {}
+    func log(_ level: LogLevel, _ message: @autoclosure () -> String, context: LogContext) {}
 }

@@ -194,7 +194,7 @@ extension GenerationCoordinator {
             // applies, and only the fallback is missing.
             let effectiveFree = await state.allowedFreeModelIDs()
             if effectiveFree == nil {
-                logger.warning("free-model set unknown (OpenRouter catalogue unavailable) — treating paid models as capped")
+                logger.warning("free-model set unknown (OpenRouter catalogue unavailable) — treating paid models as capped", context: LogContext(chat: chatKey))
             }
             // A fresh daily allowance gives the parked paid model back — quietly.
             // The gate below only fires while the chat model *is* paid, so a chat
@@ -286,7 +286,7 @@ extension GenerationCoordinator {
             return true
 
         case .tenant(let spent, let cap, let response):
-            logger.warning("tenant spend cap reached in chat \(chatKey.chatID): \(spent) of \(cap)")
+            logger.warning("tenant spend cap reached: \(spent) of \(cap)", context: LogContext(chat: chatKey))
             switch response {
             case .refuse:
                 try await sendUserFeedback(
@@ -350,7 +350,7 @@ extension GenerationCoordinator {
             await noteBillingShortfall(billed: cost.billed, charged: debit.charged)
             return debit.depleted
         } catch {
-            logger.error("could not charge \(cost.billed) to \(billedTo): \(error)")
+            logger.error("could not charge \(cost.billed) to \(billedTo): \(error)", context: LogContext(generation: generationID))
             await metrics?.increment(MetricName.persistenceErrors)
             return false
         }
@@ -407,7 +407,7 @@ extension GenerationCoordinator {
             await state.applyCommittedCredit(key: UserKey.identified(payout.inviterUserID), amount: payout.inviterReward)
             await state.applyCommittedCredit(key: UserKey.identified(userID), amount: payout.inviteeReward)
         } catch {
-            logger.error("referral payout for \(payout.inviterUsername) not credited: \(error)")
+            logger.error("referral payout not credited: \(error)", context: LogContext(user: userID))
             return
         }
         let refButton = InlineKeyboardButton(
@@ -442,11 +442,11 @@ extension GenerationCoordinator {
             if !notified {
                 // Money is already on their balance; only the good news failed
                 // to land (blocked DM, never wrote to the bot).
-                logger.warning("referral: could not notify inviter \(payout.inviterUsername) about +\(payout.inviterReward)")
+                logger.warning("referral: could not notify the inviter about +\(payout.inviterReward)", context: LogContext(user: payout.inviterUserID))
             }
         }
 
-        logger.info("referral payout: \(payout.inviterUsername) +\(payout.inviterReward), \(payout.invitedLabel) +\(payout.inviteeReward)")
+        logger.info("referral payout: inviter +\(payout.inviterReward), friend +\(payout.inviteeReward)", context: LogContext(user: userID))
     }
 
     /// Customer-facing footer: costs go through the markup multiplier; for

@@ -22,6 +22,9 @@ enum EnvironmentKey: String {
     case metricsToken = "METRICS_TOKEN"
     case ownerUserID = "OWNER_USER_ID"
     case logLevel = "LOG_LEVEL"
+    /// `json` puts one JSON object per line, which hosted log search indexes;
+    /// anything else keeps the human-readable form.
+    case logFormat = "LOG_FORMAT"
     case maxConcurrentGenerations = "MAX_CONCURRENT_GENERATIONS"
     case telegramAPIBase = "TELEGRAM_API_BASE"
     /// 32 bytes of base64 (`openssl rand -base64 32`). Encrypts the payment
