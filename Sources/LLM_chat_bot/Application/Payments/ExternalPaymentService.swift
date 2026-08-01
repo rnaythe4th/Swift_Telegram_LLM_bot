@@ -204,7 +204,8 @@ actor ExternalPaymentService {
             payerUserID: paidOrder.payerUserID ?? UserKey.userID(from: paidOrder.payerKey),
             chatID: paidOrder.chatID,
             purpose: paidOrder.purpose,
-            idempotencyKey: "ext:\(vendor.rawValue):\(callback.vendorPaymentID)"
+            idempotencyKey: "ext:\(vendor.rawValue):\(callback.vendorPaymentID)",
+            method: .external
         ))
         await announce(outcome: outcome, order: paidOrder, methodCode: callback.methodCode)
         return .acknowledged(adapter.acknowledgement)
@@ -219,6 +220,12 @@ actor ExternalPaymentService {
     ) async {
         switch outcome {
         case .duplicate:
+            return
+
+        case .failed:
+            // The vendor is not acknowledged into believing this landed: it
+            // retries, and the retry finds an unclaimed payment.
+            logger.error("external order \(order.id) could not be applied — awaiting the vendor's retry")
             return
 
         case .subscription(let activation, let claim):
@@ -236,7 +243,7 @@ actor ExternalPaymentService {
             ✅ <b>Баланс пополнен на \(CreditPack.label(cents: cents))!</b>
 
             Оплачено: <b>\(order.amountLabel)</b>
-            Текущий баланс: <b>$\(String(format: "%.2f", wallet.balanceUsd))</b>
+            Текущий баланс: <b>\(wallet.balance.formatted(fractionDigits: 2))</b>
 
             Теперь вам доступны любые модели: с баланса списывается стоимость каждого ответа, обычно доли цента. Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).
             """

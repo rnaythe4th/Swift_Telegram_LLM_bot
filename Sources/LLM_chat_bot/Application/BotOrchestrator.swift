@@ -10,7 +10,7 @@ enum IntakeRunMode: Sendable {
     case polling
 }
 
-final class BotOrchestrator: @unchecked Sendable {
+final class BotOrchestrator: Sendable {
     let telegram: TelegramGatewayPort
     let state: ChatContextStore
     let sessionRegistry: SessionRegistry
@@ -18,6 +18,16 @@ final class BotOrchestrator: @unchecked Sendable {
     let logger: LoggerPort
     let metrics: RuntimeMetrics
     let flags: RuntimeFlags
+    let alerter: OwnerAlerter
+    /// Held for the process lifetime once acquired, released on shutdown so the
+    /// next instance can start writing immediately (§3.1).
+    let writerLock = LockedValue<WriterLock?>(nil)
+    /// The loader, kept so a replica waiting for the handover can restore state
+    /// the moment it becomes the writer.
+    let storedState = LockedValue<PostgresStatePersistence?>(nil)
+    /// Where money is written — also the only thing that can check its own
+    /// books (`reconcile`).
+    let ledger: LedgerPort
     let callbackHandler: BotCallbackHandler
     let commandHandler: BotCommandHandler
     let generationCoordinator: GenerationCoordinator
@@ -49,6 +59,9 @@ final class BotOrchestrator: @unchecked Sendable {
         generationLimiter: GenerationLimiter,
         botUsername: String,
         formatOptions: String,
+        /// Where money is written. Defaults to the in-memory ledger so tests
+        /// (and a bot with no database) keep the same shape without one.
+        ledger: LedgerPort = InMemoryLedger(),
         /// Shared with the crypto and hosted-checkout services by the
         /// composition root. It holds no state of its own (everything lives in
         /// the store), so tests may let it be built here.
@@ -65,11 +78,14 @@ final class BotOrchestrator: @unchecked Sendable {
         self.logger = logger
         self.metrics = metrics
         self.flags = flags
+        self.alerter = OwnerAlerter(telegram: telegram, state: state, logger: logger)
+        self.ledger = ledger
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoMonitor = cryptoMonitor
         self.fulfillment = fulfillment ?? PaymentFulfillmentService(
             state: state,
             telegram: telegram,
+            ledger: ledger,
             persistence: persistence,
             metrics: metrics,
             logger: logger
@@ -78,9 +94,19 @@ final class BotOrchestrator: @unchecked Sendable {
         self.botUsername = botUsername
 
         let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
+        // Subscription dates and winback offers live in columns the write-behind
+        // flush never touches, so every path that changes one goes through this
+        // (§10.2) — otherwise the change is correct until the next restart.
+        let subscriptions = SubscriptionWriter(
+            state: state,
+            ledger: ledger,
+            logger: logger,
+            alerter: self.alerter
+        )
         let reminderService = SubscriptionReminderService(
             telegram: telegram,
             state: state,
+            subscriptions: subscriptions,
             logger: logger,
             metrics: metrics
         )
@@ -96,7 +122,9 @@ final class BotOrchestrator: @unchecked Sendable {
             modelPriceMonitor: modelPriceMonitor,
             cryptoService: cryptoService,
             reminderService: reminderService,
-            externalPayments: externalPayments
+            externalPayments: externalPayments,
+            durability: flags.durability,
+            subscriptions: subscriptions
         )
 
         self.menuHandler = menuHandler
@@ -118,7 +146,10 @@ final class BotOrchestrator: @unchecked Sendable {
             menuHandler: menuHandler,
             modelPriceMonitor: modelPriceMonitor,
             cryptoService: cryptoService,
-            reminderService: reminderService
+            reminderService: reminderService,
+            durability: flags.durability,
+            ledger: ledger,
+            subscriptions: subscriptions
         )
         self.generationCoordinator = GenerationCoordinator(
             telegram: telegram,
@@ -129,6 +160,8 @@ final class BotOrchestrator: @unchecked Sendable {
             logger: logger,
             botUsername: botUsername,
             generationLimiter: generationLimiter,
+            ledger: ledger,
+            alerter: alerter,
             metrics: metrics
         )
     }

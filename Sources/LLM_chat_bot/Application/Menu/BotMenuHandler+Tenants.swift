@@ -111,8 +111,8 @@ extension BotMenuHandler {
         } else {
             for row in rows.prefix(pageLimit) {
                 let mark = row.isSuperAdmin ? "🛡" : "🛠"
-                let realStr = String(format: "$%.4f", row.usage.totalCost)
-                let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
+                let realStr = row.usage.totalCost.formatted()
+                let billedStr = await state.billedCost(of: row.usage).formatted()
                 let tokens = Int(row.usage.totalTokens)
                 lines.append("\n\(mark) <b>\(row.label)</b>")
                 lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b> · запросов <b>\(row.usage.generationCount)</b> · ток. <b>\(tokens)</b>")
@@ -159,8 +159,8 @@ extension BotMenuHandler {
         } else {
             subLine = "💳 Подписка · <b>бессрочная</b>"
         }
-        let realStr = String(format: "$%.4f", row.usage.totalCost)
-        let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
+        let realStr = row.usage.totalCost.formatted()
+        let billedStr = await state.billedCost(of: row.usage).formatted()
 
         let text = """
         <b>🏢 Тенант \(row.label)</b>\(row.isSuperAdmin ? " · 🛡 суперадмин" : "")
@@ -186,24 +186,24 @@ extension BotMenuHandler {
     func renderSuperBalances(chatKey: ChatKey) async -> MenuScreen {
         let balances = await state.allBalances()
         let markupPct = await state.markupPercent()
-        func usd(_ v: Double) -> String { String(format: "$%.4f", v) }
+        func usd(_ v: Money) -> String { v.formatted() }
 
         var lines = ["<b>💰 Балансы (pay-as-you-go)</b> (\(balances.count)) · наценка <b>\(markupPct)%</b>", ""]
         if balances.isEmpty {
             lines.append("<i>Кошельков нет. Баланс — оплата платных моделей по факту, без подписки: начислите сумму, бот списывает стоимость каждого ответа с наценкой.</i>")
         } else {
-            var totalBalance = 0.0, totalBilled = 0.0, totalReal = 0.0
+            var totalBalance = Money.zero, totalBilled = Money.zero, totalReal = Money.zero
             // Totals cover everyone; the per-wallet list is capped so the page
             // is never silently trimmed by Telegram's length limit.
             let listLimit = 20
             for (index, entry) in balances.enumerated() {
                 let w = entry.wallet
-                totalBalance += w.balanceUsd
-                totalBilled += w.spentBilledUsd
-                totalReal += w.spentRealUsd
+                totalBalance += w.balance
+                totalBilled += w.spentBilled
+                totalReal += w.spentReal
                 guard index < listLimit else { continue }
-                lines.append("• <b>\(entry.label)</b> · остаток <b>\(usd(w.balanceUsd))</b>")
-                lines.append("  списано \(usd(w.spentBilledUsd)) · реально \(usd(w.spentRealUsd)) · маржа <b>\(usd(w.spentBilledUsd - w.spentRealUsd))</b>")
+                lines.append("• <b>\(entry.label)</b> · остаток <b>\(usd(w.balance))</b>")
+                lines.append("  списано \(usd(w.spentBilled)) · реально \(usd(w.spentReal)) · маржа <b>\(usd(w.margin))</b>")
             }
             if balances.count > listLimit {
                 lines.append("<i>…и ещё \(balances.count - listLimit) — полный список /balance list</i>")
@@ -215,7 +215,7 @@ extension BotMenuHandler {
         var buttons: Keyboard = [[menuButton("➕ Начислить / списать", .sbal, "add")]]
         for entry in balances.prefix(30) {
             buttons.row([
-                menuButton("\(entry.label) · \(usd(entry.wallet.balanceUsd))", command: .noop),
+                menuButton("\(entry.label) · \(usd(entry.wallet.balance))", command: .noop),
                 menuButton("🗑", .sbal, "rm", "\(entry.key)"),
             ])
         }
@@ -323,8 +323,8 @@ extension BotMenuHandler {
             lines.append("")
             lines.append(key.threadID == 0 ? "<b>Основной тред</b>" : "<b>Топик \(key.threadID)</b>")
             lines.append("🤖 <code>\(help.model)</code> · 🌡 \(Self.formatTemp(help.temp)) · 📝 \(help.maxHistory)")
-            let realStr = String(format: "$%.4f", help.cumulativeUsage.totalCost)
-            let billedStr = String(format: "$%.4f", await state.billedCost(of: help.cumulativeUsage))
+            let realStr = help.cumulativeUsage.totalCost.formatted()
+            let billedStr = await state.billedCost(of: help.cumulativeUsage).formatted()
             lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(Int(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
             let rolePreview = help.role.count > 250 ? String(help.role.prefix(250)) + "…" : help.role
             lines.append("🎭 <blockquote expandable>\(rolePreview)</blockquote>")
@@ -421,7 +421,7 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         case "ext":
             guard let target = route.arg(2) else { return }
-            if let until = await state.extendTenantSubscription(username: target, days: ChatContextStore.subscriptionDays) {
+            if let until = await extendSubscription(username: target, days: ChatContextStore.subscriptionDays) {
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продлена до \(f.string(from: until))")
             } else {
@@ -430,12 +430,12 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         case "unlim":
             guard let target = route.arg(2) else { return }
-            let ok = await state.setTenantUnlimited(username: target)
+            let ok = await setSubscriptionUnlimited(username: target)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "✓ Подписка бессрочная" : Texts.tenantNotFound)
             try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         case "exp":
             guard let target = route.arg(2) else { return }
-            let ok = await state.expireTenantSubscription(username: target)
+            let ok = await expireSubscription(username: target)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: ok ? "⛔ Подписка завершена" : Texts.tenantNotFound)
             try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(username: target))
         default:
@@ -523,7 +523,7 @@ extension BotMenuHandler {
             guard let target = route.arg(2) else { return }
             let label = await state.displayLabel(forKey: target)
             let wallet = await state.balance(username: target)
-            let amount = wallet.map { String(format: "$%.4f", $0.balanceUsd) } ?? "—"
+            let amount = wallet.map { $0.balance.formatted() } ?? "—"
             let confirmText = """
             <b>🗑 Удалить кошелёк \(label)?</b>
 

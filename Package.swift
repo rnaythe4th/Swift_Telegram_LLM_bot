@@ -13,7 +13,13 @@ let package = Package(
         // signature check is the only thing standing between a POST from the
         // internet and a free subscription. Already in the resolved graph via
         // async-http-client, so this only surfaces the product.
-        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0")
+        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"5.0.0"),
+        // Postgres driver, not a web framework: it lives in the vapor org but
+        // pulls only swift-nio / swift-log / swift-crypto, all already resolved
+        // here. It buys the three things PostgREST cannot express — transactions
+        // (money moves as one unit), constraints the database enforces itself,
+        // and `pg_try_advisory_lock` for an honest single writer.
+        .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -26,6 +32,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "PostgresNIO", package: "postgres-nio"),
             ]
         ),
         // Unit tests for the pure logic: the state actor, formatters, parsers and

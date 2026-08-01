@@ -131,8 +131,19 @@ struct TrafficSourceTally: Codable, Sendable, Equatable {
     }
 }
 
-/// All paid-traffic bookkeeping in one `bot_config` row
-/// (`GlobalConfigKey.trafficSources`): attributions + per-campaign aggregates.
+/// The scalar counters of the traffic ledger: the two kinds of link open that
+/// deliberately produce no attribution. Attributions and campaign aggregates
+/// are tables (§2.1); these two numbers are a document.
+struct TrafficSourceTotals: Codable, Sendable, Equatable {
+    var repeatOpens: Int = 0
+    var knownUserOpens: Int = 0
+
+    static let empty = TrafficSourceTotals()
+}
+
+/// All paid-traffic bookkeeping the bot holds in memory: attributions plus
+/// per-campaign aggregates. Stored as `bot_traffic_attribution` rows and the
+/// `traffic_totals` document (§10.3).
 struct TrafficSourceLedger: Codable, Sendable {
     /// Keyed by String(userID) — JSON object keys must be strings.
     var attributions: [String: TrafficSourceAttribution]
@@ -180,6 +191,15 @@ struct TrafficSourceLedger: Codable, Sendable {
             repeatOpens: try c.decodeIfPresent(Int.self, forKey: .repeatOpens) ?? 0,
             knownUserOpens: try c.decodeIfPresent(Int.self, forKey: .knownUserOpens) ?? 0
         )
+    }
+
+    /// The scalar half, for storage: attributions and tallies travel as rows.
+    var totals: TrafficSourceTotals {
+        get { TrafficSourceTotals(repeatOpens: repeatOpens, knownUserOpens: knownUserOpens) }
+        set {
+            repeatOpens = newValue.repeatOpens
+            knownUserOpens = newValue.knownUserOpens
+        }
     }
 
     var totalJoined: Int { tallies.values.reduce(0) { $0 + $1.joined } }

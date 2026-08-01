@@ -188,6 +188,12 @@ extension ChatContextStore {
         return discount.isActive(grace: Self.checkoutDiscountGrace) ? discount : nil
     }
 
+    /// Owners currently carrying an offer — the caller needs the list before
+    /// clearing them, to write each one out.
+    func tenantsWithWinbackDiscount() -> [String] {
+        tenants.compactMap { $0.value.winbackDiscount == nil ? nil : $0.key }
+    }
+
     /// Super-admin escape hatch: drops every live offer at once (e.g. after a
     /// misconfigured discount went out).
     @discardableResult

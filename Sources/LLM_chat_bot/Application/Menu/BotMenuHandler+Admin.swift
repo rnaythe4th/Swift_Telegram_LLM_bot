@@ -128,10 +128,16 @@ extension BotMenuHandler {
             ? "<i>только вы</i>"
             : admins.map(\.label).joined(separator: ", ")
 
-        let costStr = String(format: "$%.4f", await state.billedCost(of: usage))
+        let costStr = await state.billedCost(of: usage).formatted()
         let usageLine = usage.generationCount == 0
             ? "📈 Запросов пока нет"
             : "📈 запросов <b>\(usage.generationCount)</b> · итого <b>\(costStr)</b>"
+
+        // A daily spending ceiling that nobody can see is not a protection —
+        // it is an unexplained downgrade of something they paid for (§4.1). It
+        // only appears when one is actually set.
+        var spendLine: String?
+        if let invoker { spendLine = await state.spendStatusLine(forKey: invoker) }
 
         var subscriptionLine: String
         // Reminder line + opt-out: the sponsor sees when the renewal nudge will
@@ -184,7 +190,7 @@ extension BotMenuHandler {
         <b>📌 Где он работает</b>
         \(chatStatusLine)
         🆔 Номер этого чата · <code>\(chatKey.chatID)</code>
-        \(subscriptionLine)\(reminderLine.map { "\n" + $0 } ?? "")
+        \(subscriptionLine)\(reminderLine.map { "\n" + $0 } ?? "")\(spendLine.map { "\n" + $0 } ?? "")
         Чатов · <b>\(licensedChats.count)</b> · гостей · <b>\(licensedUsers.count)</b>
         \(usageLine)
 

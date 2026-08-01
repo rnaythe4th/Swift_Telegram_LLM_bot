@@ -61,9 +61,9 @@ struct ReferralConfig: Codable, Sendable, Equatable {
     static let rewardRange = 0...5000   // up to $50 per side
     static let capRange = 0...10000
 
-    var inviterRewardUsd: Double { Double(inviterRewardCents) / 100.0 }
-    var inviteeRewardUsd: Double { Double(inviteeRewardCents) / 100.0 }
-    var payingFriendBonusUsd: Double { Double(payingFriendBonusCents) / 100.0 }
+    var inviterReward: Money { .cents(inviterRewardCents) }
+    var inviteeReward: Money { .cents(inviteeRewardCents) }
+    var payingFriendBonus: Money { .cents(payingFriendBonusCents) }
     /// False when every reward is set to zero — the program runs but pays nothing.
     var paysAnything: Bool {
         inviterRewardCents > 0 || inviteeRewardCents > 0 || payingFriendBonusCents > 0
@@ -141,14 +141,14 @@ struct ReferralRecord: Codable, Sendable, Equatable {
     /// Set once the pair is resolved (paid or refused) — makes payout
     /// idempotent no matter how often the invited user writes.
     var rewardedAt: Date?
-    var inviterRewardUsd: Double
-    var inviteeRewardUsd: Double
+    var inviterReward: Money
+    var inviteeReward: Money
     /// The payout was refused by the anti-farming cap (kept for monitoring).
     var blocked: Bool
     /// Set the first time this friend paid for anything and the inviter's
     /// bonus was credited — makes the bonus one-per-pair, ever.
     var paidBonusAt: Date?
-    var paidBonusUsd: Double
+    var paidBonus: Money
 
     init(
         inviterUserID: Int,
@@ -156,22 +156,22 @@ struct ReferralRecord: Codable, Sendable, Equatable {
         invitedUsername: String?,
         boundAt: Date = Date(),
         rewardedAt: Date? = nil,
-        inviterRewardUsd: Double = 0,
-        inviteeRewardUsd: Double = 0,
+        inviterReward: Money = .zero,
+        inviteeReward: Money = .zero,
         blocked: Bool = false,
         paidBonusAt: Date? = nil,
-        paidBonusUsd: Double = 0
+        paidBonus: Money = .zero
     ) {
         self.inviterUserID = inviterUserID
         self.inviterUsername = inviterUsername
         self.invitedUsername = invitedUsername
         self.boundAt = boundAt
         self.rewardedAt = rewardedAt
-        self.inviterRewardUsd = inviterRewardUsd
-        self.inviteeRewardUsd = inviteeRewardUsd
+        self.inviterReward = inviterReward
+        self.inviteeReward = inviteeReward
         self.blocked = blocked
         self.paidBonusAt = paidBonusAt
-        self.paidBonusUsd = paidBonusUsd
+        self.paidBonus = paidBonus
     }
 
     var isPending: Bool { rewardedAt == nil }
@@ -180,7 +180,7 @@ struct ReferralRecord: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case inviterUserID, inviterUsername, invitedUsername, boundAt, rewardedAt
-        case inviterRewardUsd, inviteeRewardUsd, blocked, paidBonusAt, paidBonusUsd
+        case inviterReward, inviteeReward, blocked, paidBonusAt, paidBonus
     }
 
     /// Hand-written so that fields added later are optional on the way in — a
@@ -194,11 +194,11 @@ struct ReferralRecord: Codable, Sendable, Equatable {
             invitedUsername: try c.decodeIfPresent(String.self, forKey: .invitedUsername),
             boundAt: try c.decodeIfPresent(Date.self, forKey: .boundAt) ?? Date(),
             rewardedAt: try c.decodeIfPresent(Date.self, forKey: .rewardedAt),
-            inviterRewardUsd: try c.decodeIfPresent(Double.self, forKey: .inviterRewardUsd) ?? 0,
-            inviteeRewardUsd: try c.decodeIfPresent(Double.self, forKey: .inviteeRewardUsd) ?? 0,
+            inviterReward: try c.decodeIfPresent(Money.self, forKey: .inviterReward) ?? .zero,
+            inviteeReward: try c.decodeIfPresent(Money.self, forKey: .inviteeReward) ?? .zero,
             blocked: try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false,
             paidBonusAt: try c.decodeIfPresent(Date.self, forKey: .paidBonusAt),
-            paidBonusUsd: try c.decodeIfPresent(Double.self, forKey: .paidBonusUsd) ?? 0
+            paidBonus: try c.decodeIfPresent(Money.self, forKey: .paidBonus) ?? .zero
         )
     }
 }
@@ -211,7 +211,7 @@ struct ReferralTally: Codable, Sendable, Equatable {
     var invited: Int
     var rewarded: Int
     var blocked: Int
-    var earnedUsd: Double
+    var earned: Money
     /// Friends of this inviter who went on to pay — the number that says
     /// whether their invites are worth anything.
     var paidConversions: Int
@@ -221,19 +221,19 @@ struct ReferralTally: Codable, Sendable, Equatable {
         invited: Int = 0,
         rewarded: Int = 0,
         blocked: Int = 0,
-        earnedUsd: Double = 0,
+        earned: Money = .zero,
         paidConversions: Int = 0
     ) {
         self.username = username
         self.invited = invited
         self.rewarded = rewarded
         self.blocked = blocked
-        self.earnedUsd = earnedUsd
+        self.earned = earned
         self.paidConversions = paidConversions
     }
 
     enum CodingKeys: String, CodingKey {
-        case username, invited, rewarded, blocked, earnedUsd, paidConversions
+        case username, invited, rewarded, blocked, earned, paidConversions
     }
 
     /// Same reasoning as `ReferralRecord`: later fields must be optional on the
@@ -245,14 +245,31 @@ struct ReferralTally: Codable, Sendable, Equatable {
             invited: try c.decodeIfPresent(Int.self, forKey: .invited) ?? 0,
             rewarded: try c.decodeIfPresent(Int.self, forKey: .rewarded) ?? 0,
             blocked: try c.decodeIfPresent(Int.self, forKey: .blocked) ?? 0,
-            earnedUsd: try c.decodeIfPresent(Double.self, forKey: .earnedUsd) ?? 0,
+            earned: try c.decodeIfPresent(Money.self, forKey: .earned) ?? .zero,
             paidConversions: try c.decodeIfPresent(Int.self, forKey: .paidConversions) ?? 0
         )
     }
 }
 
-/// The whole referral bookkeeping in one `bot_config` row
-/// (`GlobalConfigKey.referralLedger`): attributions + per-inviter aggregates.
+/// The program's scalar counters: everything in the referral ledger that is not
+/// a per-person record or a per-inviter aggregate. Those two are tables now
+/// (§2.1) because they grow with the user base; these six numbers are a
+/// document and stay one.
+struct ReferralTotals: Codable, Sendable, Equatable {
+    var paidOut: Money = .zero
+    var refusedSelf: Int = 0
+    var refusedRepeat: Int = 0
+    var refusedNotNew: Int = 0
+    var refusedUnknown: Int = 0
+
+    static let empty = ReferralTotals()
+}
+
+/// The referral bookkeeping the bot holds in memory: attributions,
+/// per-inviter aggregates and the program's scalar counters. In storage it is
+/// three things — `bot_referral`, `bot_referral_tally` and the
+/// `referral_totals` document (§10.3) — because the first two grow with the
+/// user base and a single row would not.
 struct ReferralLedger: Codable, Sendable {
     /// Keyed by String(invited userID) — JSON object keys must be strings.
     var records: [String: ReferralRecord]
@@ -260,7 +277,7 @@ struct ReferralLedger: Codable, Sendable {
     var tallies: [String: ReferralTally]
     /// Running total of everything the program has paid out, both sides. Stored
     /// rather than summed over records so pruning never rewrites history.
-    var paidOutUsd: Double
+    var paidOut: Money
     /// Link opens that produced no attribution, by reason. Without these a
     /// super-admin cannot tell "nobody clicks the link" from "everybody clicks
     /// it and the rules throw them out" — two problems with opposite fixes.
@@ -283,7 +300,7 @@ struct ReferralLedger: Codable, Sendable {
     init(
         records: [String: ReferralRecord] = [:],
         tallies: [String: ReferralTally] = [:],
-        paidOutUsd: Double = 0,
+        paidOut: Money = .zero,
         refusedSelf: Int = 0,
         refusedRepeat: Int = 0,
         refusedNotNew: Int = 0,
@@ -291,7 +308,7 @@ struct ReferralLedger: Codable, Sendable {
     ) {
         self.records = records
         self.tallies = tallies
-        self.paidOutUsd = paidOutUsd
+        self.paidOut = paidOut
         self.refusedSelf = refusedSelf
         self.refusedRepeat = refusedRepeat
         self.refusedNotNew = refusedNotNew
@@ -299,7 +316,7 @@ struct ReferralLedger: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case records, tallies, paidOutUsd
+        case records, tallies, paidOut
         case refusedSelf, refusedRepeat, refusedNotNew, refusedUnknown
     }
 
@@ -308,12 +325,32 @@ struct ReferralLedger: Codable, Sendable {
         self.init(
             records: try c.decodeIfPresent([String: ReferralRecord].self, forKey: .records) ?? [:],
             tallies: try c.decodeIfPresent([String: ReferralTally].self, forKey: .tallies) ?? [:],
-            paidOutUsd: try c.decodeIfPresent(Double.self, forKey: .paidOutUsd) ?? 0,
+            paidOut: try c.decodeIfPresent(Money.self, forKey: .paidOut) ?? .zero,
             refusedSelf: try c.decodeIfPresent(Int.self, forKey: .refusedSelf) ?? 0,
             refusedRepeat: try c.decodeIfPresent(Int.self, forKey: .refusedRepeat) ?? 0,
             refusedNotNew: try c.decodeIfPresent(Int.self, forKey: .refusedNotNew) ?? 0,
             refusedUnknown: try c.decodeIfPresent(Int.self, forKey: .refusedUnknown) ?? 0
         )
+    }
+
+    /// The scalar half, for storage: records and tallies travel as rows.
+    var totals: ReferralTotals {
+        get {
+            ReferralTotals(
+                paidOut: paidOut,
+                refusedSelf: refusedSelf,
+                refusedRepeat: refusedRepeat,
+                refusedNotNew: refusedNotNew,
+                refusedUnknown: refusedUnknown
+            )
+        }
+        set {
+            paidOut = newValue.paidOut
+            refusedSelf = newValue.refusedSelf
+            refusedRepeat = newValue.refusedRepeat
+            refusedNotNew = newValue.refusedNotNew
+            refusedUnknown = newValue.refusedUnknown
+        }
     }
 
     var pendingCount: Int { records.values.filter(\.isPending).count }
@@ -376,7 +413,7 @@ struct ReferralTopInviter: Sendable {
 enum ReferralBindOutcome: Sendable, Equatable {
     /// Attribution recorded; the reward lands after the friend's first answer.
     /// Neither side needs a @username — wallets are keyed by userID.
-    case bound(inviter: String, inviteeRewardUsd: Double)
+    case bound(inviter: String, inviteeReward: Money)
     /// Attribution recorded, but the inviter has already used up their reward
     /// cap, so this pair will not pay. Reported separately so the greeting can
     /// stay honest instead of promising money that never arrives.
@@ -396,12 +433,12 @@ enum ReferralBindOutcome: Sendable, Equatable {
 struct ReferralPayout: Sendable {
     let inviterUserID: Int
     let inviterUsername: String
-    let inviterRewardUsd: Double
+    let inviterReward: Money
     let invitedUsername: String?
     /// Ready-to-print name of the friend: `@ник` / имя / `id 12345`. Works for
     /// someone who never set a @username, unlike `invitedUsername`.
     let invitedLabel: String
-    let inviteeRewardUsd: Double
+    let inviteeReward: Money
     /// Total rewarded invites of this inviter after this payout.
     let inviterRewardedTotal: Int
 }
@@ -412,7 +449,7 @@ struct ReferralPaymentBonus: Sendable {
     let inviterUserID: Int
     let inviterLabel: String
     let friendLabel: String
-    let amountUsd: Double
+    let amount: Money
     /// How many paying friends this inviter has brought in total.
     let inviterPaidTotal: Int
 }
@@ -422,7 +459,7 @@ struct ReferralUserStats: Sendable {
     var invited: Int
     var rewarded: Int
     var pending: Int
-    var earnedUsd: Double
+    var earned: Money
     /// Invited friends who went on to pay.
     var paidConversions: Int
     /// Remaining rewarded invites under the cap; nil = uncapped.
@@ -437,7 +474,7 @@ struct ReferralOverview: Sendable {
     var pending: Int
     var rewarded: Int
     var blocked: Int
-    var paidOutUsd: Double
+    var paidOut: Money
     var inviters: Int
     var top: [ReferralTopInviter]
     /// Invited friends who became paying customers — the number that says

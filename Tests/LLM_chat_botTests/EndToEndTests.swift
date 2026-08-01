@@ -9,6 +9,7 @@ final class EndToEndTests: XCTestCase {
 
     private var telegram: FakeTelegram!
     private var store: ChatContextStore!
+    private var flags: RuntimeFlags!
     private var orchestrator: BotOrchestrator!
     private var baseURL = ""
 
@@ -28,6 +29,11 @@ final class EndToEndTests: XCTestCase {
             metrics: nil
         )
         store = Fixtures.makeStore(ownerUsername: "owner", ownerUserID: ownerID, model: "paid/model")
+        // A running bot has finished boot, so state is durable and the checkout
+        // is open. `RuntimeFlags` starts closed on purpose (§4.3) — a process
+        // that never reached `bootstrapState` must not be able to sell.
+        flags = RuntimeFlags()
+        flags.durability.value = .durable
         orchestrator = BotOrchestrator(
             telegram: gateway,
             state: store,
@@ -37,7 +43,7 @@ final class EndToEndTests: XCTestCase {
             persistence: nil,
             logger: SilentLogger(),
             metrics: RuntimeMetrics(),
-            flags: RuntimeFlags(),
+            flags: flags,
             generationLimiter: GenerationLimiter(maxConcurrent: 4),
             botUsername: botUsername,
             formatOptions: ""
@@ -307,8 +313,8 @@ final class EndToEndTests: XCTestCase {
 
         inviterWallet = await store.balance(username: UserKey.forUserID(ownerID))
         let friendWallet = await store.balance(username: UserKey.forUserID(friendID))
-        XCTAssertEqual(inviterWallet?.balanceUsd, ReferralConfig.default.inviterRewardUsd)
-        XCTAssertEqual(friendWallet?.balanceUsd, ReferralConfig.default.inviteeRewardUsd)
+        XCTAssertEqual(inviterWallet?.balance, ReferralConfig.default.inviterReward)
+        XCTAssertEqual(friendWallet?.balance, ReferralConfig.default.inviteeReward)
     }
 
     /// A paid-traffic link says nothing to the user but records the campaign.

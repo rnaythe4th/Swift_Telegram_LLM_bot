@@ -1,17 +1,21 @@
 import Foundation
 
-struct CumulativeUsage: Codable, Sendable {
+/// Running usage totals for one chat or one tenant.
+///
+/// Tokens stay a `Double` — they are a count nobody bills on. Both costs are
+/// `Money`, because they are compared with a spend cap and reconciled against
+/// the ledger, and neither works on floating point.
+struct CumulativeUsage: Codable, Sendable, Equatable {
     var totalTokens: Double
     /// Real provider cost (what the bot owner actually pays).
-    var totalCost: Double
+    var totalCost: Money
     var generationCount: Int
-    /// Marked-up cost shown to and charged from customers. 0 in rows written
-    /// before markup existed — display falls back to totalCost × multiplier.
-    var totalBilledCost: Double
+    /// Marked-up cost shown to and charged from customers.
+    var totalBilledCost: Money
 
-    static let zero = CumulativeUsage(totalTokens: 0, totalCost: 0, generationCount: 0, totalBilledCost: 0)
+    static let zero = CumulativeUsage(totalTokens: 0, totalCost: .zero, generationCount: 0, totalBilledCost: .zero)
 
-    init(totalTokens: Double, totalCost: Double, generationCount: Int, totalBilledCost: Double = 0) {
+    init(totalTokens: Double, totalCost: Money, generationCount: Int, totalBilledCost: Money = .zero) {
         self.totalTokens = totalTokens
         self.totalCost = totalCost
         self.generationCount = generationCount
@@ -22,19 +26,25 @@ struct CumulativeUsage: Codable, Sendable {
         case totalTokens, totalCost, generationCount, totalBilledCost
     }
 
+    /// Every field optional on the way in. This is the payload of a `jsonb`
+    /// column whose default is `'{}'`, and Swift's synthesised decoder would
+    /// throw on it — turning a tenant row created by a payment into a row the
+    /// next boot cannot read.
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        totalTokens = try container.decode(Double.self, forKey: .totalTokens)
-        totalCost = try container.decode(Double.self, forKey: .totalCost)
-        generationCount = try container.decode(Int.self, forKey: .generationCount)
-        totalBilledCost = try container.decodeIfPresent(Double.self, forKey: .totalBilledCost) ?? 0
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            totalTokens: try c.decodeIfPresent(Double.self, forKey: .totalTokens) ?? 0,
+            totalCost: try c.decodeIfPresent(Money.self, forKey: .totalCost) ?? .zero,
+            generationCount: try c.decodeIfPresent(Int.self, forKey: .generationCount) ?? 0,
+            totalBilledCost: try c.decodeIfPresent(Money.self, forKey: .totalBilledCost) ?? .zero
+        )
     }
 
-    mutating func add(_ usage: StreamUsageSummary?, priceMultiplier: Double = 1.0) {
+    mutating func add(_ usage: StreamUsageSummary?, markupPercent: Int) {
         totalTokens += usage?.totalTokens ?? 0
-        let real = usage?.cost ?? 0
-        totalCost += real
-        totalBilledCost += real * priceMultiplier
+        let real = Money.usd(usage?.cost ?? 0)
+        totalCost = totalCost + real
+        totalBilledCost = totalBilledCost + real.multiplied(byPercent: markupPercent)
         generationCount += 1
     }
 }
@@ -96,24 +106,9 @@ struct ChatContextSnapshot: Codable, Sendable {
     var activeMode: String?
 }
 
-struct BotStateSnapshot: Codable, Sendable {
-    var contexts: [String: ChatContextSnapshot]
-    var tenants: [String: TenantStateSnapshot]?
-    var chatOwnership: [String: String]?
-    var telegramUpdateOffset: Int
-    var starsPrice: Int?
-    var freeModelIDs: [String]?
-    var crypto: CryptoConfigSnapshot?
-    var superAdminUsernames: [String]?
-
-    // Legacy fields — present in pre-tenant snapshots, absent in new ones
-    var whitelistedUserIDs: [Int]?
-    var adminUsernames: [String]?
-    var defaultModel: String?
-    var defaultRole: String?
-    var defaultHistoryLength: Int?
-    var modelPresets: [Preset]?
-    var tempPresets: [Preset]?
-    var historyLengthPresets: [Preset]?
-    var rolePresets: [Preset]?
-}
+// The whole-state `BotStateSnapshot` blob and its one-time import are gone
+// (§2.2): the bot never ran against a live database under that format, and a
+// migration path that can never execute is a path where "a stale blob
+// overwrote live rows" waits for its chance. Chat contexts and tenant
+// documents keep their `Codable` snapshots above — those are the jsonb
+// payloads of `bot_chat_context.data` and `bot_tenant.presets`.

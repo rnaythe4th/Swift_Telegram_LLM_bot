@@ -149,7 +149,15 @@ enum FunnelPeriod: String, Sendable, CaseIterable {
 /// Per-day event counts, so the same counters can be read as a window instead
 /// of an ever-growing total. Keyed by UTC day number (Unix epoch / 86400) and
 /// pruned to `windowDays` — it stays one bounded `bot_config` row
-/// (`GlobalConfigKey.funnelDaily`).
+/// (`bot_funnel_daily`, one row per day and event).
+/// One cell of the per-day funnel table: which counter, on which day. Its own
+/// type so the dirty set that drives incremental writes is keyed by exactly
+/// what a `bot_funnel_daily` row is keyed by.
+struct FunnelDayKey: Hashable, Sendable {
+    let day: Int
+    let event: String
+}
+
 struct FunnelDailyLog: Codable, Sendable, Equatable {
     /// A bit more than the longest window offered (30 days), so the oldest
     /// bucket of a 30-day view is never half-pruned.
@@ -169,6 +177,25 @@ struct FunnelDailyLog: Codable, Sendable, Equatable {
         // timestamp of the write: a backdated bump must not be able to keep the
         // row growing (or to wipe newer buckets).
         if days.count > Self.windowDays { prune() }
+    }
+
+    /// One cell, for the incremental write that follows a bump.
+    func count(day: Int, event: String) -> Int {
+        days[day]?[event] ?? 0
+    }
+
+    /// Every cell currently held — used when the whole state is queued for a
+    /// rewrite.
+    var allCells: [FunnelDayKey] {
+        days.flatMap { day, counters in counters.keys.map { FunnelDayKey(day: day, event: $0) } }
+    }
+
+    /// Rebuilds the window from stored rows.
+    init(rows: [(day: Int, event: String, count: Int)]) {
+        for row in rows {
+            days[row.day, default: [:]][row.event] = row.count
+        }
+        prune()
     }
 
     mutating func prune(now: Date = Date()) {

@@ -21,8 +21,8 @@ extension BotMenuHandler {
                 parts.append("текста <b>\(ResponseFooterFormatter.formatTokenValue(usage.totalTokens))</b>")
             }
             let billedTotal = await state.billedCost(of: usage)
-            if billedTotal > 0 {
-                parts.append("итого <b>$\(Self.formatCost(billedTotal))</b>")
+            if billedTotal.isPositive {
+                parts.append("итого <b>$\(Self.formatCost(billedTotal.usdValue))</b>")
             }
             usageLine = "📈 " + parts.joined(separator: " · ")
         }
@@ -37,8 +37,8 @@ extension BotMenuHandler {
         let wallet = isGroupChat ? nil : await state.balance(username: username)
         var balanceLine = ""
         if let wallet {
-            let status = wallet.balanceUsd > 0 ? "" : " <i>(исчерпан)</i>"
-            balanceLine = String(format: "\n💰 Баланс · <b>$%.4f</b>", wallet.balanceUsd) + status
+            let status = wallet.balance.isPositive ? "" : " <i>(исчерпан)</i>"
+            balanceLine = "\n💰 Баланс · <b>\(wallet.balance.formatted())</b>" + status
         }
 
         // Who pays for the smart models here — the sponsor's standing credit
@@ -199,8 +199,8 @@ extension BotMenuHandler {
                 : "⚡ Премиум · открыт по подписке <b>\(owner)</b>"
         case .guest(let owner):
             return "⚡ Премиум · вам открыл доступ <b>\(owner)</b>"
-        case .balance(let usd):
-            return String(format: "💰 Оплата по факту · на балансе <b>$%.4f</b>", usd)
+        case .balance(let remaining):
+            return "💰 Оплата по факту · на балансе <b>\(remaining.formatted())</b>"
         case .free:
             // Only promise a daily taste of the smart models when one is
             // actually configured (the super-admin can set the cap to 0).

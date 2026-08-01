@@ -4,6 +4,14 @@ import Foundation
 
 extension BotCommandHandler {
     func handleBuy(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+        // Nothing is sold while state is not durable (§4.3): a purchase written
+        // into a memory that dies with the process takes real money and gives
+        // back a subscription that lasts until the next redeploy.
+        let durability = durability.value
+        guard durability.acceptsPayments else {
+            try await sendUserFeedback(chatKey: chatKey, text: "⏸ \(durability.purchaseRefusalMessage)")
+            return
+        }
         let starsPrice = await state.starsPrice()
         let cryptoPriceCents = await state.cryptoPriceUsdCents()
         let cryptoAssets: [CryptoAsset] = await {

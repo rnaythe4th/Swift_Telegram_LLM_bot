@@ -9,29 +9,29 @@ final class StoreIdentityTests: XCTestCase {
     func testPendingWalletIsAdoptedAndSummed() async {
         let store = Fixtures.makeStore()
         // Somebody was told about, but never seen: a pending record.
-        _ = await store.creditPurchasedBalance(username: "@newbie", amountUsd: 3)
+        _ = await store.creditPurchasedBalance(username: "@newbie", amount: .usd(3))
         let pending = await store.balance(username: "newbie")
-        XCTAssertEqual(pending?.balanceUsd, 3)
+        XCTAssertEqual(pending?.balance, .usd(3))
 
         await store.identifyUser(userID: 700, username: "newbie", firstName: "Newbie")
 
         let adopted = await store.balance(username: UserKey.forUserID(700))
-        XCTAssertEqual(adopted?.balanceUsd, 3)
-        XCTAssertEqual(adopted?.toppedUpUsd, 3, "a proven payer must not become a stranger again")
+        XCTAssertEqual(adopted?.balance, .usd(3))
+        XCTAssertEqual(adopted?.toppedUp, .usd(3), "a proven payer must not become a stranger again")
     }
 
     /// Wallets under both keys are merged whole — including the "paid real
     /// money" marker and the lapse timestamps.
     func testWalletsUnderBothKeysAreMerged() async {
         let store = Fixtures.makeStore()
-        _ = await store.creditPurchasedBalance(username: "@dual", amountUsd: 2)
-        _ = await store.creditBalance(key: UserKey.forUserID(701), amountUsd: 5)
+        _ = await store.creditPurchasedBalance(username: "@dual", amount: .usd(2))
+        _ = await store.creditBalance(key: UserKey.forUserID(701), amount: .usd(5))
 
         await store.identifyUser(userID: 701, username: "dual", firstName: nil)
 
         let wallet = await store.balance(username: UserKey.forUserID(701))
-        XCTAssertEqual(wallet?.balanceUsd, 7)
-        XCTAssertEqual(wallet?.toppedUpUsd, 2)
+        XCTAssertEqual(wallet?.balance, .usd(7))
+        XCTAssertEqual(wallet?.toppedUp, .usd(2))
         let leftovers = await store.allBalances().filter { $0.key == "dual" }
         XCTAssertTrue(leftovers.isEmpty, "the pending row must not linger")
     }

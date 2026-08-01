@@ -71,7 +71,7 @@ enum TonAddress {
 
 // MARK: - TON
 
-final class TonExplorer: @unchecked Sendable {
+final class TonExplorer: Sendable {
     private let network: NetworkClient
     private let apiKey: String?
     private let baseURL = "https://tonapi.io"
@@ -192,7 +192,7 @@ final class TonExplorer: @unchecked Sendable {
 
 // MARK: - EVM (BSC / Ethereum) — Etherscan API V2 (multichain, one key)
 
-final class EvmExplorer: @unchecked Sendable {
+final class EvmExplorer: Sendable {
     private let network: NetworkClient
     private let baseURL: String
     /// Etherscan V2 chain id: 1 = Ethereum, 56 = BSC.
@@ -281,7 +281,7 @@ final class EvmExplorer: @unchecked Sendable {
 
 // MARK: - Tron
 
-final class TronExplorer: @unchecked Sendable {
+final class TronExplorer: Sendable {
     private let network: NetworkClient
     private let apiKey: String?
     private let baseURL = "https://api.trongrid.io"

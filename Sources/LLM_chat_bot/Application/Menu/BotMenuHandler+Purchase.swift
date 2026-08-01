@@ -78,6 +78,17 @@ extension BotMenuHandler {
     }
 
     func renderPay(chatKey: ChatKey, username: String?) async -> MenuScreen {
+        // Selling is switched off while state is not durable (§4.3). The page
+        // still opens and still explains what premium is — it just does not
+        // offer a button that would take money the bot cannot keep.
+        let durability = durability.value
+        guard durability.acceptsPayments else {
+            return MenuScreen(
+                "<b>⚡ Премиум</b>\n\n⏸ \(durability.purchaseRefusalMessage)",
+                [[backButton(to: .main)]]
+            )
+        }
+
         // The purchase page itself makes sense in a group (anyone can open
         // premium for the chat), but the menu message there is shared: balance,
         // subscription dates and a personal winback discount would become public
@@ -172,7 +183,7 @@ extension BotMenuHandler {
             }
             if let wallet = await state.balance(username: username) {
                 lines.append("")
-                lines.append(String(format: "💰 Баланс · <b>$%.4f</b>", wallet.balanceUsd) + (wallet.balanceUsd > 0 ? "" : " <i>(исчерпан)</i>"))
+                lines.append("💰 Баланс · <b>\(wallet.balance.formatted())</b>" + (wallet.balance.isPositive ? "" : " <i>(исчерпан)</i>"))
                 lines.append("<i>С баланса списывается стоимость каждого ответа — обычно доли цента. Подписка при этом не нужна. Подробнее — /balance.</i>")
             }
         } else {

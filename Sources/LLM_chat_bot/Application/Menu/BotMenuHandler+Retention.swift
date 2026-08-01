@@ -144,7 +144,7 @@ extension BotMenuHandler {
             }
 
         case "cleardiscounts":
-            let cleared = await state.clearAllWinbackDiscounts()
+            let cleared = await clearWinbackDiscounts()
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🗑 Снято скидок: \(cleared)")
             try await showPage(.superReminders, chatKey: chatKey, callback: callback, message: message)
 

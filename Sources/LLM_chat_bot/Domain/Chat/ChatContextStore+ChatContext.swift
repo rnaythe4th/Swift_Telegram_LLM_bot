@@ -281,18 +281,18 @@ extension ChatContextStore {
         )
     }
 
-    /// Returns true when the charge for this answer emptied the payer's wallet
-    /// (see `chargeBalance`) — the coordinator pitches a top-up right there.
-    @discardableResult
+    /// Records the answer and its usage. Charging is *not* here: money moves
+    /// through a ledger transaction, and the coordinator applies what was
+    /// committed with `applyCommittedCharge`. Returns what the turn cost, so
+    /// the caller knows what to charge.
     func appendAssistant(
         chatKey: ChatKey,
         generationID: GenerationID,
         content: String,
-        usage: StreamUsageSummary? = nil,
-        billedTo: String? = nil
-    ) -> Bool {
-        let real = usage?.cost ?? 0
-        let billed = real * priceMultiplier()
+        usage: StreamUsageSummary? = nil
+    ) -> (real: Money, billed: Money) {
+        let real = Money.usd(usage?.cost ?? 0)
+        let billed = real.multiplied(byPercent: markupPercentValue)
         mutate(chatKey: chatKey) { context in
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
                 return
@@ -305,10 +305,8 @@ extension ChatContextStore {
             context.cumulativeUsage.generationCount += 1
         }
         accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
-        if let billedTo {
-            return chargeBalance(username: billedTo, billedUsd: billed, realUsd: real)
-        }
-        return false
+        recordProviderSpend(chatID: chatKey.chatID, real: real)
+        return (real, billed)
     }
 
     func cancelPendingTurn(chatKey: ChatKey, generationID: GenerationID) {
@@ -322,9 +320,9 @@ extension ChatContextStore {
     }
 
     func accumulateUsage(chatKey: ChatKey, usage: StreamUsageSummary?) {
-        let multiplier = priceMultiplier()
+        let markup = markupPercentValue
         mutate(chatKey: chatKey) { context in
-            context.cumulativeUsage.add(usage, priceMultiplier: multiplier)
+            context.cumulativeUsage.add(usage, markupPercent: markup)
         }
         accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
     }

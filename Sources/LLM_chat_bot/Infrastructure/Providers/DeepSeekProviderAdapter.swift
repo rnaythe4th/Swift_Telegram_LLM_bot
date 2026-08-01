@@ -1,6 +1,6 @@
 import Foundation
 
-final class DeepSeekProviderAdapter: ProviderGatewayPort, @unchecked Sendable {
+final class DeepSeekProviderAdapter: ProviderGatewayPort, Sendable {
     let provider: ServiceProvider = .deepseek
     let capabilities = ProviderCapabilities(
         supportsImageInput: false,

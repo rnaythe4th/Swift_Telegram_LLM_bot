@@ -44,7 +44,9 @@ struct TelegramAPIChatMember: Decodable, Sendable {
     let user: TelegramAPIUser
 }
 
-final class TelegramAPIMessage: Decodable, @unchecked Sendable {
+/// Recursive for the same reason as `TelegramMessage`, immutable for the same
+/// reason, and checked by the compiler for the same reason.
+final class TelegramAPIMessage: Decodable, Sendable {
     let message_id: Int
     let from: TelegramAPIUser?
     let chat: TelegramAPIChat

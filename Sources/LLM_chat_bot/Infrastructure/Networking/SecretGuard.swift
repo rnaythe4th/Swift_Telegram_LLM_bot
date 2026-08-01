@@ -36,6 +36,8 @@ enum SecretGuard {
 /// unlucky error path is all it takes to publish the token to the log
 /// collector. Registering the secrets once at boot means nothing has to
 /// remember to redact at each call site.
+/// Safety is provided by the lock around the secret set; nothing reaches the
+/// storage without it (§5.5).
 final class SecretRedactor: @unchecked Sendable {
     static let shared = SecretRedactor()
 

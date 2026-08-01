@@ -3,7 +3,7 @@ import Foundation
 // The inline menu. Wiring, the callback dispatcher and page rendering live
 // here; the pages themselves are split across BotMenuHandler+*.swift by area.
 
-final class BotMenuHandler: @unchecked Sendable {
+final class BotMenuHandler: Sendable {
     let telegram: TelegramGatewayPort
     let state: ChatContextStore
     let gateways: ProviderGatewayRegistry
@@ -16,6 +16,14 @@ final class BotMenuHandler: @unchecked Sendable {
     /// Hosted checkout (§7 «Внешняя касса»): opens a signed link for the payer
     /// and knows the notification URL the merchant cabinet needs.
     let externalPayments: ExternalPaymentService?
+    /// Whether a purchase made right now would still exist tomorrow (§4.3).
+    /// Read at every entrance to the checkout — the store page, `/buy`,
+    /// pre-checkout — because selling from a state that dies with the process
+    /// takes real money for nothing.
+    let durability: LockedValue<StateDurability>
+    /// Subscription dates are not write-behind state (§10.2); the menu changes
+    /// them through here so they survive a restart.
+    let subscriptions: SubscriptionWriter?
 
     init(
         telegram: TelegramGatewayPort,
@@ -27,7 +35,9 @@ final class BotMenuHandler: @unchecked Sendable {
         modelPriceMonitor: ModelPriceMonitor? = nil,
         cryptoService: CryptoPaymentService? = nil,
         reminderService: SubscriptionReminderService? = nil,
-        externalPayments: ExternalPaymentService? = nil
+        externalPayments: ExternalPaymentService? = nil,
+        durability: LockedValue<StateDurability> = LockedValue(.durable),
+        subscriptions: SubscriptionWriter? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -39,6 +49,8 @@ final class BotMenuHandler: @unchecked Sendable {
         self.cryptoService = cryptoService
         self.reminderService = reminderService
         self.externalPayments = externalPayments
+        self.durability = durability
+        self.subscriptions = subscriptions
     }
 
     /// Plain chat message, no keyboard — used for the short confirmations and
@@ -531,5 +543,32 @@ final class BotMenuHandler: @unchecked Sendable {
         case ..<1.7: return "креативно"
         default: return "хаотично"
         }
+    }
+}
+
+// Subscription dates and winback offers are not write-behind state: they live
+// in columns only the money transaction writes (§10.2). These four go through
+// `SubscriptionWriter` so a super-admin's change is still there after a
+// restart; without one wired (tests, a bot with no database) they fall back to
+// the in-memory path, which is all there is to change anyway.
+extension BotMenuHandler {
+    func extendSubscription(username: String, days: Int) async -> Date? {
+        if let subscriptions { return await subscriptions.extend(username: username, days: days) }
+        return await state.extendTenantSubscription(username: username, days: days)
+    }
+
+    func setSubscriptionUnlimited(username: String) async -> Bool {
+        if let subscriptions { return await subscriptions.setUnlimited(username: username) }
+        return await state.setTenantUnlimited(username: username)
+    }
+
+    func expireSubscription(username: String) async -> Bool {
+        if let subscriptions { return await subscriptions.expire(username: username) }
+        return await state.expireTenantSubscription(username: username)
+    }
+
+    func clearWinbackDiscounts() async -> Int {
+        if let subscriptions { return await subscriptions.clearAllWinback() }
+        return await state.clearAllWinbackDiscounts()
     }
 }

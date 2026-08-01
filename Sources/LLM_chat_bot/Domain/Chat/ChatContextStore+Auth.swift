@@ -170,8 +170,8 @@ extension ChatContextStore {
             }
         }
         for u in candidates {
-            if let wallet = userBalances[u], wallet.balanceUsd > 0 {
-                return .balance(wallet.balanceUsd)
+            if let wallet = userBalances[u], wallet.balance.isPositive {
+                return .balance(wallet.balance)
             }
         }
         return .free
@@ -249,6 +249,6 @@ extension ChatContextStore {
         // A wallet belongs to a person, not to a handle: the userID alone is
         // enough, so someone with no @username still spends their balance.
         return userKeys(username: username, userID: userID)
-            .contains { (userBalances[$0]?.balanceUsd ?? 0) > 0 }
+            .contains { (userBalances[$0]?.balance ?? .zero).isPositive }
     }
 }

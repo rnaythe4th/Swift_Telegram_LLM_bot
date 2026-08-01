@@ -140,8 +140,8 @@ extension BotCommandHandler {
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 for row in rows {
                     let mark = row.isSuperAdmin ? "🛡" : "🛠"
-                    let realStr = String(format: "$%.4f", row.usage.totalCost)
-                    let billedStr = String(format: "$%.4f", await state.billedCost(of: row.usage))
+                    let realStr = row.usage.totalCost.formatted()
+                    let billedStr = await state.billedCost(of: row.usage).formatted()
                     let tokens = Int(row.usage.totalTokens)
                     let subscription: String
                     if let until = row.paidUntil {
@@ -352,7 +352,7 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant extend @username &lt;дней&gt;</code>")
                 return
             }
-            if let until = await state.extendTenantSubscription(username: username, days: days) {
+            if let until = await extendSubscription(username: username, days: days) {
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 try await sendUserFeedback(chatKey: chatKey, text: "✓ Подписка @\(username) продлена до <b>\(f.string(from: until))</b>.")
             } else {
@@ -365,7 +365,7 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant unlimited @username</code>")
                 return
             }
-            let ok = await state.setTenantUnlimited(username: username)
+            let ok = await setSubscriptionUnlimited(username: username)
             try await sendUserFeedback(chatKey: chatKey, text: ok
                 ? "✓ Подписка @\(username) теперь бессрочная."
                 : "Tenant @\(username) не найден.")
@@ -376,7 +376,7 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant expire @username</code>")
                 return
             }
-            let ok = await state.expireTenantSubscription(username: username)
+            let ok = await expireSubscription(username: username)
             try await sendUserFeedback(chatKey: chatKey, text: ok
                 ? "✓ Подписка @\(username) немедленно завершена (лицензия и настройки сохранены)."
                 : "Tenant @\(username) не найден или это владелец бота.")

@@ -46,7 +46,8 @@ extension ChatContextStore {
     func recordChatMeta(chatID: Int, info: ChatMetaInfo) {
         guard chatMetaByID[chatID] != info else { return }
         chatMetaByID[chatID] = info
-        dirtyConfigs.insert(.chatMeta)
+        dirtyChats.insert(chatID)
+        deletedChats.remove(chatID)
     }
 
     func chatMeta(chatID: Int) -> ChatMetaInfo? {
@@ -69,7 +70,8 @@ extension ChatContextStore {
         info.botRemoved = isMember ? nil : true
         guard chatMetaByID[chatID] != info else { return }
         chatMetaByID[chatID] = info
-        dirtyConfigs.insert(.chatMeta)
+        dirtyChats.insert(chatID)
+        deletedChats.remove(chatID)
     }
 
     /// True when the bot is known to have been removed from this chat.
@@ -108,23 +110,29 @@ extension ChatContextStore {
     func regenerateInviteToken(owner: String) -> String? {
         let u = userKeyOrRaw(owner)
         guard tenants[u] != nil else { return nil }
-        inviteRecords = inviteRecords.filter { $0.value.ownerUsername != u }
+        for stale in inviteRecords.filter({ $0.value.ownerUsername == u }).keys {
+            inviteRecords.removeValue(forKey: stale)
+            dirtyInvites.remove(stale)
+            deletedInvites.insert(stale)
+        }
         let token = Self.makeInviteToken()
         inviteRecords[token] = InviteRecord(ownerUsername: u, createdAt: Date())
-        dirtyConfigs.insert(.invites)
+        dirtyInvites.insert(token)
+        deletedInvites.remove(token)
         return token
     }
 
     @discardableResult
     func revokeInviteToken(owner: String) -> Bool {
         let u = userKeyOrRaw(owner)
-        let before = inviteRecords.count
-        inviteRecords = inviteRecords.filter { $0.value.ownerUsername != u }
-        if inviteRecords.count != before {
-            dirtyConfigs.insert(.invites)
-            return true
+        let stale = inviteRecords.filter { $0.value.ownerUsername == u }.keys
+        guard !stale.isEmpty else { return false }
+        for token in stale {
+            inviteRecords.removeValue(forKey: token)
+            dirtyInvites.remove(token)
+            deletedInvites.insert(token)
         }
-        return false
+        return true
     }
 
     /// Returns the issuing owner when the token is valid and their

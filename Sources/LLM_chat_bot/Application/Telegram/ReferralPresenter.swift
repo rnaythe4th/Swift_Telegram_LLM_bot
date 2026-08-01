@@ -6,10 +6,10 @@ import Foundation
 /// cannot drift between them.
 enum ReferralPresenter {
     static func paymentBonusText(_ bonus: ReferralPaymentBonus) -> String {
-        String(
-            format: "💎 <b>Ваш друг %@ оформил оплату — вам бонус $%.2f на баланс.</b>\n\nПриглашённых, которые оплатили: <b>%d</b>.\n\nС баланса списывается стоимость каждого ответа, обычно доли цента, — подписка для этого не нужна.",
-            bonus.friendLabel, bonus.amountUsd, bonus.inviterPaidTotal
-        )
+        "💎 <b>Ваш друг \(bonus.friendLabel) оформил оплату — вам бонус"
+            + " \(bonus.amount.formatted(fractionDigits: 2)) на баланс.</b>"
+            + "\n\nПриглашённых, которые оплатили: <b>\(bonus.inviterPaidTotal)</b>."
+            + "\n\nС баланса списывается стоимость каждого ответа, обычно доли цента, — подписка для этого не нужна."
     }
 
     static let inviteButton = InlineKeyboardButton(

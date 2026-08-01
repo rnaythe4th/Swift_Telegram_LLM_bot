@@ -59,6 +59,9 @@ final class AppHTTPServer {
     }
 }
 
+/// Safety is provided by NIO's confinement: a channel handler is only ever
+/// touched on its own event loop, which is the guarantee `ChannelInboundHandler`
+/// is written against (§5.5).
 private final class HTTPRouteChannelHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart

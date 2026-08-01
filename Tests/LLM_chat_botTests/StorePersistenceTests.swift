@@ -28,15 +28,16 @@ final class StorePersistenceTests: XCTestCase {
         await store.identifyUser(userID: 960, username: "payer", firstName: nil)
         _ = await store.drainDirtyBatch()
 
-        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(960), amountUsd: 1)
+        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(960), amount: .usd(1))
         _ = await store.activatePaidSubscription(username: UserKey.forUserID(960))
         _ = await store.assignChat(chatID: -960, to: UserKey.forUserID(960))
         await store.setDailyPremiumLimit(3)
 
         let batch = await store.drainDirtyBatch()
+        let wallets = await store.drainDirtyWallets()
         XCTAssertFalse(batch.tenants.isEmpty, "tenants")
-        XCTAssertFalse(batch.ownership.isEmpty, "ownership")
-        XCTAssertTrue(batch.configs.contains { if case .balances = $0 { return true } else { return false } }, "balances")
+        XCTAssertFalse(batch.chats.isEmpty, "chat ownership")
+        XCTAssertFalse(wallets.changed.isEmpty, "wallets")
         XCTAssertTrue(
             batch.configs.contains { if case .dailyPremiumLimit = $0 { return true } else { return false } },
             "daily premium limit"
@@ -52,26 +53,25 @@ final class StorePersistenceTests: XCTestCase {
         _ = await store.consumeDailyPremium(chatID: 961, userID: 961, isGroup: false)
 
         let batch = await store.drainDirtyBatch()
-        XCTAssertTrue(batch.configs.contains { if case .dailyPremiumUsage = $0 { return true } else { return false } })
+        XCTAssertEqual(batch.premiumUsage.count, 1)
+        XCTAssertEqual(batch.premiumUsage.first?.usage.used, 1)
     }
 
     func testMergeKeepsTheNewerRowAndHonoursDeletes() {
-        let older = PersistenceBatch(
-            tenants: [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "old/model"))],
-            ownership: [OwnershipRow(chatID: -1, owner: "#1")],
-            configs: [.markup(10)]
-        )
-        let newer = PersistenceBatch(
-            tenants: [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "new/model"))],
-            deletedOwnership: [-1],
-            configs: [.markup(20)]
-        )
+        var older = PersistenceBatch()
+        older.tenants = [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "old/model"))]
+        older.chats = [ChatRow(chatID: -1, meta: nil, ownerKey: "#1")]
+        older.configs = [.markup(10)]
+        var newer = PersistenceBatch()
+        newer.tenants = [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "new/model"))]
+        newer.deletedChats = [-1]
+        newer.configs = [.markup(20)]
 
         let merged = PersistenceBatch.merged(older: older, newer: newer)
         XCTAssertEqual(merged.tenants.count, 1)
         XCTAssertEqual(merged.tenants.first?.snapshot.defaultModel, "new/model")
-        XCTAssertTrue(merged.ownership.isEmpty)
-        XCTAssertEqual(merged.deletedOwnership, [-1])
+        XCTAssertTrue(merged.chats.isEmpty)
+        XCTAssertEqual(merged.deletedChats, [-1])
         XCTAssertEqual(merged.configs.count, 1)
         if case .markup(let percent) = merged.configs[0] {
             XCTAssertEqual(percent, 20)
@@ -82,8 +82,10 @@ final class StorePersistenceTests: XCTestCase {
 
     /// A row written and then deleted must not come back, and vice versa.
     func testMergeResurrectsARowWrittenAfterItsDelete() {
-        let older = PersistenceBatch(deletedTenants: ["#1"])
-        let newer = PersistenceBatch(tenants: [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "m"))])
+        var older = PersistenceBatch()
+        older.deletedTenants = ["#1"]
+        var newer = PersistenceBatch()
+        newer.tenants = [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "m"))]
 
         let merged = PersistenceBatch.merged(older: older, newer: newer)
         XCTAssertEqual(merged.tenants.count, 1)
@@ -92,31 +94,25 @@ final class StorePersistenceTests: XCTestCase {
 
     func testRestoreRebuildsStateAfterARestart() async {
         let store = Fixtures.makeStore()
-        var directory = UserDirectory.empty
-        directory.record(userID: 970, username: "sponsor", firstName: nil)
-
         let paidUntil = Date().addingTimeInterval(Fixtures.days(10))
-        await store.restore(from: PersistedBotState(
-            contexts: [
-                ChatContextRow(
-                    key: ChatKey(chatID: -970, threadID: 0),
-                    snapshot: makeContextSnapshot(model: "restored/model")
-                )
-            ],
-            tenants: [
-                TenantRow(
-                    username: "#970",
-                    snapshot: makeTenantSnapshot(model: "tenant/model", paidUntil: paidUntil)
-                )
-            ],
-            ownership: [OwnershipRow(chatID: -970, owner: "#970")],
-            configs: PersistedGlobalConfigs(
-                starsPrice: 777,
-                markup: 42,
-                balances: ["#970": UserBalance(balanceUsd: 3, spentBilledUsd: 1, spentRealUsd: 0.5, updatedAt: nil, toppedUpUsd: 3)],
-                userDirectory: directory
-            )
-        ))
+        var stored = PersistedBotState()
+        stored.users = [UserRow(identity: UserIdentity(
+            userID: 970, username: "sponsor", firstName: nil, seenAt: Date(), firstSeenAt: Date()
+        ))]
+        stored.contexts = [ChatContextRow(
+            key: ChatKey(chatID: -970, threadID: 0),
+            snapshot: makeContextSnapshot(model: "restored/model")
+        )]
+        stored.tenants = [TenantRow(
+            username: "#970",
+            snapshot: makeTenantSnapshot(model: "tenant/model", paidUntil: paidUntil)
+        )]
+        stored.chats = [ChatRow(chatID: -970, meta: nil, ownerKey: "#970")]
+        stored.wallets = ["#970": UserBalance(
+            balance: .usd(3), spentBilled: .usd(1), spentReal: .usd(0.5), toppedUp: .usd(3)
+        )]
+        stored.configs = PersistedGlobalConfigs(starsPrice: 777, markup: 42)
+        await store.restore(from: stored)
 
         let help = await store.fetchHelp(chatKey: ChatKey(chatID: -970, threadID: 0))
         XCTAssertEqual(help.model, "restored/model")
@@ -129,7 +125,7 @@ final class StorePersistenceTests: XCTestCase {
         let pricing = await store.subscriptionPricing(username: nil)
         XCTAssertEqual(pricing.stars, 777)
         let wallet = await store.balance(username: "@sponsor")
-        XCTAssertEqual(wallet?.toppedUpUsd, 3)
+        XCTAssertEqual(wallet?.toppedUp, .usd(3))
         let label = await store.displayLabel(forKey: "#970")
         XCTAssertEqual(label, "@sponsor")
     }

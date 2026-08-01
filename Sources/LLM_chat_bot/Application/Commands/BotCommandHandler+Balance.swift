@@ -14,9 +14,7 @@ extension BotCommandHandler {
             raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
         }
 
-        func formatUsd(_ value: Double) -> String {
-            String(format: "$%.4f", value)
-        }
+        func formatUsd(_ value: Money) -> String { value.formatted() }
 
         // Super-admin management subcommands
         if isSuper {
@@ -37,11 +35,11 @@ extension BotCommandHandler {
                     return
                 }
                 let wallet = subcommand == "add"
-                    ? await state.creditBalance(username: target, amountUsd: amount)
-                    : await state.setBalanceAmount(username: target, amountUsd: amount)
+                    ? await state.creditBalance(username: target, amount: .usd(amount))
+                    : await state.setBalanceAmount(username: target, amount: .usd(amount))
                 try await sendUserFeedback(chatKey: chatKey, text: """
-                    ✓ Баланс @\(target.lowercased()) · <b>\(formatUsd(wallet.balanceUsd))</b>
-                    Потрачено: клиентская цена \(formatUsd(wallet.spentBilledUsd)) · реально \(formatUsd(wallet.spentRealUsd))
+                    ✓ Баланс @\(target.lowercased()) · <b>\(formatUsd(wallet.balance))</b>
+                    Потрачено: клиентская цена \(formatUsd(wallet.spentBilled)) · реально \(formatUsd(wallet.spentReal))
                     """)
                 return
 
@@ -64,16 +62,15 @@ extension BotCommandHandler {
                 if balances.isEmpty {
                     lines.append("<i>кошельков нет</i>")
                 } else {
-                    var totalBalance = 0.0, totalBilled = 0.0, totalReal = 0.0
+                    var totalBalance = Money.zero, totalBilled = Money.zero, totalReal = Money.zero
                     for entry in balances {
                         let w = entry.wallet
-                        totalBalance += w.balanceUsd
-                        totalBilled += w.spentBilledUsd
-                        totalReal += w.spentRealUsd
-                        let marginStr = formatUsd(w.spentBilledUsd - w.spentRealUsd)
+                        totalBalance += w.balance
+                        totalBilled += w.spentBilled
+                        totalReal += w.spentReal
                         lines.append("")
-                        lines.append("• <b>\(entry.label)</b> · остаток <b>\(formatUsd(w.balanceUsd))</b>")
-                        lines.append("  списано \(formatUsd(w.spentBilledUsd)) · реально \(formatUsd(w.spentRealUsd)) · маржа <b>\(marginStr)</b>")
+                        lines.append("• <b>\(entry.label)</b> · остаток <b>\(formatUsd(w.balance))</b>")
+                        lines.append("  списано \(formatUsd(w.spentBilled)) · реально \(formatUsd(w.spentReal)) · маржа <b>\(formatUsd(w.margin))</b>")
                     }
                     lines.append("")
                     lines.append("<b>Итого</b> · остатки \(formatUsd(totalBalance)) · списано \(formatUsd(totalBilled)) · реально \(formatUsd(totalReal)) · маржа <b>\(formatUsd(totalBilled - totalReal))</b>")
@@ -113,18 +110,35 @@ extension BotCommandHandler {
             return
         }
 
-        let status = wallet.balanceUsd > 0
+        let status = wallet.balance.isPositive
             ? "🟢 Пока баланс не пуст, вам доступны любые модели"
             : "⛔ Баланс пуст — отвечают только бесплатные модели"
         var lines = ["<b>💰 Ваш баланс</b>", ""]
-        lines.append("Остаток · <b>\(formatUsd(wallet.balanceUsd))</b>")
-        lines.append("Потрачено всего · \(formatUsd(wallet.spentBilledUsd))")
+        lines.append("Остаток · <b>\(formatUsd(wallet.balance))</b>")
+        lines.append("Потрачено всего · \(formatUsd(wallet.spentBilled))")
         lines.append(status)
         lines.append("")
         lines.append("<i>С баланса списывается стоимость каждого ответа — обычно доли цента. Сколько списалось, видно под самим ответом (включите показ: /show_cost).</i>")
         lines.append("<i>Пополнить — /buy. Бесплатно — пригласить друга: /ref.</i>")
+
+        // The last few movements. Without them a shrinking balance is something
+        // the user has to take on trust, and a disagreement about it has no
+        // evidence on either side (§10.2).
+        if let recent = try? await ledger.recentEntries(userKey: username, limit: 5), !recent.isEmpty {
+            lines.append("")
+            lines.append("<b>Последние движения</b>")
+            let formatter = DateFormatter()
+            formatter.dateFormat = "dd.MM HH:mm"
+            for entry in recent {
+                let sign = entry.amount.isPositive ? "+" : "−"
+                lines.append(
+                    "\(formatter.string(from: entry.createdAt)) · \(entry.kind.displayName)"
+                    + " · <b>\(sign)$\(entry.amount.formattedAmount(fractionDigits: 4))</b>"
+                )
+            }
+        }
         if isSuper {
-            lines.append("<i>Реально потрачено (суперадмин): \(formatUsd(wallet.spentRealUsd)) · маржа \(formatUsd(wallet.spentBilledUsd - wallet.spentRealUsd))</i>")
+            lines.append("<i>Реально потрачено (суперадмин): \(formatUsd(wallet.spentReal)) · маржа \(formatUsd(wallet.margin))</i>")
         }
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
     }

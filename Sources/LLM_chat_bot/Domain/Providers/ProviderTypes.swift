@@ -76,6 +76,10 @@ enum ProviderAdapterError: Error, LocalizedError {
     /// Carries the upstream detail for the logs; the user-facing wording is
     /// built by `UserFacingError`.
     case upstream(provider: ServiceProvider, code: Int?, message: String?)
+    /// The provider accepted the connection and then stopped sending (§4.5).
+    /// A distinct case because it is not the provider refusing — it is nobody
+    /// saying anything, which needs a different message and a different fix.
+    case idleTimeout(seconds: Int)
 
     var errorDescription: String? {
         switch self {
@@ -85,6 +89,8 @@ enum ProviderAdapterError: Error, LocalizedError {
             let codePart = code.map { " \($0)" } ?? ""
             let detail = message.map { ": \($0)" } ?? ""
             return "Upstream error from \(provider.commandValue)\(codePart)\(detail)"
+        case .idleTimeout(let seconds):
+            return "Provider stopped sending for \(seconds)s"
         }
     }
 }

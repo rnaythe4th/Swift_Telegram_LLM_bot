@@ -93,14 +93,14 @@ extension ChatContextStore {
         let ownedChats = chatOwnership.filter { $0.value == u }.map(\.key)
         for chatID in ownedChats {
             chatOwnership.removeValue(forKey: chatID)
-            dirtyOwnership.remove(chatID)
-            deletedOwnership.insert(chatID)
+            dirtyChats.insert(chatID)
+            deletedChats.remove(chatID)
         }
         userTenantMap = userTenantMap.filter { $0.value != u }
-        let hadInvites = inviteRecords.contains { $0.value.ownerUsername == u }
-        if hadInvites {
-            inviteRecords = inviteRecords.filter { $0.value.ownerUsername != u }
-            dirtyConfigs.insert(.invites)
+        for token in inviteRecords.filter({ $0.value.ownerUsername == u }).keys {
+            inviteRecords.removeValue(forKey: token)
+            dirtyInvites.remove(token)
+            deletedInvites.insert(token)
         }
         dirtyTenants.remove(u)
         deletedTenants.insert(u)
@@ -136,8 +136,8 @@ extension ChatContextStore {
         let u = userKeyOrRaw(ownerUsername)
         guard tenants[u] != nil else { return false }
         chatOwnership[chatID] = u
-        dirtyOwnership.insert(chatID)
-        deletedOwnership.remove(chatID)
+        dirtyChats.insert(chatID)
+        deletedChats.remove(chatID)
         return true
     }
 
@@ -169,8 +169,8 @@ extension ChatContextStore {
             return .keptSponsor(label: displayLabel(forKey: current))
         }
         chatOwnership[chatID] = key
-        dirtyOwnership.insert(chatID)
-        deletedOwnership.remove(chatID)
+        dirtyChats.insert(chatID)
+        deletedChats.remove(chatID)
         return .assigned
     }
 
@@ -178,8 +178,8 @@ extension ChatContextStore {
     func unassignChat(chatID: Int) -> String? {
         let removed = chatOwnership.removeValue(forKey: chatID)
         if removed != nil {
-            dirtyOwnership.remove(chatID)
-            deletedOwnership.insert(chatID)
+            dirtyChats.insert(chatID)
+            deletedChats.remove(chatID)
         }
         return removed
     }
@@ -208,8 +208,8 @@ extension ChatContextStore {
         } else {
             return
         }
-        dirtyOwnership.insert(chatID)
-        deletedOwnership.remove(chatID)
+        dirtyChats.insert(chatID)
+        deletedChats.remove(chatID)
     }
 
     // MARK: - Per-tenant licensed users (paid access for individuals)
@@ -266,9 +266,9 @@ extension ChatContextStore {
 
     func accumulateTenantUsage(chatID: Int, usage: StreamUsageSummary?) {
         let owner = chatOwnership[chatID] ?? defaultOwnerKey
-        let multiplier = priceMultiplier()
+        let markup = markupPercentValue
         mutateTenantByOwner(owner) {
-            $0.cumulativeUsage.add(usage, priceMultiplier: multiplier)
+            $0.cumulativeUsage.add(usage, markupPercent: markup)
         }
     }
 }

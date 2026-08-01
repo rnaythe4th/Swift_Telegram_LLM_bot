@@ -69,6 +69,8 @@ enum UserFacingError {
                     return httpStatusReason(code)
                 }
                 return "Сервис ИИ прервал ответ. Попробуйте ещё раз или выберите другую модель в /menu → 🤖 Модель."
+            case .idleTimeout:
+                return "Сервис ИИ перестал отвечать на середине. Попробуйте ещё раз — ответ не потрачен."
             }
         }
 

@@ -1,13 +1,21 @@
 import Foundation
 
 /// Write-behind persistence: drains the store's dirty entities every couple of
-/// seconds and upserts them as rows. Critical paths (payments) call
-/// `flushNow()` for immediate durability. A failed flush is retried merged
-/// into the next one, so transient Supabase hiccups never lose data — the
-/// batch just waits in memory.
+/// seconds and upserts them as rows. A failed flush is retried merged into the
+/// next one, so a transient database hiccup never loses data — the batch just
+/// waits in memory.
+///
+/// Money does not travel this way. Wallet balances, subscription end dates and
+/// payment claims are written through `LedgerPort` inside a transaction and are
+/// durable before the payer is told anything (§3.2); what this coordinator
+/// carries is everything whose loss for two seconds is survivable. The one
+/// exception is a wallet that changed *without* money moving — a rename folding
+/// a pending wallet into an identified one — which is synced here because no
+/// transaction was involved.
 actor PersistenceCoordinator {
     private let store: ChatContextStore
     private let persistence: StatePersistencePort
+    private let ledger: LedgerPort
     private let logger: LoggerPort
     private let metrics: RuntimeMetrics
     private let flushInterval: Duration
@@ -15,6 +23,7 @@ actor PersistenceCoordinator {
     private var loopTask: Task<Void, Never>?
     private var retryCarry: PersistenceBatch?
     private var flushing = false
+    private var abandoned = false
 
     private var lastErrorMessage: String?
     private var lastSuccessAt: Date?
@@ -25,12 +34,14 @@ actor PersistenceCoordinator {
     init(
         store: ChatContextStore,
         persistence: StatePersistencePort,
+        ledger: LedgerPort,
         logger: LoggerPort,
         metrics: RuntimeMetrics,
         flushInterval: Duration = .seconds(2)
     ) {
         self.store = store
         self.persistence = persistence
+        self.ledger = ledger
         self.logger = logger
         self.metrics = metrics
         self.flushInterval = flushInterval
@@ -66,7 +77,18 @@ actor PersistenceCoordinator {
         }
     }
 
+    /// Stops without flushing. Used when the writer lock is gone: the rows in
+    /// hand describe a world another instance now owns, and writing them would
+    /// overwrite its work with ours.
+    func abandon() {
+        loopTask?.cancel()
+        loopTask = nil
+        retryCarry = nil
+        abandoned = true
+    }
+
     private func flushOnce() async {
+        guard !abandoned else { return }
         // Serialize concurrent flushes (actor reentrancy across the await):
         // two overlapping applies could write an older row after a newer one.
         while flushing {
@@ -80,10 +102,12 @@ actor PersistenceCoordinator {
             batch = PersistenceBatch.merged(older: carry, newer: batch)
             retryCarry = nil
         }
-        guard !batch.isEmpty else { return }
+        let wallets = await store.drainDirtyWallets()
+        guard !batch.isEmpty || !wallets.changed.isEmpty || !wallets.removed.isEmpty else { return }
 
         do {
             try await persistence.apply(batch)
+            try await ledger.syncWallets(changed: wallets.changed, removed: wallets.removed)
             lastSuccessAt = Date()
             lastErrorMessage = nil
             totalEntitiesFlushed += batch.entityCount

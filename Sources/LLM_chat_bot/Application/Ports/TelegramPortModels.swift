@@ -17,7 +17,11 @@ struct ChatMemberUpdate: Codable, Sendable {
     let newStatus: String
 }
 
-final class TelegramMessage: Codable, @unchecked Sendable {
+/// A class rather than a struct only because `reply_to_message` makes the type
+/// recursive. Every field is `let` and every field type is `Sendable`, so the
+/// compiler can check this one — no `@unchecked` needed, and the album buffer
+/// builds a new message rather than mutating one.
+final class TelegramMessage: Codable, Sendable {
     let message_id: Int
     let from: TelegramUser?
     let chat: TelegramChat

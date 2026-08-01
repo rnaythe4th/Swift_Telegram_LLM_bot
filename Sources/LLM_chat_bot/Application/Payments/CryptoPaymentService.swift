@@ -385,15 +385,18 @@ actor CryptoPaymentService {
                 payerUserID: UserKey.userID(from: copy.username),
                 chatID: copy.userChatID,
                 purpose: copy.resolvedPurpose,
-                idempotencyKey: "crypto:\(txHash)"
+                idempotencyKey: "crypto:\(txHash)",
+                method: .crypto
             ))
             switch outcome {
-            case .duplicate:
+            case .duplicate, .failed:
+                // Nothing was applied and nothing was claimed: the poller sees
+                // this transfer again on its next pass and tries once more.
                 break
             case .subscription(let activation, let claim):
                 await notifyFullPayment(copy, activation: activation, claim: claim)
             case .credit(let cents, let wallet):
-                await notifyCreditPayment(copy, cents: cents, balanceUsd: wallet.balanceUsd)
+                await notifyCreditPayment(copy, cents: cents, balance: wallet.balance)
             }
             return .fullyPaid(copy)
         } else {
@@ -474,13 +477,13 @@ actor CryptoPaymentService {
         logger.info("crypto: invoice \(invoice.id) fully paid by @\(invoice.username) [\(invoice.asset.rawValue)]")
     }
 
-    private func notifyCreditPayment(_ invoice: CryptoInvoice, cents: Int, balanceUsd: Double) async {
+    private func notifyCreditPayment(_ invoice: CryptoInvoice, cents: Int, balance: Money) async {
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
         let text = """
         ✅ <b>Баланс пополнен на \(CreditPack.label(cents: cents))!</b>
 
         Принято: <b>\(amount) \(invoice.asset.symbol)</b> (\(invoice.asset.displayLabel))
-        Текущий баланс: <b>$\(String(format: "%.2f", balanceUsd))</b>
+        Текущий баланс: <b>\(balance.formatted(fractionDigits: 2))</b>
 
         Теперь вам доступны любые модели: с баланса списывается стоимость каждого ответа, обычно доли цента. Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).
         """

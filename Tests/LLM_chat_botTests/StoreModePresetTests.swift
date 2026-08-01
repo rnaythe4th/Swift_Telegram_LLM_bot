@@ -207,7 +207,7 @@ final class StoreModePresetTests: XCTestCase {
         let fresh = Fixtures.makeStore()
         var configs = PersistedGlobalConfigs()
         configs.modes = saved
-        await fresh.restore(from: PersistedBotState(contexts: [], tenants: [], ownership: [], configs: configs))
+        await fresh.restore(from: PersistedBotState(configs: configs))
 
         let restored = await fresh.modeConfig()
         XCTAssertEqual(restored.modes.map(\.id), ["free", "smart"])

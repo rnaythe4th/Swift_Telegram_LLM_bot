@@ -28,15 +28,40 @@ actor ChatContextStore {
 
     // MARK: - Dirty tracking (drained by PersistenceCoordinator)
 
+    // Every mutable entity has a set here, and every mutation marks its own.
+    // Anything that grows with the user base is tracked per row, so a flush
+    // writes the wallet that changed rather than the file that holds all of
+    // them (§2.1).
     var dirtyContexts = Set<ChatKey>()
+    var deletedContexts = Set<ChatKey>()
     var dirtyTenants = Set<String>()
     var deletedTenants = Set<String>()
-    var dirtyOwnership = Set<Int>()
-    var deletedOwnership = Set<Int>()
+    /// Chat identity *and* which tenant's licence covers it — one row, because
+    /// they describe one thing and are always read together.
+    var dirtyChats = Set<Int>()
+    var deletedChats = Set<Int>()
+    var dirtyUsers = Set<Int>()
+    /// Wallets are drained by the ledger, not by the write-behind batch: money
+    /// is written through a transaction (§3.2). The set exists so a cache-only
+    /// change (a rename adopting a wallet) still reaches storage.
+    var dirtyWallets = Set<String>()
+    var deletedWallets = Set<String>()
+    var dirtyInvites = Set<String>()
+    var deletedInvites = Set<String>()
+    var dirtyPremiumUsage = Set<String>()
+    var deletedPremiumUsage = Set<String>()
+    var dirtyReferrals = Set<Int>()
+    var deletedReferrals = Set<Int>()
+    var dirtyReferralTallies = Set<Int>()
+    var deletedReferralTallies = Set<Int>()
+    var dirtyTrafficAttributions = Set<Int>()
+    var deletedTrafficAttributions = Set<Int>()
+    var dirtyFunnelDays = Set<FunnelDayKey>()
+    var dirtyCryptoInvoices = Set<String>()
+    var deletedCryptoInvoices = Set<String>()
+    var dirtyExternalOrders = Set<String>()
+    var deletedExternalOrders = Set<String>()
     var dirtyConfigs = Set<GlobalConfigKey>()
-    /// Telegram Stars charge IDs already handled — makes payment processing
-    /// idempotent across update redeliveries and restarts.
-    var processedPaymentChargeIDs: [String] = []
     var pollingOffsetValue: Int? = nil
     var chatMetaByID: [Int: ChatMetaInfo] = [:]
     var inviteRecords: [String: InviteRecord] = [:]
@@ -59,12 +84,12 @@ actor ChatContextStore {
     /// persisted via GlobalConfigKey.referrals.
     var referralConfigValue: ReferralConfig = .default
     /// Referral attributions + per-inviter aggregates (roadmap step 10).
-    /// Persisted via GlobalConfigKey.referralLedger — the anti-fraud rules
+    /// Persisted as `bot_referral` / `bot_referral_tally` rows — the anti-fraud rules
     /// ("one attribution per person, once per pair") depend on it surviving
     /// restarts, so unlike the daily premium counter it is not in-memory.
     var referralLedgerValue: ReferralLedger = .empty
     /// Paid-traffic attributions + per-campaign aggregates behind `src_` deep
-    /// links. Persisted via GlobalConfigKey.trafficSources: an ad buy is judged
+    /// links. Persisted as `bot_traffic_attribution` rows: an ad buy is judged
     /// weeks after the click, so these numbers have to outlive every redeploy in
     /// between or the campaign becomes unmeasurable.
     var trafficSourceLedgerValue: TrafficSourceLedger = .empty
@@ -73,7 +98,7 @@ actor ChatContextStore {
     /// userID ↔ @username directory. Everything above that is "keyed by user"
     /// is keyed by `UserKey` (`#<userID>`), and this is what turns a typed
     /// `@name` into that key and back into a label for the interface. Persisted
-    /// via GlobalConfigKey.userDirectory.
+    /// as `bot_user` rows.
     var userDirectoryValue: UserDirectory = .empty
 
     /// Conversion-funnel event counters (roadmap step 7), keyed by
@@ -82,8 +107,14 @@ actor ChatContextStore {
     var funnelCounters: [String: Int] = [:]
     /// The same events bucketed per day (roadmap step 7), so the page can show
     /// a period and not only an all-time total. Persisted via
-    /// GlobalConfigKey.funnelDaily, pruned to `FunnelDailyLog.windowDays`.
+    /// `bot_funnel_daily`, pruned to `FunnelDailyLog.windowDays`.
     var funnelDailyValue: FunnelDailyLog = .empty
+
+    /// Provider spending ceilings (§4.1). Super-admin knob, persisted via
+    /// GlobalConfigKey.spendPolicy; the day's running spend next to it is
+    /// in-memory (see `DailySpendLedger`).
+    var spendPolicyValue: SpendPolicy = .default
+    var dailySpendValue: DailySpendLedger = DailySpendLedger()
 
     /// Built-in self-promo that fills the ad slot when no paid campaign runs
     /// (roadmap step 5). Super-admin knob, persisted via
@@ -97,7 +128,7 @@ actor ChatContextStore {
 
     /// Daily free "taste" of premium for free-tier chats/users (roadmap step 6).
     /// Group chats share one counter (`c<chatID>`); private chats count per user
-    /// (`u<userID>`). Persisted via GlobalConfigKey.dailyPremiumUsage — see
+    /// (`u<userID>`). Persisted as `bot_premium_usage` rows — see
     /// `DailyPremiumUsage` for why this one is not in-memory.
     var premiumDailyUsage: [String: DailyPremiumUsage] = [:]
 

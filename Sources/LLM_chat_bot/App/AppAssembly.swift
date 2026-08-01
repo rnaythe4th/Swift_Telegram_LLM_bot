@@ -1,11 +1,12 @@
 import Foundation
+import Logging
+import PostgresNIO
 
 // Composition root. Every dependency is built here, by hand, in one pass —
 // `main` is then just the startup sequence (serve → restore → run → drain).
 
 /// The assembled object graph, plus the two secrets the HTTP surface checks.
 struct AppAssembly {
-    static let ownerUsername = "maythe4th"
     static let companyMembers = ""
     static let systemPrompt = "Ты — полезный ИИ-ассистент в Telegram. Отвечай по делу, кратко и понятно, без воды и канцелярита. Если вопрос неясен — уточни."
     static let formatOptions = " Ты можешь форматировать свой текст в соответствии с HTML (по документации Telegram bot api). При упоминании или обращении к участникам никогда не ставь @ перед их именами, чтобы не тегать их."
@@ -14,7 +15,7 @@ struct AppAssembly {
     let flags: RuntimeFlags
     let telegram: TelegramHTTPGateway
     let botUsername: String
-    let rawPersistence: StatePersistencePort?
+    let storage: Storage
     let orchestrator: BotOrchestrator
     let intake: UpdateIntake
     let mode: IntakeRunMode
@@ -29,8 +30,10 @@ struct AppAssembly {
             config.telegramToken,
             config.deepseekKey,
             config.routerApiKey,
-            config.supabaseServiceKey,
-            config.supabaseAnonKey,
+            config.databaseURL,
+            // …and the password on its own: a driver error quotes the
+            // credential, not the whole URL the credential came from.
+            config.databaseURL.flatMap { DatabaseEndpoint(urlString: $0)?.password },
             config.webhookSecret,
             config.metricsToken,
             config.tonapiKey,
@@ -53,24 +56,18 @@ struct AppAssembly {
         }
 
         if config.ownerUserID == nil {
-            logger.warning("OWNER_USER_ID is not set — the owner is recognised by @\(ownerUsername) alone; set it so root cannot follow the username to somebody else")
+            logger.warning("OWNER_USER_ID is not set — the owner is recognised by @\(config.ownerUsername) alone; set it so root cannot follow the username to somebody else")
         }
 
         let state = await makeStore(config: config, botUsername: botUsername)
-        let (rawPersistence, persistenceCoordinator) = makePersistence(
-            config: config,
-            state: state,
-            network: network,
-            logger: logger,
-            metrics: metrics
-        )
+        let storage = makeStorage(config: config, state: state, logger: logger, metrics: metrics)
 
         let orchestrator = makeOrchestrator(
             config: config,
             state: state,
             telegram: telegram,
             network: network,
-            persistence: persistenceCoordinator,
+            storage: storage,
             botUsername: botUsername,
             logger: logger,
             metrics: metrics,
@@ -87,7 +84,7 @@ struct AppAssembly {
             flags: flags,
             telegram: telegram,
             botUsername: botUsername,
-            rawPersistence: rawPersistence,
+            storage: storage,
             orchestrator: orchestrator,
             intake: intake,
             mode: try resolveMode(config: config, webhookSecret: webhookSecret),
@@ -118,7 +115,7 @@ struct AppAssembly {
 
     static func makeStore(config: AppConfig, botUsername: String) async -> ChatContextStore {
         let state = ChatContextStore(
-            ownerUsername: ownerUsername,
+            ownerUsername: config.ownerUsername,
             ownerUserID: config.ownerUserID,
             model: "google/gemini-3-flash-preview",
             systemPrompt: systemPrompt,
@@ -148,35 +145,73 @@ struct AppAssembly {
         return state
     }
 
-    /// Without Supabase the bot runs memory-only; that is a supported mode, not
-    /// a failure, so it only logs.
-    static func makePersistence(
+    /// Everything that talks to the database, or the memory-only stand-ins when
+    /// there is no `DATABASE_URL`. Memory-only is a supported mode (local
+    /// development, a first run) — it just refuses to sell anything (§4.3).
+    struct Storage {
+        let client: PostgresClient?
+        let persistence: PostgresStatePersistence?
+        let coordinator: PersistenceCoordinator?
+        let ledger: LedgerPort
+        let writerLock: WriterLock?
+
+        /// `PostgresClient` is a `Service`: without an active `run()` its pool
+        /// never opens a connection and every query waits forever. Starting it
+        /// is not optional, and it has to happen before the first query — which
+        /// is the schema migration, one line into boot.
+        func startPool() -> Task<Void, Never>? {
+            guard let client else { return nil }
+            return Task { await client.run() }
+        }
+    }
+
+    static func makeStorage(
         config: AppConfig,
         state: ChatContextStore,
-        network: NetworkClient,
         logger: LoggerPort,
         metrics: RuntimeMetrics
-    ) -> (StatePersistencePort?, PersistenceCoordinator?) {
-        guard let supabaseURL = config.supabaseURL, let supabaseKey = config.supabaseKey else {
-            logger.info("Supabase persistence disabled (missing SUPABASE_URL or key)")
-            return (nil, nil)
+    ) -> Storage {
+        guard let urlString = config.databaseURL else {
+            logger.warning("DATABASE_URL is not set — state is in-memory only and nothing will be sold")
+            return Storage(client: nil, persistence: nil, coordinator: nil, ledger: InMemoryLedger(), writerLock: nil)
         }
-        if config.usesAnonSupabaseKey {
-            logger.warning("using SUPABASE_ANON_KEY — create SUPABASE_SERVICE_KEY and enable RLS (see DEPLOY.md)")
+        guard let endpoint = DatabaseEndpoint(urlString: urlString) else {
+            logger.error("DATABASE_URL is not a usable postgres:// URL — state is in-memory only")
+            return Storage(client: nil, persistence: nil, coordinator: nil, ledger: InMemoryLedger(), writerLock: nil)
         }
-        let supabase = SupabaseStatePersistence(
-            network: network,
-            baseURL: supabaseURL,
-            apiKey: supabaseKey
-        )
-        let coordinator = PersistenceCoordinator(
-            store: state,
-            persistence: supabase,
-            logger: logger,
-            metrics: metrics
-        )
-        logger.info("Supabase persistence enabled (row schema, write-behind)")
-        return (supabase, coordinator)
+        if endpoint.looksLikeTransactionPooler {
+            // Worth a loud line: in transaction mode the advisory lock returns
+            // true and is dropped with the connection, so the single-writer
+            // guarantee disappears without a single error anywhere.
+            logger.error("DATABASE_URL points at port 6543 (transaction pooler) — use the session pooler on 5432, or the writer lock will not hold (see DEPLOY.md)")
+        }
+
+        do {
+            let client = PostgresClient(
+                configuration: try endpoint.clientConfiguration(maximumConnections: 8),
+                backgroundLogger: Logger(label: "postgres") { _ in PostgresLogHandler(sink: logger) }
+            )
+            let persistence = PostgresStatePersistence(client: client, logger: logger)
+            let ledger = PostgresLedger(client: client, logger: logger)
+            let coordinator = PersistenceCoordinator(
+                store: state,
+                persistence: persistence,
+                ledger: ledger,
+                logger: logger,
+                metrics: metrics
+            )
+            logger.info("postgres persistence enabled at \(endpoint.displayName)")
+            return Storage(
+                client: client,
+                persistence: persistence,
+                coordinator: coordinator,
+                ledger: ledger,
+                writerLock: WriterLock(client: client, logger: logger)
+            )
+        } catch {
+            logger.error("could not configure the database connection — state is in-memory only: \(error)")
+            return Storage(client: nil, persistence: nil, coordinator: nil, ledger: InMemoryLedger(), writerLock: nil)
+        }
     }
 
     static func makeOrchestrator(
@@ -184,12 +219,13 @@ struct AppAssembly {
         state: ChatContextStore,
         telegram: TelegramHTTPGateway,
         network: NetworkClient,
-        persistence: PersistenceCoordinator?,
+        storage: Storage,
         botUsername: String,
         logger: LoggerPort,
         metrics: RuntimeMetrics,
         flags: RuntimeFlags
     ) -> BotOrchestrator {
+        let persistence = storage.coordinator
         let sessionRegistry = SessionRegistry()
         let mediaResolver = TelegramMediaResolver(telegram: telegram)
         let generationLimiter = GenerationLimiter(maxConcurrent: config.maxConcurrentGenerations)
@@ -211,6 +247,7 @@ struct AppAssembly {
         let fulfillment = PaymentFulfillmentService(
             state: state,
             telegram: telegram,
+            ledger: storage.ledger,
             persistence: persistence,
             metrics: metrics,
             logger: logger
@@ -255,6 +292,7 @@ struct AppAssembly {
             generationLimiter: generationLimiter,
             botUsername: botUsername,
             formatOptions: formatOptions,
+            ledger: storage.ledger,
             fulfillment: fulfillment,
             modelPriceMonitor: modelPriceMonitor,
             cryptoService: cryptoService,
@@ -376,9 +414,14 @@ struct AppAssembly {
                 ) else {
                     return AppHTTPResponse(status: .unauthorized, body: "bad secret")
                 }
-                // 503 before restore completes and while draining — Telegram
-                // holds the update and redelivers once we answer 200 again.
-                guard flags.ready.value, !flags.draining.value else {
+                // 503 before restore completes, while draining, and while
+                // another instance is still the writer — Telegram holds the
+                // update and redelivers once we answer 200 again. That is what
+                // makes the handover between two deploys lossless instead of
+                // making one of them answer from state it cannot save.
+                guard flags.ready.value,
+                      !flags.draining.value,
+                      flags.durability.value.acceptsUpdates else {
                     return AppHTTPResponse(status: .serviceUnavailable, body: "not accepting updates")
                 }
                 guard let update = try? telegram.decodeIncomingUpdate(body) else {

@@ -18,11 +18,12 @@ extension ChatContextStore {
         bumpFunnelCounter(key: source.counterKey)
     }
 
-    private func bumpFunnelCounter(key: String, by amount: Int = 1) {
+    private func bumpFunnelCounter(key: String, by amount: Int = 1, now: Date = Date()) {
         funnelCounters[key, default: 0] += amount
         dirtyConfigs.insert(.funnel)
-        funnelDailyValue.bump(key: key, by: amount)
-        dirtyConfigs.insert(.funnelDaily)
+        funnelDailyValue.bump(key: key, by: amount, now: now)
+        // Only the cell that moved is written, not the whole 35-day window.
+        dirtyFunnelDays.insert(FunnelDayKey(day: FunnelDailyLog.dayNumber(now), event: key))
     }
 
     /// Counts the `firstMessage` activation the first time a chat produces an LLM
@@ -70,7 +71,7 @@ extension ChatContextStore {
             winbackOffersActive: offers,
             referralPending: referralLedgerValue.pendingCount,
             referralRewarded: referralLedgerValue.rewardedCount,
-            referralPaidCents: Int((referralLedgerValue.paidOutUsd * 100).rounded()),
+            referralPaidCents: referralLedgerValue.paidOut.wholeCents,
             referralConversions: referralLedgerValue.paidConversionCount
         )
     }
@@ -79,9 +80,22 @@ extension ChatContextStore {
 
     func trafficSourceLedger() -> TrafficSourceLedger { trafficSourceLedgerValue }
 
-    private func markTrafficSourcesDirty() {
+    /// The campaign totals are a document; the attribution that changed is a
+    /// row. Pruning drops per-person records only, so the rows it removes are
+    /// named here and the aggregates they rolled into stay untouched.
+    private func markTrafficSourcesDirty(userID: Int? = nil) {
+        let before = Set(trafficSourceLedgerValue.attributions.keys)
         trafficSourceLedgerValue.prune()
-        dirtyConfigs.insert(.trafficSources)
+        for gone in before.subtracting(trafficSourceLedgerValue.attributions.keys) {
+            guard let id = Int(gone) else { continue }
+            dirtyTrafficAttributions.remove(id)
+            deletedTrafficAttributions.insert(id)
+        }
+        if let userID {
+            dirtyTrafficAttributions.insert(userID)
+            deletedTrafficAttributions.remove(userID)
+        }
+        dirtyConfigs.insert(.trafficTotals)
     }
 
     /// Files a person under the campaign whose link they opened.
@@ -115,7 +129,7 @@ extension ChatContextStore {
         tally.joined += 1
         tally.lastSeenAt = now
         trafficSourceLedgerValue.tallies[stored] = tally
-        markTrafficSourcesDirty()
+        markTrafficSourcesDirty(userID: userID)
         return .bound(tag: stored)
     }
 
@@ -131,7 +145,7 @@ extension ChatContextStore {
         tally.activated += 1
         tally.lastSeenAt = now
         trafficSourceLedgerValue.tallies[record.tag] = tally
-        markTrafficSourcesDirty()
+        markTrafficSourcesDirty(userID: userID)
     }
 
     /// Credits a payment to the campaign that brought the payer. `payers` counts
@@ -150,7 +164,7 @@ extension ChatContextStore {
         tally.payments += 1
         tally.lastSeenAt = now
         trafficSourceLedgerValue.tallies[record.tag] = tally
-        markTrafficSourcesDirty()
+        markTrafficSourcesDirty(userID: userID)
     }
 
     func trafficSourceOverview() -> TrafficSourceOverview {
@@ -167,7 +181,12 @@ extension ChatContextStore {
     }
 
     func clearTrafficSources() {
+        for key in trafficSourceLedgerValue.attributions.keys {
+            guard let id = Int(key) else { continue }
+            dirtyTrafficAttributions.remove(id)
+            deletedTrafficAttributions.insert(id)
+        }
         trafficSourceLedgerValue = .empty
-        dirtyConfigs.insert(.trafficSources)
+        dirtyConfigs.insert(.trafficTotals)
     }
 }

@@ -105,9 +105,9 @@ extension ChatContextStore {
         // read it, and if it only ever reached the database as a side effect of
         // somebody else's rename it would roll back to a stale value on restart
         // — and an active person would be told «давно вас не было».
-        if outcome.seenAtAdvanced { dirtyConfigs.insert(.userDirectory) }
+        if outcome.seenAtAdvanced { dirtyUsers.insert(userID) }
         guard outcome.changed else { return }
-        dirtyConfigs.insert(.userDirectory)
+        dirtyUsers.insert(userID)
 
         let key = UserKey.forUserID(userID)
         // Claim whatever is still filed under a bare username this person now
@@ -177,25 +177,28 @@ extension ChatContextStore {
             if var existing = userBalances[key] {
                 // Both buckets can only coexist if the pending one was topped
                 // up before we ever saw this person: fold it in, losing nothing.
-                existing.balanceUsd += wallet.balanceUsd
-                existing.spentBilledUsd += wallet.spentBilledUsd
-                existing.spentRealUsd += wallet.spentRealUsd
+                existing.balance += wallet.balance
+                existing.spentBilled += wallet.spentBilled
+                existing.spentReal += wallet.spentReal
                 // `toppedUpUsd` is the only proof this person ever paid real
                 // money (§7 «Возврат по балансу»); dropping it on a merge would
                 // quietly turn a client back into a stranger. `lapsedNoticeAt`
                 // must survive too, or the lapsed-wallet offer is sent twice.
-                existing.toppedUpUsd += wallet.toppedUpUsd
+                existing.toppedUp += wallet.toppedUp
                 existing.lapsedNoticeAt = [existing.lapsedNoticeAt, wallet.lapsedNoticeAt].compactMap { $0 }.max()
                 existing.updatedAt = [existing.updatedAt, wallet.updatedAt].compactMap { $0 }.max()
                 userBalances[key] = existing
             } else {
                 userBalances[key] = wallet
             }
-            dirtyConfigs.insert(.balances)
+            markWalletDirty(key)
+            dirtyWallets.remove(pending)
+            deletedWallets.insert(pending)
         }
         for (chatID, owner) in chatOwnership where owner == pending {
             chatOwnership[chatID] = key
-            dirtyOwnership.insert(chatID)
+            dirtyChats.insert(chatID)
+            deletedChats.remove(chatID)
         }
         for (mappedUserID, owner) in userTenantMap where owner == pending {
             userTenantMap[mappedUserID] = key
@@ -222,7 +225,8 @@ extension ChatContextStore {
         }
         for (token, record) in inviteRecords where record.ownerUsername == pending {
             inviteRecords[token] = InviteRecord(ownerUsername: key, createdAt: record.createdAt)
-            dirtyConfigs.insert(.invites)
+            dirtyInvites.insert(token)
+            deletedInvites.remove(token)
         }
         if let role = _simulatedRoles.removeValue(forKey: pending) {
             _simulatedRoles[key] = role
@@ -231,8 +235,15 @@ extension ChatContextStore {
             var moved = invoice
             moved.username = key
             _cryptoInvoices[invoiceID] = moved
-            dirtyConfigs.insert(.crypto)
+            dirtyCryptoInvoices.insert(invoiceID)
+            deletedCryptoInvoices.remove(invoiceID)
         }
+    }
+
+    /// The stored key behind a handle, for callers that have to name a row in
+    /// the database rather than a person in the interface.
+    func storageKey(forUsername username: String) -> String {
+        userKeyOrRaw(username)
     }
 
     /// Keeps denormalized display names in step with the directory, so lists
@@ -263,7 +274,7 @@ extension ChatContextStore {
         }
         if ledgerTouched {
             referralLedgerValue = ledger
-            dirtyConfigs.insert(.referralLedger)
+            markWholeReferralLedgerDirty()
         }
     }
 }

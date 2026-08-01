@@ -43,6 +43,26 @@ actor SubscriptionReminderService {
 
     private let telegram: TelegramGatewayPort
     private let state: ChatContextStore
+    /// Winback offers are stored money-side state (§10.2), never write-behind.
+    private let subscriptions: SubscriptionWriter?
+
+    /// Grants (and stores) a winback offer. Falls back to the cache-only path
+    /// when no writer is wired — the tests and a memory-only bot, where there
+    /// is nothing to store it in anyway.
+    private func grantDiscount(username: String, percent: Int, hours: Int) async -> SubscriptionDiscount? {
+        if let subscriptions {
+            return await subscriptions.grantWinback(username: username, percent: percent, hours: hours)
+        }
+        return await state.grantWinbackDiscount(username: username, percent: percent, hours: hours)
+    }
+
+    private func clearDiscount(_ username: String) async {
+        if let subscriptions {
+            _ = await subscriptions.consumeWinback(username: username)
+        } else {
+            _ = await state.consumeWinbackDiscount(username: username)
+        }
+    }
     private let logger: LoggerPort
     private let metrics: RuntimeMetrics
 
@@ -53,11 +73,13 @@ actor SubscriptionReminderService {
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
+        subscriptions: SubscriptionWriter? = nil,
         logger: LoggerPort,
         metrics: RuntimeMetrics
     ) {
         self.telegram = telegram
         self.state = state
+        self.subscriptions = subscriptions
         self.logger = logger
         self.metrics = metrics
     }
@@ -241,7 +263,7 @@ actor SubscriptionReminderService {
         // every purchase path quote exactly the same discounted price.
         var discount: SubscriptionDiscount?
         if target.notice.isWinback, config.winbackDiscountPercent > 0 {
-            discount = await state.grantWinbackDiscount(
+            discount = await grantDiscount(
                 username: target.username,
                 percent: config.winbackDiscountPercent,
                 hours: config.winbackOfferHours
@@ -285,7 +307,7 @@ actor SubscriptionReminderService {
         // The notice is about to be marked handled, and nobody saw the offer —
         // so the discount it granted is withdrawn too. Otherwise a price cut
         // nobody was ever told about waits for them at checkout.
-        if discount != nil { await state.consumeWinbackDiscount(username: target.username) }
+        if discount != nil { await clearDiscount(target.username) }
         return .noChannel
     }
 

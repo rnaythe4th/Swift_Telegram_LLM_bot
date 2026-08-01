@@ -36,22 +36,23 @@ extension BotMenuHandler {
         }
 
         if config.paysOnSignup {
-            lines.append(String(
-                format: "Друг открывает вашу ссылку и задаёт боту первый вопрос — в этот момент вам приходит <b>$%.2f</b>, а ему <b>$%.2f</b> на баланс.",
-                config.inviterRewardUsd, config.inviteeRewardUsd
-            ))
+            lines.append(
+                "Друг открывает вашу ссылку и задаёт боту первый вопрос — в этот момент вам приходит"
+                + " <b>\(config.inviterReward.formatted(fractionDigits: 2))</b>,"
+                + " а ему <b>\(config.inviteeReward.formatted(fractionDigits: 2))</b> на баланс."
+            )
             if config.payingFriendBonusCents > 0 {
-                lines.append(String(
-                    format: "А если друг потом оформит оплату — вам придёт ещё <b>$%.2f</b>.",
-                    config.payingFriendBonusUsd
-                ))
+                lines.append(
+                    "А если друг потом оформит оплату — вам придёт ещё"
+                    + " <b>\(config.payingFriendBonus.formatted(fractionDigits: 2))</b>."
+                )
             }
             lines.append("<i>Пока баланс не пуст, отвечают любые модели — подписка не нужна. С баланса списывается стоимость каждого ответа, обычно доли цента.</i>")
         } else if config.payingFriendBonusCents > 0 {
-            lines.append(String(
-                format: "Приведите друга: как только он оформит оплату, вам придёт <b>$%.2f</b> на баланс.",
-                config.payingFriendBonusUsd
-            ))
+            lines.append(
+                "Приведите друга: как только он оформит оплату, вам придёт"
+                + " <b>\(config.payingFriendBonus.formatted(fractionDigits: 2))</b> на баланс."
+            )
         } else {
             lines.append("Отправьте ссылку друзьям — бот сразу начнёт им отвечать в личке.")
         }
@@ -65,8 +66,8 @@ extension BotMenuHandler {
         if stats.paidConversions > 0 {
             lines.append("Из них оформили оплату · <b>\(stats.paidConversions)</b>")
         }
-        if stats.earnedUsd > 0 {
-            lines.append(String(format: "Заработано · <b>$%.2f</b>", stats.earnedUsd))
+        if stats.earned.isPositive {
+            lines.append("Заработано · <b>\(stats.earned.formatted(fractionDigits: 2))</b>")
         }
         if let remaining = stats.capRemaining {
             lines.append("Осталось приглашений с бонусом · <b>\(remaining)</b>")
@@ -142,7 +143,7 @@ extension BotMenuHandler {
             "",
             "Привязок · <b>\(overview.bound)</b> · выплачено пар · <b>\(overview.rewarded)</b> · ждут первого сообщения · <b>\(overview.pending)</b>",
             "Отклонено лимитом · <b>\(overview.blocked)</b> · пригласивших · <b>\(overview.inviters)</b>",
-            String(format: "Выплачено всего · <b>$%.2f</b>", overview.paidOutUsd),
+            "Выплачено всего · <b>\(overview.paidOut.formatted(fractionDigits: 2))</b>",
             "Переходов по ссылке · <b>\(joined)</b> → наград · <b>\(rewarded)</b> · конверсия <b>\(pct(rewarded, joined))</b>",
             "🔑 <b>Друзья, которые оплатили · \(overview.paidConversions)</b> · из награждённых <b>\(pct(overview.paidConversions, overview.rewarded))</b> — это число решает, окупается ли программа",
         ]
@@ -162,11 +163,11 @@ extension BotMenuHandler {
             lines.append("")
             lines.append("<b>Топ пригласивших</b>")
             for (index, entry) in overview.top.enumerated() {
-                lines.append(String(
-                    format: "%d. %@ · оплатили <b>%d</b> · наград %d · $%.2f · привязок %d",
-                    index + 1, entry.tally.username, entry.tally.paidConversions,
-                    entry.tally.rewarded, entry.tally.earnedUsd, entry.tally.invited
-                ))
+                lines.append(
+                    "\(index + 1). \(entry.tally.username) · оплатили <b>\(entry.tally.paidConversions)</b>"
+                    + " · наград \(entry.tally.rewarded) · \(entry.tally.earned.formatted(fractionDigits: 2))"
+                    + " · привязок \(entry.tally.invited)"
+                )
             }
         }
 
@@ -253,7 +254,7 @@ extension BotMenuHandler {
             let text = """
                 <b>🗑 Очистить журнал приглашений?</b>
 
-                Будет удалено привязок · <b>\(overview.bound)</b> (в т.ч. ждущих награды · \(overview.pending)), статистика пригласивших, счётчики отказов и итог «выплачено всего» (\(String(format: "$%.2f", overview.paidOutUsd))).
+                Будет удалено привязок · <b>\(overview.bound)</b> (в т.ч. ждущих награды · \(overview.pending)), статистика пригласивших, счётчики отказов и итог «выплачено всего» (\(overview.paidOut.formatted(fractionDigits: 2))).
 
                 ⚠️ Уже начисленные балансы останутся, но защита «одна привязка на человека» обнулится: ранее приглашённые смогут быть привязаны заново, если ещё не писали боту. Счётчики воронки не меняются.
                 """

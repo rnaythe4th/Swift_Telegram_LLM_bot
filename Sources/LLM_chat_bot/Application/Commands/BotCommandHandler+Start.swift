@@ -66,10 +66,10 @@ extension BotCommandHandler {
             // promises money for the first question — otherwise a config with
             // only that bonus prints «на ваш баланс придёт $0.00».
             if config.paysOnSignup {
-                note = String(
-                    format: "🎁 <b>Вас пригласил %@.</b>\n\nЗадайте первый вопрос — и на ваш баланс придёт <b>$%.2f</b> (пригласившему — $%.2f).\n\nПока баланс не пуст, вам доступны любые модели без подписки: с него списывается стоимость каждого ответа, обычно доли цента.",
-                    inviter, inviteeReward, config.inviterRewardUsd
-                )
+                note = "🎁 <b>Вас пригласил \(inviter).</b>\n\nЗадайте первый вопрос — и на ваш баланс придёт"
+                    + " <b>\(inviteeReward.formatted(fractionDigits: 2))</b>"
+                    + " (пригласившему — \(config.inviterReward.formatted(fractionDigits: 2)))."
+                    + "\n\nПока баланс не пуст, вам доступны любые модели без подписки: с него списывается стоимость каждого ответа, обычно доли цента."
             } else {
                 note = "🎁 Вы пришли по приглашению <b>\(inviter)</b>. Просто напишите вопрос — отвечу."
             }

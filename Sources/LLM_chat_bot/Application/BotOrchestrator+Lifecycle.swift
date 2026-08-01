@@ -5,43 +5,137 @@ import Foundation
 // `/metrics` report that describes all of it.
 
 extension BotOrchestrator {
-    // MARK: - Boot: restore state (with one-time legacy migration)
+    // MARK: - Boot: schema, writer lock, restore
 
-    /// Loads state from the row-based schema; if those tables are empty and a
-    /// legacy blob exists, imports it once and flushes everything as rows.
-    /// On load failure the bot runs memory-only (persistence loop stays off)
-    /// rather than risking partial overwrites of good data.
-    func bootstrapState(rawPersistence: StatePersistencePort?) async -> Bool {
-        guard let rawPersistence, let persistence else {
-            logger.warning("persistence disabled (missing Supabase credentials) — state is in-memory only")
+    /// Brings the database up to date and, if this process wins the writer
+    /// race, loads state into the store. The order is not negotiable:
+    ///
+    /// 1. **Migrate**, or refuse to start if the schema is newer than this
+    ///    binary knows — an old build writing into a new schema loses whatever
+    ///    the new columns hold.
+    /// 2. **Take the writer lock** (§3.1) — one attempt here; `run` keeps
+    ///    trying in the background, see `becomeWriterWhenFree`.
+    /// 3. **Read** — after the lock, never before, or the race just moves.
+    ///
+    /// A failure at any step leaves the bot answering questions from memory and
+    /// refusing to sell anything (§4.3), which is the only honest response to
+    /// "I cannot promise this will still be here tomorrow".
+    func bootstrapState(storage: AppAssembly.Storage) async -> Bool {
+        writerLock.value = storage.writerLock
+        guard let persistence = storage.persistence, storage.coordinator != nil else {
+            flags.durability.value = .volatile(reason: "no DATABASE_URL")
+            logger.warning("persistence disabled — state is in-memory only, purchases are refused")
             return false
         }
+
         do {
-            let stored = try await rawPersistence.loadEverything()
-            if stored.isEmpty {
-                if let legacy = try await rawPersistence.loadLegacySnapshot() {
-                    await state.restoreFromSnapshot(legacy)
-                    await state.markAllDirty()
-                    await persistence.flushNow()
-                    logger.info("migrated legacy snapshot to row schema (chats: \(legacy.contexts.count))")
-                } else {
-                    logger.info("no saved state found, starting fresh")
-                }
-            } else {
-                await state.restore(from: stored)
-                logger.info("state restored (chats: \(stored.contexts.count), tenants: \(stored.tenants.count))")
+            try await persistence.migrate()
+        } catch {
+            flags.durability.value = .volatile(reason: "schema")
+            logger.error("schema check failed — running memory-only, purchases refused: \(error)")
+            return false
+        }
+        storedState.value = persistence
+        return await claimWriterAndRestore()
+    }
+
+    /// One attempt at the lock, and a full restore if it lands.
+    func claimWriterAndRestore() async -> Bool {
+        guard let persistence = storedState.value else { return false }
+
+        if let lock = writerLock.value {
+            let acquired = await lock.acquire { [weak self] in
+                // The connection holding the lock died: we are not the writer
+                // any more. Writing on top of whoever took it is worse than
+                // stopping, so the process leaves rather than argues.
+                guard let self else { return }
+                Task { await self.stepDownAsWriter() }
             }
+            guard acquired else {
+                flags.durability.value = .readOnly(reason: "another instance is the writer")
+                return false
+            }
+        }
+
+        do {
+            let stored = try await persistence.loadEverything()
+            await state.restore(from: stored)
+            flags.durability.value = .durable
+            logger.info("state restored (chats: \(stored.contexts.count), tenants: \(stored.tenants.count), wallets: \(stored.wallets.count))")
             return true
         } catch {
+            flags.durability.value = .volatile(reason: "restore failed")
             logger.error("state restore failed — running memory-only, writes disabled to protect stored data: \(error)")
             return false
         }
+    }
+
+    /// Waits for the outgoing instance to let the lock go, then takes over.
+    ///
+    /// This exists because of how a healthcheck-gated deploy actually works:
+    /// the platform keeps the old instance serving until the new one reports
+    /// ready, and the old one holds the writer lock until it is stopped. A new
+    /// instance that refused to report ready without the lock would wait for an
+    /// instance that is waiting for it — a deploy that can never finish.
+    ///
+    /// So the new process reports ready straight away and simply **declines
+    /// every update** until it is the writer: the webhook answers 503, Telegram
+    /// holds those updates and redelivers them, and nothing is lost. The
+    /// handover costs a few seconds of queued updates, which is exactly what
+    /// the redeploy path was already built for.
+    private func becomeWriterWhenFree(mode: IntakeRunMode, intake: UpdateIntake) async {
+        logger.warning("another instance is still the writer — waiting for the handover")
+        let alertAfter = ContinuousClock().now + .seconds(600)
+        var alerted = false
+
+        while !flags.draining.value {
+            try? await Task.sleep(for: .seconds(2))
+            if await claimWriterAndRestore() {
+                logger.info("writer lock acquired — taking over")
+                await alerter.report(.notWriter, active: false)
+                await startServing(mode: mode, intake: intake, persistenceHealthy: true)
+                return
+            }
+            if !alerted, ContinuousClock().now > alertAfter {
+                alerted = true
+                // Ten minutes is no longer a handover; something is holding the
+                // lock that is not going away (a stuck instance, replicas > 1).
+                await alerter.report(.notWriter, active: true, detail: "дольше 10 минут")
+            }
+        }
+    }
+
+    /// Called when the writer lock is lost mid-flight. Stops persisting
+    /// immediately and **without a final flush**: writing over whoever holds the
+    /// lock now is worse than losing the last two seconds.
+    func stepDownAsWriter() async {
+        guard flags.durability.value == .durable else { return }
+        flags.durability.value = .readOnly(reason: "writer lock lost")
+        logger.error("writer lock lost — stopping persistence and draining")
+        await persistence?.abandon()
+        await shutdown()
     }
 
     // MARK: - Run
 
     func run(mode: IntakeRunMode, intake: UpdateIntake, persistenceHealthy: Bool) async {
         activeIntake.value = intake
+        // Ready as soon as the process can answer a healthcheck. Whether it may
+        // *change* anything is a separate question, asked at every entrance by
+        // `flags.durability` — including the webhook, which declines updates
+        // until this instance is the writer.
+        flags.ready.value = true
+
+        if case .readOnly = flags.durability.value {
+            await becomeWriterWhenFree(mode: mode, intake: intake)
+            return
+        }
+        await startServing(mode: mode, intake: intake, persistenceHealthy: persistenceHealthy)
+    }
+
+    /// Everything that only a writer may do: persistence, the background
+    /// sweeps, and taking updates.
+    private func startServing(mode: IntakeRunMode, intake: UpdateIntake, persistenceHealthy: Bool) async {
         if persistenceHealthy {
             await persistence?.start()
         }
@@ -60,15 +154,16 @@ extension BotOrchestrator {
                 await self?.runPersistenceNotifyLoop()
             })
         }
+        tasks.append(Task { [weak self] in
+            await self?.runHealthLoop()
+        })
         // Renewal reminders / winback (roadmap step 8). Runs regardless of the
         // storage state: notices are deduplicated in memory too, and a
         // memory-only bot still shouldn't let subscriptions lapse silently.
         tasks.append(Task { [weak self] in
             await self?.reminderService.run()
         })
-        backgroundTasks.value = tasks
-
-        flags.ready.value = true
+        backgroundTasks.value.append(contentsOf: tasks)
 
         switch mode {
         case .webhook(let publicBaseURL, let secret):
@@ -114,6 +209,58 @@ extension BotOrchestrator {
                 logger.error("getUpdates error: \(error)")
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
             }
+        }
+    }
+
+    /// Turns the conditions nobody watches into messages the owner gets once
+    /// (§6.1). Every check is cheap and reads state the bot already holds; the
+    /// alerter itself does the deduplication.
+    private func runHealthLoop() async {
+        // A first pass after a minute: long enough for boot to settle, short
+        // enough that a bot that came up degraded says so while the owner is
+        // still looking at the deploy.
+        try? await Task.sleep(for: .seconds(60))
+        var nextReconcile = ContinuousClock().now
+        while !Task.isCancelled {
+            let durability = flags.durability.value
+            switch durability {
+            case .durable:
+                await alerter.report(.volatileMode, active: false)
+                await alerter.report(.notWriter, active: false)
+            case .volatile(let reason):
+                await alerter.report(.volatileMode, active: true, detail: reason)
+            case .readOnly(let reason):
+                await alerter.report(.notWriter, active: true, detail: reason)
+            }
+
+            if let persistence {
+                let status = await persistence.status()
+                let stuck = status.lastErrorMessage != nil
+                    && (status.lastSuccessAt.map { Date().timeIntervalSince($0) > 300 } ?? true)
+                await alerter.report(.databaseDown, active: stuck, detail: status.lastErrorMessage)
+            }
+
+            // An unknown free-model set means every paid model is being gated by
+            // the daily allowance — the bot keeps working, but the owner should
+            // know why answers got worse.
+            let catalogueDown = await state.allowedFreeModelIDs() == nil
+            await alerter.report(.modelCatalogueDown, active: catalogueDown)
+
+            // Reconciliation reads the whole journal, so it runs on its own
+            // slower clock: the invariant it checks cannot drift in five
+            // minutes without something else alerting first.
+            if ContinuousClock().now >= nextReconcile {
+                nextReconcile = ContinuousClock().now + .seconds(3600)
+                if let mismatched = try? await ledger.reconcile() {
+                    await alerter.report(
+                        .ledgerMismatch,
+                        active: !mismatched.isEmpty,
+                        detail: mismatched.isEmpty ? nil : "кошельков: \(mismatched.count)"
+                    )
+                }
+            }
+
+            try? await Task.sleep(for: .seconds(300))
         }
     }
 
@@ -181,7 +328,15 @@ extension BotOrchestrator {
         }
 
         await persistence?.stop()
-        logger.info("shutdown: state flushed, exiting")
+
+        // The lock goes last, after the final flush: it is what tells the next
+        // instance that this one is done. Dropping the connection releases it —
+        // no unlock to forget, no lease to wait out, so the incoming deploy can
+        // start writing within its next retry (two seconds).
+        if let lock = writerLock.value {
+            await lock.release()
+        }
+        logger.info("shutdown: state flushed, writer lock released, exiting")
     }
 
 
@@ -193,6 +348,12 @@ extension BotOrchestrator {
         let queuedChatOperations: Int
         let dirtyEntities: Int
         let persistence: String
+        /// Whether what the bot writes now will still be there later (§4.3).
+        /// `degraded` is the one boolean worth an external alert rule.
+        let durability: String
+        let degraded: Bool
+        /// Conditions the owner has already been messaged about (§6.1).
+        let alerts: [String]
         let counters: [String: Int]
         /// Conversion-funnel event counts + live sponsor tallies (roadmap step 7).
         let funnel: [String: Int]
@@ -222,6 +383,9 @@ extension BotOrchestrator {
             queuedChatOperations: await updateDispatcher.totalQueuedOperations,
             dirtyEntities: await state.dirtyEntityCount,
             persistence: persistenceLine,
+            durability: flags.durability.value.statusLine,
+            degraded: flags.durability.value.isDegraded,
+            alerts: await alerter.activeAlerts().map(\.rawValue),
             counters: snapshot.counters,
             funnel: funnel.flat,
             funnelToday: funnel.todayCounters,

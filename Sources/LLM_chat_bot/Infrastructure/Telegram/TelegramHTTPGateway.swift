@@ -16,7 +16,7 @@ struct TelegramAPIError: Error, LocalizedError {
     }
 }
 
-final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
+final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
     /// Where the Bot API lives. Overridable (`TELEGRAM_API_BASE`) for one
     /// reason: end-to-end tests point it at a local stand-in and then assert
     /// what the bot actually sent — text, keyboard, parse mode — instead of

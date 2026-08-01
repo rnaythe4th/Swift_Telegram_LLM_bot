@@ -84,8 +84,8 @@ final class StoreChatContextTests: XCTestCase {
 
         let help = await store.fetchHelp(chatKey: chat)
         XCTAssertEqual(help.cumulativeUsage.generationCount, 1)
-        XCTAssertEqual(help.cumulativeUsage.totalCost, 1, accuracy: 0.0001)
-        XCTAssertEqual(help.cumulativeUsage.totalBilledCost, 1.3, accuracy: 0.0001)
+        XCTAssertEqual(help.cumulativeUsage.totalCost, .usd(1))
+        XCTAssertEqual(help.cumulativeUsage.totalBilledCost, .usd(1.3))
     }
 
     func testTrimmingKeepsTheSystemMessageFirst() async {

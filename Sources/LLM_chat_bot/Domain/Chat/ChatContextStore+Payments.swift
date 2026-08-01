@@ -94,7 +94,14 @@ extension ChatContextStore {
 
     func upsertCryptoInvoice(_ invoice: CryptoInvoice) {
         _cryptoInvoices[invoice.id] = invoice
-        dirtyConfigs.insert(.crypto)
+        markCryptoInvoiceDirty(invoice.id)
+    }
+
+    /// An invoice is a row of its own, not part of the crypto settings
+    /// document: it is a payment in flight, and there is one per purchase.
+    func markCryptoInvoiceDirty(_ id: String) {
+        dirtyCryptoInvoices.insert(id)
+        deletedCryptoInvoices.remove(id)
     }
 
     func cryptoInvoice(id: String) -> CryptoInvoice? {
@@ -124,7 +131,7 @@ extension ChatContextStore {
         if inv.status == .open || inv.status == .partial {
             inv.status = .cancelled
             _cryptoInvoices[id] = inv
-            dirtyConfigs.insert(.crypto)
+            markCryptoInvoiceDirty(id)
         }
     }
 
@@ -137,9 +144,9 @@ extension ChatContextStore {
                 copy.status = .expired
                 _cryptoInvoices[id] = copy
                 expired.append(copy)
+                markCryptoInvoiceDirty(id)
             }
         }
-        if !expired.isEmpty { dirtyConfigs.insert(.crypto) }
         return expired
     }
 
@@ -276,11 +283,20 @@ extension ChatContextStore {
             priceUsdCents: _cryptoPriceUsdCents,
             addresses: addrs,
             slotCounters: counters,
-            invoices: Array(_cryptoInvoices.values),
+            // Invoices are rows now (`bot_crypto_invoice`); the settings
+            // document keeps only what configures the rails.
+            invoices: [],
             matchMode: _cryptoMatchMode.rawValue,
             addressPools: pools.isEmpty ? nil : pools,
             explorerCursors: _explorerCursors.isEmpty ? nil : _explorerCursors
         )
+    }
+
+    func restoreCryptoInvoices(_ invoices: [CryptoInvoice]) {
+        _cryptoInvoices = [:]
+        for invoice in invoices {
+            _cryptoInvoices[invoice.id] = invoice
+        }
     }
 
     func restoreCryptoConfig(_ snapshot: CryptoConfigSnapshot?) {
@@ -296,10 +312,6 @@ extension ChatContextStore {
             if let asset = CryptoAsset(rawValue: key) {
                 _cryptoSlotCounters[asset] = value
             }
-        }
-        _cryptoInvoices = [:]
-        for invoice in snapshot?.invoices ?? [] {
-            _cryptoInvoices[invoice.id] = invoice
         }
         _cryptoMatchMode = (snapshot?.matchMode).flatMap { CryptoMatchMode(rawValue: $0) } ?? .amountDelta
         _cryptoAddressPools = [:]

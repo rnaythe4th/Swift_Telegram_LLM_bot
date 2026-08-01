@@ -9,24 +9,31 @@ enum RequestMethod {
     case delete
 }
 
-struct AnyEncodable: Encodable, @unchecked Sendable {
-    private let encodeImpl: (Encoder) throws -> Void
-    
-    init<T: Encodable>(_ value: T) {
-        self.encodeImpl = value.encode(to:)
+/// Type-erased request body.
+///
+/// The initialiser takes `Encodable & Sendable`, not just `Encodable`: the
+/// closure it stores captures the value and the whole spec is handed to another
+/// task, so a non-`Sendable` payload here was a genuine data race wearing an
+/// `@unchecked` badge. Narrowing the requirement lets the compiler check it,
+/// and makes `HTTPBody` and `HTTPRequestSpec` plain `Sendable` in turn.
+struct AnyEncodable: Encodable, Sendable {
+    private let encodeImpl: @Sendable (Encoder) throws -> Void
+
+    init<T: Encodable & Sendable>(_ value: T) {
+        self.encodeImpl = { encoder in try value.encode(to: encoder) }
     }
-    
+
     func encode(to encoder: Encoder) throws {
         try encodeImpl(encoder)
     }
 }
 
-enum HTTPBody: @unchecked Sendable {
+enum HTTPBody: Sendable {
     case none
     case json(AnyEncodable)
 }
 
-struct HTTPRequestSpec: @unchecked Sendable {
+struct HTTPRequestSpec: Sendable {
     var url: String
     var method: RequestMethod = .get
     var headers: [String: String] = [:]
@@ -64,7 +71,7 @@ enum SharedHTTPClient {
     static let instance = HTTPClient(eventLoopGroupProvider: .singleton)
 }
 
-final class NetworkClient: @unchecked Sendable {
+final class NetworkClient: Sendable {
     private let httpClient: HTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder

@@ -46,6 +46,13 @@ enum MetricName {
     static let remindersSent = "reminders_sent"
     static let winbacksSent = "winbacks_sent"
     static let reminderSendErrors = "reminder_send_errors"
+    /// Nanodollars given away because a wallet ran out mid-answer (§4.4). If
+    /// this climbs, `minimumBillableBalance` is set too low.
+    static let billingShortfallNanos = "billing_shortfall_nanos"
+    /// Turns dropped because the provider stopped sending mid-stream (§4.5).
+    static let providerIdleTimeouts = "provider_idle_timeouts"
+    /// Payments refused because state was not durable at the time (§4.3).
+    static let paymentsRefusedVolatile = "payments_refused_volatile"
 
     static let activeGenerations = "active_generations"
     static let dirtyEntities = "dirty_entities"

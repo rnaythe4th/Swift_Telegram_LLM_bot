@@ -139,7 +139,7 @@ extension BotCommandHandler {
             }
 
         case "clear":
-            let cleared = await state.clearAllWinbackDiscounts()
+            let cleared = await clearWinbackDiscounts()
             try await sendUserFeedback(chatKey: chatKey, text: "🗑 Снято активных скидок: <b>\(cleared)</b>.")
 
         default:

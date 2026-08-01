@@ -29,6 +29,20 @@ struct PaymentReceipt: Sendable {
     /// The whole point of the dedup, because every one of those transports
     /// redelivers.
     let idempotencyKey: String
+    /// Which rail brought the money — recorded so the payment table can answer
+    /// "where did this come from" without a join through three other places.
+    let method: PaymentMethod
+}
+
+/// The rails a payment can arrive on.
+enum PaymentMethod: String, Sendable, CaseIterable {
+    case stars
+    case card
+    case crypto
+    case external
+    /// Super-admin simulation (`/simulate buy`), so a test purchase is visible
+    /// as such in the payments table instead of looking like real revenue.
+    case simulated
 }
 
 /// Outcome, for the caller to turn into the message its channel needs — the
@@ -37,13 +51,26 @@ struct PaymentReceipt: Sendable {
 enum PaymentFulfillmentOutcome: Sendable {
     /// Seen before: nothing was applied, nothing should be announced.
     case duplicate
+    /// The database refused the write, so nothing was applied *and* nothing was
+    /// marked processed. The transport will deliver again; until then the
+    /// caller must not tell anyone the purchase worked.
+    case failed
     case subscription(activation: SubscriptionActivation, claim: ChatContextStore.ChatClaimOutcome)
     case credit(cents: Int, wallet: UserBalance)
 }
 
-final class PaymentFulfillmentService: @unchecked Sendable {
+/// What the money transaction actually committed, for the cache to mirror.
+struct CommittedPayment: Sendable {
+    let subscription: SubscriptionExtension?
+    let wallet: UserBalance?
+}
+
+/// All fields are `let` and every one of them is `Sendable`, so the type is
+/// concurrency-safe by construction rather than by assertion.
+final class PaymentFulfillmentService: Sendable {
     private let state: ChatContextStore
     private let telegram: TelegramGatewayPort
+    private let ledger: LedgerPort
     private let persistence: PersistenceCoordinator?
     private let metrics: RuntimeMetrics
     private let logger: LoggerPort
@@ -51,78 +78,132 @@ final class PaymentFulfillmentService: @unchecked Sendable {
     init(
         state: ChatContextStore,
         telegram: TelegramGatewayPort,
+        ledger: LedgerPort,
         persistence: PersistenceCoordinator?,
         metrics: RuntimeMetrics,
         logger: LoggerPort
     ) {
         self.state = state
         self.telegram = telegram
+        self.ledger = ledger
         self.persistence = persistence
         self.metrics = metrics
         self.logger = logger
     }
 
-    /// Applies a payment and returns what it bought. Everything is persisted
+    /// Applies a payment and returns what it bought. Everything is committed
     /// before this returns, so a caller may announce the purchase without
     /// wondering whether a SIGTERM in the next second would take it back.
+    ///
+    /// The order matters and is the whole reason this method exists:
+    ///
+    /// 1. **Claim, credit and extend inside one transaction.** The idempotency
+    ///    key is taken by `insert … on conflict do nothing returning`, so the
+    ///    check and the claim are one statement and a redelivery cannot slip
+    ///    between them — not on another task, not in another process. The money
+    ///    the payment moves is written in the same transaction: either the
+    ///    person has the subscription (or the credit) and the payment is
+    ///    recorded, or neither happened.
+    /// 2. **Mirror it into memory.** The store is a cache for wallets and
+    ///    subscription dates now; it is updated from what the database
+    ///    committed, never the other way round.
+    /// 3. **The rest is write-behind.** Chat claim, winback consumption, funnel
+    ///    counters, referral bookkeeping and traffic attribution are not money
+    ///    leaving anyone's pocket, and the claim already guarantees they run at
+    ///    most once per payment.
     func fulfil(_ receipt: PaymentReceipt) async -> PaymentFulfillmentOutcome {
-        if await state.isPaymentProcessed(chargeID: receipt.idempotencyKey) {
+        let defaults = await state.tenantDefaults(forKey: receipt.payerKey)
+        let referralBonusDue = await state.pendingReferralPaymentBonus(payerUserID: receipt.payerUserID)
+
+        let committed: CommittedPayment?
+        do {
+            committed = try await ledger.inTransaction { transaction in
+                guard try await transaction.claimPayment(receipt) else { return nil }
+                switch receipt.purpose {
+                case .subscription:
+                    let extended = try await transaction.extendSubscription(
+                        receipt.payerKey,
+                        days: ChatContextStore.subscriptionDays,
+                        defaults: defaults
+                    )
+                    // A winback offer is one-shot; clearing it belongs to the
+                    // same commit as the price it discounted.
+                    try await transaction.setWinbackDiscount(receipt.payerKey, nil)
+                    return CommittedPayment(subscription: extended, wallet: nil)
+                case .credit(let cents):
+                    let wallet = try await transaction.credit(
+                        receipt.payerKey,
+                        .cents(cents),
+                        kind: .topup,
+                        purchased: true,
+                        ref: receipt.idempotencyKey
+                    )
+                    return CommittedPayment(subscription: nil, wallet: wallet)
+                }
+            }
+        } catch {
+            // Nothing was committed, so nothing is announced and the payment is
+            // not marked processed: the next delivery (Telegram retries for 24
+            // hours, the aggregator until acknowledged) will apply it.
+            logger.error("payment \(receipt.idempotencyKey) could not be committed, will retry on redelivery: \(error)")
+            await metrics.increment(MetricName.persistenceErrors)
+            return .failed
+        }
+
+        guard let committed else {
             await metrics.increment(MetricName.paymentsDeduplicated)
             logger.info("duplicate payment ignored (\(receipt.idempotencyKey))")
             return .duplicate
         }
 
-        let outcome: PaymentFulfillmentOutcome
-        switch receipt.purpose {
-        case .subscription:
-            let activation = await state.activatePaidSubscription(username: receipt.payerKey)
-            // Never move a group away from a sponsor who is still paying for it
-            // (§7 «Спонсор-герой»): a purchase buys the buyer access, not
-            // somebody else's chat.
-            let claim = await state.claimChatForPayment(chatID: receipt.chatID, payerKey: receipt.payerKey)
-            // A winback offer is one-shot: consume it whether or not it was
-            // still valid, and count the ones that brought the payment back.
-            if await state.consumeWinbackDiscount(username: receipt.payerKey) != nil {
-                await state.bumpFunnel(.winbackRedeemed)
+        // The conversion bonus is money too, so it goes through the ledger — in
+        // its own transaction, because failing to pay a bonus must not undo a
+        // subscription somebody already paid for.
+        var referralBonus: ReferralPaymentBonus?
+        if let due = referralBonusDue, let friendUserID = receipt.payerUserID {
+            do {
+                // The claim, not the record's timestamp, is what makes this
+                // once-only: the timestamp is write-behind state, and a crash
+                // between crediting and flushing it would pay again.
+                let paid = try await ledger.inTransaction { transaction in
+                    guard try await transaction.claim("refbonus:\(friendUserID)") else { return false }
+                    try await transaction.credit(
+                        UserKey.forUserID(due.inviterUserID),
+                        due.amount,
+                        kind: .referral,
+                        purchased: false,
+                        ref: "refbonus:\(friendUserID)"
+                    )
+                    return true
+                }
+                if paid {
+                    referralBonus = await state.redeemReferralPaymentBonus(payerUserID: friendUserID)
+                    if let referralBonus {
+                        await state.applyCommittedCredit(
+                            key: UserKey.forUserID(referralBonus.inviterUserID),
+                            amount: referralBonus.amount
+                        )
+                    }
+                }
+            } catch {
+                logger.error("referral conversion bonus for \(due.inviterLabel) not credited: \(error)")
             }
-            switch activation {
-            case .started: await state.bumpFunnel(.paid)
-            case .extended: await state.bumpFunnel(.renewed)
-            case .alreadyUnlimited: break
-            }
-            outcome = .subscription(activation: activation, claim: claim)
-
-        case .credit(let cents):
-            // `creditPurchasedBalance`, never `creditBalance`: only it records
-            // that real money was paid, which is what makes a lapsed wallet
-            // worth a comeback offer later (§7).
-            let wallet = await state.creditPurchasedBalance(key: receipt.payerKey, amountUsd: Double(cents) / 100.0)
-            await state.bumpFunnel(.creditTopup)
-            outcome = .credit(cents: cents, wallet: wallet)
         }
 
-        await state.markPaymentProcessed(chargeID: receipt.idempotencyKey)
-
-        // Referral (§7): a friend who pays is what the programme is for. Both
-        // this and the traffic attribution below run *before* the flush, so the
-        // bonus and the campaign credit are as durable as the payment.
-        let referralBonus = await redeemReferralBonus(userID: receipt.payerUserID)
+        let outcome = await state.applyCommittedPayment(receipt, committed: committed)
         if let userID = receipt.payerUserID {
             await state.recordTrafficSourcePayment(userID: userID)
         }
         await metrics.increment(MetricName.paymentsProcessed)
-        // Payments never wait out the 2s debounce.
+        // The write-behind half is flushed straight away as well: the money is
+        // already durable, but the chat claim and the funnel should not wait
+        // out a debounce that a redeploy could cut short.
         await persistence?.flushNow()
 
         if let referralBonus {
             await announceReferralBonus(referralBonus)
         }
         return outcome
-    }
-
-    private func redeemReferralBonus(userID: Int?) async -> ReferralPaymentBonus? {
-        guard let userID else { return nil }
-        return await state.redeemReferralPaymentBonus(payerUserID: userID)
     }
 
     /// Tells an inviter their friend converted. The money is already on their
@@ -139,6 +220,6 @@ final class PaymentFulfillmentService: @unchecked Sendable {
         if !delivered {
             logger.warning("referral: could not notify \(bonus.inviterLabel) about the conversion bonus")
         }
-        logger.info("referral conversion bonus: \(bonus.inviterLabel) +$\(bonus.amountUsd) (friend \(bonus.friendLabel))")
+        logger.info("referral conversion bonus: \(bonus.inviterLabel) +\(bonus.amount) (friend \(bonus.friendLabel))")
     }
 }

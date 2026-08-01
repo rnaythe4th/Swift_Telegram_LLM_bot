@@ -20,7 +20,7 @@ final class StoreReferralTests: XCTestCase {
             return XCTFail("expected a binding, got \(outcome)")
         }
         XCTAssertEqual(inviter, "@inviter")
-        XCTAssertEqual(inviteeReward, ReferralConfig.default.inviteeRewardUsd)
+        XCTAssertEqual(inviteeReward, ReferralConfig.default.inviteeReward)
 
         // Binding alone pays nothing — that is what makes farming expensive.
         var inviterWallet = await store.balance(username: UserKey.forUserID(100))
@@ -29,13 +29,16 @@ final class StoreReferralTests: XCTestCase {
         await store.identifyUser(userID: 200, username: "friend", firstName: nil)
         let payout = await store.redeemReferralIfDue(userID: 200, username: "friend")
         XCTAssertEqual(payout?.inviterUserID, 100)
+        XCTAssertEqual(payout?.inviterReward, ReferralConfig.default.inviterReward)
+        XCTAssertEqual(payout?.inviteeReward, ReferralConfig.default.inviteeReward)
 
+        // The store decides and stamps; it does **not** credit. Money moves
+        // through `LedgerPort` under its own idempotency claim, so a crash
+        // between the credit and the stamp cannot pay the pair twice (§10.2).
+        // `EndToEndTests.testReferralDeepLinkPaysAfterFirstAnswer` covers the
+        // whole path, wallets included.
         inviterWallet = await store.balance(username: UserKey.forUserID(100))
-        let friendWallet = await store.balance(username: UserKey.forUserID(200))
-        XCTAssertEqual(inviterWallet?.balanceUsd, ReferralConfig.default.inviterRewardUsd)
-        XCTAssertEqual(friendWallet?.balanceUsd, ReferralConfig.default.inviteeRewardUsd)
-        // Referral money is not a purchase: it must not make a proven payer.
-        XCTAssertEqual(inviterWallet?.toppedUpUsd, 0)
+        XCTAssertNil(inviterWallet, "crediting here as well would pay the bonus twice")
     }
 
     func testRewardIsPaidOnlyOnce() async {
@@ -77,7 +80,7 @@ final class StoreReferralTests: XCTestCase {
     func testExistingUserCannotBeInvited() async {
         let store = await makePair()
         // The "friend" already has a wallet — they are not a new user.
-        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(200), amountUsd: 1)
+        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(200), amount: .usd(1))
         let outcome = await store.bindReferral(invitedUserID: 200, invitedUsername: nil, inviterUserID: 100)
         XCTAssertEqual(outcome, .notNewUser)
         let overview = await store.referralOverview()
@@ -134,7 +137,7 @@ final class StoreReferralTests: XCTestCase {
         _ = await store.redeemReferralIfDue(userID: 200, username: nil)
 
         let bonus = await store.redeemReferralPaymentBonus(payerUserID: 200)
-        XCTAssertEqual(bonus?.amountUsd, ReferralConfig.default.payingFriendBonusUsd)
+        XCTAssertEqual(bonus?.amount, ReferralConfig.default.payingFriendBonus)
         let again = await store.redeemReferralPaymentBonus(payerUserID: 200)
         XCTAssertNil(again, "a redelivered payment must not pay the bonus twice")
 
@@ -225,7 +228,7 @@ final class StoreTrafficSourceTests: XCTestCase {
     /// it is.
     func testExistingUserIsNotAnAcquisition() async {
         let store = Fixtures.makeStore()
-        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(302), amountUsd: 1)
+        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(302), amount: .usd(1))
         let outcome = await store.bindTrafficSource(userID: 302, tag: "vk", username: nil)
         XCTAssertEqual(outcome, .knownUser)
     }

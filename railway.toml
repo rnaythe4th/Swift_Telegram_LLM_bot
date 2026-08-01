@@ -1,6 +1,7 @@
 # Railway config-as-code (https://docs.railway.com/reference/config-as-code)
 #
-# /ready returns 503 until the bot has restored state from Supabase, so a new
+# /ready returns 503 until the bot has restored state and taken the writer
+# lock (§3.1), so a new
 # deployment starts receiving traffic (and the old one stops) only when it is
 # actually ready — zero-loss redeploys together with the webhook queue.
 

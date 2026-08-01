@@ -184,6 +184,18 @@ struct UserDirectory: Codable, Sendable {
 
     func identity(userID: Int) -> UserIdentity? { identities[userID] }
 
+    /// Loads one stored row on boot. The username index is maintained here as
+    /// on every other write, so a stale duplicate in storage still cannot make
+    /// one handle point at two people.
+    mutating func restore(_ identity: UserIdentity) {
+        identities[identity.userID] = identity
+        guard let name = identity.username, !name.isEmpty else { return }
+        if let other = byUsername[name], let existing = identities[other], existing.seenAt > identity.seenAt {
+            return
+        }
+        byUsername[name] = identity.userID
+    }
+
     /// Drops the least recently seen identities that hold no state.
     /// `protectedKeys` are the `UserKey`s currently attached to a tenant,
     /// wallet, chat, licence or super-admin role — those are never evicted.

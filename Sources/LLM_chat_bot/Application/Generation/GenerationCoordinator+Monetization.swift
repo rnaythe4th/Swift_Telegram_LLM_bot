@@ -155,6 +155,13 @@ extension GenerationCoordinator {
     ///
     /// Returns nil when the turn must be abandoned — the user has been told why.
     func resolveDailyPremium(origin: GenerationOrigin, chatKey: ChatKey) async throws -> DailyPremiumVerdict? {
+        // Spending ceilings come first, because they are the only gate that
+        // applies to people who *have* paid (§4.1). A subscription is a fixed
+        // price and cannot buy unbounded consumption; without this the first
+        // sign of a heavy group on an expensive model is the provider's
+        // invoice, weeks later.
+        if try await applySpendCap(chatKey: chatKey) == false { return nil }
+
         let hasAccess = await state.hasFullModelAccess(
             username: origin.user?.username,
             userID: origin.user?.id,
@@ -244,6 +251,61 @@ extension GenerationCoordinator {
         return DailyPremiumVerdict(ticket: premiumTicket, lastCall: lastPremiumCall)
     }
 
+    /// Applies the daily spending ceilings. Returns false when the turn must be
+    /// abandoned; the user has been told why.
+    ///
+    /// Free models cost nothing and are never gated: a ceiling that switches
+    /// the bot off entirely would turn an accounting limit into an outage.
+    private func applySpendCap(chatKey: ChatKey) async throws -> Bool {
+        guard let verdict = await state.spendVerdict(chatID: chatKey.chatID) else { return true }
+        let currentModel = await state.model(chatKey: chatKey)
+        guard await state.allowedFreeModelIDs()?.contains(currentModel) != true else { return true }
+
+        switch verdict {
+        case .global(let spent, let cap):
+            // Everything the bot spends today is gone. Falling back to a free
+            // model keeps the bot answering; refusing outright would punish
+            // every user for one heavy chat.
+            logger.error("daily global spend cap reached: \(spent) of \(cap)")
+            await alerter?.report(
+                .spendCapReached, active: true,
+                detail: "потрачено \(spent.formatted(fractionDigits: 2)) из \(cap.formatted(fractionDigits: 2))"
+            )
+            guard let free = await state.fallbackFreeModel() else {
+                try await sendUserFeedback(
+                    chatKey: chatKey,
+                    text: "⏸ Умные модели на сегодня недоступны — дневной лимит расходов исчерпан. Завтра всё вернётся."
+                )
+                return false
+            }
+            await state.downgradeModelToFree(chatKey: chatKey, freeModel: free)
+            try? await sendUserFeedback(
+                chatKey: chatKey,
+                text: "⏸ Дневной лимит расходов исчерпан — отвечаю на бесплатной модели <code>\(free)</code> до завтра."
+            )
+            return true
+
+        case .tenant(let spent, let cap, let response):
+            logger.warning("tenant spend cap reached in chat \(chatKey.chatID): \(spent) of \(cap)")
+            switch response {
+            case .refuse:
+                try await sendUserFeedback(
+                    chatKey: chatKey,
+                    text: "⏸ Дневной лимит расходов этой подписки исчерпан (\(cap.formatted(fractionDigits: 2))). Ответы вернутся завтра."
+                )
+                return false
+            case .downgradeToFree:
+                guard let free = await state.fallbackFreeModel() else { return true }
+                await state.downgradeModelToFree(chatKey: chatKey, freeModel: free)
+                try? await sendUserFeedback(
+                    chatKey: chatKey,
+                    text: "⏸ Дневной лимит расходов исчерпан (\(cap.formatted(fractionDigits: 2))) — отвечаю на бесплатной модели <code>\(free)</code> до завтра."
+                )
+                return true
+            }
+        }
+    }
+
     /// Billing: a chat covered by a tenant subscription costs the sender
     /// nothing; otherwise a sender with a positive balance pays per message
     /// (marked-up). Everyone else is free-tier → sees ads.
@@ -265,6 +327,45 @@ extension GenerationCoordinator {
         return (billedTo, !covered && billedTo == nil)
     }
 
+    /// Charges the answer to the payer's wallet, in a transaction, and mirrors
+    /// the result into the store's cache. Returns true when this charge is the
+    /// one that emptied the wallet — the pitch moment (roadmap step 5).
+    ///
+    /// A database that will not take the write means the answer is not billed.
+    /// That costs the owner fractions of a cent; charging without a durable
+    /// record would cost a customer their balance with nothing to show for it,
+    /// and there is no version of that trade worth making.
+    func chargeForAnswer(billedTo: String?, cost: (real: Money, billed: Money), generationID: GenerationID) async -> Bool {
+        guard let billedTo, cost.billed.isPositive else { return false }
+        do {
+            let debit = try await ledger.inTransaction { transaction in
+                try await transaction.debit(
+                    billedTo,
+                    upTo: cost.billed,
+                    real: cost.real,
+                    ref: generationID.raw.uuidString
+                )
+            }
+            await state.applyCommittedCharge(key: billedTo, debit: debit, real: cost.real)
+            await noteBillingShortfall(billed: cost.billed, charged: debit.charged)
+            return debit.depleted
+        } catch {
+            logger.error("could not charge \(cost.billed) to \(billedTo): \(error)")
+            await metrics?.increment(MetricName.persistenceErrors)
+            return false
+        }
+    }
+
+    /// An answer whose price outran the wallet is a gift the owner paid for.
+    /// It is bounded (one turn, from a wallet already below
+    /// `minimumBillableBalance`) but it must not be invisible: a counter that
+    /// climbs says the billable floor is set too low.
+    func noteBillingShortfall(billed: Money, charged: Money) async {
+        let shortfall = billed - charged
+        guard shortfall.isPositive else { return }
+        await metrics?.increment(MetricName.billingShortfallNanos, by: Int(shortfall.nanoValue))
+    }
+
     /// A free user's daily allowance is tiny — a provider error, a stop or an
     /// empty reply must not eat one of it.
     func refundPremium(_ ticket: DailyPremiumTicket?) async {
@@ -283,45 +384,69 @@ extension GenerationCoordinator {
     /// always has a DM — the attribution came from `/start` in one.
     func payReferralIfDue(userID: Int, username: String?) async {
         guard let payout = await state.redeemReferralIfDue(userID: userID, username: username) else { return }
+        // The store decided the pair is due and stamped it; the money moves
+        // here, once, guarded by its own claim (§10.2). A failure leaves the
+        // stamp without the credit — visible in `reconcile()` and in the log,
+        // and far better than a second payout.
+        do {
+            try await ledger.inTransaction { transaction in
+                guard try await transaction.claim("refsignup:\(userID)") else { return }
+                if payout.inviterReward.isPositive {
+                    try await transaction.credit(
+                        UserKey.forUserID(payout.inviterUserID), payout.inviterReward,
+                        kind: .referral, purchased: false, ref: "refsignup:\(userID)"
+                    )
+                }
+                if payout.inviteeReward.isPositive {
+                    try await transaction.credit(
+                        UserKey.forUserID(userID), payout.inviteeReward,
+                        kind: .referral, purchased: false, ref: "refsignup:\(userID):friend"
+                    )
+                }
+            }
+            await state.applyCommittedCredit(key: UserKey.forUserID(payout.inviterUserID), amount: payout.inviterReward)
+            await state.applyCommittedCredit(key: UserKey.forUserID(userID), amount: payout.inviteeReward)
+        } catch {
+            logger.error("referral payout for \(payout.inviterUsername) not credited: \(error)")
+            return
+        }
         let refButton = InlineKeyboardButton(
             text: "🎁 Пригласить друга",
             callback_data: BotCallbackAction.menu(action: MenuRoute.navigation(to: .referral)).rawData
         )
 
-        if payout.inviteeRewardUsd > 0 {
+        if payout.inviteeReward.isPositive {
             _ = try? await telegram.sendMessage(.init(
                 chatID: userID,
                 threadID: nil,
                 replyTo: nil,
-                text: String(
-                    format: "🎁 <b>Бонус за приглашение: $%.2f на баланс</b> — спасибо %@!\n\nПока баланс не пуст, вам доступны любые модели: с него списывается стоимость каждого ответа, обычно доли цента. Сколько списалось — видно под самим ответом (включите показ: /show_cost).\n\nВаша ссылка для друзей — /ref.",
-                    payout.inviteeRewardUsd, payout.inviterUsername
-                ),
+                text: "🎁 <b>Бонус за приглашение: \(payout.inviteeReward.formatted(fractionDigits: 2)) на баланс</b> — спасибо \(payout.inviterUsername)!"
+                    + "\n\nПока баланс не пуст, вам доступны любые модели: с него списывается стоимость каждого ответа, обычно доли цента."
+                    + " Сколько списалось — видно под самим ответом (включите показ: /show_cost).\n\nВаша ссылка для друзей — /ref.",
                 replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
             ))
         }
 
-        if payout.inviterRewardUsd > 0 {
+        if payout.inviterReward.isPositive {
             // The label works without a @username (the migration to userID keys
             // made nicks optional), so a friend without one is still named.
             let notified = (try? await telegram.sendMessage(.init(
                 chatID: payout.inviterUserID,
                 threadID: nil,
                 replyTo: nil,
-                text: String(
-                    format: "🎉 <b>Ваше приглашение сработало: %@ уже пишет боту.</b>\n\nВам начислено <b>$%.2f</b> на баланс · приглашений с наградой: <b>%d</b>.",
-                    payout.invitedLabel, payout.inviterRewardUsd, payout.inviterRewardedTotal
-                ),
+                text: "🎉 <b>Ваше приглашение сработало: \(payout.invitedLabel) уже пишет боту.</b>"
+                    + "\n\nВам начислено <b>\(payout.inviterReward.formatted(fractionDigits: 2))</b> на баланс"
+                    + " · приглашений с наградой: <b>\(payout.inviterRewardedTotal)</b>.",
                 replyMarkup: InlineKeyboardMarkup(inline_keyboard: [[refButton]])
             ))) != nil
             if !notified {
                 // Money is already on their balance; only the good news failed
                 // to land (blocked DM, never wrote to the bot).
-                logger.warning("referral: could not notify inviter \(payout.inviterUsername) about +$\(payout.inviterRewardUsd)")
+                logger.warning("referral: could not notify inviter \(payout.inviterUsername) about +\(payout.inviterReward)")
             }
         }
 
-        logger.info("referral payout: \(payout.inviterUsername) +$\(payout.inviterRewardUsd), \(payout.invitedLabel) +$\(payout.inviteeRewardUsd)")
+        logger.info("referral payout: \(payout.inviterUsername) +\(payout.inviterReward), \(payout.invitedLabel) +\(payout.inviteeReward)")
     }
 
     /// Customer-facing footer: costs go through the markup multiplier; for
@@ -336,9 +461,9 @@ extension GenerationCoordinator {
         sponsorLine: String?
     ) async -> String {
         let multiplier = await state.priceMultiplier()
-        var balanceAfter: Double?
+        var balanceAfter: Money?
         if let billedTo, hasContent {
-            let realCost = streamMeta?.usage?.cost ?? 0
+            let realCost = Money.usd(streamMeta?.usage?.cost ?? 0)
             balanceAfter = await state.projectedBalanceAfterCharge(username: billedTo, realCost: realCost)
         }
         return ResponseFooterFormatter.formatFooter(

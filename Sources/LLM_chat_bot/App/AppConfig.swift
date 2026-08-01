@@ -5,9 +5,11 @@ enum EnvironmentKey: String {
     case deepseekKey = "DEEPSEEK_API_KEY"
     case routerApiKey = "ROUTER_API_KEY"
     case companyChatId = "COMPANY_CHAT_ID"
-    case supabaseURL = "SUPABASE_URL"
-    case supabaseAnonKey = "SUPABASE_ANON_KEY"
-    case supabaseServiceKey = "SUPABASE_SERVICE_KEY"
+    /// Owner's @username. The composition root should not know a person's name.
+    case ownerUsername = "OWNER_USERNAME"
+    /// `postgres://user:password@host:5432/database` — the **session** pooler
+    /// or a direct connection, never the transaction pooler on 6543 (§1).
+    case databaseURL = "DATABASE_URL"
     case healthPort = "PORT"
     case bscscanApiKey = "BSCSCAN_API_KEY"
     case etherscanApiKey = "ETHERSCAN_API_KEY"
@@ -26,14 +28,11 @@ enum EnvironmentKey: String {
 
 enum AppConfigError: LocalizedError {
     case missingEnvironment(EnvironmentKey)
-    case invalidCompanyChatId(String)
 
     var errorDescription: String? {
         switch self {
         case .missingEnvironment(let key):
             return "Missing env: \(key.rawValue)"
-        case .invalidCompanyChatId(let rawValue):
-            return "COMPANY_CHAT_ID must be Int, got: \(rawValue)"
         }
     }
 }
@@ -51,10 +50,13 @@ struct AppConfig: Sendable {
     let telegramToken: String
     let deepseekKey: String
     let routerApiKey: String
+    /// Legacy operational chat id. Optional: it feeds one unused member list,
+    /// and a required variable that does nothing is one more way to fail to
+    /// start for no reason.
     let companyChatId: Int
-    let supabaseURL: String?
-    let supabaseAnonKey: String?
-    let supabaseServiceKey: String?
+    /// Owner's @username, without the `@`.
+    let ownerUsername: String
+    let databaseURL: String?
     let healthPort: Int
     let bscscanApiKey: String?
     let etherscanApiKey: String?
@@ -81,21 +83,11 @@ struct AppConfig: Sendable {
     /// production — the default is Telegram itself.
     let telegramAPIBase: String
 
-    /// Server-side Supabase key: the service key bypasses RLS and never ships
-    /// to clients — preferred. The anon key remains a fallback for setups
-    /// created before the split.
-    var supabaseKey: String? { supabaseServiceKey ?? supabaseAnonKey }
-    var usesAnonSupabaseKey: Bool { supabaseServiceKey == nil && supabaseAnonKey != nil }
-
     static func load() throws -> AppConfig {
         let telegramToken = try env(.telegramToken)
         let deepseekKey = try env(.deepseekKey)
         let routerApiKey = try env(.routerApiKey)
-        let companyChatIdRaw = try env(.companyChatId)
-
-        guard let companyChatId = Int(companyChatIdRaw) else {
-            throw AppConfigError.invalidCompanyChatId(companyChatIdRaw)
-        }
+        let companyChatId = Int(optionalEnv(.companyChatId) ?? "") ?? 0
 
         let healthPort = Int(optionalEnv(.healthPort) ?? "") ?? 8000
 
@@ -111,9 +103,10 @@ struct AppConfig: Sendable {
             deepseekKey: deepseekKey,
             routerApiKey: routerApiKey,
             companyChatId: companyChatId,
-            supabaseURL: optionalEnv(.supabaseURL),
-            supabaseAnonKey: optionalEnv(.supabaseAnonKey),
-            supabaseServiceKey: optionalEnv(.supabaseServiceKey),
+            ownerUsername: (optionalEnv(.ownerUsername) ?? "maythe4th")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+                .lowercased(),
+            databaseURL: optionalEnv(.databaseURL),
             healthPort: healthPort,
             bscscanApiKey: optionalEnv(.bscscanApiKey),
             etherscanApiKey: optionalEnv(.etherscanApiKey),

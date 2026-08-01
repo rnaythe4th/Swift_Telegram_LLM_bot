@@ -26,8 +26,11 @@ extension ChatContextStore {
     /// Drops entries from previous days. Called on every write, so the row
     /// tracks "free chats active today" rather than growing forever.
     private func pruneDailyPremiumUsage(today: Int) {
-        guard premiumDailyUsage.contains(where: { $0.value.day != today }) else { return }
-        premiumDailyUsage = premiumDailyUsage.filter { $0.value.day == today }
+        for (key, entry) in premiumDailyUsage where entry.day != today {
+            premiumDailyUsage.removeValue(forKey: key)
+            dirtyPremiumUsage.remove(key)
+            deletedPremiumUsage.insert(key)
+        }
     }
 
     /// Consumes one unit of today's free premium allowance for a free-tier
@@ -44,7 +47,7 @@ extension ChatContextStore {
         entry.used += 1
         premiumDailyUsage[key] = entry
         pruneDailyPremiumUsage(today: today)
-        dirtyConfigs.insert(.dailyPremiumUsage)
+        markPremiumUsageDirty(key)
         return .allowed(remaining: max(0, limit - entry.used), limit: limit)
     }
 
@@ -57,7 +60,12 @@ extension ChatContextStore {
         guard var entry = premiumDailyUsage[key], entry.day == today, entry.used > 0 else { return }
         entry.used -= 1
         premiumDailyUsage[key] = entry
-        dirtyConfigs.insert(.dailyPremiumUsage)
+        markPremiumUsageDirty(key)
+    }
+
+    private func markPremiumUsageDirty(_ key: String) {
+        dirtyPremiumUsage.insert(key)
+        deletedPremiumUsage.remove(key)
     }
 
     /// Read-only view for the menu: how much of today's taste is left.

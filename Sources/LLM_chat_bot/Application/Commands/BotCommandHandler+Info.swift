@@ -49,8 +49,8 @@ extension BotCommandHandler {
             lines.append("")
             lines.append(key.threadID == 0 ? "<b>Основной тред</b>" : "<b>Топик \(key.threadID)</b>")
             lines.append("🤖 <code>\(help.model)</code> · 🌡 \(BotMenuHandler.formatTemp(help.temp)) · 📝 \(help.maxHistory)")
-            let realStr = String(format: "$%.4f", help.cumulativeUsage.totalCost)
-            let billedStr = String(format: "$%.4f", await state.billedCost(of: help.cumulativeUsage))
+            let realStr = help.cumulativeUsage.totalCost.formatted()
+            let billedStr = await state.billedCost(of: help.cumulativeUsage).formatted()
             lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(Int(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
             let rolePreview = help.role.count > 300 ? String(help.role.prefix(300)) + "…" : help.role
             lines.append("🎭 <blockquote expandable>\(rolePreview)</blockquote>")

@@ -151,7 +151,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// shared message, so whatever it renders, everyone reads.
     func testPersonalPagesRefuseToRenderInAGroup() async {
         let group = ChatKey(chatID: -7_300, threadID: 0)
-        await store.creditBalance(username: UserKey.forUserID(ownerID), amountUsd: 12.34)
+        await store.creditBalance(username: UserKey.forUserID(ownerID), amount: .usd(12.34))
 
         for page in MenuPage.allCases where page.isPersonal {
             let text = await menu.renderPage(page, chatKey: group, username: UserKey.forUserID(ownerID)).text
@@ -174,7 +174,7 @@ final class MenuPageRenderTests: XCTestCase {
 
         // A wallet is enough — the line is "pays for something", not "has a
         // subscription" (CLAUDE.md §6, `hasFullModelAccess`).
-        await store.creditBalance(username: stranger, amountUsd: 1.0)
+        await store.creditBalance(username: stranger, amount: .usd(1.0))
         for page in MenuPage.allCases where page.requiresFullAccess {
             let screen = await menu.renderPage(page, chatKey: chat, username: stranger)
             XCTAssertNotEqual(screen.text, page.restrictedNotice, "\(page) still refused a paying chat")
@@ -218,7 +218,7 @@ final class MenuPageRenderTests: XCTestCase {
 
     /// The purchase page in a group is a price list, not somebody's account.
     func testGroupPurchasePageCarriesNoPersonalNumbers() async {
-        await store.creditBalance(username: UserKey.forUserID(ownerID), amountUsd: 9.87)
+        await store.creditBalance(username: UserKey.forUserID(ownerID), amount: .usd(9.87))
         let group = ChatKey(chatID: -7_400, threadID: 0)
 
         let text = await menu.renderPage(.pay, chatKey: group, username: UserKey.forUserID(ownerID)).text

@@ -144,8 +144,8 @@ extension BotMenuHandler {
         let traffic = await state.trafficSourceOverview()
         let lifecycle = await state.subscriptionLifecycleStats()
         let balances = await state.allBalances()
-        let balancesTotal = balances.reduce(0.0) { $0 + $1.wallet.balanceUsd }
-        let marginTotal = balances.reduce(0.0) { $0 + ($1.wallet.spentBilledUsd - $1.wallet.spentRealUsd) }
+        let balancesTotal = balances.reduce(Money.zero) { $0 + $1.wallet.balance }
+        let marginTotal = balances.reduce(Money.zero) { $0 + $1.wallet.margin }
 
         let modes = await state.modeConfig()
         let freeModeCount = modes.activeModes.filter { $0.tier == .free }.count
@@ -196,9 +196,9 @@ extension BotMenuHandler {
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
         💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · в личке <b>\(onboarding.activeExamples(inGroup: false).count)</b> · в группах <b>\(onboarding.showInGroups ? onboarding.activeExamples(inGroup: true).count : 0)</b>
         ⏳ Напоминания · <b>\(reminders.enabled ? "вкл" : "выкл")</b> · скоро истекут <b>\(lifecycle.expiringSoon.count)</b> · winback-офферов <b>\(lifecycle.activeDiscounts.count)</b>
-        🎁 Приглашения · <b>\(referral.enabled ? "вкл" : "выкл")</b> · выплачено пар <b>\(referralOverview.rewarded)</b> · \(String(format: "$%.2f", referralOverview.paidOutUsd)) · ждут <b>\(referralOverview.pending)</b>
+        🎁 Приглашения · <b>\(referral.enabled ? "вкл" : "выкл")</b> · выплачено пар <b>\(referralOverview.rewarded)</b> · \(referralOverview.paidOut.formatted(fractionDigits: 2)) · ждут <b>\(referralOverview.pending)</b>
         📈 Источники рекламы · кампаний <b>\(traffic.campaigns)</b> · пришло <b>\(traffic.joined)</b> · оплатили <b>\(traffic.payers)</b>
-        💰 Балансов · <b>\(balances.count)</b> · остатки \(String(format: "$%.2f", balancesTotal)) · маржа <b>\(String(format: "$%.4f", marginTotal))</b> · /balance list
+        💰 Балансов · <b>\(balances.count)</b> · остатки \(balancesTotal.formatted(fractionDigits: 2)) · маржа <b>\(marginTotal.formatted())</b> · /balance list
         🆓 Бесплатных моделей · <b>\(freeCount)</b>
         🪙 Открытых счетов · <b>\(openInvoices.count)</b>
 

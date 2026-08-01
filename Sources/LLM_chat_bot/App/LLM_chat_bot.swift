@@ -35,7 +35,12 @@ struct BlueprintBotApp {
         try await server.start()
         logger.info("HTTP server started on port \(config.healthPort) (/health, /ready, /metrics, webhook)")
 
-        let persistenceHealthy = await app.orchestrator.bootstrapState(rawPersistence: app.rawPersistence)
+        // The connection pool runs for the process lifetime; nothing can be
+        // read or written until it does.
+        let pool = app.storage.startPool()
+        defer { pool?.cancel() }
+
+        let persistenceHealthy = await app.orchestrator.bootstrapState(storage: app.storage)
 
         installShutdownHandlers(orchestrator: app.orchestrator, logger: logger)
 

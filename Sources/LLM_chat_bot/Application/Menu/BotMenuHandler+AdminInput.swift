@@ -407,8 +407,8 @@ extension BotMenuHandler {
                 if target.isEmpty {
                     toast = Texts.usernameRequired
                 } else {
-                    let wallet = await state.creditBalance(username: target, amountUsd: amount)
-                    toast = "✓ Баланс @\(target.lowercased()) · <b>\(String(format: "$%.4f", wallet.balanceUsd))</b>"
+                    let wallet = await state.creditBalance(username: target, amount: .usd(amount))
+                    toast = "✓ Баланс @\(target.lowercased()) · <b>\(wallet.balance.formatted())</b>"
                 }
             } else {
                 toast = "⚠️ Формат: <code>@username сумма</code>, например <code>@user 5</code>"

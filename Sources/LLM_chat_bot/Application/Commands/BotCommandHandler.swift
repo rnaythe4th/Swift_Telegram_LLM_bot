@@ -3,7 +3,7 @@ import Foundation
 // Slash commands. Wiring, role gates and the shared send helper live here;
 // the command bodies are split across BotCommandHandler+*.swift by area.
 
-final class BotCommandHandler: @unchecked Sendable {
+final class BotCommandHandler: Sendable {
     let telegram: TelegramGatewayPort
     let state: ChatContextStore
     let gateways: ProviderGatewayRegistry
@@ -13,6 +13,14 @@ final class BotCommandHandler: @unchecked Sendable {
     let modelPriceMonitor: ModelPriceMonitor?
     let cryptoService: CryptoPaymentService?
     let reminderService: SubscriptionReminderService?
+    /// See `BotMenuHandler.durability` — the same gate, for `/buy`.
+    let durability: LockedValue<StateDurability>
+    /// Read-only here: `/balance` shows the last few movements, which is the
+    /// whole point of keeping a journal — "почему у меня было $2, а стало
+    /// $1.30" has to have an answer the person can see for themselves.
+    let ledger: LedgerPort
+    /// See `BotMenuHandler.subscriptions`.
+    let subscriptions: SubscriptionWriter?
 
     init(
         telegram: TelegramGatewayPort,
@@ -23,7 +31,10 @@ final class BotCommandHandler: @unchecked Sendable {
         menuHandler: BotMenuHandler,
         modelPriceMonitor: ModelPriceMonitor? = nil,
         cryptoService: CryptoPaymentService? = nil,
-        reminderService: SubscriptionReminderService? = nil
+        reminderService: SubscriptionReminderService? = nil,
+        durability: LockedValue<StateDurability> = LockedValue(.durable),
+        ledger: LedgerPort = InMemoryLedger(),
+        subscriptions: SubscriptionWriter? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -34,6 +45,9 @@ final class BotCommandHandler: @unchecked Sendable {
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoService = cryptoService
         self.reminderService = reminderService
+        self.durability = durability
+        self.ledger = ledger
+        self.subscriptions = subscriptions
     }
 
     func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?, isPrivate: Bool) async throws -> Bool {
@@ -108,5 +122,32 @@ final class BotCommandHandler: @unchecked Sendable {
                 replyMarkup: nil
             )
         )
+    }
+}
+
+// Subscription dates and winback offers are not write-behind state: they live
+// in columns only the money transaction writes (§10.2). These four go through
+// `SubscriptionWriter` so a super-admin's change is still there after a
+// restart; without one wired (tests, a bot with no database) they fall back to
+// the in-memory path, which is all there is to change anyway.
+extension BotCommandHandler {
+    func extendSubscription(username: String, days: Int) async -> Date? {
+        if let subscriptions { return await subscriptions.extend(username: username, days: days) }
+        return await state.extendTenantSubscription(username: username, days: days)
+    }
+
+    func setSubscriptionUnlimited(username: String) async -> Bool {
+        if let subscriptions { return await subscriptions.setUnlimited(username: username) }
+        return await state.setTenantUnlimited(username: username)
+    }
+
+    func expireSubscription(username: String) async -> Bool {
+        if let subscriptions { return await subscriptions.expire(username: username) }
+        return await state.expireTenantSubscription(username: username)
+    }
+
+    func clearWinbackDiscounts() async -> Int {
+        if let subscriptions { return await subscriptions.clearAllWinback() }
+        return await state.clearAllWinbackDiscounts()
     }
 }

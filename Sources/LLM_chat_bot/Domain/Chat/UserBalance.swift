@@ -4,67 +4,56 @@ import Foundation
 /// rename — see `UserDirectory`).
 ///
 /// The balance lives in the *billed* (marked-up) price world: deposits and
-/// deductions are what the user sees. `spentRealUsd` keeps the provider's
-/// actual cost alongside, so the super-admin can read the margin directly:
-/// margin = spentBilledUsd − spentRealUsd.
-struct UserBalance: Codable, Sendable, Equatable {
-    var balanceUsd: Double
-    var spentBilledUsd: Double
-    var spentRealUsd: Double
+/// deductions are what the user sees. `spentReal` keeps the provider's actual
+/// cost alongside, so the super-admin can read the margin directly:
+/// margin = spentBilled − spentReal.
+///
+/// Every amount is `Money` (integer nanodollars) rather than `Double`: a
+/// balance is compared against zero to decide access, and a float balance has
+/// no zero. See `Money`.
+struct UserBalance: Sendable, Equatable {
+    var balance: Money
+    var spentBilled: Money
+    var spentReal: Money
     var updatedAt: Date?
     /// Real money this person has put into the wallet, ever — credit packs only.
     /// Referral bonuses and super-admin grants are deliberately excluded: this
     /// is what separates a proven payer from someone spending free credit, and
     /// only proven payers are worth a lapsed-wallet offer (§7 «Возврат по
     /// балансу»). Also shows the super-admin who actually pays.
-    var toppedUpUsd: Double
+    var toppedUp: Money
     /// When the lapsed-wallet offer was last sent, so it goes out once per
     /// lapse. Cleared by the next top-up — coming back opens a new cycle.
     var lapsedNoticeAt: Date?
 
     static let empty = UserBalance(
-        balanceUsd: 0,
-        spentBilledUsd: 0,
-        spentRealUsd: 0,
+        balance: .zero,
+        spentBilled: .zero,
+        spentReal: .zero,
         updatedAt: nil,
-        toppedUpUsd: 0,
+        toppedUp: .zero,
         lapsedNoticeAt: nil
     )
 
-    enum CodingKeys: String, CodingKey {
-        case balanceUsd, spentBilledUsd, spentRealUsd, updatedAt, toppedUpUsd, lapsedNoticeAt
-    }
-
     init(
-        balanceUsd: Double,
-        spentBilledUsd: Double,
-        spentRealUsd: Double,
-        updatedAt: Date?,
-        toppedUpUsd: Double = 0,
+        balance: Money,
+        spentBilled: Money = .zero,
+        spentReal: Money = .zero,
+        updatedAt: Date? = nil,
+        toppedUp: Money = .zero,
         lapsedNoticeAt: Date? = nil
     ) {
-        self.balanceUsd = balanceUsd
-        self.spentBilledUsd = spentBilledUsd
-        self.spentRealUsd = spentRealUsd
+        self.balance = balance
+        self.spentBilled = spentBilled
+        self.spentReal = spentReal
         self.updatedAt = updatedAt
-        self.toppedUpUsd = toppedUpUsd
+        self.toppedUp = toppedUp
         self.lapsedNoticeAt = lapsedNoticeAt
     }
 
-    /// The new fields are optional on the way in, so wallets written by earlier
-    /// builds decode unchanged — they simply count as "never topped up", which
-    /// keeps them out of the lapsed-wallet audience until they pay again.
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(
-            balanceUsd: try c.decodeIfPresent(Double.self, forKey: .balanceUsd) ?? 0,
-            spentBilledUsd: try c.decodeIfPresent(Double.self, forKey: .spentBilledUsd) ?? 0,
-            spentRealUsd: try c.decodeIfPresent(Double.self, forKey: .spentRealUsd) ?? 0,
-            updatedAt: try c.decodeIfPresent(Date.self, forKey: .updatedAt),
-            toppedUpUsd: try c.decodeIfPresent(Double.self, forKey: .toppedUpUsd) ?? 0,
-            lapsedNoticeAt: try c.decodeIfPresent(Date.self, forKey: .lapsedNoticeAt)
-        )
-    }
+    /// Margin the owner earned on this wallet: what was charged minus what the
+    /// providers actually cost.
+    var margin: Money { spentBilled - spentReal }
 }
 
 /// One lapsed wallet the sweep decided to reach out to (§7 «Возврат по балансу»).
@@ -77,7 +66,7 @@ struct WalletWinbackTarget: Sendable {
     /// channel. Never nil — the store only lists reachable wallets.
     let privateChatID: Int
     /// What they have already paid in, for the copy ("вы уже вложили $X").
-    let toppedUpUsd: Double
+    let toppedUp: Money
     /// Days since the bot last saw them.
     let idleDays: Int
 }
@@ -85,7 +74,7 @@ struct WalletWinbackTarget: Sendable {
 /// One free-tier chat's (or user's) daily "taste" of premium: how many smart
 /// answers it has spent, and on which UTC day (roadmap step 6).
 ///
-/// Persisted (`GlobalConfigKey.dailyPremiumUsage`) rather than in-memory: the
+/// Persisted (`bot_premium_usage`) rather than in-memory: the
 /// bot redeploys often, and an in-memory counter hands everyone a fresh
 /// allowance on every deploy — the cap is the main conversion driver, so it
 /// must not evaporate. Stale days are pruned on write, so the row stays about
@@ -108,7 +97,7 @@ enum ChatAccessStatus: Sendable, Equatable {
     /// Guest of an active licence (named user or per-chat guest list).
     case guest(String)
     /// No subscription; the asker's pay-as-you-go balance covers each answer.
-    case balance(Double)
+    case balance(Money)
     /// Free tier: free models, ads, daily premium taste.
     case free
 

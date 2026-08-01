@@ -1,6 +1,6 @@
 import Foundation
 
-final class OpenRouterProviderAdapter: ProviderGatewayPort, @unchecked Sendable {
+final class OpenRouterProviderAdapter: ProviderGatewayPort, Sendable {
     let provider: ServiceProvider = .openrouter
     let capabilities = ProviderCapabilities(
         supportsImageInput: true,

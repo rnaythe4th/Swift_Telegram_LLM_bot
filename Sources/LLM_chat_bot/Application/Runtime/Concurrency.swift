@@ -2,6 +2,10 @@ import Foundation
 
 /// Minimal lock-guarded box for values shared across concurrency domains
 /// where an actor would be overkill (flags, task references).
+/// Safety is provided by the lock: every access to `value` goes through it, and
+/// there is no other path to the storage. That is what `@unchecked` is asserting
+/// here — the one shape in which the annotation is an argument rather than an
+/// escape (§5.5).
 final class LockedValue<Value: Sendable>: @unchecked Sendable {
     private var _value: Value
     private let lock = NSLock()
@@ -29,4 +33,7 @@ final class RuntimeFlags: Sendable {
     /// True while the process is draining before exit; the webhook endpoint
     /// answers 503 so Telegram redelivers those updates to the next instance.
     let draining = LockedValue(false)
+    /// Whether state written now will still be there later (§4.3). Every
+    /// entrance to a purchase reads it; nothing sells while it is degraded.
+    let durability = LockedValue(StateDurability.volatile(reason: "starting"))
 }

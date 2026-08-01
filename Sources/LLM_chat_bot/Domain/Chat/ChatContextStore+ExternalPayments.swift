@@ -3,11 +3,15 @@ import Foundation
 // Hosted checkout ("внешняя касса", §7): merchant configuration and the orders
 // waiting for a callback.
 //
-// Everything here is one `bot_config` row. Orders live in it rather than in
-// memory because the vendor answers minutes later, into whichever process
-// instance is alive by then — an order lost to a redeploy is money received
-// with nothing delivered, and unlike Telegram the vendor will not replay it
-// forever.
+// The merchant configuration is a document (`bot_config`); each order is a row
+// of its own (`bot_external_order`), because an order is a payment in flight,
+// there is one per purchase, and the vendor's payment id on it carries a
+// `unique` constraint — the second dedup ring behind `bot_payment`.
+//
+// Orders are stored rather than kept in memory because the vendor answers
+// minutes later, into whichever process instance is alive by then: an order
+// lost to a redeploy is money received with nothing delivered, and unlike
+// Telegram the vendor will not replay it forever.
 
 extension ChatContextStore {
     // MARK: - Configuration
@@ -62,8 +66,13 @@ extension ChatContextStore {
 
     func upsertExternalOrder(_ order: ExternalPaymentOrder) {
         _externalOrders[order.id] = order
+        markExternalOrderDirty(order.id)
         pruneExternalOrders()
-        dirtyConfigs.insert(.externalPayments)
+    }
+
+    func markExternalOrderDirty(_ id: String) {
+        dirtyExternalOrders.insert(id)
+        deletedExternalOrders.remove(id)
     }
 
     func openExternalOrders(now: Date = Date()) -> [ExternalPaymentOrder] {
@@ -103,7 +112,7 @@ extension ChatContextStore {
         order.paidAt = now
         order.vendorPaymentID = vendorPaymentID
         _externalOrders[id] = order
-        dirtyConfigs.insert(.externalPayments)
+        markExternalOrderDirty(id)
         return order
     }
 
@@ -112,7 +121,7 @@ extension ChatContextStore {
         guard var order = _externalOrders[id], order.isOpen else { return false }
         order.status = .cancelled
         _externalOrders[id] = order
-        dirtyConfigs.insert(.externalPayments)
+        markExternalOrderDirty(id)
         return true
     }
 
@@ -127,38 +136,35 @@ extension ChatContextStore {
             copy.status = .expired
             _externalOrders[id] = copy
             expired.append(copy)
+            markExternalOrderDirty(id)
         }
-        if !expired.isEmpty { dirtyConfigs.insert(.externalPayments) }
         return expired
     }
 
-    /// Keeps the row small: settled orders are history, and the only reason to
-    /// hold any of them is a late duplicate notification (already covered by
-    /// `processedPaymentChargeIDs`). Open orders are never pruned.
+    /// Keeps the table small: settled orders are history, and the only reason
+    /// to hold any of them is a late duplicate notification (already covered by
+    /// `bot_payment`). Open orders are never pruned.
     private func pruneExternalOrders() {
         guard _externalOrders.count > Self.maxStoredExternalOrders else { return }
         let settled = _externalOrders.values
             .filter { !$0.isOpen }
             .sorted { $0.createdAt > $1.createdAt }
         let keep = Set(settled.prefix(Self.maxStoredExternalOrders / 2).map(\.id))
-        _externalOrders = _externalOrders.filter { $0.value.isOpen || keep.contains($0.key) }
+        for (id, order) in _externalOrders where !order.isOpen && !keep.contains(id) {
+            _externalOrders.removeValue(forKey: id)
+            dirtyExternalOrders.remove(id)
+            deletedExternalOrders.insert(id)
+        }
     }
 
     static let maxStoredExternalOrders = 200
 
     // MARK: - Persistence
 
-    func externalPaymentSnapshot() -> ExternalPaymentSnapshot {
-        ExternalPaymentSnapshot(
-            config: _externalPaymentConfig,
-            orders: Array(_externalOrders.values)
-        )
-    }
-
-    func restoreExternalPayments(_ snapshot: ExternalPaymentSnapshot?) {
-        _externalPaymentConfig = (snapshot?.config ?? .default).normalized
+    func restoreExternalPayments(config: ExternalPaymentConfig?, orders: [ExternalPaymentOrder]) {
+        _externalPaymentConfig = (config ?? .default).normalized
         _externalOrders = [:]
-        for order in snapshot?.orders ?? [] {
+        for order in orders {
             _externalOrders[order.id] = order
         }
     }

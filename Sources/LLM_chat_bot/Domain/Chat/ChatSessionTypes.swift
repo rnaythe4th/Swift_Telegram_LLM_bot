@@ -9,17 +9,8 @@ public struct ChatKey: Hashable, Codable, Sendable {
         self.threadID = threadID
     }
 
-    var snapshotKey: String {
-        "\(chatID):\(threadID)"
-    }
-
-    init?(snapshotKey: String) {
-        let parts = snapshotKey.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2,
-              let chatID = Int(parts[0]),
-              let threadID = Int64(parts[1]) else { return nil }
-        self.init(chatID: chatID, threadID: threadID)
-    }
+    /// Forum topics are separate contexts; thread 0 is the main one.
+    var isThread: Bool { threadID != 0 }
 }
 
 struct GenerationID: Hashable, Sendable {

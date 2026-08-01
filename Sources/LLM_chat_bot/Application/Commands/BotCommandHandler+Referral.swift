@@ -64,7 +64,7 @@ extension BotCommandHandler {
                 lines.append("Статус · <b>\(onOff(config.enabled))</b> · награда \(ReferralConfig.formatUsd(cents: config.inviterRewardCents)) / \(ReferralConfig.formatUsd(cents: config.inviteeRewardCents)) · за оплату друга \(config.payingFriendBonusCents > 0 ? ReferralConfig.formatUsd(cents: config.payingFriendBonusCents) : "выкл") · лимит \(config.maxRewardsPerInviter > 0 ? "\(config.maxRewardsPerInviter)" : "нет")")
                 lines.append("Друзья, которые оплатили · <b>\(overview.paidConversions)</b>")
                 lines.append("Привязок · <b>\(overview.bound)</b> · выплачено пар · <b>\(overview.rewarded)</b> · ждут · <b>\(overview.pending)</b> · отклонено лимитом · <b>\(overview.blocked)</b>")
-                lines.append(String(format: "Выплачено всего · <b>$%.2f</b> · пригласивших · <b>%d</b>", overview.paidOutUsd, overview.inviters))
+                lines.append("Выплачено всего · <b>\(overview.paidOut.formatted(fractionDigits: 2))</b> · пригласивших · <b>\(overview.inviters)</b>")
                 lines.append("Переходов по ссылке · <b>\(report.count(.referralJoined))</b> · наград · <b>\(report.count(.referralRewarded))</b>")
                 if overview.refusedTotal > 0 {
                     lines.append("Не засчитано переходов · <b>\(overview.refusedTotal)</b> · сам себя \(overview.refusedSelf) · уже приглашён \(overview.refusedRepeat) · не новый \(overview.refusedNotNew) · автор неизвестен \(overview.refusedUnknown)")
@@ -74,11 +74,11 @@ extension BotCommandHandler {
                     lines.append("<b>Топ пригласивших</b>")
                     for (index, entry) in overview.top.enumerated() {
                         // The tally label already carries its own `@`.
-                        lines.append(String(
-                            format: "%d. %@ · оплатили %d · наград %d · $%.2f · привязок %d",
-                            index + 1, entry.tally.username, entry.tally.paidConversions,
-                            entry.tally.rewarded, entry.tally.earnedUsd, entry.tally.invited
-                        ))
+                        lines.append(
+                            "\(index + 1). \(entry.tally.username) · оплатили \(entry.tally.paidConversions)"
+                            + " · наград \(entry.tally.rewarded) · \(entry.tally.earned.formatted(fractionDigits: 2))"
+                            + " · привязок \(entry.tally.invited)"
+                        )
                     }
                 }
                 lines.append("")

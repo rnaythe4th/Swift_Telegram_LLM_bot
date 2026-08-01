@@ -156,7 +156,8 @@ extension GenerationCoordinator {
 
         do {
             try Task.checkCancellation()
-            let stream = gateway.stream(request)
+            // Silence, not slowness, is what kills a turn (§4.5).
+            let stream = gateway.stream(request).withIdleTimeout()
 
             for try await event in stream {
                 if Task.isCancelled {
@@ -259,8 +260,11 @@ extension GenerationCoordinator {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             await refundPremium(premiumTicket)
         } else if !fullAccumulator.isEmpty {
-            let walletEmptied = await state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
-            if walletEmptied {
+            let cost = await state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage)
+            let depleted = await chargeForAnswer(
+                billedTo: billedTo, cost: cost, generationID: generationID
+            )
+            if depleted {
                 await sendBalanceEmptyNotice(chatKey: chatKey)
             }
             if let limit = lastPremiumCall {
@@ -342,7 +346,8 @@ extension GenerationCoordinator {
 
         do {
             try Task.checkCancellation()
-            let stream = gateway.stream(request)
+            // Silence, not slowness, is what kills a turn (§4.5).
+            let stream = gateway.stream(request).withIdleTimeout()
 
             for try await event in stream {
                 if Task.isCancelled {
@@ -461,8 +466,11 @@ extension GenerationCoordinator {
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             await self.refundPremium(premiumTicket)
         } else if !fullAccumulator.isEmpty {
-            let walletEmptied = await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage, billedTo: billedTo)
-            if walletEmptied {
+            let cost = await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage)
+            let depleted = await self.chargeForAnswer(
+                billedTo: billedTo, cost: cost, generationID: generationID
+            )
+            if depleted {
                 await self.sendBalanceEmptyNotice(chatKey: chatKey)
             }
             if let limit = lastPremiumCall {

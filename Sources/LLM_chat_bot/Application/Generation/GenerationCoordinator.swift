@@ -39,7 +39,7 @@ struct GenerationOrigin: Sendable {
     }
 }
 
-final class GenerationCoordinator: @unchecked Sendable {
+final class GenerationCoordinator: Sendable {
     let telegram: TelegramGatewayPort
     let state: ChatContextStore
     let sessionRegistry: SessionRegistry
@@ -48,7 +48,12 @@ final class GenerationCoordinator: @unchecked Sendable {
     let logger: LoggerPort
     private let botUsername: String
     private let generationLimiter: GenerationLimiter
-    private let metrics: RuntimeMetrics?
+    let metrics: RuntimeMetrics?
+    /// Charging for an answer moves money, so it goes where all money goes.
+    let ledger: LedgerPort
+    /// A spending ceiling that stops paid models is something the owner has to
+    /// hear about, not discover in the logs (§6.1).
+    let alerter: OwnerAlerter?
 
     init(
         telegram: TelegramGatewayPort,
@@ -59,6 +64,8 @@ final class GenerationCoordinator: @unchecked Sendable {
         logger: LoggerPort,
         botUsername: String,
         generationLimiter: GenerationLimiter,
+        ledger: LedgerPort,
+        alerter: OwnerAlerter? = nil,
         metrics: RuntimeMetrics? = nil
     ) {
         self.telegram = telegram
@@ -69,6 +76,8 @@ final class GenerationCoordinator: @unchecked Sendable {
         self.logger = logger
         self.botUsername = botUsername
         self.generationLimiter = generationLimiter
+        self.ledger = ledger
+        self.alerter = alerter
         self.metrics = metrics
     }
 

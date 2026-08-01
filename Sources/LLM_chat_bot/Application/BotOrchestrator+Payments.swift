@@ -11,6 +11,18 @@ import Foundation
 extension BotOrchestrator {
     func handlePreCheckoutQuery(_ query: TelegramPreCheckoutQuery) async {
         await state.identifyUser(userID: query.from.id, username: query.from.username, firstName: query.from.first_name)
+        // The last gate before money actually moves (§4.3). Telegram shows this
+        // text to the buyer and charges nothing — the one place in the whole
+        // product where refusing a sale is strictly better than making it.
+        let durability = flags.durability.value
+        guard durability.acceptsPayments else {
+            await metrics.increment(MetricName.paymentsRefusedVolatile)
+            logger.error("refusing a purchase: state is \(durability.statusLine)")
+            try? await telegram.answerPreCheckoutQuery(
+                queryID: query.id, ok: false, errorMessage: durability.purchaseRefusalMessage
+            )
+            return
+        }
         do {
             let valid: Bool
             let payload = query.invoice_payload
@@ -74,8 +86,8 @@ extension BotOrchestrator {
         // The payer is identified by userID, so a missing @username is no
         // longer a dead end — the money lands on their account either way.
         guard let payer = message.from else {
-            await state.markPaymentProcessed(chargeID: chargeID)
-            await persistence?.flushNow()
+            // Nobody to credit. Telegram will not tell us who paid on a retry
+            // either, so there is nothing to wait for.
             logger.error("successful_payment without a sender (charge \(chargeID))")
             return
         }
@@ -102,13 +114,23 @@ extension BotOrchestrator {
             payerUserID: payer.id,
             chatID: message.chat.id,
             purpose: purpose,
-            idempotencyKey: chargeID
+            idempotencyKey: chargeID,
+            // Stars settle inside Telegram and carry no provider charge id; a
+            // card goes through an acquirer, which is what fills that field in.
+            method: payment.provider_payment_charge_id.isEmpty ? .stars : .card
         ))
 
         let activation: SubscriptionActivation
         let claim: ChatContextStore.ChatClaimOutcome
         switch outcome {
         case .duplicate:
+            return
+
+        case .failed:
+            // Telegram redelivers `successful_payment` for 24 hours, and the
+            // payment was never claimed, so the retry applies it. Saying
+            // nothing is better than confirming a purchase that did not stick.
+            logger.error("payment \(chargeID) could not be applied — awaiting Telegram's redelivery")
             return
 
         case .credit(let cents, let wallet):
@@ -118,7 +140,7 @@ extension BotOrchestrator {
                 replyTo: nil,
                 text: String(
                     format: "✅ <b>Баланс пополнен на %@.</b>\n\nТекущий баланс: <b>$%.2f</b>. Теперь вам доступны любые модели: с баланса списывается стоимость каждого ответа, обычно доли цента. Сколько списалось и сколько осталось — видно под самим ответом (включите показ: /show_cost).",
-                    CreditPack.label(cents: cents), wallet.balanceUsd
+                    CreditPack.label(cents: cents), wallet.balance.usdValue
                 ),
                 replyMarkup: nil
             ))

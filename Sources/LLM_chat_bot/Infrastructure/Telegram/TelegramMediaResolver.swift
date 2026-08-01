@@ -11,7 +11,7 @@ enum TelegramMediaResolverError: LocalizedError {
     }
 }
 
-final class TelegramMediaResolver: MediaResolverPort, @unchecked Sendable {
+final class TelegramMediaResolver: MediaResolverPort, Sendable {
     private let telegram: TelegramGatewayPort
 
     init(telegram: TelegramGatewayPort) {

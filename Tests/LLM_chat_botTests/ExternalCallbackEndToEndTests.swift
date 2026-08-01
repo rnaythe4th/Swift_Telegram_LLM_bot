@@ -44,6 +44,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         let fulfillment = PaymentFulfillmentService(
             state: store,
             telegram: gateway,
+            ledger: InMemoryLedger(),
             persistence: nil,
             metrics: RuntimeMetrics(),
             logger: SilentLogger()
@@ -146,10 +147,10 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
             parameters: notification(orderID: checkout.order.id, amount: "475.00", paymentID: "333")
         )
         let wallet = await store.balance(username: store.userKey(userID: payerID))
-        XCTAssertEqual(wallet?.balanceUsd ?? 0, 5.0, accuracy: 0.0001)
+        XCTAssertEqual(wallet?.balance, .usd(5))
         // Paid with real money: this is what makes a lapsed wallet worth an
         // offer later (§7 «Возврат по балансу»).
-        XCTAssertEqual(wallet?.toppedUpUsd ?? 0, 5.0, accuracy: 0.0001)
+        XCTAssertEqual(wallet?.toppedUp, .usd(5))
     }
 
     /// An unsigned POST is the whole threat model of a public endpoint.

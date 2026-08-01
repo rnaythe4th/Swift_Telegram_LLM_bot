@@ -1,6 +1,6 @@
 import Foundation
 
-final class BotCallbackHandler: @unchecked Sendable {
+final class BotCallbackHandler: Sendable {
     private let telegram: TelegramGatewayPort
     private let state: ChatContextStore
     private let sessionRegistry: SessionRegistry

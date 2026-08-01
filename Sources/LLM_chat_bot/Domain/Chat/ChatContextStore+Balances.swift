@@ -22,16 +22,18 @@ extension ChatContextStore {
     }
 
     /// Multiplier applied to real provider cost for everything customers see
-    /// and pay: 30% markup → 1.3.
+    /// and pay: 30% markup → 1.3. Display only — money is marked up with
+    /// `Money.multiplied(byPercent:)`, which is integral.
     func priceMultiplier() -> Double {
         1.0 + Double(markupPercentValue) / 100.0
     }
 
-    /// Customer-facing total for a usage record. Rows written before markup
-    /// existed carry no billed value — approximate with the current rate.
-    func billedCost(of usage: CumulativeUsage) -> Double {
-        if usage.totalBilledCost > 0 { return usage.totalBilledCost }
-        return usage.totalCost * priceMultiplier()
+    /// Customer-facing total for a usage record. Rows that predate markup
+    /// carry no billed value — approximate with the current rate.
+    func billedCost(of usage: CumulativeUsage) -> Money {
+        usage.totalBilledCost.isPositive
+            ? usage.totalBilledCost
+            : usage.totalCost.multiplied(byPercent: markupPercentValue)
     }
 
     func balance(username: String?) -> UserBalance? {
@@ -40,33 +42,39 @@ extension ChatContextStore {
     }
 
     func hasPositiveBalance(username: String?) -> Bool {
-        (balance(username: username)?.balanceUsd ?? 0) > 0
+        balance(username: username)?.balance.isPositive ?? false
     }
 
     /// Key of the wallet that should pay for this person's answers, or nil when
     /// there is nothing to charge. Resolved by userID first, so a person with
     /// no @username still spends the balance they topped up.
+    ///
+    /// "Has money" means at least `minimumBillableBalance`, not "more than
+    /// zero": sub-cent dust cannot pay for an answer, and billing against it
+    /// means the answer costs more than the wallet held (§4.4).
     func billingKey(username: String?, userID: Int?) -> String? {
         userKeys(username: username, userID: userID)
-            .first { (userBalances[$0]?.balanceUsd ?? 0) > 0 }
+            .first { (userBalances[$0]?.balance ?? .zero) >= Self.minimumBillableBalance }
     }
 
     /// Adds (or subtracts, for corrections) to the user's balance. Creates the
     /// wallet on first credit.
     @discardableResult
-    func creditBalance(username: String, amountUsd: Double) -> UserBalance {
-        creditBalance(key: userKeyOrRaw(username), amountUsd: amountUsd)
+    func creditBalance(username: String, amount: Money) -> UserBalance {
+        creditBalance(key: userKeyOrRaw(username), amount: amount)
     }
 
     /// Same, for a caller that already holds the person's key — the referral
     /// payout, which addresses wallets by userID and never by @username.
     @discardableResult
-    func creditBalance(key: String, amountUsd: Double) -> UserBalance {
+    func creditBalance(key: String, amount: Money) -> UserBalance {
         var wallet = userBalances[key] ?? .empty
-        wallet.balanceUsd += amountUsd
+        // A correction may be negative; a wallet may not. The same floor is a
+        // `check` constraint on the column (§2.1).
+        wallet.balance = (wallet.balance + amount).clampedToZero
         wallet.updatedAt = Date()
         userBalances[key] = wallet
-        dirtyConfigs.insert(.balances)
+        markWalletDirty(key)
         return wallet
     }
 
@@ -76,17 +84,17 @@ extension ChatContextStore {
     /// what tells the super-admin who is a customer (§7 «Возврат по балансу»).
     /// Topping up also reopens the lapse cycle: coming back earns a new notice.
     @discardableResult
-    func creditPurchasedBalance(username: String, amountUsd: Double) -> UserBalance {
-        creditPurchasedBalance(key: userKeyOrRaw(username), amountUsd: amountUsd)
+    func creditPurchasedBalance(username: String, amount: Money) -> UserBalance {
+        creditPurchasedBalance(key: userKeyOrRaw(username), amount: amount)
     }
 
     @discardableResult
-    func creditPurchasedBalance(key: String, amountUsd: Double) -> UserBalance {
-        var wallet = creditBalance(key: key, amountUsd: amountUsd)
-        wallet.toppedUpUsd += amountUsd
+    func creditPurchasedBalance(key: String, amount: Money) -> UserBalance {
+        var wallet = creditBalance(key: key, amount: amount)
+        wallet.toppedUp = wallet.toppedUp + amount
         wallet.lapsedNoticeAt = nil
         userBalances[key] = wallet
-        dirtyConfigs.insert(.balances)
+        markWalletDirty(key)
         return wallet
     }
 
@@ -106,12 +114,12 @@ extension ChatContextStore {
         var targets: [WalletWinbackTarget] = []
 
         for (key, wallet) in userBalances {
-            guard wallet.toppedUpUsd > 0, wallet.lapsedNoticeAt == nil else { continue }
+            guard wallet.toppedUp.isPositive, wallet.lapsedNoticeAt == nil else { continue }
             // The bot's owners are not sold the bot's own product — same rule
             // the subscription sweep follows.
             guard !superAdminUsernames.contains(key) else { continue }
             // Still has money, or is covered by a subscription: not lapsed.
-            guard wallet.balanceUsd <= Self.lapsedWalletThresholdUsd else { continue }
+            guard wallet.balance <= Self.lapsedWalletThreshold else { continue }
             if let tenant = tenants[key] {
                 if tenant.isActive || tenant.remindersOptOut { continue }
             }
@@ -126,15 +134,21 @@ extension ChatContextStore {
                 key: key,
                 label: displayLabel(forKey: key),
                 privateChatID: chatID,
-                toppedUpUsd: wallet.toppedUpUsd,
+                toppedUp: wallet.toppedUp,
                 idleDays: max(1, Int(now.timeIntervalSince(lastSeen) / 86_400))
             ))
         }
-        return targets.sorted { $0.toppedUpUsd > $1.toppedUpUsd }
+        return targets.sorted { $0.toppedUp > $1.toppedUp }
     }
 
     /// A wallet is "empty enough" below this: sub-cent dust is not money.
-    static let lapsedWalletThresholdUsd = 0.01
+    static let lapsedWalletThreshold = Money.cents(1)
+
+    /// Below this a wallet is not billed at all. Dust is not "has money": one
+    /// expensive answer eats the remainder whole and the person gets an answer
+    /// worth more than their balance. The difference is a gift of fractions of
+    /// a cent — but a bounded, counted one (`MetricName.billingShortfallNanos`).
+    static let minimumBillableBalance = Money.cents(2)
 
     /// Stamps a delivered lapsed-wallet offer, so it goes out once per lapse.
     /// Only called after a successful send — a failed one is retried next sweep.
@@ -143,7 +157,7 @@ extension ChatContextStore {
         guard var wallet = userBalances[key] else { return false }
         wallet.lapsedNoticeAt = now
         userBalances[key] = wallet
-        dirtyConfigs.insert(.balances)
+        markWalletDirty(key)
         return true
     }
 
@@ -152,7 +166,7 @@ extension ChatContextStore {
     func lapsedWalletStats(now: Date = Date()) -> (due: Int, notified: Int, payers: Int) {
         var notified = 0
         var payers = 0
-        for wallet in userBalances.values where wallet.toppedUpUsd > 0 {
+        for wallet in userBalances.values where wallet.toppedUp.isPositive {
             payers += 1
             if wallet.lapsedNoticeAt != nil { notified += 1 }
         }
@@ -160,21 +174,31 @@ extension ChatContextStore {
     }
 
     @discardableResult
-    func setBalanceAmount(username: String, amountUsd: Double) -> UserBalance {
+    func setBalanceAmount(username: String, amount: Money) -> UserBalance {
         let u = userKeyOrRaw(username)
         var wallet = userBalances[u] ?? .empty
-        wallet.balanceUsd = amountUsd
+        wallet.balance = amount.clampedToZero
         wallet.updatedAt = Date()
         userBalances[u] = wallet
-        dirtyConfigs.insert(.balances)
+        markWalletDirty(u)
         return wallet
     }
 
     @discardableResult
     func removeBalance(username: String) -> Bool {
-        let removed = userBalances.removeValue(forKey: userKeyOrRaw(username)) != nil
-        if removed { dirtyConfigs.insert(.balances) }
-        return removed
+        let key = userKeyOrRaw(username)
+        guard userBalances.removeValue(forKey: key) != nil else { return false }
+        dirtyWallets.remove(key)
+        deletedWallets.insert(key)
+        return true
+    }
+
+    /// One wallet changed in the cache. The row itself is written through the
+    /// ledger transaction; this set is what carries a change that happened
+    /// outside one (a rename adopting a wallet) to storage.
+    func markWalletDirty(_ key: String) {
+        dirtyWallets.insert(key)
+        deletedWallets.remove(key)
     }
 
     func allBalances() -> [(key: String, label: String, wallet: UserBalance)] {
@@ -183,31 +207,12 @@ extension ChatContextStore {
             .sorted { $0.label < $1.label }
     }
 
-    /// What the footer will show as the post-charge balance. The actual charge
-    /// happens in `appendAssistant`; formula is identical.
-    func projectedBalanceAfterCharge(username: String, realCost: Double) -> Double {
-        let current = userBalances[userKeyOrRaw(username)]?.balanceUsd ?? 0
-        return current - realCost * priceMultiplier()
+    /// What the footer will show as the post-charge balance. The real charge is
+    /// a ledger transaction (`LedgerTransaction.debit`); the formula here is the
+    /// same one, floor included, so the projection and the deduction agree.
+    func projectedBalanceAfterCharge(username: String, realCost: Money) -> Money {
+        let current = userBalances[userKeyOrRaw(username)]?.balance ?? .zero
+        return (current - realCost.multiplied(byPercent: markupPercentValue)).clampedToZero
     }
 
-    /// Returns true when this charge is the one that emptied the wallet — the
-    /// caller turns that into a single "top up" pitch at the pain point
-    /// (roadmap step 5). Subsequent turns bill nobody (`billingKey` requires a
-    /// positive balance), so this can only fire once per top-up cycle.
-    @discardableResult
-    func chargeBalance(username: String, billedUsd: Double, realUsd: Double) -> Bool {
-        guard billedUsd > 0 else { return false }
-        let u = userKeyOrRaw(username)
-        var wallet = userBalances[u] ?? .empty
-        let wasPositive = wallet.balanceUsd > 0
-        wallet.balanceUsd -= billedUsd
-        wallet.spentBilledUsd += billedUsd
-        wallet.spentRealUsd += realUsd
-        wallet.updatedAt = Date()
-        userBalances[u] = wallet
-        dirtyConfigs.insert(.balances)
-        let depleted = wasPositive && wallet.balanceUsd <= 0
-        if depleted { bumpFunnel(.balanceEmpty) }
-        return depleted
-    }
 }
