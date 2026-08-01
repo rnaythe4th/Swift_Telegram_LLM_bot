@@ -15,7 +15,7 @@ final class StorePersistenceTests: XCTestCase {
 
         let batch = await store.drainDirtyBatch()
         XCTAssertEqual(batch.contexts.map(\.key), [chat])
-        XCTAssertTrue(batch.configs.contains { if case .markup = $0 { return true } else { return false } })
+        XCTAssertTrue(batch.configs.contains { $0.name == .markup })
 
         let second = await store.drainDirtyBatch()
         XCTAssertTrue(second.isEmpty, "a drained change must not be written twice")
@@ -38,10 +38,7 @@ final class StorePersistenceTests: XCTestCase {
         XCTAssertFalse(batch.tenants.isEmpty, "tenants")
         XCTAssertFalse(batch.chats.isEmpty, "chat ownership")
         XCTAssertFalse(wallets.changed.isEmpty, "wallets")
-        XCTAssertTrue(
-            batch.configs.contains { if case .dailyPremiumLimit = $0 { return true } else { return false } },
-            "daily premium limit"
-        )
+        XCTAssertTrue(batch.configs.contains { $0.name == .dailyPremiumLimit }, "daily premium limit")
     }
 
     /// The daily premium counter is persisted on purpose: an in-memory one
@@ -61,11 +58,11 @@ final class StorePersistenceTests: XCTestCase {
         var older = PersistenceBatch()
         older.tenants = [TenantRow(key: UserKey.identified(1), snapshot: makeTenantSnapshot(model: "old/model"))]
         older.chats = [ChatRow(chatID: -1, meta: nil, ownerKey: UserKey.identified(1))]
-        older.configs = [.markup(10)]
+        older.configs = [StoredConfig(Config.markup, 10)]
         var newer = PersistenceBatch()
         newer.tenants = [TenantRow(key: UserKey.identified(1), snapshot: makeTenantSnapshot(model: "new/model"))]
         newer.deletedChats = [-1]
-        newer.configs = [.markup(20)]
+        newer.configs = [StoredConfig(Config.markup, 20)]
 
         let merged = PersistenceBatch.merged(older: older, newer: newer)
         XCTAssertEqual(merged.tenants.count, 1)
@@ -73,11 +70,8 @@ final class StorePersistenceTests: XCTestCase {
         XCTAssertTrue(merged.chats.isEmpty)
         XCTAssertEqual(merged.deletedChats, [-1])
         XCTAssertEqual(merged.configs.count, 1)
-        if case .markup(let percent) = merged.configs[0] {
-            XCTAssertEqual(percent, 20)
-        } else {
-            XCTFail("expected the newer markup")
-        }
+        XCTAssertEqual(merged.configs.first?.name, .markup)
+        XCTAssertEqual(try JSONEncoder().encode(merged.configs[0]), try JSONEncoder().encode(StoredConfig(Config.markup, 20)))
     }
 
     /// A row written and then deleted must not come back, and vice versa.
@@ -111,7 +105,10 @@ final class StorePersistenceTests: XCTestCase {
         stored.wallets = [UserKey.identified(970): UserBalance(
             balance: .usd(3), spentBilled: .usd(1), spentReal: .usd(0.5), toppedUp: .usd(3)
         )]
-        stored.configs = PersistedGlobalConfigs(starsPrice: 777, markup: 42)
+        var configs = ConfigDocuments()
+        configs.set(Config.starsPrice, 777)
+        configs.set(Config.markup, 42)
+        stored.configs = configs
         await store.restore(from: stored)
 
         let help = await store.fetchHelp(chatKey: ChatKey(chatID: -970, threadID: 0))

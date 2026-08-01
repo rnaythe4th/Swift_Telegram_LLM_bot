@@ -1,43 +1,5 @@
 import Foundation
 
-/// Keys of singleton configuration values stored one-per-row in `bot_config`.
-///
-/// What is left here is what a `bot_config` row is *for*: a document that is
-/// always read and written whole and that nobody ever searches inside. Anything
-/// that grows with the number of users — the directory, wallets, chat metadata,
-/// referral records, traffic attributions, processed payments — is a table now
-/// (§2.1), because a single JSON row rewritten on every new person is a
-/// scaling limit dressed up as a config value.
-enum GlobalConfigKey: String, CaseIterable, Sendable {
-    case starsPrice = "stars_price"
-    case starsPerUsd = "stars_per_usd"
-    case freeModels = "free_models"
-    case crypto = "crypto"
-    case card = "card"
-    case superAdmins = "super_admins"
-    case pollingOffset = "polling_offset"
-    case ads = "ads"
-    case markup = "markup"
-    case funnel = "funnel"
-    case dailyPremiumLimit = "daily_premium_limit"
-    case selfPromo = "self_promo"
-    case modes = "modes"
-    case reminders = "reminders"
-    case onboarding = "onboarding"
-    case referrals = "referrals"
-    /// Program-wide referral counters (payout total, refusal reasons). The
-    /// records and per-inviter tallies behind them are tables.
-    case referralTotals = "referral_totals"
-    /// Campaign-level `src_` aggregates; the per-person attributions are a table.
-    case trafficTotals = "traffic_totals"
-    /// Hosted checkout: merchant credentials and prices. The open orders are a
-    /// table — an order is a payment in flight, not a setting.
-    case externalPayments = "external_payments"
-    /// Spending ceilings (§4.1): the only thing standing between a subscriber
-    /// with a heavy group and an unbounded provider bill.
-    case spendPolicy = "spend_policy"
-}
-
 // MARK: - Rows
 
 struct ChatContextRow: Sendable {
@@ -111,69 +73,6 @@ struct ExternalOrderRow: Sendable {
     let order: ExternalPaymentOrder
 }
 
-// MARK: - Config values
-
-enum GlobalConfigValue: Sendable {
-    case starsPrice(Int?)
-    /// Stars charged per $1 for credit-pack purchases.
-    case starsPerUsd(Int)
-    case freeModels([String])
-    case crypto(CryptoConfigSnapshot)
-    case card(CardPaymentConfig)
-    case superAdmins([UserKey])
-    case pollingOffset(Int)
-    case ads([AdCampaign])
-    /// Markup percent applied to provider prices for customers.
-    case markup(Int)
-    /// Conversion-funnel event counters, keyed by FunnelEvent.rawValue.
-    case funnel([String: Int])
-    /// Daily free-premium "taste" allowance per free-tier chat/user.
-    case dailyPremiumLimit(Int)
-    /// Built-in self-promo filling the free-tier ad slot.
-    case selfPromo(SelfPromoConfig)
-    /// Reference modes: the settings bundles a user picks in one tap.
-    case modes(ModePresetConfig)
-    /// Renewal-reminder / winback schedule.
-    case reminders(SubscriptionReminderConfig)
-    /// Greeting example prompts + their tap counters.
-    case onboarding(OnboardingConfig)
-    /// Two-sided referral economics.
-    case referrals(ReferralConfig)
-    /// Program-wide referral counters.
-    case referralTotals(ReferralTotals)
-    /// Campaign-level `src_` aggregates.
-    case trafficTotals(TrafficSourceTotals)
-    /// Third-party hosted checkout: credentials and prices.
-    case externalPayments(ExternalPaymentConfig)
-    /// Provider spending ceilings.
-    case spendPolicy(SpendPolicy)
-
-    var key: GlobalConfigKey {
-        switch self {
-        case .starsPrice: return .starsPrice
-        case .starsPerUsd: return .starsPerUsd
-        case .freeModels: return .freeModels
-        case .crypto: return .crypto
-        case .card: return .card
-        case .superAdmins: return .superAdmins
-        case .pollingOffset: return .pollingOffset
-        case .ads: return .ads
-        case .markup: return .markup
-        case .funnel: return .funnel
-        case .dailyPremiumLimit: return .dailyPremiumLimit
-        case .selfPromo: return .selfPromo
-        case .modes: return .modes
-        case .reminders: return .reminders
-        case .onboarding: return .onboarding
-        case .referrals: return .referrals
-        case .referralTotals: return .referralTotals
-        case .trafficTotals: return .trafficTotals
-        case .externalPayments: return .externalPayments
-        case .spendPolicy: return .spendPolicy
-        }
-    }
-}
-
 /// One incremental write: only entities that changed since the previous drain.
 /// A flush stays O(changed), not O(all chats), no matter how many chats the bot
 /// serves.
@@ -205,7 +104,7 @@ struct PersistenceBatch: Sendable {
     var deletedCryptoInvoices: [String] = []
     var externalOrders: [ExternalOrderRow] = []
     var deletedExternalOrders: [String] = []
-    var configs: [GlobalConfigValue] = []
+    var configs: [StoredConfig] = []
 
     var isEmpty: Bool { entityCount == 0 }
 
@@ -268,10 +167,10 @@ struct PersistenceBatch: Sendable {
             newer.externalOrders, newer.deletedExternalOrders, by: \.order.id
         )
 
-        var configsByKey: [GlobalConfigKey: GlobalConfigValue] = [:]
-        for value in older.configs { configsByKey[value.key] = value }
-        for value in newer.configs { configsByKey[value.key] = value }
-        result.configs = Array(configsByKey.values)
+        var configsByName: [ConfigName: StoredConfig] = [:]
+        for value in older.configs { configsByName[value.name] = value }
+        for value in newer.configs { configsByName[value.name] = value }
+        result.configs = Array(configsByName.values)
         return result
     }
 
@@ -315,29 +214,6 @@ struct PersistenceBatch: Sendable {
 
 // MARK: - Load
 
-struct PersistedGlobalConfigs: Sendable {
-    var starsPrice: Int?
-    var starsPerUsd: Int?
-    var freeModelIDs: [String]?
-    var crypto: CryptoConfigSnapshot?
-    var card: CardPaymentConfig?
-    var superAdmins: [UserKey]?
-    var pollingOffset: Int?
-    var ads: [AdCampaign]?
-    var markup: Int?
-    var funnel: [String: Int]?
-    var dailyPremiumLimit: Int?
-    var selfPromo: SelfPromoConfig?
-    var modes: ModePresetConfig?
-    var reminders: SubscriptionReminderConfig?
-    var onboarding: OnboardingConfig?
-    var referrals: ReferralConfig?
-    var referralTotals: ReferralTotals?
-    var trafficTotals: TrafficSourceTotals?
-    var externalPayments: ExternalPaymentConfig?
-    var spendPolicy: SpendPolicy?
-}
-
 struct PersistedBotState: Sendable {
     var users: [UserRow] = []
     var contexts: [ChatContextRow] = []
@@ -354,7 +230,7 @@ struct PersistedBotState: Sendable {
     /// Wallets come from the money tables (`LedgerPort`), but they are restored
     /// into the same store, so the boot path carries them together.
     var wallets: [UserKey: UserBalance] = [:]
-    var configs: PersistedGlobalConfigs = PersistedGlobalConfigs()
+    var configs = ConfigDocuments()
 }
 
 protocol StatePersistencePort: Sendable {

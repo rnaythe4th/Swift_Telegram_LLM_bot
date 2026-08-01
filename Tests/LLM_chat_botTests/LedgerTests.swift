@@ -185,22 +185,51 @@ final class ConfigRoundTripTests: XCTestCase {
         await store.markAllDirty()
         let batch = await store.drainDirtyBatch()
 
-        let exported = Set(batch.configs.map(\.key))
-        let missing = Set(GlobalConfigKey.allCases).subtracting(exported)
-        XCTAssertTrue(missing.isEmpty, "config keys never exported: \(missing.map(\.rawValue).sorted())")
+        let exported = Set(batch.configs.map(\.name))
+        let missing = Set(ConfigName.allCases).subtracting(exported)
+        XCTAssertTrue(missing.isEmpty, "config rows never exported: \(missing.map(\.rawValue).sorted())")
 
         // And each one has to survive being encoded the way the row encodes it.
         let encoder = JSONEncoder()
         for value in batch.configs {
-            XCTAssertNoThrow(
-                try encoder.encode(ConfigDocumentProbe(value: value)),
-                "config \(value.key.rawValue) cannot be written"
-            )
+            XCTAssertNoThrow(try encoder.encode(value), "config \(value.name.rawValue) cannot be written")
         }
     }
 
-    /// Mirrors the envelope the adapter wraps every config row in.
-    private struct ConfigDocumentProbe: Encodable {
-        let value: GlobalConfigValue
+    /// The other half of the round trip, and the one that used to be missing:
+    /// a row that is written but never *read back* silently reverts to its
+    /// default on every restart, and nothing else in the suite can see it.
+    /// The registry makes the load path a loop over declarations, so this test
+    /// self-updates too.
+    func testEveryDeclaredKeyIsLoadedBack() async throws {
+        let store = Fixtures.makeStore()
+        await store.markAllDirty()
+        let batch = await store.drainDirtyBatch()
+
+        let declared = Set(Config.all.map(\.name))
+        XCTAssertEqual(declared, Set(ConfigName.allCases), "a declared row and an exported row must be the same set")
+
+        let encoder = JSONEncoder()
+        var rows: [ConfigName: Data] = [:]
+        for value in batch.configs { rows[value.name] = try encoder.encode(value) }
+
+        var failures: [String] = []
+        let documents = ConfigDocuments(rows: rows, keys: Config.all) { name, error in
+            failures.append("\(name.rawValue): \(error)")
+        }
+        XCTAssertTrue(failures.isEmpty, "config rows that do not decode: \(failures)")
+
+        // A value the store actually changed has to come back changed, not as
+        // the default — the exact failure mode a missing load line produces.
+        await store.setMarkupPercent(42)
+        let markupBatch = await store.drainDirtyBatch()
+        let markupRow = try XCTUnwrap(markupBatch.configs.first { $0.name == .markup })
+        let reloaded = ConfigDocuments(
+            rows: [.markup: try encoder.encode(markupRow)],
+            keys: Config.all,
+            onError: { name, error in XCTFail("\(name.rawValue): \(error)") }
+        )
+        XCTAssertEqual(reloaded[Config.markup], 42)
+        XCTAssertEqual(documents[Config.starsPerUsd], 77, "an untouched row reads as its default")
     }
 }

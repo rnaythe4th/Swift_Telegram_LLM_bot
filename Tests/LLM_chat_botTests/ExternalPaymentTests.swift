@@ -318,14 +318,11 @@ final class ExternalPaymentStoreTests: XCTestCase {
         await store.upsertExternalOrder(makeOrder(id: "a1", purpose: .credit(cents: 500), method: "44"))
 
         let batch = await store.drainDirtyBatch()
-        let stored: ExternalPaymentConfig? = batch.configs.compactMap {
-            if case .externalPayments(let value) = $0 { return value }
-            return nil
-        }.first
-        XCTAssertNotNil(stored)
+        XCTAssertTrue(batch.configs.contains { $0.name == .externalPayments })
         XCTAssertEqual(batch.externalOrders.count, 1, "an open order is a row of its own")
 
         // Round-trip through JSON, exactly as the config row does.
+        let stored = await store.externalPaymentConfig()
         let data = try! JSONEncoder().encode(stored)
         let decoded = try! JSONDecoder().decode(ExternalPaymentConfig.self, from: data)
 

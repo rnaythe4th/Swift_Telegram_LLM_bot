@@ -62,7 +62,7 @@ actor ChatContextStore {
     var deletedCryptoInvoices = Set<String>()
     var dirtyExternalOrders = Set<String>()
     var deletedExternalOrders = Set<String>()
-    var dirtyConfigs = Set<GlobalConfigKey>()
+    var dirtyConfigs = Set<ConfigName>()
     var pollingOffsetValue: Int? = nil
     var chatMetaByID: [Int: ChatMetaInfo] = [:]
     var inviteRecords: [String: InviteRecord] = [:]

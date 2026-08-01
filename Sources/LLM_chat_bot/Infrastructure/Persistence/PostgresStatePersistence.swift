@@ -273,49 +273,23 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
         return result
     }
 
-    private func loadConfigs() async throws -> PersistedGlobalConfigs {
-        var documents: [String: Data] = [:]
+    /// Every declared row, decoded into its own type. The loop is over the
+    /// registry rather than a hand-written list: a key that exists is a key
+    /// that loads, which is what stops a setting from silently reverting to its
+    /// default on every restart (§5.4).
+    private func loadConfigs() async throws -> ConfigDocuments {
+        var rows: [ConfigName: Data] = [:]
         for entry in try await map("select key, data::text as json from bot_config", {
             (key: try $0["key"].decode(String.self), json: try $0["json"].decode(String.self))
         }) {
-            documents[entry.key] = Data(entry.json.utf8)
+            guard let name = ConfigName(rawValue: entry.key) else { continue }
+            rows[name] = Data(entry.json.utf8)
         }
-
-        let decoder = JSONDecoder()
-        func value<T: Decodable>(_ key: GlobalConfigKey, as type: T.Type) -> T? {
-            guard let data = documents[key.rawValue] else { return nil }
-            do {
-                return try decoder.decode(ConfigDocument<T>.self, from: data).value
-            } catch {
-                // One unreadable document must not stop the bot from starting;
-                // it falls back to its default and says which one it was.
-                logger.error("config \(key.rawValue) could not be decoded, using the default: \(error)")
-                return nil
-            }
+        return ConfigDocuments(rows: rows, keys: Config.all) { name, error in
+            // One unreadable document must not stop the bot from starting;
+            // it falls back to its default and says which one it was.
+            logger.error("config \(name.rawValue) could not be decoded, using the default: \(error)")
         }
-
-        var configs = PersistedGlobalConfigs()
-        configs.starsPrice = value(.starsPrice, as: Int.self)
-        configs.starsPerUsd = value(.starsPerUsd, as: Int.self)
-        configs.freeModelIDs = value(.freeModels, as: [String].self)
-        configs.crypto = value(.crypto, as: CryptoConfigSnapshot.self)
-        configs.card = value(.card, as: CardPaymentConfig.self)
-        configs.superAdmins = value(.superAdmins, as: [UserKey].self)
-        configs.pollingOffset = value(.pollingOffset, as: Int.self)
-        configs.ads = value(.ads, as: [AdCampaign].self)
-        configs.markup = value(.markup, as: Int.self)
-        configs.funnel = value(.funnel, as: [String: Int].self)
-        configs.dailyPremiumLimit = value(.dailyPremiumLimit, as: Int.self)
-        configs.selfPromo = value(.selfPromo, as: SelfPromoConfig.self)
-        configs.modes = value(.modes, as: ModePresetConfig.self)
-        configs.reminders = value(.reminders, as: SubscriptionReminderConfig.self)
-        configs.onboarding = value(.onboarding, as: OnboardingConfig.self)
-        configs.referrals = value(.referrals, as: ReferralConfig.self)
-        configs.referralTotals = value(.referralTotals, as: ReferralTotals.self)
-        configs.trafficTotals = value(.trafficTotals, as: TrafficSourceTotals.self)
-        configs.externalPayments = value(.externalPayments, as: ExternalPaymentConfig.self)
-        configs.spendPolicy = value(.spendPolicy, as: SpendPolicy.self)
-        return configs
     }
 
     // MARK: - Apply
@@ -573,7 +547,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_config (key, data, updated_at)
-                    values (\(config.key.rawValue), \(ConfigEnvelope(value: config)), now())
+                    values (\(config.name.rawValue), \(ConfigEnvelope(document: config)), now())
                     on conflict (key) do update set data = excluded.data, updated_at = excluded.updated_at
                     """,
                     logger: log
@@ -635,49 +609,13 @@ struct TenantLicencesDocument: Codable, Sendable, PostgresCodable {
     }
 }
 
-/// `bot_config.data` is always a JSON object, whatever the payload type — a
-/// bare `7` is legal `jsonb` but makes the column impossible to read uniformly.
-struct ConfigEnvelope<Value: Encodable & Sendable>: Encodable, Sendable, PostgresEncodable {
-    let value: Value
-}
+/// Carries an already-shaped `{"value": …}` document into the `jsonb` column.
+/// A bare `7` is legal `jsonb` but makes the column impossible to read
+/// uniformly, so the envelope is not optional — `StoredConfig` builds it.
+struct ConfigEnvelope: Encodable, Sendable, PostgresEncodable {
+    let document: StoredConfig
 
-/// The read side. Separate from `ConfigEnvelope` because writing goes through
-/// the `GlobalConfigValue` enum (encode-only) while reading resolves the one
-/// concrete type that knows what the JSON means.
-private struct ConfigDocument<Value: Decodable>: Decodable {
-    let value: Value
-}
-
-/// Serialising a config value is the one place the enum's associated values
-/// reach the database. The switch is exhaustive, so a new key cannot be stored
-/// as nothing — the compiler asks for its line. There is no decode side: a
-/// config row is read into its own concrete type.
-extension GlobalConfigValue: Encodable {
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .starsPrice(let value): try container.encode(value)
-        case .starsPerUsd(let value): try container.encode(value)
-        case .freeModels(let value): try container.encode(value)
-        case .crypto(let value): try container.encode(value)
-        case .card(let value): try container.encode(value)
-        case .superAdmins(let value): try container.encode(value)
-        case .pollingOffset(let value): try container.encode(value)
-        case .ads(let value): try container.encode(value)
-        case .markup(let value): try container.encode(value)
-        case .funnel(let value): try container.encode(value)
-        case .dailyPremiumLimit(let value): try container.encode(value)
-        case .selfPromo(let value): try container.encode(value)
-        case .modes(let value): try container.encode(value)
-        case .reminders(let value): try container.encode(value)
-        case .onboarding(let value): try container.encode(value)
-        case .referrals(let value): try container.encode(value)
-        case .referralTotals(let value): try container.encode(value)
-        case .trafficTotals(let value): try container.encode(value)
-        case .externalPayments(let value): try container.encode(value)
-        case .spendPolicy(let value): try container.encode(value)
-        }
-    }
+    func encode(to encoder: Encoder) throws { try document.encode(to: encoder) }
 }
 
 // MARK: - Column bridges

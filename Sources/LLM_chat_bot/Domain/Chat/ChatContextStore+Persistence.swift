@@ -190,7 +190,7 @@ extension ChatContextStore {
             }
         }
         batch.deletedExternalOrders = Array(deletedExternalOrders)
-        batch.configs = dirtyConfigs.map(currentConfigValue)
+        batch.configs = dirtyConfigs.map(currentConfig(for:))
 
         dirtyUsers.removeAll()
         dirtyContexts.removeAll()
@@ -248,48 +248,53 @@ extension ChatContextStore {
             + dirtyConfigs.count
     }
 
-    private func currentConfigValue(for key: GlobalConfigKey) -> GlobalConfigValue {
-        switch key {
+    /// What a row holds right now. Exhaustive over `ConfigName`, and each
+    /// branch has to name a `ConfigKey` to build its `StoredConfig` — so a new
+    /// row cannot be added without declaring its type and default, and cannot
+    /// be declared without being exported here. That pair of compile errors is
+    /// what replaced the two silent omissions this used to have (§5.4).
+    private func currentConfig(for name: ConfigName) -> StoredConfig {
+        switch name {
         case .starsPrice:
-            return .starsPrice(_starsPrice)
+            return StoredConfig(Config.starsPrice, _starsPrice ?? 0)
         case .starsPerUsd:
-            return .starsPerUsd(_starsPerUsd)
+            return StoredConfig(Config.starsPerUsd, _starsPerUsd)
         case .freeModels:
-            return .freeModels(_freeModelIDs)
+            return StoredConfig(Config.freeModels, _freeModelIDs)
         case .crypto:
-            return .crypto(cryptoConfigSnapshot())
+            return StoredConfig(Config.crypto, cryptoConfigSnapshot())
         case .card:
-            return .card(_cardConfig)
+            return StoredConfig(Config.card, _cardConfig)
         case .superAdmins:
-            return .superAdmins(Array(superAdminKeys.subtracting([rootSuperAdminKey, configuredOwnerKey])).sorted())
+            return StoredConfig(Config.superAdmins, Array(superAdminKeys.subtracting([rootSuperAdminKey, configuredOwnerKey])).sorted())
         case .pollingOffset:
-            return .pollingOffset(pollingOffsetValue ?? 0)
+            return StoredConfig(Config.pollingOffset, pollingOffsetValue ?? 0)
         case .ads:
-            return .ads(adCampaignList)
+            return StoredConfig(Config.ads, adCampaignList)
         case .markup:
-            return .markup(markupPercentValue)
+            return StoredConfig(Config.markup, markupPercentValue)
         case .funnel:
-            return .funnel(funnelCounters)
+            return StoredConfig(Config.funnel, funnelCounters)
         case .dailyPremiumLimit:
-            return .dailyPremiumLimit(dailyPremiumLimitValue)
+            return StoredConfig(Config.dailyPremiumLimit, dailyPremiumLimitValue)
         case .selfPromo:
-            return .selfPromo(selfPromoConfigValue)
+            return StoredConfig(Config.selfPromo, selfPromoConfigValue)
         case .modes:
-            return .modes(modeConfigValue)
+            return StoredConfig(Config.modes, modeConfigValue)
         case .reminders:
-            return .reminders(reminderConfigValue)
+            return StoredConfig(Config.reminders, reminderConfigValue)
         case .onboarding:
-            return .onboarding(onboardingConfigValue)
+            return StoredConfig(Config.onboarding, onboardingConfigValue)
         case .referrals:
-            return .referrals(referralConfigValue)
+            return StoredConfig(Config.referrals, referralConfigValue)
         case .referralTotals:
-            return .referralTotals(referralLedgerValue.totals)
+            return StoredConfig(Config.referralTotals, referralLedgerValue.totals)
         case .trafficTotals:
-            return .trafficTotals(trafficSourceLedgerValue.totals)
+            return StoredConfig(Config.trafficTotals, trafficSourceLedgerValue.totals)
         case .externalPayments:
-            return .externalPayments(_externalPaymentConfig)
+            return StoredConfig(Config.externalPayments, _externalPaymentConfig)
         case .spendPolicy:
-            return .spendPolicy(spendPolicyValue)
+            return StoredConfig(Config.spendPolicy, spendPolicyValue)
         }
     }
 
@@ -308,7 +313,7 @@ extension ChatContextStore {
         dirtyFunnelDays.formUnion(funnelDailyValue.allCells)
         dirtyCryptoInvoices.formUnion(_cryptoInvoices.keys)
         dirtyExternalOrders.formUnion(_externalOrders.keys)
-        dirtyConfigs.formUnion(GlobalConfigKey.allCases)
+        dirtyConfigs.formUnion(ConfigName.allCases)
     }
 
     // MARK: - Polling offset (long-polling mode only)
@@ -353,31 +358,33 @@ extension ChatContextStore {
         }
 
         superAdminKeys = [rootSuperAdminKey]
-        for key in state.configs.superAdmins ?? [] where !key.storageValue.isEmpty {
+        for key in state.configs[Config.superAdmins] where !key.storageValue.isEmpty {
             superAdminKeys.insert(key)
         }
 
         rebuildUserTenantMap()
 
-        _starsPrice = state.configs.starsPrice
-        if let rate = state.configs.starsPerUsd { _starsPerUsd = rate }
-        _freeModelIDs = state.configs.freeModelIDs ?? []
-        restoreCryptoConfig(state.configs.crypto)
+        // Absent and zero mean different things for these two: a stars price
+        // of nil is "not for sale", and no polling cursor is not offset 0.
+        _starsPrice = state.configs.stored(Config.starsPrice).flatMap { $0 > 0 ? $0 : nil }
+        _starsPerUsd = state.configs[Config.starsPerUsd]
+        _freeModelIDs = state.configs[Config.freeModels]
+        restoreCryptoConfig(state.configs.stored(Config.crypto))
         restoreCryptoInvoices(state.cryptoInvoices.map(\.invoice))
-        _cardConfig = state.configs.card ?? .empty
-        pollingOffsetValue = state.configs.pollingOffset
+        _cardConfig = state.configs[Config.card]
+        pollingOffsetValue = state.configs.stored(Config.pollingOffset)
 
         inviteRecords = [:]
         for row in state.invites { inviteRecords[row.token] = row.record }
 
-        adCampaignList = state.configs.ads ?? []
-        markupPercentValue = state.configs.markup ?? 30
+        adCampaignList = state.configs[Config.ads]
+        markupPercentValue = state.configs[Config.markup]
 
         userBalances = state.wallets
 
-        funnelCounters = state.configs.funnel ?? [:]
+        funnelCounters = state.configs[Config.funnel]
         funnelDailyValue = FunnelDailyLog(rows: state.funnelDays.map { (day: $0.day, event: $0.event, count: $0.count) })
-        dailyPremiumLimitValue = state.configs.dailyPremiumLimit ?? 5
+        dailyPremiumLimitValue = state.configs[Config.dailyPremiumLimit]
         // Yesterday's counters are dead weight — a restore is as good a moment
         // to drop them as a write is. They are dropped from storage too, so the
         // table tracks "free chats active today" rather than growing forever.
@@ -391,20 +398,20 @@ extension ChatContextStore {
             }
         }
 
-        selfPromoConfigValue = (state.configs.selfPromo ?? .default).normalized
-        modeConfigValue = (state.configs.modes ?? .default).normalized
-        reminderConfigValue = (state.configs.reminders ?? .default).normalized
-        onboardingConfigValue = (state.configs.onboarding ?? .default).normalized
-        referralConfigValue = (state.configs.referrals ?? .default).normalized
-        spendPolicyValue = state.configs.spendPolicy ?? .default
+        selfPromoConfigValue = state.configs[Config.selfPromo].normalized
+        modeConfigValue = state.configs[Config.modes].normalized
+        reminderConfigValue = state.configs[Config.reminders].normalized
+        onboardingConfigValue = state.configs[Config.onboarding].normalized
+        referralConfigValue = state.configs[Config.referrals].normalized
+        spendPolicyValue = state.configs[Config.spendPolicy]
 
         referralLedgerValue = .empty
-        referralLedgerValue.totals = state.configs.referralTotals ?? .empty
+        referralLedgerValue.totals = state.configs[Config.referralTotals]
         for row in state.referrals { referralLedgerValue.records[String(row.invitedUserID)] = row.record }
         for row in state.referralTallies { referralLedgerValue.tallies[String(row.inviterUserID)] = row.tally }
 
         trafficSourceLedgerValue = .empty
-        trafficSourceLedgerValue.totals = state.configs.trafficTotals ?? .empty
+        trafficSourceLedgerValue.totals = state.configs[Config.trafficTotals]
         for row in state.trafficAttributions {
             trafficSourceLedgerValue.attributions[String(row.userID)] = row.attribution
             var tally = trafficSourceLedgerValue.tallies[row.attribution.tag]
@@ -419,7 +426,7 @@ extension ChatContextStore {
         }
 
         restoreExternalPayments(
-            config: state.configs.externalPayments,
+            config: state.configs.stored(Config.externalPayments),
             orders: state.externalOrders.map(\.order)
         )
     }

@@ -199,14 +199,14 @@ final class StoreModePresetTests: XCTestCase {
     func testModeConfigSurvivesAFlushAndRestore() async {
         let store = await makeStore(modes: [freeMode(), paidMode()], defaultID: "free")
         let batch = await store.drainDirtyBatch()
-        guard let value = batch.configs.first(where: { $0.key == .modes }),
-              case .modes(let saved) = value else {
+        guard batch.configs.contains(where: { $0.name == .modes }) else {
             return XCTFail("mode config was not queued for persistence")
         }
+        let saved = await store.modeConfig()
 
         let fresh = Fixtures.makeStore()
-        var configs = PersistedGlobalConfigs()
-        configs.modes = saved
+        var configs = ConfigDocuments()
+        configs.set(Config.modes, saved)
         await fresh.restore(from: PersistedBotState(configs: configs))
 
         let restored = await fresh.modeConfig()

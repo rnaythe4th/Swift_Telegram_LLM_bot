@@ -150,6 +150,17 @@ struct CryptoConfigSnapshot: Codable, Sendable {
     /// transfer that landed while the bot was down (redeploys are frequent) —
     /// and crypto, unlike Telegram, has no delivery retry to fall back on.
     var explorerCursors: [String: Int]?
+
+    /// Crypto switched off: no price, no addresses, nothing in flight.
+    static let empty = CryptoConfigSnapshot(
+        priceUsdCents: nil,
+        addresses: [:],
+        slotCounters: [:],
+        invoices: [],
+        matchMode: nil,
+        addressPools: nil,
+        explorerCursors: nil
+    )
 }
 
 enum CryptoAmountFormatter {
