@@ -63,6 +63,26 @@ final class DatabaseEndpointTests: XCTestCase {
 
 /// Selling from state that will not survive the process is the one failure
 /// where refusing is strictly better than succeeding (§4.3).
+/// The public origin is glued to a path at three call sites, so it may not
+/// carry a trailing slash. Worth a test because of how quietly it fails: a
+/// pasted `https://host/` gives `setWebhook` the URL `https://host//telegram/
+/// webhook`, which the router does not match — the deploy looks healthy and the
+/// bot never receives another update.
+final class PublicOriginTests: XCTestCase {
+
+    func testATrailingSlashIsStrippedBeforeAPathIsAppended() {
+        XCTAssertEqual(AppConfig.normalizedOrigin("https://bot.example.com/"), "https://bot.example.com")
+        XCTAssertEqual(AppConfig.normalizedOrigin("https://bot.example.com///"), "https://bot.example.com")
+        XCTAssertEqual(AppConfig.normalizedOrigin("  https://bot.example.com  "), "https://bot.example.com")
+        XCTAssertEqual(AppConfig.normalizedOrigin("https://bot.example.com"), "https://bot.example.com")
+    }
+
+    func testTheWebhookURLItProducesIsTheOneTheRouterServes() {
+        let origin = AppConfig.normalizedOrigin("https://bot.example.com/")
+        XCTAssertEqual(origin + WebhookEndpoint.path, "https://bot.example.com/telegram/webhook")
+    }
+}
+
 final class StateDurabilityTests: XCTestCase {
 
     func testOnlyDurableStateMaySell() {

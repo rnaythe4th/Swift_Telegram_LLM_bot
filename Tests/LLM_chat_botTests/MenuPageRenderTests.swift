@@ -216,6 +216,62 @@ final class MenuPageRenderTests: XCTestCase {
         XCTAssertTrue(labels.contains { $0.hasSuffix("⭐") }, "no locked mode is advertised to a free chat")
     }
 
+    /// Telegram caps `callback_data` at 64 bytes and refuses the *whole*
+    /// message when one button is over it, so an oversized payload does not
+    /// disable a button — it stops the page from opening at all. Every button
+    /// on every page has to stay inside the cap, including the ones carrying a
+    /// preset the owner typed in.
+    func testNoButtonCarriesAPayloadTelegramWouldReject() async {
+        // Longer than the 48 characters that fit after `menu:model:gsel:` —
+        // OpenRouter really does list ids this long.
+        let longModelID = "cognitivecomputations/dolphin3.0-r1-mistral-24b:free"
+        XCTAssertGreaterThan(longModelID.utf8.count, 48, "this id is too short to prove anything")
+
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
+        _ = await store.addPreset(category: .model, display: "Длинная", value: longModelID, chatID: chat.chatID)
+        _ = await store.addChatPreset(category: .model, chatKey: chat, display: "Своя длинная", value: longModelID)
+        await store.addFreeModel(longModelID)
+
+        for (page, chatKey, user) in everyRendering() {
+            let markup = await menu.renderPage(page, chatKey: chatKey, invoker: user).markup
+            for button in markup.inline_keyboard.flatMap({ $0 }) {
+                guard let data = button.callback_data else { continue }
+                XCTAssertLessThanOrEqual(
+                    data.utf8.count, MenuRoute.maxCallbackDataBytes,
+                    "\(page): \"\(button.text)\" carries \(data.utf8.count) bytes — Telegram would refuse the whole page"
+                )
+            }
+        }
+    }
+
+    /// …and the button still means what it says: the payload it carries has to
+    /// resolve back to the preset it was drawn for, or the page renders and
+    /// nothing happens when it is tapped.
+    func testAModelButtonResolvesBackToItsPreset() async {
+        let longModelID = "cognitivecomputations/dolphin3.0-r1-mistral-24b:free"
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
+        _ = await store.addPreset(category: .model, display: "Длинная", value: longModelID, chatID: chat.chatID)
+
+        let presets = await store.modelPresets(chatID: chat.chatID)
+        let markup = await menu.renderPage(.model, chatKey: chat, invoker: UserKey.identified(ownerID)).markup
+        let tokens = menuActions(markup)
+            .compactMap { MenuRoute(action: $0) }
+            .filter { $0.command == .model && $0.sub == "gsel" }
+            .compactMap { $0.arg(2) }
+
+        XCTAssertEqual(tokens.count, presets.count, "the picker did not draw one button per preset")
+        for (token, preset) in zip(tokens, presets) {
+            XCTAssertEqual(
+                BotMenuHandler.presetTarget(token, in: presets)?.value, preset.value,
+                "button payload \"\(token)\" does not lead back to \(preset.value)"
+            )
+        }
+
+        // Buttons in messages an older build already sent carry the value
+        // itself; they have to keep working.
+        XCTAssertEqual(BotMenuHandler.presetTarget(longModelID, in: presets)?.value, longModelID)
+    }
+
     /// The purchase page in a group is a price list, not somebody's account.
     func testGroupPurchasePageCarriesNoPersonalNumbers() async {
         await store.creditBalance(key: UserKey.identified(ownerID), amount: .usd(9.87))

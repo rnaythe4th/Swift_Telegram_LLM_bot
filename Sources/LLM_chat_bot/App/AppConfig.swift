@@ -109,8 +109,9 @@ struct AppConfig: Sendable {
 
         // Railway injects RAILWAY_PUBLIC_DOMAIN for services with a domain;
         // an explicit WEBHOOK_PUBLIC_URL always wins.
-        let webhookPublicURL = optionalEnv(.webhookPublicURL)
-            ?? optionalEnv(.railwayPublicDomain).map { "https://\($0)" }
+        let webhookPublicURL = (optionalEnv(.webhookPublicURL)
+            ?? optionalEnv(.railwayPublicDomain).map { "https://\($0)" })
+            .map(normalizedOrigin)
 
         let updateMode = optionalEnv(.updateMode).flatMap { UpdateMode(rawValue: $0.lowercased()) } ?? .auto
 
@@ -137,6 +138,20 @@ struct AppConfig: Sendable {
             telegramAPIBase: optionalEnv(.telegramAPIBase) ?? TelegramHTTPGateway.defaultAPIBase,
             stateEncryptionKey: optionalEnv(.stateEncryptionKey)
         )
+    }
+
+    /// Origin with no trailing slash, because everything that uses it appends a
+    /// path (`…/telegram/webhook`, `…/payments/<vendor>`).
+    ///
+    /// A pasted URL ending in `/` is an easy mistake with an expensive failure:
+    /// `setWebhook` accepts `https://host//telegram/webhook` happily, our router
+    /// does not match that path, and Telegram then delivers into a 404 forever.
+    /// Nothing looks wrong — `/ready` is 200, the log says "webhook registered"
+    /// — the bot simply never hears from anyone again.
+    static func normalizedOrigin(_ raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespaces)
+        while value.hasSuffix("/") { value.removeLast() }
+        return value
     }
 
     private static func env(_ key: EnvironmentKey) throws -> String {

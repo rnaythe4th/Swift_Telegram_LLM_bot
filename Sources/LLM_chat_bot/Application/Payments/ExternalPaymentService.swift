@@ -207,6 +207,17 @@ actor ExternalPaymentService {
             idempotencyKey: "ext:\(vendor.rawValue):\(callback.vendorPaymentID)",
             method: .external
         ))
+        if case .failed = outcome {
+            // Nothing was committed, so the order goes back to `pending` and
+            // the vendor is *not* acknowledged: only an unacknowledged
+            // notification is retried, and only a reopened order lets the retry
+            // get past the duplicate check above. Acknowledging here — which is
+            // what this used to do — ended the retry loop on a purchase that
+            // had bought nothing.
+            await state.reopenExternalOrder(id: paidOrder.id)
+            logger.error("external order \(paidOrder.id) could not be applied — reopened, awaiting the vendor's retry")
+            return .rejected(reason: "not applied")
+        }
         await announce(outcome: outcome, order: paidOrder, methodCode: callback.methodCode)
         return .acknowledged(adapter.acknowledgement)
     }
@@ -223,9 +234,8 @@ actor ExternalPaymentService {
             return
 
         case .failed:
-            // The vendor is not acknowledged into believing this landed: it
-            // retries, and the retry finds an unclaimed payment.
-            logger.error("external order \(order.id) could not be applied — awaiting the vendor's retry")
+            // Handled by the caller, which reopens the order and withholds the
+            // acknowledgement so the vendor delivers again.
             return
 
         case .subscription(let activation, let claim):

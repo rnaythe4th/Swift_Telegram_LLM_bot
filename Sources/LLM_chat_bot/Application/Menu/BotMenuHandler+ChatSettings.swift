@@ -141,17 +141,25 @@ extension BotMenuHandler {
             await sendOpenRouterFreeModels(chatKey: chatKey, callback: callback)
             return
         }
-        guard let modelValue = route.arg(2) else { return }
-        if route.sub == "markfree" {
+        guard let token = route.arg(2) else { return }
+        if route.sub == "markfree" || route.sub == "unmarkfree" {
             guard await requireSuperAdmin(callback) else { return }
-            await state.addFreeModel(modelValue)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🆓 Добавлено в бесплатные")
-            try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
-            return
-        } else if route.sub == "unmarkfree" {
-            guard await requireSuperAdmin(callback) else { return }
-            await state.removeFreeModel(modelValue)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🔒 Убрано из бесплатных")
+            let listed = await state.modelPresets(chatID: chatKey.chatID)
+                + state.chatPresets(category: .model, chatKey: chatKey)
+            guard let preset = Self.presetTarget(token, in: listed) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modelNotFound)
+                return
+            }
+            let pinning = route.sub == "markfree"
+            if pinning {
+                await state.addFreeModel(preset.value)
+            } else {
+                await state.removeFreeModel(preset.value)
+            }
+            try? await telegram.answerCallback(
+                callbackQueryID: callback.id,
+                text: pinning ? "🆓 Добавлено в бесплатные" : "🔒 Убрано из бесплатных"
+            )
             try await showPage(.superFreeModels, chatKey: chatKey, callback: callback, message: message)
             return
         } else if route.sub == "select" || route.sub == "gsel" || route.sub == "csel" {
@@ -160,10 +168,11 @@ extension BotMenuHandler {
             let presets = route.sub == "csel"
                 ? await state.chatPresets(category: .model, chatKey: chatKey)
                 : await state.modelPresets(chatID: chatKey.chatID)
-            guard let preset = presets.first(where: { $0.value == modelValue }) else {
+            guard let preset = Self.presetTarget(token, in: presets) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modelNotFound)
                 return
             }
+            let modelValue = preset.value
             let gate = await paidModelGate(modelValue, callback: callback, chatKey: chatKey)
             if gate.isPaid, case .none = gate.access {
                 let price = await state.starsPrice()
@@ -178,6 +187,19 @@ extension BotMenuHandler {
             try await showPage(.model, chatKey: chatKey, callback: callback, message: message)
             return
         }
+    }
+
+    /// The preset a model button points at.
+    ///
+    /// Buttons carry the preset's position, because a model id does not fit:
+    /// `menu:model:gsel:` plus an OpenRouter id over 48 characters exceeds
+    /// Telegram's 64-byte `callback_data`, and the API then refuses the whole
+    /// message — the page simply never opens. Buttons in messages sent by an
+    /// older build still carry the value, so both are accepted; a numeric token
+    /// is a position first, which is why the value lookup runs second.
+    static func presetTarget(_ token: String, in presets: [Preset]) -> Preset? {
+        if let index = Int(token), presets.indices.contains(index) { return presets[index] }
+        return presets.first { $0.value == token }
     }
 
     /// One answer to "may this person point the chat at this model right now".

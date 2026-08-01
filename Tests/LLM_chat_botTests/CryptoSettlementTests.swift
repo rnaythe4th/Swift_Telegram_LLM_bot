@@ -1,0 +1,177 @@
+import XCTest
+@testable import LLM_chat_bot
+
+// What happens to a crypto transfer once it lands, with the real service, the
+// real invoice bookkeeping and the shared fulfilment routine. Only the Bot API
+// and the blockchain reader are absent — the transfer is handed in directly,
+// exactly as the monitor hands one in.
+//
+// The rule under test is the one the chain gives us no second chance at:
+// a blockchain does not redeliver. If a transfer that arrived is not credited,
+// the *only* recovery is the next poll finding it again — which means neither
+// the invoice nor the scan cursor may move past a settlement that failed.
+
+final class CryptoSettlementTests: XCTestCase {
+    private var telegram: FakeTelegram!
+    private var gateway: TelegramHTTPGateway!
+    private var store: ChatContextStore!
+
+    private let payerID: UserID = 9_100
+    private let address = "UQtest_receiving_address"
+
+    override func setUp() async throws {
+        telegram = FakeTelegram()
+        let baseURL = try await telegram.start()
+        gateway = TelegramHTTPGateway(
+            network: NetworkClient(),
+            botToken: "test-token",
+            apiBase: baseURL,
+            rateLimiter: nil,
+            metrics: nil
+        )
+        store = Fixtures.makeStore()
+        await store.setCryptoPriceUsdCents(500)
+        await store.setCryptoAddress(.ton, address: address)
+    }
+
+    override func tearDown() async throws {
+        await telegram.stop()
+        telegram = nil
+        gateway = nil
+        store = nil
+    }
+
+    private func makeService(ledger: LedgerPort) -> CryptoPaymentService {
+        CryptoPaymentService(
+            state: store,
+            network: NetworkClient(),
+            telegram: gateway,
+            logger: SilentLogger(),
+            fulfillment: PaymentFulfillmentService(
+                state: store,
+                telegram: gateway,
+                ledger: ledger,
+                persistence: nil,
+                metrics: RuntimeMetrics(),
+                logger: SilentLogger()
+            ),
+            persistence: nil
+        )
+    }
+
+    /// One open invoice for exactly 5 USDT-on-TON, filed under the payer.
+    @discardableResult
+    private func openInvoice(amountAtomic: Int64 = 5_000_000) async -> CryptoInvoice {
+        let now = Date()
+        let invoice = CryptoInvoice(
+            id: "inv-1",
+            ownerKey: store.userKey(userID: payerID),
+            userChatID: payerID.privateChat,
+            asset: .usdtTon,
+            receivingAddress: address,
+            exactAmountAtomic: amountAtomic,
+            accumulatedAtomic: 0,
+            quotedPriceUsdCents: 500,
+            rateAtomicPerUsdCentMicro: 10_000_000_000,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(1_800),
+            status: .open,
+            linkedSenders: [],
+            creditedTxHashes: [],
+            slotOffset: 0,
+            purpose: .subscription
+        )
+        await store.upsertCryptoInvoice(invoice)
+        return invoice
+    }
+
+    private func deliver(
+        _ service: CryptoPaymentService,
+        amountAtomic: Int64 = 5_000_000,
+        txHash: String = "0xdeadbeef"
+    ) async -> CryptoApplyResult {
+        await service.applyIncomingTransfer(
+            asset: .usdtTon,
+            amountAtomic: amountAtomic,
+            fromAddress: "UQsender",
+            recipientAddress: address,
+            txHash: txHash,
+            timestamp: Date()
+        )
+    }
+
+    // MARK: - Tests
+
+    func testAnExactTransferPaysTheInvoiceAndOpensPremium() async {
+        await openInvoice()
+
+        let result = await deliver(makeService(ledger: InMemoryLedger()))
+        guard case .fullyPaid = result else {
+            return XCTFail("an exact transfer must settle the invoice, got \(result)")
+        }
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertTrue(subscription.isActive)
+        let settled = await store.cryptoInvoice(id: "inv-1")
+        XCTAssertEqual(settled?.status, .paid)
+    }
+
+    /// The database refusing the write must leave the invoice open. Closing it
+    /// first — which is what this used to do — meant the next poll matched only
+    /// open invoices, found none, and the transfer bought nothing forever: the
+    /// chain has no redelivery to fall back on.
+    func testASettlementTheDatabaseRefusesLeavesTheInvoiceOpen() async {
+        await openInvoice()
+
+        let result = await deliver(makeService(ledger: RefusingLedger()))
+        guard case .deferred = result else {
+            return XCTFail("a refused settlement must be deferred, got \(result)")
+        }
+        let invoice = await store.cryptoInvoice(id: "inv-1")
+        XCTAssertEqual(invoice?.status, .open, "the invoice has to stay payable")
+        XCTAssertTrue(invoice?.creditedTxHashes.isEmpty == true, "nothing was credited, so nothing may be marked credited")
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertFalse(subscription.isActive, "nothing was committed, so nothing may be granted")
+
+        // The next poll sees the same transfer and settles it once.
+        let retry = await deliver(makeService(ledger: InMemoryLedger()))
+        guard case .fullyPaid = retry else {
+            return XCTFail("the retry must settle the invoice, got \(retry)")
+        }
+        let granted = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertTrue(granted.isActive)
+        let report = await store.funnelReport()
+        XCTAssertEqual(report.counters[FunnelEvent.paid.rawValue], 1, "the payment must count once")
+    }
+
+    /// A partial payment is received money: it stays on the invoice so the
+    /// payer is asked for the difference, not for the whole amount again.
+    /// (Above half the outstanding amount — below that a transfer may not claim
+    /// an invoice it is not linked to, or one dust payment parks a stranger's
+    /// invoice in `.partial`.)
+    func testAPartialTransferAccumulatesRatherThanResetting() async {
+        await openInvoice()
+
+        let result = await deliver(makeService(ledger: InMemoryLedger()), amountAtomic: 3_000_000, txHash: "0xpart")
+        guard case .partial(_, _, let remaining) = result else {
+            return XCTFail("an underpayment must be recorded as partial, got \(result)")
+        }
+        XCTAssertEqual(remaining, 2_000_000)
+        let held = await store.cryptoInvoice(id: "inv-1")
+        XCTAssertEqual(held?.accumulatedAtomic, 3_000_000)
+    }
+
+    /// Dust must not be able to claim somebody else's invoice: adopting it
+    /// would park it in `.partial` and attach the sender, and every later
+    /// transfer from that address would follow it there.
+    func testDustCannotClaimAnUnlinkedInvoice() async {
+        await openInvoice()
+
+        let result = await deliver(makeService(ledger: InMemoryLedger()), amountAtomic: 1, txHash: "0xdust")
+        guard case .unmatched = result else {
+            return XCTFail("a dust transfer must not claim an invoice, got \(result)")
+        }
+        let untouched = await store.cryptoInvoice(id: "inv-1")
+        XCTAssertEqual(untouched?.status, .open)
+        XCTAssertEqual(untouched?.accumulatedAtomic, 0)
+    }
+}

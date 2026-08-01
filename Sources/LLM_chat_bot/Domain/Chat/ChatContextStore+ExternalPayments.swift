@@ -116,6 +116,21 @@ extension ChatContextStore {
         return order
     }
 
+    /// Puts an order back in play after a settlement that could not be
+    /// committed. Without it the vendor's retry finds an order that is already
+    /// `.paid`, treats the notification as a duplicate and credits nothing —
+    /// money received, nothing delivered, and no third chance.
+    @discardableResult
+    func reopenExternalOrder(id: String) -> Bool {
+        guard var order = _externalOrders[id], order.status == .paid else { return false }
+        order.status = .pending
+        order.paidAt = nil
+        order.vendorPaymentID = nil
+        _externalOrders[id] = order
+        markExternalOrderDirty(id)
+        return true
+    }
+
     @discardableResult
     func cancelExternalOrder(id: String) -> Bool {
         guard var order = _externalOrders[id], order.isOpen else { return false }

@@ -477,8 +477,20 @@ final class BotMenuHandler: Sendable {
     static let unknownAccountNotice =
         "Не удалось определить ваш аккаунт. Напишите боту любое сообщение в личке и откройте меню снова."
 
+    /// Builds the button and refuses to hand Telegram a payload it will reject.
+    ///
+    /// `callback_data` is capped at 64 bytes, and going over does not disable
+    /// one button — the API rejects the whole `sendMessage`/`editMessage`, so
+    /// the page does not open at all. A dead button on a page that renders is
+    /// the lesser failure, and the log line names the payload that caused it.
+    /// Nothing should reach this: arguments are ids and indices by design.
     private func menuButton(_ text: String, action: String) -> InlineKeyboardButton {
-        .init(text: text, callback_data: BotCallbackAction.menu(action: action).rawData)
+        let data = BotCallbackAction.menu(action: action).rawData
+        guard data.utf8.count <= MenuRoute.maxCallbackDataBytes else {
+            logger.error("menu button payload is \(data.utf8.count) B, over Telegram's \(MenuRoute.maxCallbackDataBytes) — button disabled: \(data)")
+            return .init(text: text, callback_data: BotCallbackAction.menu(action: MenuCommand.noop.rawValue).rawData)
+        }
+        return .init(text: text, callback_data: data)
     }
 
     /// A button that only names a command — no arguments to mistype.

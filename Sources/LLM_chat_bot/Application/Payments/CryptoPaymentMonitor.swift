@@ -60,6 +60,7 @@ actor CryptoPaymentMonitor {
                 let cursor = ExplorerCursor(lastSeenUnix: stored[key] ?? coldSeed)
                 do {
                     let (transfers, newCursor) = try await fetchTransfers(asset: asset, address: address, cursor: cursor)
+                    var deferredCredit = false
                     for transfer in transfers {
                         let result = await service.applyIncomingTransfer(
                             asset: transfer.asset,
@@ -78,13 +79,22 @@ actor CryptoPaymentMonitor {
                             break
                         case .unmatched:
                             logger.info("crypto monitor: unmatched \(asset.rawValue) addr=\(address) tx=\(transfer.txHash) amount=\(transfer.amountAtomic)")
+                        case .deferred:
+                            // Received money the database would not take yet.
+                            // The cursor stays where it is so the next pass sees
+                            // this transfer again — the blockchain will not
+                            // deliver it a second time by itself.
+                            deferredCredit = true
+                            logger.error("crypto monitor: deferred \(asset.rawValue) addr=\(address) tx=\(transfer.txHash) — cursor held for a retry")
                         }
                     }
                     // Only after every transfer of this batch was applied (and
                     // flushed by the payment path): a cursor moved first would
                     // mark the range scanned while a crash in between leaves the
                     // money uncredited and outside all future scans.
-                    await state.advanceExplorerCursor(asset: asset, address: address, unix: newCursor.lastSeenUnix)
+                    if !deferredCredit {
+                        await state.advanceExplorerCursor(asset: asset, address: address, unix: newCursor.lastSeenUnix)
+                    }
                 } catch {
                     logger.error("crypto monitor: \(asset.rawValue) addr=\(address) fetch failed: \(error)")
                 }

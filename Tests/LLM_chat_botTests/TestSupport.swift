@@ -69,6 +69,25 @@ enum Fixtures {
     static func days(_ count: Double) -> TimeInterval { count * 86_400 }
 }
 
+/// A ledger that will not take the write — the database being briefly
+/// unreachable, which is the one moment a payment path must not congratulate
+/// anybody. Nothing is committed and nothing is claimed, so the transport's own
+/// retry is the whole recovery plan; these tests check the retry still has a
+/// door to come back through.
+struct RefusingLedger: LedgerPort {
+    struct Refused: Error {}
+
+    func inTransaction<T: Sendable>(
+        _ body: @Sendable (any LedgerTransaction) async throws -> T
+    ) async throws -> T {
+        throw Refused()
+    }
+
+    func syncWallets(changed: [UserKey: UserBalance], removed: [UserKey]) async throws {}
+    func recentEntries(userKey: UserKey, limit: Int) async throws -> [LedgerEntry] { [] }
+    func reconcile() async throws -> [UserKey] { [] }
+}
+
 // Integer literals for ids, in the test target only.
 //
 // `ChatID(-7_200)` at three hundred call sites reads as ceremony, not as

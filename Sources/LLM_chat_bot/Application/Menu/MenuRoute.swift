@@ -92,6 +92,12 @@ struct MenuRoute {
 
     // MARK: - Rendering (the other half of the round trip)
 
+    /// Telegram's hard limit on `callback_data` (Bot API: "1-64 bytes"). Worth
+    /// naming because of *how* it fails: a single overlong button makes the API
+    /// reject the whole `sendMessage`/`editMessage`, so one bad payload takes
+    /// the entire page down rather than one button.
+    static let maxCallbackDataBytes = 64
+
     /// `<command>[:<arg>…]` — the payload a button carries. The only place the
     /// wire format is written, so a caller cannot invent a separator or leave
     /// out the command.

@@ -13,6 +13,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
     private var telegram: FakeTelegram!
     private var store: ChatContextStore!
     private var service: ExternalPaymentService!
+    private var gateway: TelegramHTTPGateway!
 
     private let payerID: UserID = 5_555
     private let merchantID = "7012"
@@ -22,7 +23,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
     override func setUp() async throws {
         telegram = FakeTelegram()
         let baseURL = try await telegram.start()
-        let gateway = TelegramHTTPGateway(
+        gateway = TelegramHTTPGateway(
             network: NetworkClient(),
             botToken: "test-token",
             apiBase: baseURL,
@@ -65,6 +66,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         telegram = nil
         store = nil
         service = nil
+        gateway = nil
     }
 
     private func notification(orderID: String, amount: String, paymentID: String) -> [String: String] {
@@ -193,6 +195,60 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         XCTAssertFalse(subscription.isActive)
         let call = await telegram.waitForCall("sendMessage", containing: "не совпала")
         XCTAssertNotNil(call)
+    }
+
+    /// The database refusing the write is the one case where the vendor must
+    /// *not* hear YES: only an unacknowledged notification is retried, and only
+    /// an order that is open again can be settled by that retry. Closing the
+    /// order and answering YES anyway — which is what this used to do — ended
+    /// the retry loop on a payment that had bought nothing.
+    func testAPaymentTheDatabaseRefusesIsRetriedRatherThanLost() async throws {
+        let checkout = try await service.createCheckout(
+            payerKey: store.userKey(userID: payerID),
+            payerUserID: payerID,
+            chatID: payerID.privateChat,
+            threadID: nil,
+            purpose: .subscription,
+            methodCode: nil
+        )
+        let params = notification(orderID: checkout.order.id, amount: "499.00", paymentID: "666")
+
+        // Same store, same order — only the ledger is unavailable.
+        let refusing = ExternalPaymentService(
+            state: store,
+            resolver: ExternalCheckoutRegistry(),
+            fulfillment: PaymentFulfillmentService(
+                state: store,
+                telegram: gateway,
+                ledger: RefusingLedger(),
+                persistence: nil,
+                metrics: RuntimeMetrics(),
+                logger: SilentLogger()
+            ),
+            telegram: gateway,
+            logger: SilentLogger(),
+            metrics: RuntimeMetrics(),
+            publicBaseURL: "https://bot.example.com"
+        )
+
+        let verdict = await refusing.handleCallback(vendor: .freekassa, parameters: params)
+        guard case .rejected = verdict else {
+            return XCTFail("an unapplied payment must not be acknowledged, got \(verdict)")
+        }
+        let stalled = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertFalse(stalled.isActive, "nothing was committed, so nothing may be granted")
+        let reopened = await store.externalOrder(id: checkout.order.id)
+        XCTAssertEqual(reopened?.status, .pending, "the order has to be open for the retry to settle it")
+
+        // The vendor delivers again once the database is back.
+        let retry = await service.handleCallback(vendor: .freekassa, parameters: params)
+        guard case .acknowledged = retry else {
+            return XCTFail("the retry must land, got \(retry)")
+        }
+        let granted = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertTrue(granted.isActive, "the redelivered payment must open premium")
+        let report = await store.funnelReport()
+        XCTAssertEqual(report.counters[FunnelEvent.paid.rawValue], 1, "the payment must count once, not twice")
     }
 
     func testNotificationURLIsTheOneTheCabinetNeeds() async {

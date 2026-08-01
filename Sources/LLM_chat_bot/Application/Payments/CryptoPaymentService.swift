@@ -27,6 +27,11 @@ enum CryptoApplyResult: Sendable {
     case partial(invoice: CryptoInvoice, addedAtomic: Int64, remainingAtomic: Int64)
     case alreadyCredited
     case unmatched
+    /// The transfer belongs to an invoice, but the database would not take the
+    /// write, so nothing was credited and nothing was marked. The caller must
+    /// **not** move its scan cursor past this transfer: the chain has no
+    /// redelivery, and the next poll is the only retry there is.
+    case deferred
 }
 
 actor CryptoPaymentService {
@@ -372,11 +377,16 @@ actor CryptoPaymentService {
 
         if copy.accumulatedAtomic >= copy.exactAmountAtomic {
             copy.status = .paid
-            await state.upsertCryptoInvoice(copy)
             // Everything a payment buys happens in one place, so this path
             // cannot drift from the Telegram and hosted-checkout ones: the
             // chain has already moved the money, and `fulfil` flushes before
             // returning (CLAUDE.md §7, §17).
+            //
+            // Fulfilment runs *before* the invoice is closed. Closing it first
+            // and then failing to commit left a paid invoice nobody could pay
+            // again: the next poll matches only open invoices, so the transfer
+            // stopped matching anything and the money bought nothing. The
+            // claim inside `fulfil` is what keeps this from paying twice.
             let outcome = await fulfillment.fulfil(PaymentReceipt(
                 payerKey: copy.ownerKey,
                 // Invoices are filed under a `UserKey`; a pending record (a
@@ -388,10 +398,18 @@ actor CryptoPaymentService {
                 idempotencyKey: "crypto:\(txHash)",
                 method: .crypto
             ))
+            if case .failed = outcome {
+                logger.error("crypto: invoice \(invoice.id) not credited (tx \(txHash)) — left open for the next poll")
+                return .deferred
+            }
+            await state.upsertCryptoInvoice(copy)
+            // `fulfil` flushed the money; this flushes the closed invoice, so a
+            // restart cannot reopen an order that has already been paid for.
+            await persistence?.flushNow()
             switch outcome {
             case .duplicate, .failed:
-                // Nothing was applied and nothing was claimed: the poller sees
-                // this transfer again on its next pass and tries once more.
+                // Already credited on an earlier pass — the invoice row is now
+                // caught up with it, and nothing is announced twice.
                 break
             case .subscription(let activation, let claim):
                 await notifyFullPayment(copy, activation: activation, claim: claim)

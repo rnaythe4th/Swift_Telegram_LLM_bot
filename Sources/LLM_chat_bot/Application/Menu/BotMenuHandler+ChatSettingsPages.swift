@@ -85,9 +85,13 @@ extension BotMenuHandler {
 
         func appendPresets(_ presets: [Preset], action: String) {
             var currentRow: [InlineKeyboardButton] = []
-            for preset in presets {
+            for (index, preset) in presets.enumerated() {
                 let label = presetLabel(preset: preset, scope: action == "gsel" ? "🌐" : "💬")
-                currentRow.append(menuButton(label, .model, action, preset.value))
+                // The position, not the model id: ids run past 50 characters on
+                // OpenRouter, and `menu:model:gsel:` + one of those is over
+                // Telegram's 64-byte `callback_data` — which fails the whole
+                // page, not the one button (`BotMenuHandler.presetTarget`).
+                currentRow.append(menuButton(label, .model, action, "\(index)"))
                 if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
             if !currentRow.isEmpty { rows.row(currentRow) }
