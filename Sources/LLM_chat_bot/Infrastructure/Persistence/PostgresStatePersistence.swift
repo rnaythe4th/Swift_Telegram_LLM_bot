@@ -80,7 +80,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             ))
         }
 
-        state.contexts = try await map("select chat_id, thread_id, data from bot_chat_context") {
+        state.contexts = try await mapSkippingUnreadable("conversation", "select chat_id, thread_id, data from bot_chat_context") {
             ChatContextRow(
                 key: ChatKey(
                     chatID: ChatID(Int(try $0["chat_id"].decode(Int64.self))),
@@ -269,6 +269,43 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
         var result: [T] = []
         for try await row in rows {
             result.append(try transform(PostgresRandomAccessRow(row)))
+        }
+        return result
+    }
+
+    /// Like `map`, but one row that cannot be decoded is skipped — loudly —
+    /// instead of failing the whole load.
+    ///
+    /// Reserved for rows whose loss is survivable and self-repairing: a
+    /// conversation is rebuilt by the chat's next message. Everything else
+    /// (tenants, wallets, orders, referral records) stays strict on purpose —
+    /// silently dropping a paid subscription is far worse than refusing to
+    /// write at all, which is what a thrown restore does (§4.3).
+    ///
+    /// Without this, one unreadable `jsonb` document — a rollback to a build
+    /// that predates an enum case is enough — takes the *entire* restore down,
+    /// and with it the checkout: the process comes up in memory-only mode and
+    /// refuses to sell anything, because of one chat's history.
+    private func mapSkippingUnreadable<T>(
+        _ what: String,
+        _ query: PostgresQuery,
+        _ transform: (PostgresRandomAccessRow) throws -> T
+    ) async throws -> [T] {
+        let rows = try await client.query(query, logger: queryLogger)
+        var result: [T] = []
+        var skipped = 0
+        for try await row in rows {
+            do {
+                result.append(try transform(PostgresRandomAccessRow(row)))
+            } catch {
+                skipped += 1
+                if skipped == 1 {
+                    logger.error("unreadable \(what) row skipped during restore: \(error)")
+                }
+            }
+        }
+        if skipped > 1 {
+            logger.error("\(skipped) unreadable \(what) rows skipped during restore")
         }
         return result
     }

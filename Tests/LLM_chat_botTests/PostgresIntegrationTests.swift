@@ -487,6 +487,27 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertTrue(tenants.contains(UserKey.identified(902)), "the other tenant must survive")
     }
 
+    /// One document this build cannot read must not cost the bot its whole
+    /// state — and with it the checkout, because a failed restore leaves the
+    /// process memory-only and refusing to sell. Conversations are the one kind
+    /// of row where skipping is right: the chat rebuilds it on its next
+    /// message. Tenants and wallets stay strict.
+    func testAnUnreadableConversationDoesNotTakeTheRestoreDown() async throws {
+        let store = Fixtures.makeStore()
+        await store.setModelOnly(chatKey: ChatKey(chatID: -910, threadID: 0), model: "good/model")
+        try await persistence.apply(await store.drainDirtyBatch())
+
+        // The shape a rollback to a build that predates a field produces.
+        let broken = #"{"role":"only half a snapshot"}"#
+        try await client.query(
+            "insert into bot_chat_context (chat_id, thread_id, data) values (-911, 0, \(broken)::jsonb)"
+        )
+
+        let loaded = try await persistence.loadEverything()
+        XCTAssertEqual(loaded.contexts.count, 1, "the readable conversation must still arrive")
+        XCTAssertEqual(loaded.contexts.first?.key.chatID, ChatID(-910))
+    }
+
     /// Only one process may write. This is the guarantee a lease with a TTL
     /// cannot give, and the reason the pooler must be in session mode.
     func testOnlyOneWriterLockIsGranted() async throws {
@@ -509,5 +530,27 @@ final class PostgresIntegrationTests: XCTestCase {
         }
         XCTAssertTrue(reacquired, "the lock must be free once the holder lets go")
         await second.release()
+    }
+
+    /// `onLost` means "the lock we were holding is gone" and nothing else. An
+    /// instance waiting out a deploy retries every two seconds; if a losing
+    /// attempt reported a lost lock, that callback would step the process down
+    /// — possibly seconds after a later attempt made it the writer.
+    func testALosingAttemptNeverReportsALostLock() async throws {
+        let holder = WriterLock(client: client, logger: SilentLogger())
+        let waiter = WriterLock(client: client, logger: SilentLogger())
+        let reportedLost = LockedValue(false)
+
+        let holds = await holder.acquire(onLost: {})
+        XCTAssertTrue(holds)
+        for _ in 0..<3 {
+            let got = await waiter.acquire(onLost: { reportedLost.value = true })
+            XCTAssertFalse(got, "the lock is taken")
+        }
+        // Long enough for the losing attempts' tails to run.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(reportedLost.value, "failing to take the lock is not losing it")
+
+        await holder.release()
     }
 }

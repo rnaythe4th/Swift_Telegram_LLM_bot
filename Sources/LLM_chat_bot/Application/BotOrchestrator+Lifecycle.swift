@@ -20,7 +20,13 @@ extension BotOrchestrator {
     /// A failure at any step leaves the bot answering questions from memory and
     /// refusing to sell anything (§4.3), which is the only honest response to
     /// "I cannot promise this will still be here tomorrow".
-    func bootstrapState(storage: AppAssembly.Storage) async -> Bool {
+    ///
+    /// With one exception, and it is the reason this method throws: a database
+    /// written by a **newer** build. That is not a transient outage and it will
+    /// never repair itself — it is a rolled-back deploy — so the process
+    /// refuses to start instead of running as a healthy-looking bot that has
+    /// quietly stopped persisting anything.
+    func bootstrapState(storage: AppAssembly.Storage) async throws -> Bool {
         writerLock.value = storage.writerLock
         guard let persistence = storage.persistence, storage.coordinator != nil else {
             flags.durability.value = .volatile(reason: "no DATABASE_URL")
@@ -30,6 +36,10 @@ extension BotOrchestrator {
 
         do {
             try await persistence.migrate()
+        } catch let error as PostgresSchemaError {
+            flags.durability.value = .volatile(reason: "schema")
+            logger.error("refusing to start: \(error.localizedDescription)")
+            throw error
         } catch {
             flags.durability.value = .volatile(reason: "schema")
             logger.error("schema check failed — running memory-only, purchases refused: \(error)")

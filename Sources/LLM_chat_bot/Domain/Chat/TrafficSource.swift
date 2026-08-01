@@ -131,14 +131,45 @@ struct TrafficSourceTally: Codable, Sendable, Equatable {
     }
 }
 
-/// The scalar counters of the traffic ledger: the two kinds of link open that
-/// deliberately produce no attribution. Attributions and campaign aggregates
-/// are tables (§2.1); these two numbers are a document.
+/// Everything about paid traffic that is *not* per person: the two kinds of
+/// link open that deliberately produce no attribution, and the per-campaign
+/// aggregates.
+///
+/// The aggregates live here rather than being recomputed from the attribution
+/// rows because they are meant to **outlive** them: attributions are pruned by
+/// age (`TrafficSourceLedger.prune`) and can be cleared outright, and a
+/// campaign whose arrivals aged out must not lose the customers it paid for.
+/// It stays a document (not a table) because it is bounded by construction —
+/// `maxTags` campaigns and an overflow bucket — and is always read and written
+/// whole.
 struct TrafficSourceTotals: Codable, Sendable, Equatable {
     var repeatOpens: Int = 0
     var knownUserOpens: Int = 0
+    /// Keyed by campaign tag.
+    var tallies: [String: TrafficSourceTally] = [:]
 
     static let empty = TrafficSourceTotals()
+
+    init(repeatOpens: Int = 0, knownUserOpens: Int = 0, tallies: [String: TrafficSourceTally] = [:]) {
+        self.repeatOpens = repeatOpens
+        self.knownUserOpens = knownUserOpens
+        self.tallies = tallies
+    }
+
+    enum CodingKeys: String, CodingKey { case repeatOpens, knownUserOpens, tallies }
+
+    /// Hand-written for the reason every stored document here is: a field
+    /// added later must be optional on the way in, or the row written by the
+    /// previous build stops decoding and the whole document reverts to its
+    /// default — here, to zero campaigns.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            repeatOpens: try c.decodeIfPresent(Int.self, forKey: .repeatOpens) ?? 0,
+            knownUserOpens: try c.decodeIfPresent(Int.self, forKey: .knownUserOpens) ?? 0,
+            tallies: try c.decodeIfPresent([String: TrafficSourceTally].self, forKey: .tallies) ?? [:]
+        )
+    }
 }
 
 /// All paid-traffic bookkeeping the bot holds in memory: attributions plus
@@ -193,12 +224,15 @@ struct TrafficSourceLedger: Codable, Sendable {
         )
     }
 
-    /// The scalar half, for storage: attributions and tallies travel as rows.
+    /// The half that is not per person, for storage: attributions travel as
+    /// rows, the campaign aggregates and the two scalar counters as one
+    /// document.
     var totals: TrafficSourceTotals {
-        get { TrafficSourceTotals(repeatOpens: repeatOpens, knownUserOpens: knownUserOpens) }
+        get { TrafficSourceTotals(repeatOpens: repeatOpens, knownUserOpens: knownUserOpens, tallies: tallies) }
         set {
             repeatOpens = newValue.repeatOpens
             knownUserOpens = newValue.knownUserOpens
+            tallies = newValue.tallies
         }
     }
 
@@ -225,6 +259,24 @@ struct TrafficSourceLedger: Codable, Sendable {
                 if $0.tally.joined != $1.tally.joined { return $0.tally.joined > $1.tally.joined }
                 return $0.tag < $1.tag
             }
+    }
+
+    /// Recomputes the aggregates from the attributions still held. Only for a
+    /// ledger restored without a stored `totals` document: the counts it can
+    /// produce are bounded by what survived pruning, which is exactly why the
+    /// aggregates are stored rather than derived.
+    mutating func rebuildTalliesFromAttributions() {
+        tallies = [:]
+        for attribution in attributions.values {
+            var tally = tallies[attribution.tag] ?? TrafficSourceTally(firstSeenAt: attribution.joinedAt)
+            tally.joined += 1
+            if attribution.activatedAt != nil { tally.activated += 1 }
+            if attribution.paidAt != nil { tally.payers += 1 }
+            tally.payments += attribution.payments
+            tally.firstSeenAt = Swift.min(tally.firstSeenAt, attribution.joinedAt)
+            tally.lastSeenAt = Swift.max(tally.lastSeenAt, attribution.joinedAt)
+            tallies[attribution.tag] = tally
+        }
     }
 
     /// Drops the oldest attributions once the row outgrows its budget. Only the

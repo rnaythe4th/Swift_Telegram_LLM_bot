@@ -21,8 +21,12 @@ actor PersistenceCoordinator {
     private let flushInterval: Duration
 
     private var loopTask: Task<Void, Never>?
-    private var retryCarry: PersistenceBatch?
-    private var flushing = false
+    private var retryCarry: PendingFlush?
+    /// The flush currently running (or the last one that ran). A new flush is
+    /// chained behind it instead of polling a flag: two overlapping applies
+    /// could write an older row after a newer one, and a spin-wait that a
+    /// cancelled task falls straight through burns a core during shutdown.
+    private var flushChain: Task<Void, Never>?
     private var abandoned = false
 
     private var lastErrorMessage: String?
@@ -87,38 +91,95 @@ actor PersistenceCoordinator {
         abandoned = true
     }
 
+    /// Queues one flush behind whatever is already running and waits for it.
+    ///
+    /// The chain is what serializes flushes (an actor does not: every `await`
+    /// inside one lets the next in). It is an unstructured `Task` on purpose —
+    /// a flush that started must finish even if the caller that asked for it
+    /// was cancelled, which is exactly the shutdown case.
     private func flushOnce() async {
-        guard !abandoned else { return }
-        // Serialize concurrent flushes (actor reentrancy across the await):
-        // two overlapping applies could write an older row after a newer one.
-        while flushing {
-            try? await Task.sleep(for: .milliseconds(100))
+        let previous = flushChain
+        let task = Task { [weak self] in
+            await previous?.value
+            await self?.performFlush()
         }
-        flushing = true
-        defer { flushing = false }
+        flushChain = task
+        await task.value
+    }
 
-        var batch = await store.drainDirtyBatch()
+    private func performFlush() async {
+        guard !abandoned else { return }
+
+        var pending = PendingFlush(
+            batch: await store.drainDirtyBatch(),
+            wallets: await store.drainDirtyWallets()
+        )
         if let carry = retryCarry {
-            batch = PersistenceBatch.merged(older: carry, newer: batch)
+            pending = PendingFlush.merged(older: carry, newer: pending)
             retryCarry = nil
         }
-        let wallets = await store.drainDirtyWallets()
-        guard !batch.isEmpty || !wallets.changed.isEmpty || !wallets.removed.isEmpty else { return }
+        guard !pending.isEmpty else { return }
+        // The lock may have gone while we were draining. These rows describe a
+        // world another instance now owns, and `abandon()` already accepted
+        // losing them — writing them anyway is the one thing it exists to stop.
+        guard !abandoned else { return }
 
         do {
-            try await persistence.apply(batch)
-            try await ledger.syncWallets(changed: wallets.changed, removed: wallets.removed)
+            try await persistence.apply(pending.batch)
+            try await ledger.syncWallets(changed: pending.changedWallets, removed: Array(pending.removedWallets))
             lastSuccessAt = Date()
             lastErrorMessage = nil
-            totalEntitiesFlushed += batch.entityCount
+            totalEntitiesFlushed += pending.entityCount
             totalFlushes += 1
             await metrics.increment(MetricName.persistenceFlushes)
         } catch {
-            retryCarry = batch
+            retryCarry = pending
             totalFailures += 1
             lastErrorMessage = UserFacingError.message(error)
-            logger.error("persistence flush failed (\(batch.entityCount) entities, will retry): \(error)")
+            logger.error("persistence flush failed (\(pending.entityCount) entities, will retry): \(error)")
             await metrics.increment(MetricName.persistenceErrors)
+        }
+    }
+
+    /// One drain, both halves of it.
+    ///
+    /// The rows and the wallets are drained together, so they have to be
+    /// retried together: a failed flush that kept the batch and dropped the
+    /// wallets loses a change the store no longer knows about. The wallet
+    /// half is small but it is money — a rename folding a pending wallet into
+    /// an identified one is written here and nowhere else, and losing it
+    /// leaves both rows in the database for the next boot to merge a second
+    /// time.
+    struct PendingFlush: Sendable {
+        var batch: PersistenceBatch
+        var changedWallets: [UserKey: UserBalance]
+        var removedWallets: Set<UserKey>
+
+        init(batch: PersistenceBatch = PersistenceBatch(), wallets: (changed: [UserKey: UserBalance], removed: [UserKey])) {
+            self.batch = batch
+            self.changedWallets = wallets.changed
+            self.removedWallets = Set(wallets.removed)
+        }
+
+        var isEmpty: Bool { batch.isEmpty && changedWallets.isEmpty && removedWallets.isEmpty }
+
+        var entityCount: Int { batch.entityCount + changedWallets.count + removedWallets.count }
+
+        /// Newer wins, and a delete cancels an older write of the same wallet
+        /// (and the other way round) — the same rule `PersistenceBatch.merged`
+        /// applies to rows.
+        static func merged(older: PendingFlush, newer: PendingFlush) -> PendingFlush {
+            var result = older
+            result.batch = PersistenceBatch.merged(older: older.batch, newer: newer.batch)
+            for key in newer.removedWallets {
+                result.removedWallets.insert(key)
+                result.changedWallets.removeValue(forKey: key)
+            }
+            for (key, wallet) in newer.changedWallets {
+                result.changedWallets[key] = wallet
+                result.removedWallets.remove(key)
+            }
+            return result
         }
     }
 

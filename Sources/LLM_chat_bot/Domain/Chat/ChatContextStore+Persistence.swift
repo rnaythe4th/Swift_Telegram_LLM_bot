@@ -418,19 +418,19 @@ extension ChatContextStore {
         for row in state.referrals { referralLedgerValue.records[String(row.invitedUserID.value)] = row.record }
         for row in state.referralTallies { referralLedgerValue.tallies[String(row.inviterUserID.value)] = row.tally }
 
+        // Campaign aggregates come from the stored document, not from a
+        // recount of the surviving attributions: attributions are pruned by
+        // age and can be cleared, and a campaign must not forget the customers
+        // it paid for just because their arrival rows aged out. The recount is
+        // kept as a fallback for a database whose rows predate the document —
+        // better an approximate history than none.
         trafficSourceLedgerValue = .empty
         trafficSourceLedgerValue.totals = state.configs[Config.trafficTotals]
         for row in state.trafficAttributions {
             trafficSourceLedgerValue.attributions[String(row.userID.value)] = row.attribution
-            var tally = trafficSourceLedgerValue.tallies[row.attribution.tag]
-                ?? TrafficSourceTally(firstSeenAt: row.attribution.joinedAt)
-            tally.joined += 1
-            if row.attribution.activatedAt != nil { tally.activated += 1 }
-            if row.attribution.paidAt != nil { tally.payers += 1 }
-            tally.payments += row.attribution.payments
-            tally.firstSeenAt = Swift.min(tally.firstSeenAt, row.attribution.joinedAt)
-            tally.lastSeenAt = Swift.max(tally.lastSeenAt, row.attribution.joinedAt)
-            trafficSourceLedgerValue.tallies[row.attribution.tag] = tally
+        }
+        if trafficSourceLedgerValue.tallies.isEmpty {
+            trafficSourceLedgerValue.rebuildTalliesFromAttributions()
         }
 
         restoreExternalPayments(

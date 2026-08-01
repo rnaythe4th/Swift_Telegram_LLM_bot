@@ -127,6 +127,35 @@ final class StorePersistenceTests: XCTestCase {
         XCTAssertEqual(label, "@sponsor")
     }
 
+    /// Campaign aggregates are what a media buy is judged on, and they are
+    /// meant to outlive the per-person rows they came from: attributions are
+    /// pruned by age, the aggregates are not. Recomputing them from whatever
+    /// attributions survived would quietly hand a campaign back a CAC of zero
+    /// customers.
+    func testCampaignAggregatesSurviveTheLossOfTheirAttributions() async {
+        let store = Fixtures.makeStore()
+        _ = await store.bindTrafficSource(userID: 992, tag: "youtube", username: nil)
+        await store.markTrafficSourceActivation(userID: 992)
+        await store.recordTrafficSourcePayment(userID: 992)
+
+        let batch = await store.drainDirtyBatch()
+        XCTAssertTrue(batch.configs.contains { $0.name == .trafficTotals }, "the aggregates have to be exported")
+
+        // A restart that finds the document but not the rows behind it.
+        var stored = PersistedBotState()
+        var configs = ConfigDocuments()
+        configs.set(Config.trafficTotals, await store.trafficSourceLedger().totals)
+        stored.configs = configs
+
+        let reloaded = Fixtures.makeStore()
+        await reloaded.restore(from: stored)
+
+        let overview = await reloaded.trafficSourceOverview()
+        XCTAssertEqual(overview.joined, 1)
+        XCTAssertEqual(overview.activated, 1)
+        XCTAssertEqual(overview.payers, 1, "a campaign must not forget the customer it paid for")
+    }
+
     // MARK: - Builders
 
     private func makeTenantSnapshot(model: String, paidUntil: Date? = nil) -> TenantStateSnapshot {

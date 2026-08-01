@@ -46,6 +46,11 @@ enum PostgresSchema {
         // ---- People ---------------------------------------------------------
         // Every per-person table points here, so `on delete cascade` can clean
         // up after a forget request without leaving orphans behind.
+        //
+        // Whether the bot can reach someone in a DM is deliberately *not* here:
+        // it is a property of the chat, and it lives in `bot_chat`
+        // (`type = 'private'` plus `bot_removed`). A column here would be a
+        // second answer to the same question, and the one nobody writes.
         """
         create table if not exists bot_user (
             user_key        text        primary key,
@@ -53,9 +58,7 @@ enum PostgresSchema {
             username        text,
             first_name      text,
             first_seen_at   timestamptz not null default now(),
-            seen_at         timestamptz not null default now(),
-            private_chat_id bigint,
-            bot_blocked     boolean     not null default false
+            seen_at         timestamptz not null default now()
         )
         """,
         "create index if not exists bot_user_username_idx on bot_user (lower(username))",

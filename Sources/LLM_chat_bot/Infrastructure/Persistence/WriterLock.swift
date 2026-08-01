@@ -82,7 +82,13 @@ actor WriterLock {
                     logger.error("writer lock lost: \(error)")
                 }
             }
-            if !Task.isCancelled { onLost() }
+            // `onLost` means "the lock we were holding is gone", never "this
+            // attempt did not get it". The box records which of the two
+            // happened, and a losing attempt must stay silent: the waiting
+            // instance retries every two seconds, and one stale callback
+            // arriving after a later attempt succeeded would step the process
+            // down seconds after it became the writer.
+            if await acquired.value, !Task.isCancelled { onLost() }
         }
 
         held = await acquired.value

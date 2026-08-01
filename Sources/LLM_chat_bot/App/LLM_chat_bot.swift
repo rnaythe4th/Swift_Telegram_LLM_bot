@@ -40,7 +40,10 @@ struct BlueprintBotApp {
         let pool = app.storage.startPool()
         defer { pool?.cancel() }
 
-        let persistenceHealthy = await app.orchestrator.bootstrapState(storage: app.storage)
+        // Throws only for a database newer than this binary: a storage problem
+        // that cannot be survived by degrading, so it stops the deploy here
+        // rather than at the first silently-dropped write.
+        let persistenceHealthy = try await app.orchestrator.bootstrapState(storage: app.storage)
 
         installShutdownHandlers(orchestrator: app.orchestrator, logger: logger)
 
