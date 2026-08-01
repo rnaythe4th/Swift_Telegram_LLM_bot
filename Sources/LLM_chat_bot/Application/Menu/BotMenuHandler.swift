@@ -147,6 +147,9 @@ final class BotMenuHandler: Sendable {
         case .funnel, .promo, .rem, .examples, .onb, .sref, .strf:
             try await processGrowthAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
+        case .spend:
+            try await processSpendAction(route: route, chatKey: chatKey, callback: callback, message: message)
+
         case .sahelp:
             try await processHelpAction(route: route, chatKey: chatKey, callback: callback, message: message)
         }
@@ -190,7 +193,7 @@ final class BotMenuHandler: Sendable {
             // Every `super*` page belongs here — the buttons inside them are
             // gated separately, but the pages themselves show the owner's
             // configuration and numbers.
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superExternalPay, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superModes, .superReferrals, .superTraffic:
+            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superExternalPay, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superModes, .superReferrals, .superTraffic, .superSpend:
                 guard await requireSuperAdmin(callback) else { return }
             case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults, .adminInvite:
                 guard await requireAdmin(callback, chatKey: chatKey) else { return }
@@ -403,6 +406,8 @@ final class BotMenuHandler: Sendable {
             return await renderSuperReferrals(chatKey: chatKey)
         case .superTraffic:
             return await renderSuperTraffic(chatKey: chatKey)
+        case .superSpend:
+            return await renderSpendPolicy()
         case .referral:
             // Private chats only (guarded at the nav gate), where chatID == the
             // user's ID — that is whose link and wallet the page is about.

@@ -107,3 +107,37 @@ extension BotCommandHandler {
         return String(text[..<endIndex]) + "…"
     }
 }
+
+// MARK: - /forget (§7.2)
+
+extension BotCommandHandler {
+    /// Erases the conversation of the chat it is used in.
+    ///
+    /// In a group it is the shared history of everyone in the room, so only
+    /// somebody who can already administer the chat's settings may do it — the
+    /// alternative is any member wiping a team's context on a whim.
+    ///
+    /// The wallet, the subscription and the money journal are untouched: those
+    /// are financial records, and the person's own evidence if a charge is ever
+    /// disputed. Deleting them on request would erase the proof, not the data.
+    func handleForget(chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+        if chatKey.chatID < 0 {
+            guard await isAdmin(fromUser, chatID: chatKey.chatID) else {
+                try await sendUserFeedback(
+                    chatKey: chatKey,
+                    text: "🔒 В общем чате переписку стирает тот, кто им управляет — она общая."
+                )
+                return
+            }
+        }
+        let erased = await state.forgetChat(chatKey: chatKey)
+        try await sendUserFeedback(chatKey: chatKey, text: erased
+            ? """
+            🧹 <b>Переписка удалена.</b>
+
+            Бот забыл всё, что здесь обсуждалось. Настройки чата, баланс, подписка и история платежей не тронуты — это ваши деньги и ваши документы по ним.
+            """
+            : "🧹 Здесь и так ничего не сохранено."
+        )
+    }
+}

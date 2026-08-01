@@ -233,6 +233,31 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
         return state
     }
 
+    /// Deletes conversations nobody has touched in `idleDays`, except the chats
+    /// named. Returns what went, so the cache drops the same rows.
+    ///
+    /// `not (chat_id = any($2))` rather than a list built in Swift: the
+    /// protected set is a bind parameter like everything else, so it cannot
+    /// become SQL however long it grows.
+    func pruneChatContexts(idleDays: Int, protecting: Set<Int>) async throws -> [ChatKey] {
+        guard idleDays > 0 else { return [] }
+        let cutoff = Date().addingTimeInterval(-Double(idleDays) * 86_400)
+        let keep = protecting.map(Int64.init)
+        return try await map(
+            """
+            delete from bot_chat_context
+             where updated_at < \(cutoff)
+               and not (chat_id = any(\(keep)))
+            returning chat_id, thread_id
+            """
+        ) {
+            ChatKey(
+                chatID: Int(try $0["chat_id"].decode(Int64.self)),
+                threadID: try $0["thread_id"].decode(Int64.self)
+            )
+        }
+    }
+
     /// Runs a query and maps each row by column name. Names, not tuple
     /// positions: a `select` list is edited far more often than it is read, and
     /// a positional decode turns a reordered column into a runtime type error

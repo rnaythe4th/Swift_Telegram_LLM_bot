@@ -360,4 +360,14 @@ struct PersistedBotState: Sendable {
 protocol StatePersistencePort: Sendable {
     func loadEverything() async throws -> PersistedBotState
     func apply(_ batch: PersistenceBatch) async throws
+
+    /// Deletes chat conversations untouched for longer than `idleDays`, except
+    /// the chats named. Returns what went, so the in-memory cache can drop the
+    /// same rows.
+    ///
+    /// A product that takes money and stores people's conversations needs an
+    /// answer to "how long do you keep this", and "forever, with no way to
+    /// erase it" is not one. The query is cheap because `bot_chat_context` is
+    /// indexed on `updated_at` (§10.3).
+    func pruneChatContexts(idleDays: Int, protecting: Set<Int>) async throws -> [ChatKey]
 }

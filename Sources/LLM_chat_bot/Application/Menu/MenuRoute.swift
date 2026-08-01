@@ -29,6 +29,8 @@ enum MenuCommand: String, CaseIterable {
     case extpay
     // Growth and retention
     case funnel, promo, rem, examples, onb, sref, strf
+    /// Daily spending ceilings (§4.1).
+    case spend
     // Help
     case sahelp
 }

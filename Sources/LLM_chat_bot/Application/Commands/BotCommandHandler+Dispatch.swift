@@ -53,6 +53,9 @@ extension BotCommandHandler {
         case .start:
             try await handleStart(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
+        case .forget:
+            try await handleForget(chatKey: chatKey, fromUser: fromUser)
+
         case .chatid:
             try await handleChatID(chatKey: chatKey)
 

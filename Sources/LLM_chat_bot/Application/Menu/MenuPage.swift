@@ -44,6 +44,9 @@ enum MenuPage: String, CaseIterable {
     case superModes = "supermodes"
     case superReferrals = "superref"
     case superTraffic = "supersrc"
+    /// Daily spending ceilings — the only cap that applies to people who have
+    /// already paid (§4.1).
+    case superSpend = "superspend"
     case referral = "ref"
     case adminInvite = "admininvite"
     case close
@@ -121,6 +124,7 @@ enum MenuPage: String, CaseIterable {
         case .superAdmin: return "← К супер-админу"
         case .adminPanel: return "← К моему премиуму"
         case .superTenants: return "← К тенантам"
+        case .superSpend: return "← К лимитам расходов"
         case .superChats: return "← К списку чатов"
         case .superAdminHelp: return "← К разделам справки"
         case .tuning: return "← К настройкам"

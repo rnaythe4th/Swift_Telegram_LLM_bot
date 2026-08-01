@@ -24,15 +24,26 @@ enum EnvironmentKey: String {
     case logLevel = "LOG_LEVEL"
     case maxConcurrentGenerations = "MAX_CONCURRENT_GENERATIONS"
     case telegramAPIBase = "TELEGRAM_API_BASE"
+    /// 32 bytes of base64 (`openssl rand -base64 32`). Encrypts the payment
+    /// credentials stored in the database (§5.6). Optional, but without it the
+    /// card token and the checkout signing words sit in the row as plain text.
+    case stateEncryptionKey = "STATE_ENCRYPTION_KEY"
 }
 
 enum AppConfigError: LocalizedError {
     case missingEnvironment(EnvironmentKey)
+    case badEncryptionKey
 
     var errorDescription: String? {
         switch self {
         case .missingEnvironment(let key):
             return "Missing env: \(key.rawValue)"
+        case .badEncryptionKey:
+            return """
+                \(EnvironmentKey.stateEncryptionKey.rawValue) must be 32 bytes of base64 \
+                (generate one with `openssl rand -base64 32`). Refusing to start: a key that \
+                cannot be read would store payment credentials in the clear without saying so.
+                """
         }
     }
 }
@@ -82,6 +93,8 @@ struct AppConfig: Sendable {
     /// stand-in to assert what the bot actually sends (§19). Unset in
     /// production — the default is Telegram itself.
     let telegramAPIBase: String
+    /// See `EnvironmentKey.stateEncryptionKey`.
+    let stateEncryptionKey: String?
 
     static func load() throws -> AppConfig {
         let telegramToken = try env(.telegramToken)
@@ -118,7 +131,8 @@ struct AppConfig: Sendable {
             metricsToken: optionalEnv(.metricsToken),
             ownerUserID: optionalEnv(.ownerUserID).flatMap { Int($0) }.flatMap { $0 > 0 ? $0 : nil },
             maxConcurrentGenerations: Int(optionalEnv(.maxConcurrentGenerations) ?? "") ?? 64,
-            telegramAPIBase: optionalEnv(.telegramAPIBase) ?? TelegramHTTPGateway.defaultAPIBase
+            telegramAPIBase: optionalEnv(.telegramAPIBase) ?? TelegramHTTPGateway.defaultAPIBase,
+            stateEncryptionKey: optionalEnv(.stateEncryptionKey)
         )
     }
 

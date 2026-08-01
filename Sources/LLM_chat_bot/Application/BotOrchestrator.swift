@@ -25,6 +25,8 @@ final class BotOrchestrator: Sendable {
     /// The loader, kept so a replica waiting for the handover can restore state
     /// the moment it becomes the writer.
     let storedState = LockedValue<PostgresStatePersistence?>(nil)
+    /// Ages out conversations nobody has touched (§7.2). Only a writer runs it.
+    let retention = LockedValue<RetentionService?>(nil)
     /// Where money is written — also the only thing that can check its own
     /// books (`reconcile`).
     let ledger: LedgerPort

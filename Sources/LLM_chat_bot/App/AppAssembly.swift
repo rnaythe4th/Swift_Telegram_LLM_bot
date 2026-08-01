@@ -28,6 +28,7 @@ struct AppAssembly {
     static func registerSecrets(_ config: AppConfig) {
         SecretRedactor.shared.register([
             config.telegramToken,
+            config.stateEncryptionKey,
             config.deepseekKey,
             config.routerApiKey,
             config.databaseURL,
@@ -44,6 +45,14 @@ struct AppAssembly {
     }
 
     static func build(config: AppConfig, logger: LoggerPort) async throws -> AppAssembly {
+        // Before anything reads a stored secret: the key that opens them.
+        guard SecretBox.configure(base64Key: config.stateEncryptionKey) else {
+            throw AppConfigError.badEncryptionKey
+        }
+        if config.stateEncryptionKey == nil {
+            logger.warning("\(EnvironmentKey.stateEncryptionKey.rawValue) is not set — payment credentials are stored unencrypted; set it before connecting a card provider or a checkout")
+        }
+
         let metrics = RuntimeMetrics()
         let flags = RuntimeFlags()
 
@@ -374,6 +383,16 @@ struct AppAssembly {
                     ?? head.headers.first(name: "X-Metrics-Token")
                 guard SecretGuard.constantTimeEquals(presented, metricsToken) else {
                     return AppHTTPResponse(status: .unauthorized, body: "unauthorized")
+                }
+                // A scraper asks for text; a person (or the old tooling) gets
+                // JSON. Same numbers, same token, no second endpoint.
+                let accept = head.headers.first(name: "Accept") ?? ""
+                if accept.contains("text/plain") {
+                    return AppHTTPResponse(
+                        status: .ok,
+                        contentType: "text/plain; version=0.0.4; charset=utf-8",
+                        body: await orchestrator.prometheusReport()
+                    )
                 }
                 let report = await orchestrator.metricsReport()
                 let encoder = JSONEncoder()

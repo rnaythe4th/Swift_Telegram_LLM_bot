@@ -36,6 +36,7 @@ extension BotOrchestrator {
             return false
         }
         storedState.value = persistence
+        retention.value = RetentionService(state: state, persistence: persistence, logger: logger)
         return await claimWriterAndRestore()
     }
 
@@ -157,6 +158,11 @@ extension BotOrchestrator {
         tasks.append(Task { [weak self] in
             await self?.runHealthLoop()
         })
+        // Retention (§7.2). Only the writer runs it — two instances deleting
+        // the same rows is pointless, and only one of them owns the state.
+        if let retention = retention.value {
+            tasks.append(Task { await retention.run() })
+        }
         // Renewal reminders / winback (roadmap step 8). Runs regardless of the
         // storage state: notices are deduplicated in memory too, and a
         // memory-only bot still shouldn't let subscriptions lapse silently.
@@ -361,6 +367,66 @@ extension BotOrchestrator {
         /// a window says whether it is moving.
         let funnelToday: [String: Int]
         let funnelWeek: [String: Int]
+    }
+
+    /// The same numbers in Prometheus exposition format, for `GET /metrics`
+    /// with `Accept: text/plain`.
+    ///
+    /// Forty lines of string building rather than a dependency, and it turns
+    /// the endpoint that already exists (and is already token-guarded) into
+    /// something a free Grafana Cloud can scrape. Without it the funnel is a
+    /// number you read by hand, once, when you remember to.
+    func prometheusReport() async -> String {
+        let report = await metricsReport()
+        var out: [String] = []
+
+        func metric(_ name: String, _ help: String, _ value: Int, labels: String = "") {
+            out.append("# HELP \(name) \(help)")
+            out.append("# TYPE \(name) gauge")
+            out.append("\(name)\(labels) \(value)")
+        }
+
+        metric("bot_uptime_seconds", "Process uptime.", report.uptimeSeconds)
+        metric("bot_active_generations", "Streams in flight.", report.activeGenerations)
+        metric("bot_queued_chat_operations", "Updates waiting behind a per-chat queue.", report.queuedChatOperations)
+        metric("bot_dirty_entities", "Entities waiting for the next write-behind flush.", report.dirtyEntities)
+        // The one gauge worth an alert rule: it means the bot is answering but
+        // cannot promise anything it writes will still be there (§4.3).
+        metric("bot_state_degraded", "1 when state is not durable and nothing is sold.", report.degraded ? 1 : 0)
+
+        for (name, value) in report.counters.sorted(by: { $0.key < $1.key }) {
+            out.append("# TYPE bot_\(name)_total counter")
+            out.append("bot_\(name)_total \(value)")
+        }
+        out.append("# HELP bot_funnel_total Conversion-funnel events, all time.")
+        out.append("# TYPE bot_funnel_total counter")
+        for (event, value) in report.funnel.sorted(by: { $0.key < $1.key }) {
+            out.append("bot_funnel_total{event=\"\(Self.escapeLabel(event))\"} \(value)")
+        }
+        out.append("# HELP bot_funnel_today Conversion-funnel events today.")
+        out.append("# TYPE bot_funnel_today gauge")
+        for (event, value) in report.funnelToday.sorted(by: { $0.key < $1.key }) {
+            out.append("bot_funnel_today{event=\"\(Self.escapeLabel(event))\"} \(value)")
+        }
+        out.append("# HELP bot_alert_firing Owner alerts currently raised (§6.1).")
+        out.append("# TYPE bot_alert_firing gauge")
+        for alert in OwnerAlert.allCases.sorted(by: { $0.rawValue < $1.rawValue }) {
+            let firing = report.alerts.contains(alert.rawValue) ? 1 : 0
+            out.append("bot_alert_firing{alert=\"\(alert.rawValue)\"} \(firing)")
+        }
+        return out.joined(separator: "\n") + "\n"
+    }
+
+    /// Label values are counter keys, which include a super-admin-chosen
+    /// campaign tag. Prometheus would read an unescaped quote as the end of the
+    /// label and the rest as syntax.
+    static func escapeLabelForTests(_ value: String) -> String { escapeLabel(value) }
+
+    private static func escapeLabel(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: " ")
     }
 
     func metricsReport() async -> MetricsReport {

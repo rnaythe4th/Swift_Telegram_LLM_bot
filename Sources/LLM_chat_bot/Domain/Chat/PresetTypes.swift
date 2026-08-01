@@ -81,6 +81,9 @@ enum AdminPendingInputKind: Sendable {
     // Super-admin monetization inputs.
     case markupPercent
     case dailyPremiumLimit
+    /// Daily spending ceilings (§4.1), in dollars; `0` removes the limit.
+    case spendGlobalCap
+    case spendTenantCap
     case balanceTopUp
     case cardProviderToken
     case cardPrice

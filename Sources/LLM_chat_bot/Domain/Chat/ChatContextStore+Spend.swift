@@ -24,6 +24,19 @@ extension ChatContextStore {
         dailySpendValue.record(real, tenant: chatOwnership[chatID] ?? defaultOwnerKey)
     }
 
+    /// Today's provider spend, in total and per tenant — the monitoring half of
+    /// the ceilings page. Names are resolved here so the page never handles a
+    /// storage key (§17).
+    func spendToday() -> SpendOverview {
+        var ledger = dailySpendValue
+        ledger.rollOverIfNeeded()
+        dailySpendValue = ledger
+        let top = ledger.byTenant
+            .map { SpendOverview.Row(label: displayLabel(forKey: $0.key), spent: $0.value) }
+            .sorted { $0.spent > $1.spent }
+        return SpendOverview(total: ledger.total, topTenants: top)
+    }
+
     /// Whether a paid answer is still within the ceilings, and which one it hit.
     /// Free models cost nothing and are never gated: a cap that switches the bot
     /// off entirely would turn an accounting limit into an outage.

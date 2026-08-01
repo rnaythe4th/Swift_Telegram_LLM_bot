@@ -31,6 +31,8 @@ enum BotCommandName: CaseIterable, Equatable {
     case simulate
     case resetStats
     case chatid
+    /// Erases this chat's conversation on request (§7.2).
+    case forget
     case inspect
     case ads
     case balance
@@ -99,6 +101,8 @@ enum BotCommandName: CaseIterable, Equatable {
             return "reset_stats"
         case .chatid:
             return "chatid"
+        case .forget:
+            return "forget"
         case .inspect:
             return "inspect"
         case .ads:

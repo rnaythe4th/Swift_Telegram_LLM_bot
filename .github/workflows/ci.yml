@@ -1,0 +1,58 @@
+# The tests already exist and already run in the Docker build; this makes them
+# run on a pull request too, against a real Postgres — which is the only place
+# the schema, the constraints and the transactions can actually be checked.
+name: CI
+
+on:
+  push:
+    branches: [main, Ai_prod]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: swift:6.2-bookworm
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: botdb
+        # Without the healthcheck the first query races the server's startup.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The database tests skip themselves without this, so a missing service
+      # would quietly turn them off rather than fail the build.
+      TEST_DATABASE_URL: postgres://postgres:test@postgres:5432/botdb?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the dependency graph
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test --skip-build
+
+      # A warning today is an error somebody stops reading tomorrow.
+      - name: Fail on warnings
+        run: |
+          set -o pipefail
+          swift build -Xswiftc -warnings-as-errors 2>&1 | tail -20

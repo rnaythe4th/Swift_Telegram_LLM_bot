@@ -54,7 +54,7 @@ extension BotMenuHandler {
                 username: username
             )
 
-        case .markupPercent, .dailyPremiumLimit, .balanceTopUp:
+        case .markupPercent, .dailyPremiumLimit, .balanceTopUp, .spendGlobalCap, .spendTenantCap:
             outcome = await applyEconomyInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
 
         case .cardProviderToken, .cardUsdRate, .cardPrice:
@@ -384,6 +384,26 @@ extension BotMenuHandler {
             } else {
                 toast = "⚠️ Нужно число 0–500"
             }
+
+        case .spendGlobalCap, .spendTenantCap:
+            resumePage = .superSpend
+            guard isSuper else { toast = Texts.superAdminOnly; break }
+            guard let dollars = Double(trimmed.replacingOccurrences(of: ",", with: ".")),
+                  dollars >= 0, dollars <= 100_000 else {
+                toast = "⚠️ Нужна сумма в долларах, например 25 или 4.50 (0 — без лимита)"
+                break
+            }
+            var policy = await state.spendPolicy()
+            if pending.kind == .spendGlobalCap {
+                policy.dailyGlobalCap = .usd(dollars)
+            } else {
+                policy.dailyPerTenantCap = .usd(dollars)
+            }
+            await applySpendPolicy(policy)
+            let scope = pending.kind == .spendGlobalCap ? "Общий лимит" : "Лимит на тенанта"
+            toast = dollars == 0
+                ? "✓ \(scope) снят — расход не ограничен"
+                : "✓ \(scope): <b>\(Money.usd(dollars).formatted(fractionDigits: 2))</b>/день"
 
         case .dailyPremiumLimit:
             resumePage = .superAdmin

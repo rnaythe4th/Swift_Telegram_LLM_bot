@@ -114,6 +114,18 @@ struct DailySpendLedger: Sendable {
     func spent(tenant: String) -> Money { byTenant[tenant] ?? .zero }
 }
 
+/// What was spent today, ready to print.
+struct SpendOverview: Sendable {
+    struct Row: Sendable {
+        /// Already a display label — a storage key never reaches the interface.
+        let label: String
+        let spent: Money
+    }
+
+    let total: Money
+    let topTenants: [Row]
+}
+
 /// Why a turn was stopped by a spending ceiling — nil means "carry on".
 enum SpendCapVerdict: Sendable, Equatable {
     /// The whole bot has spent its daily budget.

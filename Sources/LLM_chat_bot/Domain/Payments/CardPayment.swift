@@ -84,6 +84,37 @@ struct CardPaymentConfig: Codable, Sendable {
 
     static let empty = CardPaymentConfig(providerToken: nil, currency: .rub, priceMinorUnits: nil, usdRateMinorUnits: nil)
 
+    enum CodingKeys: String, CodingKey {
+        case providerToken, currency, priceMinorUnits, usdRateMinorUnits
+    }
+
+    init(providerToken: String?, currency: FiatCurrency, priceMinorUnits: Int?, usdRateMinorUnits: Int?) {
+        self.providerToken = providerToken
+        self.currency = currency
+        self.priceMinorUnits = priceMinorUnits
+        self.usdRateMinorUnits = usdRateMinorUnits
+    }
+
+    /// The provider token is a live payment credential, so it is encrypted at
+    /// rest (§5.6); everything else here is a setting. Missing fields decode to
+    /// their defaults — one unreadable value must not cost the merchant the
+    /// rest of their configuration.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        providerToken = try c.decodeIfPresent(String.self, forKey: .providerToken).map(SecretBox.open)
+        currency = (try? c.decode(FiatCurrency.self, forKey: .currency)) ?? .rub
+        priceMinorUnits = try c.decodeIfPresent(Int.self, forKey: .priceMinorUnits)
+        usdRateMinorUnits = try c.decodeIfPresent(Int.self, forKey: .usdRateMinorUnits)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(providerToken.map(SecretBox.seal), forKey: .providerToken)
+        try c.encode(currency, forKey: .currency)
+        try c.encodeIfPresent(priceMinorUnits, forKey: .priceMinorUnits)
+        try c.encodeIfPresent(usdRateMinorUnits, forKey: .usdRateMinorUnits)
+    }
+
     var isEnabled: Bool {
         guard let token = providerToken, !token.isEmpty else { return false }
         return (priceMinorUnits ?? 0) > 0

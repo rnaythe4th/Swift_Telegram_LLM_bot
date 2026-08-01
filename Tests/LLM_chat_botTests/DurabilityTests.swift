@@ -154,3 +154,119 @@ final class MoneyTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(Money.self, from: data), amount)
     }
 }
+
+/// Payment credentials live in the database because the owner configures them
+/// from inside the bot — which means a dump, a backup or a leaked read-only
+/// credential would otherwise hand over the card token and the checkout's
+/// signing words (§5.6).
+final class SecretBoxTests: XCTestCase {
+
+    override func tearDown() {
+        // The key is process-wide; leaving one behind would change how the
+        // other suites encode their fixtures.
+        SecretBox.configure(base64Key: nil)
+    }
+
+    private static let key = Data(repeating: 7, count: 32).base64EncodedString()
+
+    func testARoundTripReturnsTheSameValue() {
+        XCTAssertTrue(SecretBox.configure(base64Key: Self.key))
+        let sealed = SecretBox.seal("provider:LIVE:token")
+        XCTAssertNotEqual(sealed, "provider:LIVE:token", "the stored form must not be the value")
+        XCTAssertFalse(sealed.contains("LIVE"))
+        XCTAssertEqual(SecretBox.open(sealed), "provider:LIVE:token")
+    }
+
+    /// Every sealing is fresh, so two identical secrets do not produce two
+    /// identical rows — otherwise a dump reveals which merchants share a word.
+    func testSealingIsNotDeterministic() {
+        SecretBox.configure(base64Key: Self.key)
+        XCTAssertNotEqual(SecretBox.seal("same"), SecretBox.seal("same"))
+    }
+
+    /// Encryption is opt-in: a bot that has never had a key must keep working,
+    /// and the values it already stored must stay readable.
+    func testWithoutAKeyValuesPassThroughUnchanged() {
+        SecretBox.configure(base64Key: nil)
+        XCTAssertEqual(SecretBox.seal("plain"), "plain")
+        XCTAssertEqual(SecretBox.open("plain"), "plain")
+    }
+
+    /// A value written before the key existed is still readable after it is
+    /// introduced — otherwise turning encryption on locks the owner out of
+    /// their own merchant settings.
+    func testPlaintextWrittenBeforeTheKeyStaysReadable() {
+        SecretBox.configure(base64Key: Self.key)
+        XCTAssertEqual(SecretBox.open("written-before-the-key"), "written-before-the-key")
+    }
+
+    /// The wrong key must read as "not configured", never as garbage that gets
+    /// signed into a request the vendor then rejects for reasons nobody can see.
+    func testAWrongKeyYieldsNothingRatherThanNoise() {
+        SecretBox.configure(base64Key: Self.key)
+        let sealed = SecretBox.seal("secret-word")
+
+        SecretBox.configure(base64Key: Data(repeating: 9, count: 32).base64EncodedString())
+        XCTAssertEqual(SecretBox.open(sealed), "")
+        XCTAssertTrue(SecretBox.isUnreadable(sealed))
+    }
+
+    /// A key that cannot be used is a configuration error, not something to
+    /// shrug off and store secrets in the clear.
+    func testAMalformedKeyIsRejected() {
+        XCTAssertFalse(SecretBox.configure(base64Key: "not-base64!!"))
+        XCTAssertFalse(SecretBox.configure(base64Key: Data(repeating: 1, count: 16).base64EncodedString()))
+        XCTAssertTrue(SecretBox.configure(base64Key: nil), "no key at all is a supported mode")
+    }
+
+    /// The whole point: what reaches the row is ciphertext, and what comes back
+    /// out of it is the credential.
+    func testCheckoutCredentialsAreEncryptedInTheStoredRow() throws {
+        SecretBox.configure(base64Key: Self.key)
+        var config = ExternalPaymentConfig.default
+        config.merchantID = "7012"
+        config.secretWord = "word-one"
+        config.callbackSecret = "word-two"
+
+        let json = try XCTUnwrap(String(data: try JSONEncoder().encode(config), encoding: .utf8))
+        XCTAssertFalse(json.contains("word-one"), "the signing word must not be in the row")
+        XCTAssertFalse(json.contains("word-two"))
+        XCTAssertTrue(json.contains("7012"), "the merchant id is not a secret")
+
+        let decoded = try JSONDecoder().decode(ExternalPaymentConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.secretWord, "word-one")
+        XCTAssertEqual(decoded.callbackSecret, "word-two")
+        XCTAssertEqual(decoded.merchantID, "7012")
+    }
+
+    func testCardTokenIsEncryptedInTheStoredRow() throws {
+        SecretBox.configure(base64Key: Self.key)
+        let config = CardPaymentConfig(
+            providerToken: "390540012:LIVE:secret",
+            currency: .rub,
+            priceMinorUnits: 49_900,
+            usdRateMinorUnits: 9_500
+        )
+        let json = try XCTUnwrap(String(data: try JSONEncoder().encode(config), encoding: .utf8))
+        XCTAssertFalse(json.contains("390540012:LIVE:secret"))
+
+        let decoded = try JSONDecoder().decode(CardPaymentConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.providerToken, "390540012:LIVE:secret")
+        XCTAssertEqual(decoded.priceMinorUnits, 49_900)
+        XCTAssertEqual(decoded.usdRateMinorUnits, 9_500)
+    }
+}
+
+/// `/metrics` is the only window into a running bot, and a scraper reads it
+/// with no human to notice a malformed line (§6.2).
+final class PrometheusReportTests: XCTestCase {
+
+    /// Campaign tags reach label values, and a super-admin picks those. An
+    /// unescaped quote would end the label and turn the rest into syntax.
+    func testLabelValuesAreEscaped() {
+        XCTAssertEqual(BotOrchestrator.escapeLabelForTests(#"open"purchase"#), #"open\"purchase"#)
+        XCTAssertEqual(BotOrchestrator.escapeLabelForTests(#"back\slash"#), #"back\\slash"#)
+        XCTAssertEqual(BotOrchestrator.escapeLabelForTests("two\nlines"), "two lines")
+        XCTAssertEqual(BotOrchestrator.escapeLabelForTests("plain"), "plain")
+    }
+}

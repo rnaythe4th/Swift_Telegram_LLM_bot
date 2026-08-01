@@ -173,6 +173,11 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
     var usdRateMinorUnits: Int?
     var methods: [ExternalPaymentMethod]
 
+    enum CodingKeys: String, CodingKey {
+        case vendor, enabled, merchantID, secretWord, callbackSecret
+        case currency, priceMinorUnits, usdRateMinorUnits, methods
+    }
+
     static let maxMethods = 8
     /// How long a checkout link is worth keeping. Long enough for a bank app
     /// round-trip and a re-read of the page, short enough that stale orders do
@@ -224,12 +229,31 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
         vendor = (try? c.decode(ExternalPaymentVendor.self, forKey: .vendor)) ?? .freekassa
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
         merchantID = try c.decodeIfPresent(String.self, forKey: .merchantID)
-        secretWord = try c.decodeIfPresent(String.self, forKey: .secretWord)
-        callbackSecret = try c.decodeIfPresent(String.self, forKey: .callbackSecret)
+        // The two signing words are the only thing here worth stealing on its
+        // own, so they are encrypted at rest (§5.6). A value written before a
+        // key was configured comes back unchanged; one written under a key that
+        // is now gone comes back empty, which reads as "not configured" rather
+        // than as a wrong secret at the vendor.
+        secretWord = try c.decodeIfPresent(String.self, forKey: .secretWord).map(SecretBox.open)
+        callbackSecret = try c.decodeIfPresent(String.self, forKey: .callbackSecret).map(SecretBox.open)
         currency = (try? c.decode(FiatCurrency.self, forKey: .currency)) ?? .rub
         priceMinorUnits = try c.decodeIfPresent(Int.self, forKey: .priceMinorUnits)
         usdRateMinorUnits = try c.decodeIfPresent(Int.self, forKey: .usdRateMinorUnits)
         methods = (try? c.decode([ExternalPaymentMethod].self, forKey: .methods)) ?? []
+    }
+
+    /// Sealed on the way out, so the row never holds a usable signing word.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(vendor, forKey: .vendor)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encodeIfPresent(merchantID, forKey: .merchantID)
+        try c.encodeIfPresent(secretWord.map(SecretBox.seal), forKey: .secretWord)
+        try c.encodeIfPresent(callbackSecret.map(SecretBox.seal), forKey: .callbackSecret)
+        try c.encode(currency, forKey: .currency)
+        try c.encodeIfPresent(priceMinorUnits, forKey: .priceMinorUnits)
+        try c.encodeIfPresent(usdRateMinorUnits, forKey: .usdRateMinorUnits)
+        try c.encode(methods, forKey: .methods)
     }
 
     /// Credentials, or nil while any of them is missing. The only way to reach

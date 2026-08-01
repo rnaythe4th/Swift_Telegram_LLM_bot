@@ -136,6 +136,8 @@ extension BotMenuHandler {
         let totalTenants = tenantStats.count
 
         let markupPct = await state.markupPercent()
+        let spendPolicy = await state.spendPolicy()
+        let spendToday = await state.spendToday()
         let dailyLimit = await state.dailyPremiumLimit()
         let reminders = await state.reminderConfig()
         let onboarding = await state.onboardingConfig()
@@ -170,6 +172,12 @@ extension BotMenuHandler {
             [menuButton("💰 Балансы · \(balances.count)", page: .superBalances),
              menuButton("💹 Наценка · \(markupPct)%", .markup, "set")],
             [menuButton("🎁 Премиум-лимит/день · \(dailyLimit)", .dailylimit, "set")],
+            [menuButton(
+                spendPolicy.isEnabled
+                    ? "💸 Лимиты расходов · \(spendToday.total.formatted(fractionDigits: 2)) сегодня"
+                    : "💸 Лимиты расходов · не заданы",
+                page: .superSpend
+            )],
             [menuButton("⏳ Напоминания и winback · \(reminders.enabled ? "вкл" : "выкл")", page: .superReminders)],
             [menuButton("💡 Примеры-запросы · \(onboarding.enabled ? "\(onboarding.enabledExamples.count)" : "выкл")", page: .superOnboarding)],
             [menuButton("🎁 Приглашения · \(referral.enabled ? ReferralConfig.formatUsd(cents: referral.inviterRewardCents) : "выкл")", page: .superReferrals)],
@@ -192,6 +200,7 @@ extension BotMenuHandler {
         💳 Карта · \(cardLabel)
         🏦 Внешняя касса · \(external.vendor.displayName) · \(external.isEnabled ? "<b>\(external.priceLabel ?? "")</b>" : "<b>откл</b>")\(external.creditsEnabled ? " · пополнения вкл" : "")
         💹 Наценка · <b>\(markupPct)%</b> · /tenant markup
+        💸 Расход сегодня · <b>\(spendToday.total.formatted(fractionDigits: 2))</b>\(spendPolicy.hasGlobalCap ? " из \(spendPolicy.dailyGlobalCap.formatted(fractionDigits: 2))" : " · лимита нет")
         🎛 Режимы · <b>\(modes.enabled ? "вкл" : "выкл")</b> · всего <b>\(modes.activeModes.count)</b> · бесплатных <b>\(freeModeCount)</b> · рабочий <b>\(modes.defaultMode?.title ?? "—")</b>
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
         💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · в личке <b>\(onboarding.activeExamples(inGroup: false).count)</b> · в группах <b>\(onboarding.showInGroups ? onboarding.activeExamples(inGroup: true).count : 0)</b>

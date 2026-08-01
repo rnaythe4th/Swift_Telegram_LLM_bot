@@ -79,6 +79,46 @@ extension ChatContextStore {
         chatMetaByID[chatID]?.botRemoved == true
     }
 
+    // MARK: - Retention (§7.2)
+
+    /// Chats whose conversation is not up for expiry: anything a tenant's
+    /// licence covers, and every DM belonging to somebody who pays. They are
+    /// customers, and losing their history would be a downgrade of what they
+    /// bought.
+    func chatsWorthKeeping() -> Set<Int> {
+        var keep = Set(chatOwnership.keys)
+        for (owner, tenant) in tenants where tenant.isActive {
+            if let userID = UserKey.userID(from: owner) { keep.insert(userID) }
+        }
+        for (key, wallet) in userBalances where wallet.balance.isPositive {
+            if let userID = UserKey.userID(from: key) { keep.insert(userID) }
+        }
+        for key in superAdminUsernames {
+            if let userID = UserKey.userID(from: key) { keep.insert(userID) }
+        }
+        return keep
+    }
+
+    /// Drops conversations the retention sweep already removed from storage —
+    /// cache only, so this must not mark them dirty and write them back.
+    func dropContexts(_ keys: [ChatKey]) {
+        for key in keys {
+            contexts.removeValue(forKey: key)
+            dirtyContexts.remove(key)
+        }
+    }
+
+    /// `/forget`: erases this chat's conversation on request. The wallet, the
+    /// subscription and the money journal stay — they are the person's own
+    /// evidence in a billing dispute, and deleting them would erase the proof
+    /// rather than the data.
+    func forgetChat(chatKey: ChatKey) -> Bool {
+        guard contexts.removeValue(forKey: chatKey) != nil else { return false }
+        dirtyContexts.remove(chatKey)
+        deletedContexts.insert(chatKey)
+        return true
+    }
+
     // MARK: - Group welcome (roadmap step 4)
 
     /// One welcome per group entry. Telegram announces a join twice — as

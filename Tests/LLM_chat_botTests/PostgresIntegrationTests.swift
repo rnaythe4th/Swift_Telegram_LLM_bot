@@ -344,6 +344,78 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertNil(consumed, "a one-shot offer must stay consumed")
     }
 
+    // MARK: - Retention (§7.2)
+
+    /// Idle conversations age out; a customer's never does. Sweeping a paying
+    /// sponsor's group would be a downgrade of what they bought, and sweeping
+    /// their DM would lose the context they pay to keep.
+    func testRetentionDropsIdleChatsAndKeepsCustomers() async throws {
+        let store = Fixtures.makeStore()
+        await store.identifyUser(userID: 70, username: "sponsor", firstName: nil)
+        let sponsor = UserKey.forUserID(70)
+        await store.registerTenant(username: sponsor)
+        _ = await store.assignChat(chatID: -70, to: sponsor)
+        _ = try await ledger.inTransaction {
+            try await $0.extendSubscription(
+                sponsor, days: 30,
+                defaults: TenantDefaults(ownerUsername: sponsor, model: "m", role: "r", historyLength: 10)
+            )
+        }
+
+        let stranger = ChatKey(chatID: 71, threadID: 0)
+        let ownedGroup = ChatKey(chatID: -70, threadID: 0)
+        let sponsorDM = ChatKey(chatID: 70, threadID: 0)
+        for key in [stranger, ownedGroup, sponsorDM] {
+            await store.setModelOnly(chatKey: key, model: "some/model")
+        }
+        try await persistence.apply(await store.drainDirtyBatch())
+
+        // Nothing is old enough yet.
+        var protectedKeys = await store.chatsWorthKeeping()
+        var removed = try await persistence.pruneChatContexts(idleDays: 180, protecting: protectedKeys)
+        XCTAssertTrue(removed.isEmpty)
+
+        // Age every row past the horizon and sweep again.
+        try await client.query("update bot_chat_context set updated_at = now() - interval '200 days'")
+        // The store has to be reloaded so `chatsWorthKeeping` sees the
+        // subscription the ledger wrote.
+        let reloaded = Fixtures.makeStore()
+        await reloaded.restore(from: try await persistence.loadEverything())
+        protectedKeys = await reloaded.chatsWorthKeeping()
+        removed = try await persistence.pruneChatContexts(idleDays: 180, protecting: protectedKeys)
+
+        XCTAssertEqual(removed, [stranger], "only the chat nobody pays for goes")
+
+        let left = try await persistence.loadEverything().contexts.map(\.key)
+        XCTAssertTrue(left.contains(ownedGroup), "a sponsored group keeps its history")
+        XCTAssertTrue(left.contains(sponsorDM), "so does the sponsor's own chat")
+        XCTAssertFalse(left.contains(stranger))
+    }
+
+    /// `/forget` erases the conversation and nothing else: the wallet and the
+    /// journal are the person's own evidence in a billing dispute.
+    func testForgetErasesTheConversationButNotTheMoney() async throws {
+        let store = Fixtures.makeStore()
+        await store.identifyUser(userID: 72, username: "payer", firstName: nil)
+        let key = UserKey.forUserID(72)
+        let chat = ChatKey(chatID: 72, threadID: 0)
+        await store.setModelOnly(chatKey: chat, model: "some/model")
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(500), kind: .topup, purchased: true, ref: "top")
+        }
+        try await persistence.apply(await store.drainDirtyBatch())
+
+        let erased = await store.forgetChat(chatKey: chat)
+        XCTAssertTrue(erased)
+        try await persistence.apply(await store.drainDirtyBatch())
+
+        let stored = try await persistence.loadEverything()
+        XCTAssertFalse(stored.contexts.contains { $0.key == chat }, "the conversation is gone")
+        XCTAssertEqual(stored.wallets[key]?.balance, .cents(500), "the money is not")
+        let entries = try await ledger.recentEntries(userKey: key, limit: 10)
+        XCTAssertEqual(entries.count, 1, "and neither is its journal")
+    }
+
     // MARK: - Write-behind round trip
 
     /// Everything the store exports has to come back the way it went in — the
