@@ -15,12 +15,12 @@ extension BotMenuHandler {
         menuMessageID: Int,
         text: String,
         chatKey: ChatKey,
-        username: String?
+        invoker: UserKey?
     ) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isAdmin = await state.isAdmin(username: username, chatID: chatKey.chatID)
-        let isSuper = await state.isSuperAdmin(username: username)
-        let isRoot = await state.isRootSuperAdmin(username: username)
+        let isAdmin = await state.isAdmin(invoker, chatID: chatKey.chatID)
+        let isSuper = await state.isSuperAdmin(invoker)
+        let isRoot = await state.isRootSuperAdmin(invoker)
 
         let outcome: AdminInputOutcome
         switch pending.kind {
@@ -30,7 +30,7 @@ extension BotMenuHandler {
                 pending: pending,
                 trimmed: trimmed,
                 chatKey: chatKey,
-                username: username,
+                invoker: invoker,
                 isAdmin: isAdmin,
                 isSuper: isSuper
             )
@@ -51,7 +51,7 @@ extension BotMenuHandler {
                 pending: pending,
                 trimmed: trimmed,
                 chatKey: chatKey,
-                username: username
+                invoker: invoker
             )
 
         case .markupPercent, .dailyPremiumLimit, .balanceTopUp, .spendGlobalCap, .spendTenantCap:
@@ -80,7 +80,7 @@ extension BotMenuHandler {
             outcome = (toast: "", page: .adminPanel)
         }
 
-        await refreshMenu(chatKey: chatKey, menuMessageID: menuMessageID, screen: await renderPage(outcome.page, chatKey: chatKey, username: username))
+        await refreshMenu(chatKey: chatKey, menuMessageID: menuMessageID, screen: await renderPage(outcome.page, chatKey: chatKey, invoker: invoker))
         if !outcome.toast.isEmpty {
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
@@ -104,7 +104,7 @@ extension BotMenuHandler {
         pending: AdminPendingInput,
         trimmed: String,
         chatKey: ChatKey,
-        username: String?,
+        invoker: UserKey?,
         isAdmin: Bool,
         isSuper: Bool
     ) async -> AdminInputOutcome {
@@ -144,8 +144,8 @@ extension BotMenuHandler {
             resumePage = .adminDefaults
 
         case .tenantAssignChat:
-            guard let owner = pending.payload else { toast = "Не удалось определить владельца"; resumePage = .adminChats; break }
-            if !isSuper, owner.lowercased() != username?.lowercased() {
+            guard let owner = pending.payload.map(UserKey.init(storageValue:)) else { toast = "Не удалось определить владельца"; resumePage = .adminChats; break }
+            if !isSuper, owner != invoker {
                 toast = "🔒 Включить премиум можно только за свой счёт"
             } else if let chatID = Int(trimmed) {
                 let ok = await state.assignChat(chatID: chatID, to: owner)
@@ -156,15 +156,15 @@ extension BotMenuHandler {
             resumePage = .adminChats
 
         case .tenantAddUser:
-            guard let owner = pending.payload else { toast = "Не удалось определить владельца"; resumePage = .adminUsers; break }
-            if !isSuper, owner.lowercased() != username?.lowercased() {
+            guard let owner = pending.payload.map(UserKey.init(storageValue:)) else { toast = "Не удалось определить владельца"; resumePage = .adminUsers; break }
+            if !isSuper, owner != invoker {
                 toast = "🔒 Добавлять гостей можно только к своему премиуму"
             } else {
                 let target = normalizeUsername(trimmed)
                 if target.isEmpty {
                     toast = Texts.usernameRequired
                 } else {
-                    let ok = await state.addLicensedUser(ownerUsername: owner, target: target)
+                    let ok = await state.addLicensedUser(ownerKey: owner, target: state.userKeyOrRaw(target))
                     toast = ok ? "✓ @\(target) добавлен в гости премиума" : "Уже в списке или премиум неактивен"
                 }
             }
@@ -195,7 +195,7 @@ extension BotMenuHandler {
             if target.isEmpty {
                 toast = Texts.usernameRequired
             } else {
-                await state.registerTenant(username: target)
+                await state.registerTenant(state.userKeyOrRaw(target))
                 toast = "✓ Тенант @\(target) создан"
             }
             resumePage = .superTenants
@@ -203,7 +203,7 @@ extension BotMenuHandler {
         case .tenantRemove:
             guard isSuper else { toast = Texts.superAdminOnly; resumePage = .superTenants; break }
             let target = normalizeUsername(trimmed)
-            let removed = await state.removeTenant(username: target)
+            let removed = await state.removeTenant(state.userKeyOrRaw(target))
             toast = removed ? "✓ Тенант @\(target) удалён" : Texts.cannotRemove
             resumePage = .superTenants
 
@@ -213,7 +213,7 @@ extension BotMenuHandler {
             if target.isEmpty {
                 toast = Texts.usernameRequired
             } else {
-                let ok = await state.addSuperAdmin(target: target)
+                let ok = await state.addSuperAdmin(state.userKeyOrRaw(target))
                 toast = ok ? "✓ @\(target) — суперадмин" : "Уже суперадмин"
             }
             resumePage = .superAdmins
@@ -221,7 +221,7 @@ extension BotMenuHandler {
         case .superAdminRemove:
             guard isRoot else { toast = Texts.rootSuperAdminOnly; resumePage = .superAdmins; break }
             let target = normalizeUsername(trimmed)
-            let ok = await state.removeSuperAdmin(target: target)
+            let ok = await state.removeSuperAdmin(state.userKeyOrRaw(target))
             toast = ok ? "✓ @\(target) больше не суперадмин" : Texts.cannotRemove
             resumePage = .superAdmins
 
@@ -297,7 +297,7 @@ extension BotMenuHandler {
         pending: AdminPendingInput,
         trimmed: String,
         chatKey: ChatKey,
-        username: String?
+        invoker: UserKey?
     ) async -> AdminInputOutcome {
         var toast: String = ""
         var resumePage: MenuPage = .adminPanel
@@ -323,11 +323,11 @@ extension BotMenuHandler {
                 // The same gate as the preset buttons and /model: a free-tier
                 // user with today's taste left may type a paid model too. This
                 // used to ask `hasFullModelAccess`, so the box refused exactly
-                // what the buttons next to it allowed. `username` here is
+                // what the buttons next to it allowed. `invoker` here is
                 // already the storage key (`processTextInput` resolves it from
-                // the userID), so the wallet of someone without a @username is
+                // the userID), so the wallet of someone without a @invoker is
                 // found too.
-                let access = await state.paidModelAccess(username: username, userID: nil, chatID: chatKey.chatID)
+                let access = await state.paidModelAccess(key: invoker, userID: nil, chatID: chatKey.chatID)
                 let allowedFree = await state.allowedFreeModelIDs()
                 let isPaidModel = allowedFree.map { !$0.contains(modelID) } ?? true
                 if isPaidModel, case .none = access {
@@ -427,7 +427,7 @@ extension BotMenuHandler {
                 if target.isEmpty {
                     toast = Texts.usernameRequired
                 } else {
-                    let wallet = await state.creditBalance(username: target, amount: .usd(amount))
+                    let wallet = await state.creditBalance(key: state.userKeyOrRaw(target), amount: .usd(amount))
                     toast = "✓ Баланс @\(target.lowercased()) · <b>\(wallet.balance.formatted())</b>"
                 }
             } else {

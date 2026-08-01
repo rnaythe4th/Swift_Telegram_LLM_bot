@@ -15,8 +15,8 @@ import Foundation
 
 /// What was bought, by whom, and how the payment is deduplicated.
 struct PaymentReceipt: Sendable {
-    /// Payer's `UserKey` (§6) — never a raw @username.
-    let payerKey: String
+    /// Payer's `UserKey` (§6) — never a raw @invoker.
+    let payerKey: UserKey
     /// Referral bonuses and traffic attribution are keyed by userID. A pending
     /// record (someone the bot has only been told about) has none, and then
     /// those two steps simply have nothing to look up.
@@ -168,7 +168,7 @@ final class PaymentFulfillmentService: Sendable {
                 let paid = try await ledger.inTransaction { transaction in
                     guard try await transaction.claim("refbonus:\(friendUserID)") else { return false }
                     try await transaction.credit(
-                        UserKey.forUserID(due.inviterUserID),
+                        UserKey.identified(due.inviterUserID),
                         due.amount,
                         kind: .referral,
                         purchased: false,
@@ -180,7 +180,7 @@ final class PaymentFulfillmentService: Sendable {
                     referralBonus = await state.redeemReferralPaymentBonus(payerUserID: friendUserID)
                     if let referralBonus {
                         await state.applyCommittedCredit(
-                            key: UserKey.forUserID(referralBonus.inviterUserID),
+                            key: UserKey.identified(referralBonus.inviterUserID),
                             amount: referralBonus.amount
                         )
                     }

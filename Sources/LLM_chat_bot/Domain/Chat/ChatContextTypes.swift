@@ -9,7 +9,7 @@ enum SimulatedRole: String, Sendable, CaseIterable {
 }
 
 struct TenantState: Sendable {
-    var ownerUsername: String
+    var ownerKey: UserKey
     var defaultModel: String
     var defaultRole: String
     var defaultHistoryLength: Int
@@ -18,8 +18,8 @@ struct TenantState: Sendable {
     var historyLengthPresets: [Preset]
     var rolePresets: [Preset]
     var whitelistedUserIDs: Set<Int>
-    var adminUsernames: Set<String>
-    var licensedUsernames: Set<String>
+    var adminKeys: Set<UserKey>
+    var licensedKeys: Set<UserKey>
     var cumulativeUsage: CumulativeUsage
     var createdAt: Date?
     /// Subscription end. nil = unlimited (root owner, manually added tenants).
@@ -49,7 +49,7 @@ enum SubscriptionActivation: Sendable {
 
 struct TenantStatsRow: Sendable {
     /// Storage key — pass back to the store; `label` is what people read.
-    let username: String
+    let key: UserKey
     let label: String
     let usage: CumulativeUsage
     let chatCount: Int

@@ -96,8 +96,8 @@ extension BotMenuHandler {
             url: ReferralLink.shareURL(link: link, text: shareText)
         )])
         // Wallets are keyed by account, not by nick — resolve through the
-        // userID so someone without a @username still sees their balance.
-        if await state.balance(username: state.userKey(userID: userID)) != nil {
+        // userID so someone without a @invoker still sees their balance.
+        if await state.balance(state.userKey(userID: userID)) != nil {
             rows.row([buyButton("💰 Баланс и оплата", source: .referral)])
         }
         rows.row(navButtons())

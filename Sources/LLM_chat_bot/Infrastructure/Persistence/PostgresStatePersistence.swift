@@ -105,8 +105,8 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                let expires = try row["winback_expires_at"].decode(Date?.self) {
                 discount = SubscriptionDiscount(percent: percent, expiresAt: expires)
             }
-            return TenantRow(username: try row["user_key"].decode(String.self), snapshot: TenantStateSnapshot(
-                ownerUsername: try row["owner_username"].decode(String.self),
+            return TenantRow(key: try row["user_key"].decode(UserKey.self), snapshot: TenantStateSnapshot(
+                ownerKey: try row["owner_username"].decode(UserKey.self),
                 defaultModel: try row["default_model"].decode(String.self),
                 defaultRole: try row["default_role"].decode(String.self),
                 defaultHistoryLength: try row["default_history"].decode(Int.self),
@@ -115,8 +115,8 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 historyLengthPresets: presets.history,
                 rolePresets: presets.role,
                 whitelistedUserIDs: licences.whitelistedUserIDs,
-                adminUsernames: licences.admins,
-                licensedUsernames: licences.licensed,
+                adminKeys: licences.admins,
+                licensedKeys: licences.licensed,
                 cumulativeUsage: try row["usage"].decode(CumulativeUsage.self),
                 createdAt: try row["created_at"].decode(Date.self),
                 paidUntil: try row["paid_until"].decode(Date?.self),
@@ -141,7 +141,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                         botRemoved: removed ? true : nil
                     )
                 },
-                ownerKey: try row["owner_key"].decode(String?.self)
+                ownerKey: try row["owner_key"].decode(UserKey?.self)
             )
         }
 
@@ -149,7 +149,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             InviteRow(
                 token: try $0["token"].decode(String.self),
                 record: InviteRecord(
-                    ownerUsername: try $0["owner_key"].decode(String.self),
+                    ownerKey: try $0["owner_key"].decode(UserKey.self),
                     createdAt: try $0["created_at"].decode(Date.self)
                 )
             )
@@ -216,7 +216,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             """
         ) { row in
             (
-                key: try row["user_key"].decode(String.self),
+                key: try row["user_key"].decode(UserKey.self),
                 wallet: UserBalance(
                     balance: .nanos(try row["balance_nanos"].decode(Int64.self)),
                     spentBilled: .nanos(try row["spent_billed_nanos"].decode(Int64.self)),
@@ -227,7 +227,9 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 )
             )
         }
-        state.wallets = Dictionary(wallets.map { ($0.key, $0.wallet) }, uniquingKeysWith: { _, last in last })
+        var walletsByKey: [UserKey: UserBalance] = [:]
+        for row in wallets { walletsByKey[row.key] = row.wallet }
+        state.wallets = walletsByKey
 
         state.configs = try await loadConfigs()
         return state
@@ -298,7 +300,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
         configs.freeModelIDs = value(.freeModels, as: [String].self)
         configs.crypto = value(.crypto, as: CryptoConfigSnapshot.self)
         configs.card = value(.card, as: CardPaymentConfig.self)
-        configs.superAdmins = value(.superAdmins, as: [String].self)
+        configs.superAdmins = value(.superAdmins, as: [UserKey].self)
         configs.pollingOffset = value(.pollingOffset, as: Int.self)
         configs.ads = value(.ads, as: [AdCampaign].self)
         configs.markup = value(.markup, as: Int.self)
@@ -367,7 +369,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_user (user_key, user_id, username, first_name, first_seen_at, seen_at)
-                    values (\(UserKey.forUserID(identity.userID)), \(Int64(identity.userID)), \(identity.username),
+                    values (\(UserKey.identified(identity.userID)), \(Int64(identity.userID)), \(identity.username),
                             \(identity.firstName), \(identity.firstSeenAt ?? identity.seenAt), \(identity.seenAt))
                     on conflict (user_key) do update set
                         user_id = excluded.user_id,
@@ -402,8 +404,8 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 )
                 let licences = TenantLicencesDocument(
                     whitelistedUserIDs: snapshot.whitelistedUserIDs,
-                    admins: snapshot.adminUsernames,
-                    licensed: snapshot.licensedUsernames ?? []
+                    admins: snapshot.adminKeys,
+                    licensed: snapshot.licensedKeys ?? []
                 )
                 // `paid_until` and the winback discount are absent from the
                 // update list on purpose: they belong to the money transaction
@@ -418,7 +420,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                         presets, licences, usage, notice_cycle_until, sent_notices,
                         winback_percent, winback_expires_at, reminders_opt_out, created_at, updated_at
                     ) values (
-                        \(row.username), \(snapshot.ownerUsername), \(snapshot.paidUntil), \(snapshot.defaultModel),
+                        \(row.key), \(snapshot.ownerKey), \(snapshot.paidUntil), \(snapshot.defaultModel),
                         \(snapshot.defaultRole), \(snapshot.defaultHistoryLength),
                         \(presets), \(licences), \(snapshot.cumulativeUsage ?? .zero),
                         \(snapshot.noticeCycleUntil), \(snapshot.sentNotices ?? []),
@@ -465,7 +467,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_invite (token, owner_key, created_at)
-                    values (\(row.token), \(row.record.ownerUsername), \(row.record.createdAt))
+                    values (\(row.token), \(row.record.ownerKey), \(row.record.createdAt))
                     on conflict (token) do update set owner_key = excluded.owner_key
                     """,
                     logger: log
@@ -542,7 +544,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 try await db.query(
                     """
                     insert into bot_crypto_invoice (id, owner_key, status, expires_at, data)
-                    values (\(invoice.id), \(invoice.username), \(invoice.status.rawValue), \(invoice.expiresAt), \(invoice))
+                    values (\(invoice.id), \(invoice.ownerKey.storageValue), \(invoice.status.rawValue), \(invoice.expiresAt), \(invoice))
                     on conflict (id) do update set
                         status = excluded.status, expires_at = excluded.expires_at, data = excluded.data
                     """,
@@ -616,10 +618,10 @@ struct TenantPresetsDocument: Codable, Sendable, PostgresCodable {
 /// Who a tenant's licence covers. Same reason for the hand-written decoder.
 struct TenantLicencesDocument: Codable, Sendable, PostgresCodable {
     var whitelistedUserIDs: [Int] = []
-    var admins: [String] = []
-    var licensed: [String] = []
+    var admins: [UserKey] = []
+    var licensed: [UserKey] = []
 
-    init(whitelistedUserIDs: [Int] = [], admins: [String] = [], licensed: [String] = []) {
+    init(whitelistedUserIDs: [Int] = [], admins: [UserKey] = [], licensed: [UserKey] = []) {
         self.whitelistedUserIDs = whitelistedUserIDs
         self.admins = admins
         self.licensed = licensed
@@ -628,8 +630,8 @@ struct TenantLicencesDocument: Codable, Sendable, PostgresCodable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         whitelistedUserIDs = try c.decodeIfPresent([Int].self, forKey: .whitelistedUserIDs) ?? []
-        admins = try c.decodeIfPresent([String].self, forKey: .admins) ?? []
-        licensed = try c.decodeIfPresent([String].self, forKey: .licensed) ?? []
+        admins = try c.decodeIfPresent([UserKey].self, forKey: .admins) ?? []
+        licensed = try c.decodeIfPresent([UserKey].self, forKey: .licensed) ?? []
     }
 }
 
@@ -675,6 +677,34 @@ extension GlobalConfigValue: Encodable {
         case .externalPayments(let value): try container.encode(value)
         case .spendPolicy(let value): try container.encode(value)
         }
+    }
+}
+
+// MARK: - Column bridges
+
+/// `UserKey` is a `text` column, not a document: the whole schema is keyed on
+/// it (`bot_wallet`, `bot_tenant`, `bot_chat.owner_key`, …).
+///
+/// The bridge lives here rather than on the type so the domain keeps no
+/// knowledge of the driver — and reading is deliberately total
+/// (`init(storageValue:)` sanitises rather than throws), because one malformed
+/// key must not take a whole restore down with it and drop the bot into the
+/// memory-only mode where it stops selling (§10.6).
+extension UserKey: PostgresEncodable, PostgresDecodable {
+    static var psqlType: PostgresDataType { String.psqlType }
+    static var psqlFormat: PostgresFormat { String.psqlFormat }
+
+    func encode(into byteBuffer: inout ByteBuffer, context: PostgresEncodingContext<some PostgresJSONEncoder>) throws {
+        try storageValue.encode(into: &byteBuffer, context: context)
+    }
+
+    init(
+        from buffer: inout ByteBuffer,
+        type: PostgresDataType,
+        format: PostgresFormat,
+        context: PostgresDecodingContext<some PostgresJSONDecoder>
+    ) throws {
+        self.init(storageValue: try String(from: &buffer, type: type, format: format, context: context))
     }
 }
 

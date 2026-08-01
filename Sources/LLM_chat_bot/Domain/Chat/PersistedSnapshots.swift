@@ -50,7 +50,7 @@ struct CumulativeUsage: Codable, Sendable, Equatable {
 }
 
 struct TenantStateSnapshot: Codable, Sendable {
-    var ownerUsername: String
+    var ownerKey: UserKey
     var defaultModel: String
     var defaultRole: String
     var defaultHistoryLength: Int
@@ -59,8 +59,8 @@ struct TenantStateSnapshot: Codable, Sendable {
     var historyLengthPresets: [Preset]
     var rolePresets: [Preset]
     var whitelistedUserIDs: [Int]
-    var adminUsernames: [String]
-    var licensedUsernames: [String]?
+    var adminKeys: [UserKey]
+    var licensedKeys: [UserKey]?
     var cumulativeUsage: CumulativeUsage?
     // Subscription fields; absent in pre-subscription rows (=> unlimited)
     var createdAt: Date?

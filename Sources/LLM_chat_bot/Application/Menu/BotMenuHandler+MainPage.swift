@@ -5,7 +5,7 @@ import Foundation
 extension BotMenuHandler {
     // MARK: - Main page
 
-    func renderMain(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
+    func renderMain(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
         let gateway = try? gateways.gateway(for: provider)
@@ -34,7 +34,7 @@ extension BotMenuHandler {
         let isGroupChat = chatKey.chatID < 0
 
         // Pay-as-you-go users see their wallet right on the main page.
-        let wallet = isGroupChat ? nil : await state.balance(username: username)
+        let wallet = isGroupChat ? nil : await state.balance(invoker)
         var balanceLine = ""
         if let wallet {
             let status = wallet.balance.isPositive ? "" : " <i>(исчерпан)</i>"
@@ -45,7 +45,7 @@ extension BotMenuHandler {
         // (roadmap step 3) and the answer to "почему у меня платные модели".
         let access = await state.chatAccessStatus(
             chatID: chatKey.chatID,
-            username: isGroupChat ? nil : username
+            key: isGroupChat ? nil : invoker
         )
         // Free tier: show what is *left* today, not just the cap. A number that
         // visibly counts down is the whole point of the daily taste (step 6);
@@ -75,7 +75,7 @@ extension BotMenuHandler {
         // not about whoever tapped (CLAUDE.md §13). A member's own balance is
         // theirs to know.
         let hasFullAccess = await state.hasFullModelAccess(
-            username: isGroupChat ? nil : username,
+            key: isGroupChat ? nil : invoker,
             chatID: chatKey.chatID
         )
         let modesOn = !modeConfig.activeModes.isEmpty
@@ -144,8 +144,8 @@ extension BotMenuHandler {
         let starsPrice = await state.starsPrice()
         let cryptoCents = await state.cryptoPriceUsdCents()
         var isTenant = false
-        if let username, !isGroupChat {
-            isTenant = await state.isTenant(username: username)
+        if let invoker, !isGroupChat {
+            isTenant = await state.isTenant(invoker)
         }
         let card = await state.cardConfig()
         if (starsPrice ?? 0) > 0 || cryptoCents != nil || card.isEnabled || isTenant || wallet != nil {
@@ -166,12 +166,12 @@ extension BotMenuHandler {
             rows.row([menuButton(label, page: .referral)])
         }
         rows.row([menuButton("❓ Справка", page: .helpPage)])
-        if await state.isSuperAdmin(username: username) {
+        if await state.isSuperAdmin(invoker) {
             rows.row([
                 menuButton("⚡ Мой премиум", page: .adminPanel),
                 menuButton("🛡 Супер-админ", page: .superAdmin),
             ])
-        } else if await state.isAdmin(username: username, chatID: chatKey.chatID) {
+        } else if await state.isAdmin(invoker, chatID: chatKey.chatID) {
             rows.row([menuButton("⚡ Мой премиум", page: .adminPanel)])
         }
         rows.row([menuButton(Texts.close, command: .close)])

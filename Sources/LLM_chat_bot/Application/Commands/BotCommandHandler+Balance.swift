@@ -34,9 +34,10 @@ extension BotCommandHandler {
                     try await sendUserFeedback(chatKey: chatKey, text: "<i>Укажите @username.</i>")
                     return
                 }
+                let targetKey = await state.userKeyOrRaw(target)
                 let wallet = subcommand == "add"
-                    ? await state.creditBalance(username: target, amount: .usd(amount))
-                    : await state.setBalanceAmount(username: target, amount: .usd(amount))
+                    ? await state.creditBalance(key: targetKey, amount: .usd(amount))
+                    : await state.setBalanceAmount(key: targetKey, amount: .usd(amount))
                 try await sendUserFeedback(chatKey: chatKey, text: """
                     ✓ Баланс @\(target.lowercased()) · <b>\(formatUsd(wallet.balance))</b>
                     Потрачено: клиентская цена \(formatUsd(wallet.spentBilled)) · реально \(formatUsd(wallet.spentReal))
@@ -49,7 +50,7 @@ extension BotCommandHandler {
                     return
                 }
                 let target = normalizeUsername(parts[1])
-                let removed = await state.removeBalance(username: target)
+                let removed = await state.removeBalance(state.userKeyOrRaw(target))
                 try await sendUserFeedback(chatKey: chatKey, text: removed
                     ? "✓ Кошелёк @\(target.lowercased()) удалён."
                     : "У @\(target.lowercased()) нет кошелька.")
@@ -89,10 +90,10 @@ extension BotCommandHandler {
         }
 
         // Personal view (everyone, incl. superadmin without subcommand). The
-        // wallet belongs to the account, so no @username is required.
+        // wallet belongs to the account, so no @invoker is required.
         guard let userID = fromUser?.id else { return }
-        let username = state.userKey(userID: userID)
-        guard let wallet = await state.balance(username: username) else {
+        let invoker = state.userKey(userID: userID)
+        guard let wallet = await state.balance(invoker) else {
             var lines = [
                 "<b>💰 Баланс</b>",
                 "",
@@ -102,7 +103,7 @@ extension BotCommandHandler {
                 ""
             ]
             if isSuper {
-                lines.append("\n<i>Суперадмин:</i> <code>/balance add \(fromUser?.username.map { "@\($0)" } ?? username) 5</code> — начислить себе, <code>/balance list</code> — все кошельки.")
+                lines.append("\n<i>Суперадмин:</i> <code>/balance add \(fromUser?.username.map { "@\($0)" } ?? "@you") 5</code> — начислить себе, <code>/balance list</code> — все кошельки.")
             } else {
                 lines.append("Пополнить — /buy. Бесплатный способ: пригласить друга — /ref.")
             }
@@ -124,7 +125,7 @@ extension BotCommandHandler {
         // The last few movements. Without them a shrinking balance is something
         // the user has to take on trust, and a disagreement about it has no
         // evidence on either side (§10.2).
-        if let recent = try? await ledger.recentEntries(userKey: username, limit: 5), !recent.isEmpty {
+        if let recent = try? await ledger.recentEntries(userKey: invoker, limit: 5), !recent.isEmpty {
             lines.append("")
             lines.append("<b>Последние движения</b>")
             let formatter = DateFormatter()

@@ -21,7 +21,7 @@ final class ExternalPaymentSignatureTests: XCTestCase {
         ExternalPaymentOrder(
             id: id,
             vendor: .freekassa,
-            payerKey: "#42",
+            payerKey: UserKey.identified(42),
             payerUserID: 42,
             chatID: 42,
             threadID: nil,
@@ -250,7 +250,7 @@ final class ExternalPaymentStoreTests: XCTestCase {
     func testWinbackDiscountReachesTheHostedCheckoutPrice() async {
         let store = await configuredStore()
         let discount = SubscriptionDiscount(percent: 30, expiresAt: Date().addingTimeInterval(3600))
-        let pricing = await store.subscriptionPricing(username: "#42", applying: discount)
+        let pricing = await store.subscriptionPricing(key: UserKey.identified(42), applying: discount)
         XCTAssertEqual(pricing.externalMinorUnitsFull, 49_900)
         XCTAssertEqual(pricing.externalMinorUnits, 34_930)
         XCTAssertTrue(pricing.hasDiscount)
@@ -259,14 +259,14 @@ final class ExternalPaymentStoreTests: XCTestCase {
     func testDiscountNeverFallsBelowTheCurrencyFloor() async {
         let store = await configuredStore(price: FiatCurrency.rub.minMinorUnits)
         let discount = SubscriptionDiscount(percent: 90, expiresAt: Date().addingTimeInterval(3600))
-        let pricing = await store.subscriptionPricing(username: "#42", applying: discount)
+        let pricing = await store.subscriptionPricing(key: UserKey.identified(42), applying: discount)
         XCTAssertEqual(pricing.externalMinorUnits, FiatCurrency.rub.minMinorUnits)
     }
 
     func testDisabledCheckoutQuotesNoPrice() async {
         let store = await configuredStore()
         await store.updateExternalPaymentConfig { $0.enabled = false }
-        let pricing = await store.subscriptionPricing(username: "#42")
+        let pricing = await store.subscriptionPricing(key: UserKey.identified(42))
         XCTAssertNil(pricing.externalMinorUnits)
     }
 
@@ -276,13 +276,13 @@ final class ExternalPaymentStoreTests: XCTestCase {
         let store = await configuredStore()
         let order = makeOrder(id: "a1", purpose: .subscription, method: "44")
         await store.upsertExternalOrder(order)
-        let found = await store.openExternalOrder(payerKey: "#42", purpose: .subscription, methodCode: "44")
+        let found = await store.openExternalOrder(payerKey: UserKey.identified(42), purpose: .subscription, methodCode: "44")
         XCTAssertEqual(found?.id, "a1")
         // A different rail or a different thing bought is a different order.
-        let otherRail = await store.openExternalOrder(payerKey: "#42", purpose: .subscription, methodCode: "13")
+        let otherRail = await store.openExternalOrder(payerKey: UserKey.identified(42), purpose: .subscription, methodCode: "13")
         XCTAssertNil(otherRail)
         let otherPurpose = await store.openExternalOrder(
-            payerKey: "#42",
+            payerKey: UserKey.identified(42),
             purpose: .credit(cents: 200),
             methodCode: "44"
         )
@@ -349,7 +349,7 @@ final class ExternalPaymentStoreTests: XCTestCase {
         return ExternalPaymentOrder(
             id: id,
             vendor: .freekassa,
-            payerKey: "#42",
+            payerKey: UserKey.identified(42),
             payerUserID: 42,
             chatID: 42,
             threadID: nil,

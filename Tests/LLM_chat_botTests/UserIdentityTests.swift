@@ -7,23 +7,30 @@ import XCTest
 final class UserKeyTests: XCTestCase {
 
     func testIdentifiedKeyShape() {
-        XCTAssertEqual(UserKey.forUserID(42), "#42")
-        XCTAssertTrue(UserKey.isIdentified("#42"))
-        XCTAssertFalse(UserKey.isIdentified("alice"))
-        XCTAssertEqual(UserKey.userID(from: "#42"), 42)
-        XCTAssertNil(UserKey.userID(from: "alice"))
+        XCTAssertEqual(UserKey.identified(42), UserKey.identified(42))
+        XCTAssertTrue(UserKey.identified(42).isIdentified)
+        XCTAssertFalse(UserKey.pending("alice")!.isIdentified)
+        XCTAssertEqual(UserKey.identified(42).userID, 42)
+        XCTAssertNil(UserKey.pending("alice")!.userID)
+        XCTAssertEqual(UserKey.identified(42).storageValue, "#42")
     }
 
     /// `#-1` and `#1` must not both parse — a key has exactly one spelling.
     func testSignedDigitsAreNotAKey() {
-        XCTAssertNil(UserKey.userID(from: "#+1"))
-        XCTAssertNil(UserKey.userID(from: "#-1"))
-        XCTAssertNil(UserKey.userID(from: "#"))
+        XCTAssertNil(UserKey(storageValue: "#+1").userID)
+        XCTAssertNil(UserKey(storageValue: "#-1").userID)
+        XCTAssertNil(UserKey(storageValue: "#").userID)
+    }
+
+    /// A key never prints itself into a message: interpolating one is a bug,
+    /// and the description says so instead of looking like a label.
+    func testKeyDoesNotRenderAsALabel() {
+        XCTAssertEqual("\(UserKey.identified(42))", "UserKey(#42)")
     }
 
     func testPendingKeyNormalizesHandles() {
-        XCTAssertEqual(UserKey.pending("@Alice"), "alice")
-        XCTAssertEqual(UserKey.pending("  BOB "), "bob")
+        XCTAssertEqual(UserKey.pending("@Alice")?.storageValue, "alice")
+        XCTAssertEqual(UserKey.pending("  BOB ")?.storageValue, "bob")
         XCTAssertNil(UserKey.pending(nil))
         XCTAssertNil(UserKey.pending(""))
         XCTAssertNil(UserKey.pending("@"))
@@ -39,8 +46,8 @@ final class UserKeyTests: XCTestCase {
     }
 
     func testSanitizedFallbackKeepsOnlyUsernameCharacters() {
-        XCTAssertEqual(UserKey.sanitizedPendingFallback("A&b#c d_1"), "abc d_1".replacingOccurrences(of: " ", with: ""))
-        XCTAssertEqual(UserKey.sanitizedPendingFallback(String(repeating: "x", count: 40)).count, 32)
+        XCTAssertEqual(UserKey.sanitizedPendingFallback("A&b#c d_1").storageValue, "abcd_1")
+        XCTAssertEqual(UserKey.sanitizedPendingFallback(String(repeating: "x", count: 40)).storageValue.count, 32)
     }
 }
 
@@ -139,9 +146,9 @@ final class UserDirectoryTests: XCTestCase {
     func testDisplayLabelForKeyNeverLeaksTheKeyItself() {
         var directory = UserDirectory.empty
         directory.record(userID: 7, username: "alice", firstName: nil)
-        XCTAssertEqual(directory.displayLabel(forKey: "#7"), "@alice")
-        XCTAssertEqual(directory.displayLabel(forKey: "#404"), "id 404")
-        XCTAssertEqual(directory.displayLabel(forKey: "pendinguser"), "@pendinguser")
+        XCTAssertEqual(directory.displayLabel(forKey: UserKey.identified(7)), "@alice")
+        XCTAssertEqual(directory.displayLabel(forKey: UserKey.identified(404)), "id 404")
+        XCTAssertEqual(directory.displayLabel(forKey: UserKey.pending("pendinguser")!), "@pendinguser")
     }
 
     func testPruneKeepsPeopleWhoHoldState() {
@@ -151,7 +158,7 @@ final class UserDirectoryTests: XCTestCase {
             directory.record(userID: id, username: nil, firstName: nil, now: base.addingTimeInterval(Double(id)))
         }
         // Oldest entries are the first candidates; protect one of them.
-        directory.prune(protectedKeys: [UserKey.forUserID(1)])
+        directory.prune(protectedKeys: [UserKey.identified(1)])
         XCTAssertNotNil(directory.identity(userID: 1))
         XCTAssertEqual(directory.identities.count, UserDirectory.maxIdentities)
     }
@@ -174,13 +181,13 @@ final class UserDirectoryTests: XCTestCase {
     func testCodableRoundTripRebuildsTheUsernameIndex() throws {
         var directory = UserDirectory.empty
         directory.record(userID: 7, username: "alice", firstName: "Alice")
-        directory.rootKey = "#7"
+        directory.rootKey = UserKey.identified(7)
 
         let data = try JSONEncoder().encode(directory)
         let restored = try JSONDecoder().decode(UserDirectory.self, from: data)
 
-        XCTAssertEqual(restored.rootKey, "#7")
+        XCTAssertEqual(restored.rootKey, UserKey.identified(7))
         XCTAssertEqual(restored.userID(forUsername: "alice"), 7)
-        XCTAssertEqual(restored.displayLabel(forKey: "#7"), "@alice")
+        XCTAssertEqual(restored.displayLabel(forKey: UserKey.identified(7)), "@alice")
     }
 }

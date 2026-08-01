@@ -14,7 +14,7 @@ extension GenerationCoordinator {
         generationID: GenerationID,
         isPrivateChat: Bool,
         adEligible: Bool,
-        billedTo: String?,
+        billedTo: UserKey?,
         sponsorLine: String?,
         premiumTicket: DailyPremiumTicket?,
         lastPremiumCall: Int?
@@ -107,7 +107,7 @@ extension GenerationCoordinator {
         generationID: GenerationID,
         controlMessage: TelegramMessage,
         adEligible: Bool,
-        billedTo: String?,
+        billedTo: UserKey?,
         sponsorLine: String?,
         premiumTicket: DailyPremiumTicket?,
         lastPremiumCall: Int?
@@ -292,7 +292,7 @@ extension GenerationCoordinator {
         placeholder: TelegramMessage,
         stopMarkup: InlineKeyboardMarkup,
         adEligible: Bool,
-        billedTo: String?,
+        billedTo: UserKey?,
         sponsorLine: String?,
         premiumTicket: DailyPremiumTicket?,
         lastPremiumCall: Int?

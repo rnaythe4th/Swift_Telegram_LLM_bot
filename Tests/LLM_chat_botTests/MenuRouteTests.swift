@@ -24,7 +24,7 @@ final class MenuRouteTests: XCTestCase {
         let route = try XCTUnwrap(MenuRoute(action: "stenant:ext:#4242"))
         XCTAssertEqual(route.command, .stenant)
         XCTAssertEqual(route.sub, "ext")
-        XCTAssertEqual(route.arg(2), "#4242")
+        XCTAssertEqual(route.userKey(2), UserKey.identified(4242))
         XCTAssertNil(route.arg(3))
     }
 
@@ -35,7 +35,7 @@ final class MenuRouteTests: XCTestCase {
     }
 
     /// A payload that lost its tail must read as missing, not as an argument
-    /// that happens to be empty — `removeTenant(username: "")` is not a request
+    /// that happens to be empty — `removeTenant("")` is not a request
     /// anyone made.
     func testEmptyArgumentReadsAsMissing() throws {
         let route = try XCTUnwrap(MenuRoute(action: "stenant:rmyes:"))

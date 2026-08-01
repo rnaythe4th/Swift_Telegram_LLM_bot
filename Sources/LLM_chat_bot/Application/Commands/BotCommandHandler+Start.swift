@@ -15,7 +15,7 @@ extension BotCommandHandler {
             // claims their new group even if the join event went missing.
             await state.autoAssignIfNeeded(
                 chatID: chatKey.chatID,
-                senderUsername: fromUser?.username,
+                senderKey: actorKey(fromUser),
                 senderUserID: fromUser?.id
             )
         }
@@ -115,7 +115,7 @@ extension BotCommandHandler {
         // Match against every key this person could be filed under: with no
         // @username the handle-only comparison is nil == "#id", so the owner
         // would "activate" their own invite and add themselves as their own guest.
-        if await state.userKeys(username: fromUser?.username, userID: fromUser?.id).contains(owner) {
+        if await state.userKeys(key: actorKey(fromUser), userID: fromUser?.id).contains(owner) {
             try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Это ваша собственная пригласительная ссылка — доступ у вас и так есть.")
             return
         }
@@ -123,8 +123,8 @@ extension BotCommandHandler {
         var grantedLines: [String] = []
         if let visitorID = fromUser?.id {
             // Filed under the visitor's account, so the grant survives a rename
-            // and works for someone who never set a @username.
-            _ = await state.addLicensedUser(ownerUsername: owner, target: state.userKey(userID: visitorID))
+            // and works for someone who never set a @invoker.
+            _ = await state.addLicensedUser(ownerKey: owner, target: state.userKey(userID: visitorID))
             grantedLines.append("• платные модели доступны вам во всех чатах с этим ботом")
         }
         // Private chat: attach it to the inviter's licence too, so access holds
@@ -205,7 +205,7 @@ extension BotCommandHandler {
     /// the two paths lands first is the one that posts.
     private func sendGroupWelcome(chatID: Int) async throws {
         guard await state.claimGroupGreeting(chatID: chatID) else { return }
-        let sponsor = await state.chatSponsor(chatID: chatID, askerUsername: nil)
+        let sponsor = await state.chatSponsor(chatID: chatID, asker: nil)
         let welcome = GroupWelcomePresenter.welcome(
             sponsor: sponsor,
             onboarding: await state.onboardingConfig()

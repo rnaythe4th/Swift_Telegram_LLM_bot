@@ -64,7 +64,7 @@ actor ExternalPaymentService {
     // MARK: - Opening a checkout
 
     func createCheckout(
-        payerKey: String,
+        payerKey: UserKey,
         payerUserID: Int?,
         chatID: Int,
         threadID: Int64?,
@@ -97,7 +97,7 @@ actor ExternalPaymentService {
         let order = ExternalPaymentOrder(
             id: ExternalPaymentOrder.makeID(),
             vendor: config.vendor,
-            payerKey: await state.userKeyOrRaw(payerKey),
+            payerKey: payerKey,
             payerUserID: payerUserID,
             chatID: chatID,
             threadID: threadID,
@@ -122,14 +122,14 @@ actor ExternalPaymentService {
 
     private func price(
         for purpose: PurchasePurpose,
-        payerKey: String,
+        payerKey: UserKey,
         config: ExternalPaymentConfig
     ) async throws -> Int {
         switch purpose {
         case .subscription:
             // Single source of prices (§17): a live winback discount is already
             // baked in, so the link charges exactly what was quoted.
-            guard let amount = await state.subscriptionPricing(username: payerKey).externalMinorUnits else {
+            guard let amount = await state.subscriptionPricing(key: payerKey).externalMinorUnits else {
                 throw ExternalPaymentError.priceNotSet
             }
             return amount
@@ -141,7 +141,7 @@ actor ExternalPaymentService {
         }
     }
 
-    func cancelCheckout(orderID: String, payerKey: String) async -> Bool {
+    func cancelCheckout(orderID: String, payerKey: UserKey) async -> Bool {
         guard let order = await state.externalOrder(id: orderID), order.payerKey == payerKey else {
             return false
         }
@@ -201,7 +201,7 @@ actor ExternalPaymentService {
 
         let outcome = await fulfillment.fulfil(PaymentReceipt(
             payerKey: paidOrder.payerKey,
-            payerUserID: paidOrder.payerUserID ?? UserKey.userID(from: paidOrder.payerKey),
+            payerUserID: paidOrder.payerUserID ?? paidOrder.payerKey.userID,
             chatID: paidOrder.chatID,
             purpose: paidOrder.purpose,
             idempotencyKey: "ext:\(vendor.rawValue):\(callback.vendorPaymentID)",

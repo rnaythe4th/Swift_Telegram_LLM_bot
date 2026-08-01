@@ -6,63 +6,61 @@ import Foundation
 extension ChatContextStore {
     // MARK: - Auth
 
-    func isSuperAdmin(username: String?) -> Bool {
-        guard let u = userKey(username: username) else { return false }
-        guard superAdminUsernames.contains(u) else { return false }
+    func isSuperAdmin(_ key: UserKey?) -> Bool {
+        guard let u = key.map(resolved) else { return false }
+        guard superAdminKeys.contains(u) else { return false }
         return _simulatedRoles[u] == nil
     }
 
     /// Raw super-admin check that ignores any active simulation. Use only for
     /// gating commands that must remain reachable while a simulation is active
     /// (e.g. `/simulate` itself).
-    func isActuallySuperAdmin(username: String?) -> Bool {
-        guard let u = userKey(username: username) else { return false }
-        return superAdminUsernames.contains(u)
+    func isActuallySuperAdmin(_ key: UserKey?) -> Bool {
+        guard let u = key.map(resolved) else { return false }
+        return superAdminKeys.contains(u)
     }
 
     /// True only for the immutable bootstrap super-admin (default @maythe4th).
     /// Only this user may add or remove other super-admins.
-    func isRootSuperAdmin(username: String?) -> Bool {
-        guard let u = userKey(username: username) else { return false }
+    func isRootSuperAdmin(_ key: UserKey?) -> Bool {
+        guard let u = key.map(resolved) else { return false }
         return u == rootSuperAdminKey
     }
 
     /// Super-admins as (key, label) — the interface prints labels, the callers
     /// that act on one pass the key back.
-    func listSuperAdmins() -> [(key: String, label: String)] {
-        superAdminUsernames
+    func listSuperAdmins() -> [(key: UserKey, label: String)] {
+        superAdminKeys
             .map { (key: $0, label: displayLabel(forKey: $0)) }
             .sorted { $0.label < $1.label }
     }
 
     @discardableResult
-    func addSuperAdmin(target: String) -> Bool {
-        let u = userKeyOrRaw(target)
-        guard !u.isEmpty else { return false }
-        let inserted = superAdminUsernames.insert(u).inserted
+    func addSuperAdmin(_ u: UserKey) -> Bool {
+        guard !u.storageValue.isEmpty else { return false }
+        let inserted = superAdminKeys.insert(u).inserted
         if inserted { dirtyConfigs.insert(.superAdmins) }
         return inserted
     }
 
     @discardableResult
-    func removeSuperAdmin(target: String) -> Bool {
-        let u = userKeyOrRaw(target)
+    func removeSuperAdmin(_ u: UserKey) -> Bool {
         guard u != rootSuperAdminKey else { return false }
-        let removed = superAdminUsernames.remove(u) != nil
+        let removed = superAdminKeys.remove(u) != nil
         if removed { dirtyConfigs.insert(.superAdmins) }
         return removed
     }
 
-    func simulatedRole(username: String?) -> SimulatedRole? {
-        guard let u = userKey(username: username) else { return nil }
-        guard superAdminUsernames.contains(u) else { return nil }
+    func simulatedRole(_ key: UserKey?) -> SimulatedRole? {
+        guard let u = key.map(resolved) else { return nil }
+        guard superAdminKeys.contains(u) else { return nil }
         return _simulatedRoles[u]
     }
 
     @discardableResult
-    func setSimulatedRole(username: String, role: SimulatedRole?) -> Bool {
-        let u = userKeyOrRaw(username)
-        guard superAdminUsernames.contains(u) else { return false }
+    func setSimulatedRole(_ key: UserKey, role: SimulatedRole?) -> Bool {
+        let u = resolved(key)
+        guard superAdminKeys.contains(u) else { return false }
         if let role {
             _simulatedRoles[u] = role
         } else {
@@ -71,24 +69,24 @@ extension ChatContextStore {
         return true
     }
 
-    func isTenantOwner(username: String?, chatID: Int) -> Bool {
-        guard let u = userKey(username: username) else { return false }
-        if superAdminUsernames.contains(u) {
+    func isTenantOwner(_ key: UserKey?, chatID: Int) -> Bool {
+        guard let u = key.map(resolved) else { return false }
+        if superAdminKeys.contains(u) {
             if _simulatedRoles[u] != nil { return false }
             return true
         }
-        return effectiveOwnerUsername(chatID: chatID) == u
+        return effectiveOwnerKey(chatID: chatID) == u
     }
 
-    func isAdmin(username: String?, chatID: Int) -> Bool {
-        guard let u = userKey(username: username) else { return false }
-        if let sim = _simulatedRoles[u], superAdminUsernames.contains(u) {
+    func isAdmin(_ key: UserKey?, chatID: Int) -> Bool {
+        guard let u = key.map(resolved) else { return false }
+        if let sim = _simulatedRoles[u], superAdminKeys.contains(u) {
             return sim == .admin
         }
-        if superAdminUsernames.contains(u) { return true }
-        let owner = effectiveOwnerUsername(chatID: chatID)
+        if superAdminKeys.contains(u) { return true }
+        let owner = effectiveOwnerKey(chatID: chatID)
         if u == owner { return true }
-        return tenants[owner]?.adminUsernames.contains(u) ?? false
+        return tenants[owner]?.adminKeys.contains(u) ?? false
     }
 
     func isWhitelisted(userID: Int, chatID: Int) -> Bool {
@@ -97,8 +95,7 @@ extension ChatContextStore {
 
     func addToWhitelist(userID: Int, chatID: Int) {
         mutateTenant(for: chatID) { $0.whitelistedUserIDs.insert(userID) }
-        let owner = effectiveOwnerUsername(chatID: chatID)
-        userTenantMap[userID] = owner
+        userTenantMap[userID] = effectiveOwnerKey(chatID: chatID)
     }
 
     func removeFromWhitelist(userID: Int, chatID: Int) {
@@ -110,18 +107,16 @@ extension ChatContextStore {
         tenantState(for: chatID).whitelistedUserIDs
     }
 
-    func addAdmin(username: String, chatID: Int) {
-        let u = userKeyOrRaw(username)
-        mutateTenant(for: chatID) { $0.adminUsernames.insert(u) }
+    func addAdmin(_ u: UserKey, chatID: Int) {
+        mutateTenant(for: chatID) { $0.adminKeys.insert(u) }
     }
 
-    func removeAdmin(username: String, chatID: Int) {
-        let u = userKeyOrRaw(username)
-        mutateTenant(for: chatID) { $0.adminUsernames.remove(u) }
+    func removeAdmin(_ u: UserKey, chatID: Int) {
+        mutateTenant(for: chatID) { $0.adminKeys.remove(u) }
     }
 
-    func listAdmins(chatID: Int) -> [(key: String, label: String)] {
-        tenantState(for: chatID).adminUsernames
+    func listAdmins(chatID: Int) -> [(key: UserKey, label: String)] {
+        tenantState(for: chatID).adminKeys
             .map { (key: $0, label: displayLabel(forKey: $0)) }
             .sorted { $0.label < $1.label }
     }
@@ -135,7 +130,7 @@ extension ChatContextStore {
     /// while any chat someone had pointed at the root tenant got mail meant for
     /// the owner. Blocked DMs drop out, like everywhere else.
     func superAdminPrivateChats() -> [ChatKey] {
-        superAdminUsernames
+        superAdminKeys
             .compactMap { privateChatID(forKey: $0) }
             .map { ChatKey(chatID: $0, threadID: 0) }
     }
@@ -145,9 +140,9 @@ extension ChatContextStore {
     /// reports *who* is paying — so the menu and the purchase page can credit
     /// the sponsor (roadmap step 3) instead of selling to someone who is
     /// already covered.
-    func chatAccessStatus(chatID: Int, username: String?, userID: Int? = nil) -> ChatAccessStatus {
-        let candidates = userKeys(username: username, userID: userID)
-        let simulated = candidates.contains { superAdminUsernames.contains($0) && _simulatedRoles[$0] != nil }
+    func chatAccessStatus(chatID: Int, key: UserKey?, userID: Int? = nil) -> ChatAccessStatus {
+        let candidates = userKeys(key: key, userID: userID)
+        let simulated = candidates.contains { superAdminKeys.contains($0) && _simulatedRoles[$0] != nil }
 
         if !simulated {
             for u in candidates {
@@ -156,7 +151,7 @@ extension ChatContextStore {
                 }
             }
             for (owner, tenant) in tenants where tenant.isActive
-                && !tenant.licensedUsernames.isDisjoint(with: candidates) {
+                && !tenant.licensedKeys.isDisjoint(with: candidates) {
                 return .guest(displayLabel(forKey: owner))
             }
         }
@@ -166,7 +161,7 @@ extension ChatContextStore {
         if let userID {
             let tenant = tenantState(for: chatID)
             if tenant.whitelistedUserIDs.contains(userID), tenant.isActive {
-                return .guest(displayLabel(forKey: tenant.ownerUsername))
+                return .guest(displayLabel(forKey: tenant.ownerKey))
             }
         }
         for u in candidates {
@@ -179,9 +174,9 @@ extension ChatContextStore {
 
     /// Subscription/licence coverage only — the generation is paid by a
     /// tenant's subscription, not by the sender's personal balance.
-    func hasSubscriptionCoverage(username: String?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
-        let candidates = userKeys(username: username, userID: userID)
-        let simulated = candidates.contains { superAdminUsernames.contains($0) && _simulatedRoles[$0] != nil }
+    func hasSubscriptionCoverage(key: UserKey?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
+        let candidates = userKeys(key: key, userID: userID)
+        let simulated = candidates.contains { superAdminKeys.contains($0) && _simulatedRoles[$0] != nil }
 
         // Every path below requires the granting tenant's subscription to be
         // active: an expired admin keeps their panel (to renew) but their
@@ -189,7 +184,7 @@ extension ChatContextStore {
         if !simulated {
             for u in candidates where tenants[u]?.isActive == true { return true }
             for tenant in tenants.values where tenant.isActive
-                && !tenant.licensedUsernames.isDisjoint(with: candidates) {
+                && !tenant.licensedKeys.isDisjoint(with: candidates) {
                 return true
             }
         }
@@ -213,11 +208,11 @@ extension ChatContextStore {
     /// paid access to the whole chat. Used for the hero credit under answers.
     /// Returns nil when the chat has no active-tenant owner, or when the asker
     /// is the sponsor themselves (no self-crediting).
-    func chatSponsor(chatID: Int, askerUsername: String?) -> String? {
+    func chatSponsor(chatID: Int, asker: UserKey?) -> String? {
         guard let owner = chatOwnership[chatID], tenants[owner]?.isActive == true else {
             return nil
         }
-        if let asker = userKey(username: askerUsername), asker == owner {
+        if let asker = asker.map(resolved), asker == owner {
             return nil
         }
         return displayLabel(forKey: owner)
@@ -227,8 +222,8 @@ extension ChatContextStore {
     /// repeats at most once per `sponsorCreditCooldown` per chat. Consuming the
     /// slot here (rather than in the caller) keeps two parallel generations in
     /// one chat from both printing it.
-    func chatSponsorForCredit(chatID: Int, askerUsername: String?, now: Date = Date()) -> String? {
-        guard let sponsor = chatSponsor(chatID: chatID, askerUsername: askerUsername) else { return nil }
+    func chatSponsorForCredit(chatID: Int, asker: UserKey?, now: Date = Date()) -> String? {
+        guard let sponsor = chatSponsor(chatID: chatID, asker: asker) else { return nil }
         if let last = _sponsorCreditShownAt[chatID], now.timeIntervalSince(last) < Self.sponsorCreditCooldown {
             return nil
         }
@@ -242,13 +237,13 @@ extension ChatContextStore {
     /// Paid-model access: subscription coverage OR a positive personal
     /// balance. The balance path deliberately ignores role simulation so the
     /// super-admin can test pay-as-you-go end to end.
-    func hasFullModelAccess(username: String?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
-        if hasSubscriptionCoverage(username: username, userID: userID, chatID: chatID) {
+    func hasFullModelAccess(key: UserKey?, userID: Int? = nil, chatID: Int? = nil) -> Bool {
+        if hasSubscriptionCoverage(key: key, userID: userID, chatID: chatID) {
             return true
         }
         // A wallet belongs to a person, not to a handle: the userID alone is
         // enough, so someone with no @username still spends their balance.
-        return userKeys(username: username, userID: userID)
+        return userKeys(key: key, userID: userID)
             .contains { (userBalances[$0]?.balance ?? .zero).isPositive }
     }
 }

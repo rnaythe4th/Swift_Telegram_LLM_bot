@@ -59,7 +59,7 @@ struct UserBalance: Sendable, Equatable {
 /// One lapsed wallet the sweep decided to reach out to (§7 «Возврат по балансу»).
 struct WalletWinbackTarget: Sendable {
     /// Storage key — pass back to `markWalletWinbackSent`.
-    let key: String
+    let key: UserKey
     /// Ready-to-print name.
     let label: String
     /// The person's DM with the bot; a wallet is personal, so this is the only

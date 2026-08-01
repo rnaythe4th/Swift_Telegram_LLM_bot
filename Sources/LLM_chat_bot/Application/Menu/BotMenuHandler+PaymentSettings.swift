@@ -190,7 +190,7 @@ extension BotMenuHandler {
                 for inv in sorted.prefix(20) {
                     let amount = CryptoAmountFormatter.format(atomic: inv.exactAmountAtomic, decimals: inv.asset.decimals)
                     let received = CryptoAmountFormatter.format(atomic: inv.accumulatedAtomic, decimals: inv.asset.decimals)
-                    text += "\n• \(await state.displayLabel(forKey: inv.username)) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)"
+                    text += "\n• \(await state.displayLabel(forKey: inv.ownerKey)) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)"
                 }
                 if invoices.count > 20 {
                     text += "\n\n<i>Показаны первые 20 из \(invoices.count) — полный список /tenant cryptoinvoices.</i>"

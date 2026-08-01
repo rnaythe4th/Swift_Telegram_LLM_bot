@@ -15,25 +15,25 @@ extension BotCommandHandler {
 
         switch subcommand {
         case "add":
-            let username = normalizeUsername(arg.trimmingCharacters(in: .whitespaces))
-            guard !username.isEmpty else {
+            let handle = normalizeUsername(arg.trimmingCharacters(in: .whitespaces))
+            guard !handle.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/superadmin add @username</code>")
                 return
             }
-            let ok = await state.addSuperAdmin(target: username)
+            let ok = await state.addSuperAdmin(state.userKeyOrRaw(handle))
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ @\(username) теперь суперадмин."
-                : "@\(username) уже является суперадмином.")
+                ? "✓ @\(handle) теперь суперадмин."
+                : "@\(handle) уже является суперадмином.")
 
         case "remove":
-            let username = normalizeUsername(arg.trimmingCharacters(in: .whitespaces))
-            guard !username.isEmpty else {
+            let handle = normalizeUsername(arg.trimmingCharacters(in: .whitespaces))
+            guard !handle.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/superadmin remove @username</code>")
                 return
             }
-            let ok = await state.removeSuperAdmin(target: username)
+            let ok = await state.removeSuperAdmin(state.userKeyOrRaw(handle))
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ @\(username) больше не суперадмин."
+                ? "✓ @\(handle) больше не суперадмин."
                 : "Нельзя удалить главного суперадмина или такого пользователя нет.")
 
         case "list":
@@ -56,9 +56,9 @@ extension BotCommandHandler {
 
     func handleSimulate(chatKey: ChatKey, fromUser: TelegramUser?, argument: String) async throws {
         // Keyed by userID, so simulation (and the test purchase below) works for
-        // a super-admin who never set a @username — the gate above already let
+        // a super-admin who never set a @invoker — the gate above already let
         // them in by key, and demanding a handle here would contradict it.
-        guard let username = await actorKey(fromUser) else {
+        guard let invoker = await actorKey(fromUser) else {
             try await sendUserFeedback(chatKey: chatKey, text: "Не удалось определить ваш аккаунт — напишите боту в личку и повторите.")
             return
         }
@@ -66,7 +66,7 @@ extension BotCommandHandler {
         let arg = argument.trimmingCharacters(in: .whitespaces).lowercased()
 
         func currentLabel() async -> String {
-            switch await state.simulatedRole(username: username) {
+            switch await state.simulatedRole(invoker) {
             case .admin: return "админ"
             case .regularUser: return "обычный пользователь"
             case nil: return "выкл (суперадмин)"
@@ -95,28 +95,28 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: "🎭 Симуляция · <b>\(label)</b>")
 
         case "admin":
-            await state.setSimulatedRole(username: username, role: .admin)
+            await state.setSimulatedRole(invoker, role: .admin)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Симуляция включена · <b>админ</b>.\nЧтобы выключить — <code>/simulate off</code>.")
 
         case "user", "regular":
-            await state.setSimulatedRole(username: username, role: .regularUser)
+            await state.setSimulatedRole(invoker, role: .regularUser)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Симуляция включена · <b>обычный пользователь</b>.\nЧтобы выключить — <code>/simulate off</code>.")
 
         case "off", "выкл", "none":
-            await state.setSimulatedRole(username: username, role: nil)
+            await state.setSimulatedRole(invoker, role: nil)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Симуляция выключена. Вы снова суперадмин.")
 
         case "buy":
             // Test purchase: exercises the same activation logic as a real
             // Stars payment, without money changing hands.
-            let activation = await state.activatePaidSubscription(username: username)
-            await state.assignChat(chatID: chatKey.chatID, to: username)
+            let activation = await state.activatePaidSubscription(invoker)
+            await state.assignChat(chatID: chatKey.chatID, to: invoker)
             let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
-            // `username` here is the storage key (`#12345`): printing it would
+            // `invoker` here is the storage key (`#12345`): printing it would
             // show "@#12345" and, worse, the suggested rollback command would
             // resolve to a different key (`#` is stripped from typed input).
-            let label = await state.displayLabel(forKey: username)
-            let handle = await state.username(forKey: username)
+            let label = await state.displayLabel(forKey: invoker)
+            let handle = await state.username(forKey: invoker)
             let resultLine: String
             switch activation {
             case .started(let until):
@@ -152,7 +152,7 @@ extension BotCommandHandler {
             for inv in sorted.prefix(50) {
                 let amount = CryptoAmountFormatter.format(atomic: inv.exactAmountAtomic, decimals: inv.asset.decimals)
                 let received = CryptoAmountFormatter.format(atomic: inv.accumulatedAtomic, decimals: inv.asset.decimals)
-                lines.append("• @\(inv.username) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)")
+                lines.append("• \(await state.displayLabel(forKey: inv.ownerKey)) · \(inv.asset.displayLabel) · \(received)/\(amount) \(inv.asset.symbol) · \(inv.status.rawValue)")
             }
         }
         try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))

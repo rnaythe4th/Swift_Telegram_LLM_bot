@@ -27,7 +27,7 @@ enum LedgerEntryKind: String, Sendable, CaseIterable {
 
 /// One line of the money journal.
 struct LedgerEntry: Sendable {
-    let userKey: String
+    let userKey: UserKey
     let kind: LedgerEntryKind
     /// Signed: positive credits, negative debits.
     let amount: Money
@@ -70,16 +70,16 @@ protocol LedgerPort: Sendable {
     /// Wallet rows that changed in the cache outside a transaction — a rename
     /// folding a pending wallet into an identified one, a super-admin deleting
     /// one. Write-behind, because no money entered or left the system.
-    func syncWallets(changed: [String: UserBalance], removed: [String]) async throws
+    func syncWallets(changed: [UserKey: UserBalance], removed: [UserKey]) async throws
 
     /// The journal behind one wallet, newest first.
-    func recentEntries(userKey: String, limit: Int) async throws -> [LedgerEntry]
+    func recentEntries(userKey: UserKey, limit: Int) async throws -> [LedgerEntry]
 
     /// `sum(bot_ledger.amount) == bot_wallet.balance` for every wallet, or the
     /// keys where it does not hold. Cheap enough to run daily; a mismatch means
     /// something wrote a balance without writing its reason, and the owner
     /// should hear about it from an alert rather than from a customer (§6.1).
-    func reconcile() async throws -> [String]
+    func reconcile() async throws -> [UserKey]
 }
 
 /// The operations available inside one transaction. Everything here either all
@@ -108,7 +108,7 @@ protocol LedgerTransaction: Sendable {
     /// credit turns anyone into a proven payer (§17).
     @discardableResult
     func credit(
-        _ userKey: String,
+        _ userKey: UserKey,
         _ amount: Money,
         kind: LedgerEntryKind,
         purchased: Bool,
@@ -119,7 +119,7 @@ protocol LedgerTransaction: Sendable {
     /// — no read-modify-write, so two turns of the same person cannot both
     /// spend the same remaining balance.
     func debit(
-        _ userKey: String,
+        _ userKey: UserKey,
         upTo amount: Money,
         real: Money,
         ref: String?
@@ -129,24 +129,24 @@ protocol LedgerTransaction: Sendable {
     /// the tenant if this is their first payment. Computed by the database, so
     /// two concurrent renewals cannot both read the same end date.
     func extendSubscription(
-        _ userKey: String,
+        _ userKey: UserKey,
         days: Int,
         defaults: TenantDefaults
     ) async throws -> SubscriptionExtension
 
     /// Super-admin subscription edits (`/tenant`, the menu): an explicit end
     /// date, `nil` for unlimited.
-    func setSubscription(_ userKey: String, paidUntil: Date?) async throws
+    func setSubscription(_ userKey: UserKey, paidUntil: Date?) async throws
 
     /// The one-shot winback discount lives next to the subscription it prices,
     /// so consuming it is part of the same commit as the payment.
-    func setWinbackDiscount(_ userKey: String, _ discount: SubscriptionDiscount?) async throws
+    func setWinbackDiscount(_ userKey: UserKey, _ discount: SubscriptionDiscount?) async throws
 }
 
 /// What a tenant row needs when a payment creates it. Passed in rather than
 /// hard-coded in SQL: the defaults are the owner's settings, not the schema's.
 struct TenantDefaults: Sendable {
-    let ownerUsername: String
+    let ownerKey: UserKey
     let model: String
     let role: String
     let historyLength: Int

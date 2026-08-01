@@ -9,25 +9,23 @@ extension ChatContextStore {
     /// Storage key for a person named by @username. `#<userID>` once we have
     /// met them, the bare username while they are only a pending reference.
     ///
-    /// An already-resolved key round-trips untouched, exactly like in
-    /// `userKeyOrRaw`: callers hold keys, not handles (`invokerKey`,
-    /// `actorKey`), and pass them in as `username:` on purpose (CLAUDE.md §6).
-    /// Without this every role gate silently answered "no" for identified
-    /// users — `UserKey.pending` rejects `#`, which is what keeps *typed* text
-    /// from forging a key, and that rejection must not reach callers who
-    /// already did the resolving.
-    func userKey(username: String?) -> String? {
+    /// Text that names a person — a `/tenant adduser` argument, a `@mention` —
+    /// turned into the key their records sit under. Text is all this takes:
+    /// callers that already hold a key use `resolved(_:)` instead, and the two
+    /// stopped being the same call the moment `UserKey` stopped being a String.
+    func userKey(forHandle username: String?) -> UserKey? {
         guard let raw = username?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
-        if UserKey.userID(from: raw) != nil { return raw }
+        let candidate = UserKey(storageValue: raw)
+        if candidate.isIdentified { return candidate }
         guard let pending = UserKey.pending(raw) else { return nil }
-        if let userID = userDirectoryValue.userID(forUsername: pending) {
-            return UserKey.forUserID(userID)
+        if let userID = userDirectoryValue.userID(forUsername: pending.storageValue) {
+            return UserKey.identified(userID)
         }
         return pending
     }
 
     /// Storage key for a person we have in front of us — always identified.
-    nonisolated func userKey(userID: Int) -> String { UserKey.forUserID(userID) }
+    nonisolated func userKey(userID: Int) -> UserKey { UserKey.identified(userID) }
 
     /// Variant for call sites that already hold a non-optional username; a
     /// blank one can only key itself, which no real record ever uses.
@@ -37,58 +35,73 @@ extension ChatContextStore {
     /// key, and a storage key is not inert: it is written into database filters
     /// and printed into HTML. A key that keeps only username characters cannot
     /// reach into either, and cannot impersonate an identified `#<userID>` key.
-    func userKeyOrRaw(_ username: String) -> String {
+    func userKeyOrRaw(_ username: String) -> UserKey {
         let trimmed = username.trimmingCharacters(in: .whitespaces)
         // An already-resolved key round-trips untouched — callers pass
         // `#<userID>` deliberately (CLAUDE.md §6).
-        if UserKey.userID(from: trimmed) != nil { return trimmed }
-        if let resolved = userKey(username: trimmed) { return resolved }
+        let candidate = UserKey(storageValue: trimmed)
+        if candidate.isIdentified { return candidate }
+        if let resolved = userKey(forHandle: trimmed) { return resolved }
         return UserKey.sanitizedPendingFallback(trimmed)
+    }
+
+    /// Follows a pending key to the identified one once the directory has met
+    /// that person. A key that is already identified — which is what every
+    /// caller holds (`invokerKey`, `actorKey`) — comes back untouched, and that
+    /// round-trip is the property a role gate depends on: the last time it
+    /// broke, `isSuperAdmin`/`isAdmin` silently answered "no" to everyone who
+    /// had ever talked to the bot (CLAUDE.md §6).
+    func resolved(_ key: UserKey) -> UserKey {
+        guard !key.isIdentified,
+              let userID = userDirectoryValue.userID(forUsername: key.storageValue)
+        else { return key }
+        return .identified(userID)
     }
 
     /// Every key a person's records could sit under, most authoritative first:
     /// their permanent `#<userID>`, then anything still pending under the
     /// username they are using. A userID alone is enough — which is what lets
     /// someone with no @username at all own a subscription and a wallet.
-    func userKeys(username: String?, userID: Int?) -> [String] {
-        var keys: [String] = []
-        if let userID { keys.append(UserKey.forUserID(userID)) }
-        if let resolved = userKey(username: username), !keys.contains(resolved) {
-            keys.append(resolved)
+    func userKeys(key: UserKey?, userID: Int?) -> [UserKey] {
+        var keys: [UserKey] = []
+        if let userID { keys.append(UserKey.identified(userID)) }
+        if let key {
+            let resolved = resolved(key)
+            if !keys.contains(resolved) { keys.append(resolved) }
         }
         return keys
     }
 
     /// Key of the bot's own owner. Resolved every time, because the owner gets
     /// re-filed under `#<userID>` the first time they talk to the bot.
-    var defaultOwnerKey: String { rootSuperAdminKey }
+    var defaultOwnerKey: UserKey { rootSuperAdminKey }
 
     /// Key of the bootstrap super-admin (who is also the default owner). Pinned
     /// in the directory the first time they are seen, so root survives them
     /// changing the @username the bot was configured with.
-    var rootSuperAdminKey: String {
+    var rootSuperAdminKey: UserKey {
         // A configured owner account wins over everything stored: that is the
         // point of configuring it — root stops depending on who currently holds
         // a @username, or on what an earlier run happened to pin.
-        if let pinnedOwnerUserID { return UserKey.forUserID(pinnedOwnerUserID) }
-        return userDirectoryValue.rootKey ?? userKey(username: rootSuperAdminUsername) ?? rootSuperAdminUsername
+        if let pinnedOwnerUserID { return UserKey.identified(pinnedOwnerUserID) }
+        return userDirectoryValue.rootKey ?? userKey(forHandle: configuredOwnerKey.storageValue) ?? configuredOwnerKey
     }
 
     /// Label for a stored key: `@username` when known, otherwise the person's
     /// name or `id <n>`. Every interface string that names a stored user goes
     /// through this — the raw `#<userID>` key is never shown.
-    func displayLabel(forKey key: String) -> String {
+    func displayLabel(forKey key: UserKey) -> String {
         userDirectoryValue.displayLabel(forKey: key)
     }
 
-    func displayLabels(forKeys keys: [String]) -> [String] {
+    func displayLabels(forKeys keys: [UserKey]) -> [String] {
         keys.map { userDirectoryValue.displayLabel(forKey: $0) }
     }
 
     /// Bare @username (no `@`) behind a key, where a username is needed as data
     /// rather than as a label — deep links, wallet notices. nil when the person
     /// never set one.
-    func username(forKey key: String) -> String? {
+    func username(forKey key: UserKey) -> String? {
         userDirectoryValue.username(forKey: key)
     }
 
@@ -109,16 +122,16 @@ extension ChatContextStore {
         guard outcome.changed else { return }
         dirtyUsers.insert(userID)
 
-        let key = UserKey.forUserID(userID)
+        let key = UserKey.identified(userID)
         // Claim whatever is still filed under a bare username this person now
         // demonstrably owns: the one they just used, and the one they used to
         // have (a record could have been created for either).
-        var pendingKeys: [String] = []
+        var pendingKeys: [UserKey] = []
         if let current = UserKey.pending(username) { pendingKeys.append(current) }
-        if let previous = outcome.previousUsername { pendingKeys.append(previous) }
+        if let previous = UserKey.pending(outcome.previousUsername) { pendingKeys.append(previous) }
         // Pin the owner the first time they show up: from here on root is an
         // account, not a handle.
-        if userDirectoryValue.rootKey == nil, pendingKeys.contains(rootSuperAdminUsername.lowercased()) {
+        if userDirectoryValue.rootKey == nil, pendingKeys.contains(configuredOwnerKey) {
             userDirectoryValue.rootKey = key
         }
         for pending in Set(pendingKeys) where pending != key {
@@ -130,29 +143,29 @@ extension ChatContextStore {
 
     /// Every `UserKey` some state is currently filed under — the set the
     /// directory must never forget, however long ago that person was seen.
-    private func keysHoldingState() -> Set<String> {
+    private func keysHoldingState() -> Set<UserKey> {
         var keys = Set(tenants.keys)
         keys.formUnion(userBalances.keys)
         keys.formUnion(chatOwnership.values)
-        keys.formUnion(superAdminUsernames)
-        keys.formUnion(inviteRecords.values.map(\.ownerUsername))
+        keys.formUnion(superAdminKeys)
+        keys.formUnion(inviteRecords.values.map(\.ownerKey))
         for tenant in tenants.values {
-            keys.formUnion(tenant.licensedUsernames)
-            keys.formUnion(tenant.adminUsernames)
+            keys.formUnion(tenant.licensedKeys)
+            keys.formUnion(tenant.adminKeys)
         }
         for record in referralLedgerValue.records.values {
-            keys.insert(UserKey.forUserID(record.inviterUserID))
+            keys.insert(UserKey.identified(record.inviterUserID))
         }
         // Tallies outlive the records they were built from (records are pruned,
         // aggregates are not), so an inviter with no live record still holds
         // state — their reward cap and client count hang off this key.
         for tally in referralLedgerValue.tallies.keys {
             guard let userID = Int(tally) else { continue }
-            keys.insert(UserKey.forUserID(userID))
+            keys.insert(UserKey.identified(userID))
         }
         // An open crypto invoice is money in flight: lose the identity and
         // `openCryptoInvoiceForUser` stops finding it.
-        keys.formUnion(_cryptoInvoices.values.map(\.username))
+        keys.formUnion(_cryptoInvoices.values.map(\.ownerKey))
         keys.formUnion(_simulatedRoles.keys)
         keys.formUnion(userTenantMap.values)
         return keys
@@ -161,13 +174,13 @@ extension ChatContextStore {
     /// Moves every user-keyed record from a pending username key to the
     /// person's permanent key. Nothing is merged into an existing identified
     /// record — the identified one is the truth, the pending one is dropped.
-    private func adoptRecords(from pending: String, to key: String) {
+    private func adoptRecords(from pending: UserKey, to key: UserKey) {
         if let tenant = tenants.removeValue(forKey: pending) {
             dirtyTenants.remove(pending)
             deletedTenants.insert(pending)
             if tenants[key] == nil {
                 var moved = tenant
-                moved.ownerUsername = key
+                moved.ownerKey = key
                 tenants[key] = moved
                 deletedTenants.remove(key)
                 dirtyTenants.insert(key)
@@ -203,19 +216,19 @@ extension ChatContextStore {
         for (mappedUserID, owner) in userTenantMap where owner == pending {
             userTenantMap[mappedUserID] = key
         }
-        if superAdminUsernames.remove(pending) != nil {
-            superAdminUsernames.insert(key)
+        if superAdminKeys.remove(pending) != nil {
+            superAdminKeys.insert(key)
             dirtyConfigs.insert(.superAdmins)
         }
         for (owner, tenant) in tenants {
             var updated = tenant
             var touched = false
-            if updated.licensedUsernames.remove(pending) != nil {
-                updated.licensedUsernames.insert(key)
+            if updated.licensedKeys.remove(pending) != nil {
+                updated.licensedKeys.insert(key)
                 touched = true
             }
-            if updated.adminUsernames.remove(pending) != nil {
-                updated.adminUsernames.insert(key)
+            if updated.adminKeys.remove(pending) != nil {
+                updated.adminKeys.insert(key)
                 touched = true
             }
             if touched {
@@ -223,37 +236,31 @@ extension ChatContextStore {
                 dirtyTenants.insert(owner)
             }
         }
-        for (token, record) in inviteRecords where record.ownerUsername == pending {
-            inviteRecords[token] = InviteRecord(ownerUsername: key, createdAt: record.createdAt)
+        for (token, record) in inviteRecords where record.ownerKey == pending {
+            inviteRecords[token] = InviteRecord(ownerKey: key, createdAt: record.createdAt)
             dirtyInvites.insert(token)
             deletedInvites.remove(token)
         }
         if let role = _simulatedRoles.removeValue(forKey: pending) {
             _simulatedRoles[key] = role
         }
-        for (invoiceID, invoice) in _cryptoInvoices where invoice.username == pending {
+        for (invoiceID, invoice) in _cryptoInvoices where invoice.ownerKey == pending {
             var moved = invoice
-            moved.username = key
+            moved.ownerKey = key
             _cryptoInvoices[invoiceID] = moved
             dirtyCryptoInvoices.insert(invoiceID)
             deletedCryptoInvoices.remove(invoiceID)
         }
     }
 
-    /// The stored key behind a handle, for callers that have to name a row in
-    /// the database rather than a person in the interface.
-    func storageKey(forUsername username: String) -> String {
-        userKeyOrRaw(username)
-    }
-
     /// Keeps denormalized display names in step with the directory, so lists
     /// rendered from stored records show the person's current @username.
-    private func refreshDisplayNames(forKey key: String) {
+    private func refreshDisplayNames(forKey key: UserKey) {
         let label = userDirectoryValue.username(forKey: key)
         guard let label else { return }
         var ledger = referralLedgerValue
         var ledgerTouched = false
-        if let userID = UserKey.userID(from: key) {
+        if let userID = key.userID {
             if var tally = ledger.tallies[String(userID)], tally.username != label {
                 tally.username = label
                 ledger.tallies[String(userID)] = tally

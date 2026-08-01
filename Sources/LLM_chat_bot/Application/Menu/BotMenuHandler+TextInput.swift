@@ -6,12 +6,12 @@ import Foundation
 // +AdminInput.swift.
 
 extension BotMenuHandler {
-    /// `username` here — and everywhere it is threaded onward — is the
+    /// `invoker` here — and everywhere it is threaded onward — is the
     /// caller's **storage key**, not their raw handle: store lookups are keyed
-    /// by userID, and keys round-trip through the username-taking APIs
+    /// by userID, and keys round-trip through the invoker-taking APIs
     /// unchanged. Anything a person reads is resolved through `displayLabel`.
-    func processTextInput(text: String, chatKey: ChatKey, userID: Int?, username: String?) async -> Bool {
-        let username = userID.map { self.state.userKey(userID: $0) } ?? username
+    func processTextInput(text: String, chatKey: ChatKey, userID: Int?) async -> Bool {
+        let invoker = userID.map { self.state.userKey(userID: $0) }
         if text.hasPrefix("/") { return false }
 
         guard let pending = await state.pendingRequest(chatKey: chatKey) else { return false }
@@ -21,11 +21,11 @@ extension BotMenuHandler {
         // next message from *any* member: no LLM answer, an out-of-nowhere
         // "🔒 Только суперадмин…", and the wait is spent — which reads as the
         // bot being broken. Their message goes on to be answered normally.
-        if let owner = pending.owner, owner != username { return false }
+        if let owner = pending.owner, owner != invoker { return false }
 
         // The value is ours to spend; an invalid one re-arms the same wait.
         _ = await state.consumePending(chatKey: chatKey)
-        let handled = await apply(pending, text: text, chatKey: chatKey, username: username)
+        let handled = await apply(pending, text: text, chatKey: chatKey, invoker: invoker)
         // Whatever the applier re-armed still belongs to the same person —
         // nobody tapped a button in between. A re-armed wait left unowned
         // would swallow the next message from anyone in the group.
@@ -38,41 +38,41 @@ extension BotMenuHandler {
         _ pending: PendingRequest,
         text: String,
         chatKey: ChatKey,
-        username: String?
+        invoker: UserKey?
     ) async -> Bool {
         let menuMessageID = pending.menuMessageID
 
         switch pending.kind {
         case .starsPrice:
-            return await applyStarsPriceInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, username: username)
+            return await applyStarsPriceInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, invoker: invoker)
 
         case .starsPerUsd:
-            return await applyStarsRateInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, username: username)
+            return await applyStarsRateInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, invoker: invoker)
 
         case .cryptoPrice:
-            return await applyCryptoPriceInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, username: username)
+            return await applyCryptoPriceInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, invoker: invoker)
 
         case .cryptoPoolAdd(let chain):
-            return await applyCryptoPoolInput(text: text, chain: chain, menuMessageID: menuMessageID, chatKey: chatKey, username: username)
+            return await applyCryptoPoolInput(text: text, chain: chain, menuMessageID: menuMessageID, chatKey: chatKey, invoker: invoker)
 
         case .cryptoAddress(let chain):
-            return await applyCryptoAddressInput(text: text, chain: chain, menuMessageID: menuMessageID, chatKey: chatKey, username: username)
+            return await applyCryptoAddressInput(text: text, chain: chain, menuMessageID: menuMessageID, chatKey: chatKey, invoker: invoker)
 
         case .freeModel:
-            return await applyFreeModelInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, username: username)
+            return await applyFreeModelInput(text: text, menuMessageID: menuMessageID, chatKey: chatKey, invoker: invoker)
 
         case .admin(let admin):
-            return await processAdminPendingInput(admin, menuMessageID: menuMessageID, text: text, chatKey: chatKey, username: username)
+            return await processAdminPendingInput(admin, menuMessageID: menuMessageID, text: text, chatKey: chatKey, invoker: invoker)
 
         case .preset(let preset):
-            return await applyPresetInput(pending: preset, menuMessageID: menuMessageID, text: text, chatKey: chatKey, username: username)
+            return await applyPresetInput(pending: preset, menuMessageID: menuMessageID, text: text, chatKey: chatKey, invoker: invoker)
         }
     }
 
     // MARK: - Prices and payment addresses
 
-    private func applyStarsPriceInput(text: String, menuMessageID: Int, chatKey: ChatKey, username: String?) async -> Bool {
-        guard await state.isSuperAdmin(username: username) else {
+    private func applyStarsPriceInput(text: String, menuMessageID: Int, chatKey: ChatKey, invoker: UserKey?) async -> Bool {
+        guard await state.isSuperAdmin(invoker) else {
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
@@ -107,8 +107,8 @@ extension BotMenuHandler {
         return true
     }
 
-    private func applyStarsRateInput(text: String, menuMessageID: Int, chatKey: ChatKey, username: String?) async -> Bool {
-        guard await state.isSuperAdmin(username: username) else {
+    private func applyStarsRateInput(text: String, menuMessageID: Int, chatKey: ChatKey, invoker: UserKey?) async -> Bool {
+        guard await state.isSuperAdmin(invoker) else {
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
@@ -145,8 +145,8 @@ extension BotMenuHandler {
         return true
     }
 
-    private func applyCryptoPriceInput(text: String, menuMessageID: Int, chatKey: ChatKey, username: String?) async -> Bool {
-        guard await state.isSuperAdmin(username: username) else {
+    private func applyCryptoPriceInput(text: String, menuMessageID: Int, chatKey: ChatKey, invoker: UserKey?) async -> Bool {
+        guard await state.isSuperAdmin(invoker) else {
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
@@ -198,9 +198,9 @@ extension BotMenuHandler {
         chain: CryptoChain,
         menuMessageID: Int,
         chatKey: ChatKey,
-        username: String?
+        invoker: UserKey?
     ) async -> Bool {
-        guard await state.isSuperAdmin(username: username) else {
+        guard await state.isSuperAdmin(invoker) else {
             // Swallowing the message without a word is what makes a lost
             // right look like a broken bot.
             await sendPlain(chatKey: chatKey, text: Texts.superAdminOnlySetting)
@@ -232,9 +232,9 @@ extension BotMenuHandler {
         chain: CryptoChain,
         menuMessageID: Int,
         chatKey: ChatKey,
-        username: String?
+        invoker: UserKey?
     ) async -> Bool {
-        guard await state.isSuperAdmin(username: username) else {
+        guard await state.isSuperAdmin(invoker) else {
             // Swallowing the message without a word is what makes a lost
             // right look like a broken bot.
             await sendPlain(chatKey: chatKey, text: Texts.superAdminOnlySetting)
@@ -259,8 +259,8 @@ extension BotMenuHandler {
         return true
     }
 
-    private func applyFreeModelInput(text: String, menuMessageID: Int, chatKey: ChatKey, username: String?) async -> Bool {
-        guard await state.isSuperAdmin(username: username) else {
+    private func applyFreeModelInput(text: String, menuMessageID: Int, chatKey: ChatKey, invoker: UserKey?) async -> Bool {
+        guard await state.isSuperAdmin(invoker) else {
             // Swallowing the message without a word is what makes a lost
             // right look like a broken bot.
             await sendPlain(chatKey: chatKey, text: Texts.superAdminOnlySetting)
@@ -291,9 +291,9 @@ extension BotMenuHandler {
         menuMessageID: Int,
         text: String,
         chatKey: ChatKey,
-        username: String?
+        invoker: UserKey?
     ) async -> Bool {
-        let canManageGlobal = await state.isAdmin(username: username, chatID: chatKey.chatID)
+        let canManageGlobal = await state.isAdmin(invoker, chatID: chatKey.chatID)
 
         if pending.scope == .global, !canManageGlobal {
             _ = try? await telegram.sendMessage(

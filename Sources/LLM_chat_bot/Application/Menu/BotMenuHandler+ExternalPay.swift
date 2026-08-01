@@ -295,7 +295,7 @@ extension BotMenuHandler {
 
         // Unlimited tenants have nothing to buy — same guard as the other methods.
         if case .subscription = purpose {
-            let subscription = await state.tenantSubscription(ownerUsername: payerKey)
+            let subscription = await state.tenantSubscription(ownerKey: payerKey)
             if subscription.exists, subscription.paidUntil == nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас бессрочный доступ")
                 return

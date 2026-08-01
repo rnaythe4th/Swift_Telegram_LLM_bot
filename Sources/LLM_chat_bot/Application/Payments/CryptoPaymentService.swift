@@ -81,7 +81,7 @@ actor CryptoPaymentService {
     // MARK: - Invoice creation
 
     func createOrRefreshInvoice(
-        username: String,
+        invoker: UserKey,
         userChatID: Int,
         asset: CryptoAsset,
         purpose: CryptoInvoicePurpose = .subscription
@@ -93,7 +93,7 @@ actor CryptoPaymentService {
         case .subscription:
             // Winback offers discount the subscription price (roadmap step 8);
             // credit packs always cost their face value.
-            guard let sub = await state.subscriptionPricing(username: username).cryptoCents else {
+            guard let sub = await state.subscriptionPricing(key: invoker).cryptoCents else {
                 throw CryptoPaymentError.priceNotSet
             }
             priceCents = sub
@@ -103,13 +103,13 @@ actor CryptoPaymentService {
 
         // Invoices are filed under the payer's storage key, so a rename
         // between opening and paying still credits the right wallet.
-        let normalizedUser = await state.userKeyOrRaw(username)
+        let normalizedUser = await state.resolved(invoker)
 
         // Note (amountDelta mode): slot allocation keeps every open invoice's
         // amount unique across all purposes, so a payment attributes to one
         // invoice. Distinct pack prices sit far outside the slot-step range of
         // the subscription price, so purposes don't alias in practice.
-        if let existing = await state.openCryptoInvoiceForUser(username: normalizedUser, asset: asset, purpose: purpose),
+        if let existing = await state.openCryptoInvoiceForUser(key: normalizedUser, asset: asset, purpose: purpose),
            existing.expiresAt > Date() {
             return existing
         }
@@ -163,7 +163,7 @@ actor CryptoPaymentService {
         let now = Date()
         let invoice = CryptoInvoice(
             id: UUID().uuidString,
-            username: normalizedUser,
+            ownerKey: normalizedUser,
             userChatID: userChatID,
             asset: asset,
             receivingAddress: receivingAddress,
@@ -378,11 +378,11 @@ actor CryptoPaymentService {
             // chain has already moved the money, and `fulfil` flushes before
             // returning (CLAUDE.md §7, §17).
             let outcome = await fulfillment.fulfil(PaymentReceipt(
-                payerKey: copy.username,
+                payerKey: copy.ownerKey,
                 // Invoices are filed under a `UserKey`; a pending record (a
                 // person the bot has only been told about) carries no userID,
                 // and referral/traffic attribution then has nothing to look up.
-                payerUserID: UserKey.userID(from: copy.username),
+                payerUserID: copy.ownerKey.userID,
                 chatID: copy.userChatID,
                 purpose: copy.resolvedPurpose,
                 idempotencyKey: "crypto:\(txHash)",
@@ -419,7 +419,7 @@ actor CryptoPaymentService {
         claim: ChatContextStore.ChatClaimOutcome
     ) async {
         // The invoice carries the payer's storage key; the notice names them.
-        let payerLabel = await state.displayLabel(forKey: invoice.username)
+        let payerLabel = await state.displayLabel(forKey: invoice.ownerKey)
         let amount = CryptoAmountFormatter.format(atomic: invoice.exactAmountAtomic, decimals: invoice.asset.decimals)
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM.yyyy"
@@ -474,7 +474,7 @@ actor CryptoPaymentService {
             text: text,
             replyMarkup: nil
         ))
-        logger.info("crypto: invoice \(invoice.id) fully paid by @\(invoice.username) [\(invoice.asset.rawValue)]")
+        logger.info("crypto: invoice \(invoice.id) fully paid by \(invoice.ownerKey) [\(invoice.asset.rawValue)]")
     }
 
     private func notifyCreditPayment(_ invoice: CryptoInvoice, cents: Int, balance: Money) async {
@@ -494,7 +494,7 @@ actor CryptoPaymentService {
             text: text,
             replyMarkup: nil
         ))
-        logger.info("crypto: credit invoice \(invoice.id) fully paid by @\(invoice.username) +\(cents)c [\(invoice.asset.rawValue)]")
+        logger.info("crypto: credit invoice \(invoice.id) fully paid by \(invoice.ownerKey) +\(cents)c [\(invoice.asset.rawValue)]")
     }
 
     private func notifyPartialPayment(_ invoice: CryptoInvoice, addedAtomic: Int64, remainingAtomic: Int64) async {

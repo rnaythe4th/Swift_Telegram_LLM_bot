@@ -76,32 +76,32 @@ final class BotCommandHandler: Sendable {
 
     /// Storage key of whoever is issuing the command, userID first. Every stored
     /// record — roles, ownership, wallets — is keyed this way, and someone with
-    /// no @username has nothing else to be recognised by; passing the raw handle
+    /// no @key has nothing else to be recognised by; passing the raw handle
     /// silently fails every gate for them (CLAUDE.md §6). Store methods take a
-    /// key through their `username:` parameter unchanged.
+    /// key through their `key:` parameter unchanged.
     /// Reply when the caller's storage key cannot be resolved at all (no user
     /// on the update). It used to read "У вас не задан @username", which is
     /// both wrong — identity is the userID (§6) — and a dead end.
     static let unknownAccountNotice =
         "Не удалось определить ваш аккаунт. Напишите боту любое сообщение в личке и повторите команду."
 
-    func actorKey(_ user: TelegramUser?) async -> String? {
+    func actorKey(_ user: TelegramUser?) async -> UserKey? {
         if let userID = user?.id { return state.userKey(userID: userID) }
-        return await state.userKey(username: user?.username)
+        return await state.userKey(forHandle: user?.username)
     }
 
     /// Alias used where the caller means "which tenant owns this" rather than
     /// "who is asking" — same key, clearer at the call site.
-    func ownerKey(for user: TelegramUser?) async -> String? {
+    func ownerKey(for user: TelegramUser?) async -> UserKey? {
         await actorKey(user)
     }
 
     func isSuperAdmin(_ user: TelegramUser?) async -> Bool {
-        await state.isSuperAdmin(username: actorKey(user))
+        await state.isSuperAdmin(actorKey(user))
     }
 
     func isAdmin(_ user: TelegramUser?, chatID: Int) async -> Bool {
-        await state.isAdmin(username: actorKey(user), chatID: chatID)
+        await state.isAdmin(actorKey(user), chatID: chatID)
     }
 
     func requireAdmin(_ user: TelegramUser?, chatKey: ChatKey) async throws -> Bool {
@@ -131,19 +131,19 @@ final class BotCommandHandler: Sendable {
 // restart; without one wired (tests, a bot with no database) they fall back to
 // the in-memory path, which is all there is to change anyway.
 extension BotCommandHandler {
-    func extendSubscription(username: String, days: Int) async -> Date? {
-        if let subscriptions { return await subscriptions.extend(username: username, days: days) }
-        return await state.extendTenantSubscription(username: username, days: days)
+    func extendSubscription(key: UserKey, days: Int) async -> Date? {
+        if let subscriptions { return await subscriptions.extend(key: key, days: days) }
+        return await state.extendTenantSubscription(key, days: days)
     }
 
-    func setSubscriptionUnlimited(username: String) async -> Bool {
-        if let subscriptions { return await subscriptions.setUnlimited(username: username) }
-        return await state.setTenantUnlimited(username: username)
+    func setSubscriptionUnlimited(key: UserKey) async -> Bool {
+        if let subscriptions { return await subscriptions.setUnlimited(key: key) }
+        return await state.setTenantUnlimited(key)
     }
 
-    func expireSubscription(username: String) async -> Bool {
-        if let subscriptions { return await subscriptions.expire(username: username) }
-        return await state.expireTenantSubscription(username: username)
+    func expireSubscription(key: UserKey) async -> Bool {
+        if let subscriptions { return await subscriptions.expire(key: key) }
+        return await state.expireTenantSubscription(key)
     }
 
     func clearWinbackDiscounts() async -> Int {

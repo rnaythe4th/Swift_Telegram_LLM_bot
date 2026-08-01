@@ -7,16 +7,17 @@ actor ChatContextStore {
     // Storage is `internal` (not private) so the ChatContextStore+*.swift
     // extensions can reach it; nothing outside the actor touches it directly.
     var contexts: [ChatKey: ChatContext] = [:]
-    var tenants: [String: TenantState] = [:]
-    var chatOwnership: [Int: String] = [:]
-    var userTenantMap: [Int: String] = [:]
+    var tenants: [UserKey: TenantState] = [:]
+    var chatOwnership: [Int: UserKey] = [:]
+    var userTenantMap: [Int: UserKey] = [:]
 
-    var superAdminUsernames: Set<String>
-    let rootSuperAdminUsername: String
+    var superAdminKeys: Set<UserKey>
+    /// Owner as configured at boot (`OWNER_USER_ID` / `OWNER_USERNAME`). A seed:
+    /// `rootSuperAdminKey` prefers what the directory has pinned since.
+    let configuredOwnerKey: UserKey
     /// Owner's Telegram userID when configured (`OWNER_USER_ID`). Root is then
     /// this account and nothing else — not a stored key, not a handle.
     let pinnedOwnerUserID: Int?
-    let defaultOwnerUsername: String
     var formatOptions: String
     let companyChatId: Int
     let companyMembers: String
@@ -34,8 +35,8 @@ actor ChatContextStore {
     // them (§2.1).
     var dirtyContexts = Set<ChatKey>()
     var deletedContexts = Set<ChatKey>()
-    var dirtyTenants = Set<String>()
-    var deletedTenants = Set<String>()
+    var dirtyTenants = Set<UserKey>()
+    var deletedTenants = Set<UserKey>()
     /// Chat identity *and* which tenant's licence covers it — one row, because
     /// they describe one thing and are always read together.
     var dirtyChats = Set<Int>()
@@ -44,8 +45,8 @@ actor ChatContextStore {
     /// Wallets are drained by the ledger, not by the write-behind batch: money
     /// is written through a transaction (§3.2). The set exists so a cache-only
     /// change (a rename adopting a wallet) still reaches storage.
-    var dirtyWallets = Set<String>()
-    var deletedWallets = Set<String>()
+    var dirtyWallets = Set<UserKey>()
+    var deletedWallets = Set<UserKey>()
     var dirtyInvites = Set<String>()
     var deletedInvites = Set<String>()
     var dirtyPremiumUsage = Set<String>()
@@ -94,7 +95,7 @@ actor ChatContextStore {
     /// between or the campaign becomes unmeasurable.
     var trafficSourceLedgerValue: TrafficSourceLedger = .empty
     /// Pay-as-you-go wallets, keyed by `UserKey`.
-    var userBalances: [String: UserBalance] = [:]
+    var userBalances: [UserKey: UserBalance] = [:]
     /// userID ↔ @username directory. Everything above that is "keyed by user"
     /// is keyed by `UserKey` (`#<userID>`), and this is what turns a typed
     /// `@name` into that key and back into a label for the interface. Persisted
@@ -173,7 +174,7 @@ actor ChatContextStore {
     var _externalPaymentConfig: ExternalPaymentConfig = .default
     var _externalOrders: [String: ExternalPaymentOrder] = [:]
 
-    var _simulatedRoles: [String: SimulatedRole] = [:]
+    var _simulatedRoles: [UserKey: SimulatedRole] = [:]
 
     init(
         ownerUsername: String,
@@ -196,10 +197,11 @@ actor ChatContextStore {
         // that door — and keeps the owner's own access from depending on a
         // handle they might one day drop.
         self.pinnedOwnerUserID = ownerUserID
-        let owner = ownerUserID.map { UserKey.forUserID($0) } ?? ownerUsername.lowercased()
-        self.superAdminUsernames = [owner]
-        self.rootSuperAdminUsername = owner
-        self.defaultOwnerUsername = owner
+        let owner = ownerUserID.map { UserKey.identified($0) }
+            ?? UserKey.pending(ownerUsername)
+            ?? UserKey.sanitizedPendingFallback(ownerUsername)
+        self.superAdminKeys = [owner]
+        self.configuredOwnerKey = owner
         self.formatOptions = formatOptions
         self.companyChatId = companyChatId
         self.companyMembers = companyMembers
@@ -209,7 +211,7 @@ actor ChatContextStore {
         self.initialDefaultHistoryLength = defaultHistoryLength
         self.tenants = [
             owner: TenantState(
-                ownerUsername: owner,
+                ownerKey: owner,
                 defaultModel: model,
                 defaultRole: systemPrompt,
                 defaultHistoryLength: defaultHistoryLength,
@@ -218,8 +220,8 @@ actor ChatContextStore {
                 historyLengthPresets: [],
                 rolePresets: [],
                 whitelistedUserIDs: [],
-                adminUsernames: [],
-                licensedUsernames: [],
+                adminKeys: [],
+                licensedKeys: [],
                 cumulativeUsage: .zero,
                 createdAt: Date(),
                 paidUntil: nil

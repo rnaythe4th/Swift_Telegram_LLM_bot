@@ -34,7 +34,7 @@ extension BotCommandHandler {
             try await handleTenant(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
         case .superadmin:
-            guard await state.isRootSuperAdmin(username: actorKey(fromUser)) else {
+            guard await state.isRootSuperAdmin(actorKey(fromUser)) else {
                 try await sendUserFeedback(chatKey: chatKey, text: Texts.rootSuperAdminOnlyCommand)
                 return
             }
@@ -44,7 +44,7 @@ extension BotCommandHandler {
             try await handleBuy(chatKey: chatKey, fromUser: fromUser)
 
         case .simulate:
-            guard await state.isActuallySuperAdmin(username: actorKey(fromUser)) else {
+            guard await state.isActuallySuperAdmin(actorKey(fromUser)) else {
                 try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
                 return
             }
@@ -111,7 +111,7 @@ extension BotCommandHandler {
             ))
 
         case .menu:
-            await menuHandler.sendMenu(chatKey: chatKey, userID: fromUser?.id, username: fromUser?.username)
+            await menuHandler.sendMenu(chatKey: chatKey, userID: fromUser?.id)
 
         case .history:
             try await handleHistory(chatKey: chatKey)

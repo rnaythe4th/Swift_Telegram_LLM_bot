@@ -14,8 +14,8 @@ extension BotCommandHandler {
 
         // Storage key: stored owners are keyed by userID, so comparisons must
         // use the key rather than the rentable handle.
-        let invokerUsername = await actorKey(fromUser)
-        let invokerIsSuper = await state.isSuperAdmin(username: invokerUsername)
+        let invokerKey = await actorKey(fromUser)
+        let invokerIsSuper = await state.isSuperAdmin(invokerKey)
         let superOnlySubs: Set<String> = [
             "remove", "price", "freemodels", "cryptoprice", "cryptoaddr",
             "cryptomode", "cryptopool", "stats", "cryptoinvoices",
@@ -41,7 +41,7 @@ extension BotCommandHandler {
                 chatKey: chatKey,
                 arg1: arg1,
                 arg2: arg2,
-                invokerUsername: invokerUsername,
+                invokerKey: invokerKey,
                 invokerIsSuper: invokerIsSuper
             )
 
@@ -50,7 +50,7 @@ extension BotCommandHandler {
                 sub: subcommand.lowercased(),
                 chatKey: chatKey,
                 arg1: arg1,
-                invokerUsername: invokerUsername
+                invokerKey: invokerKey
             )
 
         case "extend", "unlimited", "expire":
@@ -103,24 +103,24 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: Texts.superAdminOnlyCommand)
                 return
             }
-            let username = normalizeUsername(arg1)
-            guard !username.isEmpty else {
+            let handle = normalizeUsername(arg1)
+            guard !handle.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant add @username</code>")
                 return
             }
-            await state.registerTenant(username: username)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Tenant @\(username) зарегистрирован.")
+            await state.registerTenant(state.userKeyOrRaw(handle))
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Спонсор @\(handle) зарегистрирован.")
 
         case "remove":
-            let username = normalizeUsername(arg1)
-            guard !username.isEmpty else {
+            let handle = normalizeUsername(arg1)
+            guard !handle.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant remove @username</code>")
                 return
             }
-            let removed = await state.removeTenant(username: username)
+            let removed = await state.removeTenant(state.userKeyOrRaw(handle))
             try await sendUserFeedback(chatKey: chatKey, text: removed
-                ? "✓ Tenant @\(username) удалён."
-                : "Tenant @\(username) не найден или является владельцем.")
+                ? "✓ Спонсор @\(handle) удалён."
+                : "Спонсор @\(handle) не найден или является владельцем.")
 
         case "list":
             let tenants = await state.listTenants()
@@ -149,7 +149,7 @@ extension BotCommandHandler {
                     } else {
                         subscription = "бессрочно"
                     }
-                    lines.append("\n\(mark) <b>@\(row.username)</b> · \(subscription)")
+                    lines.append("\n\(mark) <b>@\(row.key)</b> · \(subscription)")
                     lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b>")
                     lines.append("  запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(tokens)</b>")
                     lines.append("  💵 реально <b>\(realStr)</b> · клиентская цена <b>\(billedStr)</b>")
@@ -169,25 +169,26 @@ extension BotCommandHandler {
         chatKey: ChatKey,
         arg1: String,
         arg2: String,
-        invokerUsername: String?,
+        invokerKey: UserKey?,
         invokerIsSuper: Bool
     ) async throws {
         switch sub {
         case "assign":
-            let username = normalizeUsername(arg1)
+            let handle = normalizeUsername(arg1)
+            let target = await state.userKeyOrRaw(handle)
             // Admins may only assign chats to themselves; super may assign to anyone.
-            if !invokerIsSuper, await state.userKey(username: username) != invokerUsername {
+            if !invokerIsSuper, target != invokerKey {
                 try await sendUserFeedback(chatKey: chatKey, text: "🔒 Включить премиум в чате можно только за свой счёт.")
                 return
             }
-            guard !username.isEmpty, let chatID = Int(arg2) else {
+            guard !handle.isEmpty, let chatID = Int(arg2) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant assign @username &lt;chatID&gt;</code>")
                 return
             }
-            let ok = await state.assignChat(chatID: chatID, to: username)
+            let ok = await state.assignChat(chatID: chatID, to: target)
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ В чате <code>\(chatID)</code> включён премиум @\(username)."
-                : "У @\(username) нет премиума.")
+                ? "✓ В чате <code>\(chatID)</code> включён премиум @\(handle)."
+                : "У @\(handle) нет премиума.")
 
         case "unassign":
             guard let chatID = Int(arg1) else {
@@ -195,7 +196,7 @@ extension BotCommandHandler {
                 return
             }
             let owner = await state.chatOwner(chatID: chatID)
-            if !invokerIsSuper, owner != invokerUsername {
+            if !invokerIsSuper, owner != invokerKey {
                 try await sendUserFeedback(chatKey: chatKey, text: "🔒 В этом чате премиум открыли не вы.")
                 return
             }
@@ -206,12 +207,12 @@ extension BotCommandHandler {
 
         case "claim":
             // Admin attaches the current chat to their licence.
-            guard let username = invokerUsername else {
+            guard let invoker = invokerKey else {
                 try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
-            let ok = await state.assignChat(chatID: chatKey.chatID, to: username)
-            let claimLabel = await state.displayLabel(forKey: username)
+            let ok = await state.assignChat(chatID: chatKey.chatID, to: invoker)
+            let claimLabel = await state.displayLabel(forKey: invoker)
             try await sendUserFeedback(chatKey: chatKey, text: ok
                 ? "✓ Премиум включён в этом чате — за счёт \(claimLabel)."
                 : "У \(claimLabel) нет активного премиума — оформить: /buy")
@@ -219,7 +220,7 @@ extension BotCommandHandler {
         case "release":
             // Admin detaches the current chat from their licence.
             let owner = await state.chatOwner(chatID: chatKey.chatID)
-            if !invokerIsSuper, owner != invokerUsername {
+            if !invokerIsSuper, owner != invokerKey {
                 try await sendUserFeedback(chatKey: chatKey, text: "🔒 В этом чате премиум открыли не вы.")
                 return
             }
@@ -230,16 +231,16 @@ extension BotCommandHandler {
 
         case "chats":
             // Admin → own chats; super → all (already covered by /chats).
-            guard let username = invokerUsername else {
+            guard let invoker = invokerKey else {
                 try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
-            let chats = await state.chatsOwnedBy(username)
+            let chats = await state.chatsOwnedBy(invoker)
             if chats.isEmpty {
                 try await sendUserFeedback(chatKey: chatKey, text: "Ваш премиум пока не включён ни в одном чате.")
             } else {
                 let list = chats.sorted().map { "• <code>\($0)</code>" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты с премиумом \(await state.displayLabel(forKey: username))</b> (\(chats.count))\n\(list)")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>📌 Чаты с премиумом \(await state.displayLabel(forKey: invoker))</b> (\(chats.count))\n\(list)")
             }
 
         default:
@@ -253,11 +254,11 @@ extension BotCommandHandler {
         sub: String,
         chatKey: ChatKey,
         arg1: String,
-        invokerUsername: String?
+        invokerKey: UserKey?
     ) async throws {
         switch sub {
         case "adduser":
-            guard let username = invokerUsername else {
+            guard let invoker = invokerKey else {
                 try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
@@ -266,13 +267,13 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant adduser @username</code>")
                 return
             }
-            let added = await state.addLicensedUser(ownerUsername: username, target: target)
+            let added = await state.addLicensedUser(ownerKey: invoker, target: state.userKeyOrRaw(target))
             try await sendUserFeedback(chatKey: chatKey, text: added
                 ? "✓ @\(target) теперь пользуется умными моделями за ваш счёт."
                 : "@\(target) уже в списке, либо ваш премиум неактивен.")
 
         case "removeuser":
-            guard let username = invokerUsername else {
+            guard let invoker = invokerKey else {
                 try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
@@ -281,38 +282,38 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant removeuser @username</code>")
                 return
             }
-            let removed = await state.removeLicensedUser(ownerUsername: username, target: target)
+            let removed = await state.removeLicensedUser(ownerKey: invoker, target: state.userKeyOrRaw(target))
             try await sendUserFeedback(chatKey: chatKey, text: removed
                 ? "✓ @\(target) больше не гость вашего премиума."
                 : "@\(target) не найден среди гостей вашего премиума.")
 
         case "users":
-            guard let username = invokerUsername else {
+            guard let invoker = invokerKey else {
                 try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
-            let users = await state.licensedUsers(ownerUsername: username)
+            let users = await state.licensedUsers(ownerKey: invoker)
             if users.isEmpty {
                 try await sendUserFeedback(chatKey: chatKey, text: "Гостей премиума пока нет.\n\n<i>Проще всего пригласить ссылкой: /tenant invite</i>")
             } else {
                 let list = users.map { "• \($0.label)" }.joined(separator: "\n")
-                try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Гости премиума \(await state.displayLabel(forKey: username))</b> (\(users.count))\n\(list)")
+                try await sendUserFeedback(chatKey: chatKey, text: "<b>👥 Гости премиума \(await state.displayLabel(forKey: invoker))</b> (\(users.count))\n\(list)")
             }
 
         case "invite":
-            guard let username = invokerUsername else {
+            guard let invoker = invokerKey else {
                 try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
                 return
             }
-            guard await state.isTenant(username: username) else {
+            guard await state.isTenant(invoker) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "Премиум неактивен — оформить: /buy")
                 return
             }
             let wantsNew = arg1.lowercased() == "new"
-            let existing = await state.inviteToken(owner: username)
+            let existing = await state.inviteToken(owner: invoker)
             let token: String?
             if wantsNew || existing == nil {
-                token = await state.regenerateInviteToken(owner: username)
+                token = await state.regenerateInviteToken(owner: invoker)
             } else {
                 token = existing
             }
@@ -347,39 +348,39 @@ extension BotCommandHandler {
     ) async throws {
         switch sub {
         case "extend":
-            let username = normalizeUsername(arg1)
-            guard !username.isEmpty, let days = Int(arg2), days > 0 else {
+            let handle = normalizeUsername(arg1)
+            guard !handle.isEmpty, let days = Int(arg2), days > 0 else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant extend @username &lt;дней&gt;</code>")
                 return
             }
-            if let until = await extendSubscription(username: username, days: days) {
+            if let until = await extendSubscription(key: state.userKeyOrRaw(handle), days: days) {
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
-                try await sendUserFeedback(chatKey: chatKey, text: "✓ Подписка @\(username) продлена до <b>\(f.string(from: until))</b>.")
+                try await sendUserFeedback(chatKey: chatKey, text: "✓ Подписка @\(handle) продлена до <b>\(f.string(from: until))</b>.")
             } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Tenant @\(username) не найден.")
+                try await sendUserFeedback(chatKey: chatKey, text: "Спонсор @\(handle) не найден.")
             }
 
         case "unlimited":
-            let username = normalizeUsername(arg1)
-            guard !username.isEmpty else {
+            let handle = normalizeUsername(arg1)
+            guard !handle.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant unlimited @username</code>")
                 return
             }
-            let ok = await setSubscriptionUnlimited(username: username)
+            let ok = await setSubscriptionUnlimited(key: state.userKeyOrRaw(handle))
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ Подписка @\(username) теперь бессрочная."
-                : "Tenant @\(username) не найден.")
+                ? "✓ Подписка @\(handle) теперь бессрочная."
+                : "Спонсор @\(handle) не найден.")
 
         case "expire":
-            let username = normalizeUsername(arg1)
-            guard !username.isEmpty else {
+            let handle = normalizeUsername(arg1)
+            guard !handle.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant expire @username</code>")
                 return
             }
-            let ok = await expireSubscription(username: username)
+            let ok = await expireSubscription(key: state.userKeyOrRaw(handle))
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ Подписка @\(username) немедленно завершена (лицензия и настройки сохранены)."
-                : "Tenant @\(username) не найден или это владелец бота.")
+                ? "✓ Подписка @\(handle) немедленно завершена (лицензия и настройки сохранены)."
+                : "Спонсор @\(handle) не найден или это владелец бота.")
 
         default:
             break

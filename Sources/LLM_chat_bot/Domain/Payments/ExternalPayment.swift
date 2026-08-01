@@ -345,7 +345,7 @@ struct ExternalPaymentOrder: Codable, Sendable, Equatable, Identifiable {
     let vendor: ExternalPaymentVendor
     /// Payer's `UserKey` — a rename between opening and paying still credits
     /// the right account (§6).
-    let payerKey: String
+    let payerKey: UserKey
     /// Referral bonuses and traffic attribution are keyed by userID; a pending
     /// record (someone the bot has only been told about) simply has none.
     let payerUserID: Int?

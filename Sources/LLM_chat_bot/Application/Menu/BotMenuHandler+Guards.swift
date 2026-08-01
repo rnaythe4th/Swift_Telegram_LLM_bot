@@ -8,21 +8,21 @@ import Foundation
 // forgets `answerCallback` leaves a button that appears to do nothing, which
 // reads as a broken bot rather than as a refusal.
 //
-// All three take the callback, not a username: the key must come from the
+// All three take the callback, not a handle: the key must come from the
 // userID (CLAUDE.md §17), and a raw handle locks out everyone without one.
 
 extension BotMenuHandler {
     /// True when the tapper may act. On refusal the toast is already sent, so
     /// the caller only has to `return`.
     func requireSuperAdmin(_ callback: CallbackQuery) async -> Bool {
-        await require(await state.isSuperAdmin(username: invokerKey(callback)),
+        await require(await state.isSuperAdmin(invokerKey(callback)),
                       callback: callback,
                       refusal: Texts.superAdminOnly)
     }
 
     /// Adding and removing super-admins — only the bot's owner (CLAUDE.md §6).
     func requireRootSuperAdmin(_ callback: CallbackQuery) async -> Bool {
-        await require(await state.isRootSuperAdmin(username: invokerKey(callback)),
+        await require(await state.isRootSuperAdmin(invokerKey(callback)),
                       callback: callback,
                       refusal: Texts.rootSuperAdminOnly)
     }
@@ -30,7 +30,7 @@ extension BotMenuHandler {
     /// Licence owner for this chat. A super-admin passes too — `isAdmin`
     /// already accounts for that.
     func requireAdmin(_ callback: CallbackQuery, chatKey: ChatKey) async -> Bool {
-        await require(await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID),
+        await require(await state.isAdmin(invokerKey(callback), chatID: chatKey.chatID),
                       callback: callback,
                       refusal: Texts.adminOnly)
     }
@@ -40,7 +40,7 @@ extension BotMenuHandler {
     /// settings it guards are plumbing, not a paid feature, so pointing the
     /// person at the purchase page would be a lie.
     func requireOperator(_ callback: CallbackQuery, chatKey: ChatKey, refusal: String) async -> Bool {
-        await require(await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID),
+        await require(await state.isAdmin(invokerKey(callback), chatID: chatKey.chatID),
                       callback: callback,
                       refusal: refusal)
     }
@@ -49,7 +49,7 @@ extension BotMenuHandler {
     /// "picks a reference mode" and "takes the settings apart".
     func hasFullAccess(_ callback: CallbackQuery, chatKey: ChatKey) async -> Bool {
         await state.hasFullModelAccess(
-            username: invokerKey(callback),
+            key: invokerKey(callback),
             userID: callback.from.id,
             chatID: chatKey.chatID
         )

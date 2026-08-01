@@ -40,11 +40,11 @@ struct MessageRoutingPolicy: Equatable {
     }
     
     private static func isReplyToBot(_ message: TelegramMessage, botUsername: String) -> Bool {
-        guard let username = message.reply_to_message?.from?.username else {
+        guard let invoker = message.reply_to_message?.from?.username else {
             return false
         }
         
-        return username.caseInsensitiveCompare(botUsername) == .orderedSame
+        return invoker.caseInsensitiveCompare(botUsername) == .orderedSame
     }
     
     private static func containsBotMention(in text: String, botUsername: String) -> Bool {

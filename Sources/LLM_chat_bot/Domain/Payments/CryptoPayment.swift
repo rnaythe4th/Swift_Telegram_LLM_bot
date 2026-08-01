@@ -105,7 +105,9 @@ typealias CryptoInvoicePurpose = PurchasePurpose
 
 struct CryptoInvoice: Codable, Sendable, Identifiable {
     var id: String
-    var username: String
+    /// Whose invoice it is (§6 `UserKey`), so a rename never orphans money
+    /// already in flight.
+    var ownerKey: UserKey
     var userChatID: Int
     var asset: CryptoAsset
     var receivingAddress: String

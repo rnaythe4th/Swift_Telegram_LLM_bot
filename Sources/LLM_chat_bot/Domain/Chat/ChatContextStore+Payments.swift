@@ -118,11 +118,12 @@ extension ChatContextStore {
         }
     }
 
-    func openCryptoInvoiceForUser(username: String, asset: CryptoAsset, purpose: CryptoInvoicePurpose) -> CryptoInvoice? {
-        let u = userKeyOrRaw(username)
-        return _cryptoInvoices.values.first {
-            $0.username == u && $0.asset == asset && $0.resolvedPurpose == purpose
-                && ($0.status == .open || $0.status == .partial)
+    func openCryptoInvoiceForUser(key: UserKey, asset: CryptoAsset, purpose: CryptoInvoicePurpose) -> CryptoInvoice? {
+        let u = resolved(key)
+        return _cryptoInvoices.values.first { invoice in
+            guard invoice.ownerKey == u, invoice.asset == asset else { return false }
+            guard invoice.resolvedPurpose == purpose else { return false }
+            return invoice.status == .open || invoice.status == .partial
         }
     }
 

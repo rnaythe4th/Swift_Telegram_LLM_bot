@@ -46,7 +46,7 @@ struct ChatContextRow: Sendable {
 }
 
 struct TenantRow: Sendable {
-    let username: String
+    let key: UserKey
     let snapshot: TenantStateSnapshot
 }
 
@@ -62,7 +62,7 @@ struct UserRow: Sendable {
 struct ChatRow: Sendable {
     let chatID: Int
     let meta: ChatMetaInfo?
-    let ownerKey: String?
+    let ownerKey: UserKey?
 }
 
 struct InviteRow: Sendable {
@@ -120,7 +120,7 @@ enum GlobalConfigValue: Sendable {
     case freeModels([String])
     case crypto(CryptoConfigSnapshot)
     case card(CardPaymentConfig)
-    case superAdmins([String])
+    case superAdmins([UserKey])
     case pollingOffset(Int)
     case ads([AdCampaign])
     /// Markup percent applied to provider prices for customers.
@@ -187,7 +187,7 @@ struct PersistenceBatch: Sendable {
     var contexts: [ChatContextRow] = []
     var deletedContexts: [ChatKey] = []
     var tenants: [TenantRow] = []
-    var deletedTenants: [String] = []
+    var deletedTenants: [UserKey] = []
     var chats: [ChatRow] = []
     var deletedChats: [Int] = []
     var invites: [InviteRow] = []
@@ -235,7 +235,7 @@ struct PersistenceBatch: Sendable {
             older.contexts, older.deletedContexts, newer.contexts, newer.deletedContexts, by: \.key
         )
         (result.tenants, result.deletedTenants) = Self.merge(
-            older.tenants, older.deletedTenants, newer.tenants, newer.deletedTenants, by: \.username
+            older.tenants, older.deletedTenants, newer.tenants, newer.deletedTenants, by: \.key
         )
         (result.chats, result.deletedChats) = Self.merge(
             older.chats, older.deletedChats, newer.chats, newer.deletedChats, by: \.chatID
@@ -321,7 +321,7 @@ struct PersistedGlobalConfigs: Sendable {
     var freeModelIDs: [String]?
     var crypto: CryptoConfigSnapshot?
     var card: CardPaymentConfig?
-    var superAdmins: [String]?
+    var superAdmins: [UserKey]?
     var pollingOffset: Int?
     var ads: [AdCampaign]?
     var markup: Int?
@@ -353,7 +353,7 @@ struct PersistedBotState: Sendable {
     var externalOrders: [ExternalOrderRow] = []
     /// Wallets come from the money tables (`LedgerPort`), but they are restored
     /// into the same store, so the boot path carries them together.
-    var wallets: [String: UserBalance] = [:]
+    var wallets: [UserKey: UserBalance] = [:]
     var configs: PersistedGlobalConfigs = PersistedGlobalConfigs()
 }
 

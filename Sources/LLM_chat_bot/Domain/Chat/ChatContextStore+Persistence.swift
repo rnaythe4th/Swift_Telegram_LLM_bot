@@ -36,7 +36,7 @@ extension ChatContextStore {
 
     private func makeTenantSnapshot(_ tenant: TenantState) -> TenantStateSnapshot {
         TenantStateSnapshot(
-            ownerUsername: tenant.ownerUsername,
+            ownerKey: tenant.ownerKey,
             defaultModel: tenant.defaultModel,
             defaultRole: tenant.defaultRole,
             defaultHistoryLength: tenant.defaultHistoryLength,
@@ -45,8 +45,8 @@ extension ChatContextStore {
             historyLengthPresets: tenant.historyLengthPresets,
             rolePresets: tenant.rolePresets,
             whitelistedUserIDs: Array(tenant.whitelistedUserIDs),
-            adminUsernames: Array(tenant.adminUsernames),
-            licensedUsernames: Array(tenant.licensedUsernames),
+            adminKeys: Array(tenant.adminKeys),
+            licensedKeys: Array(tenant.licensedKeys),
             cumulativeUsage: tenant.cumulativeUsage,
             createdAt: tenant.createdAt,
             paidUntil: tenant.paidUntil,
@@ -88,7 +88,7 @@ extension ChatContextStore {
 
     private func makeTenant(from snapshot: TenantStateSnapshot) -> TenantState {
         TenantState(
-            ownerUsername: snapshot.ownerUsername,
+            ownerKey: snapshot.ownerKey,
             defaultModel: snapshot.defaultModel,
             defaultRole: snapshot.defaultRole,
             defaultHistoryLength: snapshot.defaultHistoryLength,
@@ -97,8 +97,8 @@ extension ChatContextStore {
             historyLengthPresets: snapshot.historyLengthPresets,
             rolePresets: snapshot.rolePresets,
             whitelistedUserIDs: Set(snapshot.whitelistedUserIDs),
-            adminUsernames: Set(snapshot.adminUsernames),
-            licensedUsernames: Set((snapshot.licensedUsernames ?? []).map { $0.lowercased() }),
+            adminKeys: Set(snapshot.adminKeys),
+            licensedKeys: Set(snapshot.licensedKeys ?? []),
             cumulativeUsage: snapshot.cumulativeUsage ?? .zero,
             createdAt: snapshot.createdAt,
             paidUntil: snapshot.paidUntil,
@@ -132,7 +132,7 @@ extension ChatContextStore {
         batch.deletedContexts = Array(deletedContexts)
         for owner in dirtyTenants {
             if let tenant = tenants[owner] {
-                batch.tenants.append(TenantRow(username: owner, snapshot: makeTenantSnapshot(tenant)))
+                batch.tenants.append(TenantRow(key: owner, snapshot: makeTenantSnapshot(tenant)))
             }
         }
         batch.deletedTenants = Array(deletedTenants)
@@ -221,8 +221,8 @@ extension ChatContextStore {
     /// Wallets changed outside a ledger transaction (a rename adopting one).
     /// Drained separately because money is written through `LedgerPort`, not
     /// through the write-behind batch.
-    func drainDirtyWallets() -> (changed: [String: UserBalance], removed: [String]) {
-        var changed: [String: UserBalance] = [:]
+    func drainDirtyWallets() -> (changed: [UserKey: UserBalance], removed: [UserKey]) {
+        var changed: [UserKey: UserBalance] = [:]
         for key in dirtyWallets {
             if let wallet = userBalances[key] { changed[key] = wallet }
         }
@@ -261,7 +261,7 @@ extension ChatContextStore {
         case .card:
             return .card(_cardConfig)
         case .superAdmins:
-            return .superAdmins(Array(superAdminUsernames.subtracting([rootSuperAdminKey, rootSuperAdminUsername])).sorted())
+            return .superAdmins(Array(superAdminKeys.subtracting([rootSuperAdminKey, configuredOwnerKey])).sorted())
         case .pollingOffset:
             return .pollingOffset(pollingOffsetValue ?? 0)
         case .ads:
@@ -341,7 +341,7 @@ extension ChatContextStore {
 
         tenants.removeAll()
         for row in state.tenants {
-            tenants[row.username.lowercased()] = makeTenant(from: row.snapshot)
+            tenants[row.key] = makeTenant(from: row.snapshot)
         }
         ensureDefaultOwnerTenant()
 
@@ -349,13 +349,12 @@ extension ChatContextStore {
         chatOwnership.removeAll()
         for row in state.chats {
             if let meta = row.meta { chatMetaByID[row.chatID] = meta }
-            if let owner = row.ownerKey, !owner.isEmpty { chatOwnership[row.chatID] = owner.lowercased() }
+            if let owner = row.ownerKey, !owner.storageValue.isEmpty { chatOwnership[row.chatID] = owner }
         }
 
-        superAdminUsernames = [rootSuperAdminKey]
-        for name in state.configs.superAdmins ?? [] {
-            let lowered = name.lowercased()
-            if !lowered.isEmpty { superAdminUsernames.insert(lowered) }
+        superAdminKeys = [rootSuperAdminKey]
+        for key in state.configs.superAdmins ?? [] where !key.storageValue.isEmpty {
+            superAdminKeys.insert(key)
         }
 
         rebuildUserTenantMap()
@@ -430,7 +429,7 @@ extension ChatContextStore {
     private func ensureDefaultOwnerTenant() {
         guard tenants[defaultOwnerKey] == nil else { return }
         tenants[defaultOwnerKey] = TenantState(
-            ownerUsername: defaultOwnerKey,
+            ownerKey: defaultOwnerKey,
             defaultModel: initialDefaultModel,
             defaultRole: initialDefaultRole,
             defaultHistoryLength: initialDefaultHistoryLength,
@@ -439,8 +438,8 @@ extension ChatContextStore {
             historyLengthPresets: [],
             rolePresets: [],
             whitelistedUserIDs: [],
-            adminUsernames: [],
-            licensedUsernames: [],
+            adminKeys: [],
+            licensedKeys: [],
             cumulativeUsage: .zero,
             createdAt: Date(),
             paidUntil: nil

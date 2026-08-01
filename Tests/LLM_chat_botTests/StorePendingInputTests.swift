@@ -27,7 +27,7 @@ final class StorePendingInputTests: XCTestCase {
     func testConsumingLeavesNothingBehind() async {
         let store = Fixtures.makeStore()
         await store.setPending(.freeModel, menuMessageID: 7, chatKey: chat)
-        await store.notePendingInputOwner("#1", chatKey: chat)
+        await store.notePendingInputOwner(UserKey.identified(1), chatKey: chat)
 
         let consumed = await store.consumePending(chatKey: chat)
         XCTAssertNotNil(consumed)
@@ -64,23 +64,23 @@ final class StorePendingInputTests: XCTestCase {
     func testTheWaitBelongsToWhoeverArmedIt() async {
         let store = Fixtures.makeStore()
         await store.setPending(.starsPrice, menuMessageID: 9, chatKey: chat)
-        await store.notePendingInputOwner("#42", chatKey: chat)
+        await store.notePendingInputOwner(UserKey.identified(42), chatKey: chat)
 
         let owner = await store.pendingInputOwner(chatKey: chat)
-        XCTAssertEqual(owner, "#42")
+        XCTAssertEqual(owner, UserKey.identified(42))
     }
 
     func testANewTapperTakesOverTheWait() async {
         let store = Fixtures.makeStore()
         await store.setPending(.starsPrice, menuMessageID: 9, chatKey: chat)
-        await store.notePendingInputOwner("#42", chatKey: chat)
+        await store.notePendingInputOwner(UserKey.identified(42), chatKey: chat)
 
         // Someone else taps a button that arms a different value.
         await store.setPending(.starsPerUsd, menuMessageID: 10, chatKey: chat)
-        await store.notePendingInputOwner("#43", chatKey: chat)
+        await store.notePendingInputOwner(UserKey.identified(43), chatKey: chat)
 
         let owner = await store.pendingInputOwner(chatKey: chat)
-        XCTAssertEqual(owner, "#43")
+        XCTAssertEqual(owner, UserKey.identified(43))
     }
 
     /// Re-arming a live wait (the menu redraws its own prompt) must not drop
@@ -88,17 +88,17 @@ final class StorePendingInputTests: XCTestCase {
     func testRearmingALiveWaitKeepsTheOwner() async {
         let store = Fixtures.makeStore()
         await store.setPending(.starsPrice, menuMessageID: 9, chatKey: chat)
-        await store.notePendingInputOwner("#42", chatKey: chat)
+        await store.notePendingInputOwner(UserKey.identified(42), chatKey: chat)
 
         await store.setPending(.starsPrice, menuMessageID: 9, chatKey: chat)
 
         let owner = await store.pendingInputOwner(chatKey: chat)
-        XCTAssertEqual(owner, "#42")
+        XCTAssertEqual(owner, UserKey.identified(42))
     }
 
     func testOwnerIsNotRememberedWithoutAWait() async {
         let store = Fixtures.makeStore()
-        await store.notePendingInputOwner("#42", chatKey: chat)
+        await store.notePendingInputOwner(UserKey.identified(42), chatKey: chat)
 
         let owner = await store.pendingInputOwner(chatKey: chat)
         XCTAssertNil(owner, "an owner without a wait is a stale entry waiting to misfire")

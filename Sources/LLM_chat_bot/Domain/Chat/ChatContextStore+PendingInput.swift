@@ -43,13 +43,13 @@ extension ChatContextStore {
 
     /// Remembers who a live wait belongs to. Called after every menu action, so
     /// a wait armed by a tap always carries the person who tapped.
-    func notePendingInputOwner(_ userKey: String?, chatKey: ChatKey) {
+    func notePendingInputOwner(_ userKey: UserKey?, chatKey: ChatKey) {
         guard let userKey, _pendingRequests[chatKey] != nil else { return }
         _pendingRequests[chatKey]?.owner = userKey
     }
 
     /// Owner of the chat's live wait, or nil when nothing is pending.
-    func pendingInputOwner(chatKey: ChatKey) -> String? {
+    func pendingInputOwner(chatKey: ChatKey) -> UserKey? {
         _pendingRequests[chatKey]?.owner
     }
 }

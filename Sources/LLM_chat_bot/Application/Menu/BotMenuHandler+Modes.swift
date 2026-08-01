@@ -46,7 +46,7 @@ extension BotMenuHandler {
             var access = ChatContextStore.PaidModelAccess.full
             if isPaid {
                 access = await state.paidModelAccess(
-                    username: invokerKey(callback),
+            key: invokerKey(callback),
                     userID: callback.from.id,
                     chatID: chatKey.chatID
                 )
@@ -113,16 +113,16 @@ extension BotMenuHandler {
     /// controls that cost money carry a ⭐ and lead to the offer instead
     /// (`MenuPage.requiresFullAccess`, enforced on both the nav path and the
     /// redraw-after-input path).
-    func renderTuning(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
+    func renderTuning(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
         let gateway = try? gateways.gateway(for: provider)
         let reasoningSupported = gateway?.capabilities.supportsReasoning ?? false
-        let isOperator = await state.isAdmin(username: username, chatID: chatKey.chatID)
+        let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
         // A fact about the chat, not about the tapper: in a group this page is
         // one shared message (CLAUDE.md §13).
         let hasFullAccess = await state.hasFullModelAccess(
-            username: chatKey.chatID < 0 ? nil : username,
+            key: chatKey.chatID < 0 ? nil : invoker,
             chatID: chatKey.chatID
         )
         let lock = hasFullAccess ? "" : " ⭐"

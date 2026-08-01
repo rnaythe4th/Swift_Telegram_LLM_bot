@@ -28,9 +28,9 @@ final class StorePersistenceTests: XCTestCase {
         await store.identifyUser(userID: 960, username: "payer", firstName: nil)
         _ = await store.drainDirtyBatch()
 
-        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(960), amount: .usd(1))
-        _ = await store.activatePaidSubscription(username: UserKey.forUserID(960))
-        _ = await store.assignChat(chatID: -960, to: UserKey.forUserID(960))
+        _ = await store.creditPurchasedBalance(key: UserKey.identified(960), amount: .usd(1))
+        _ = await store.activatePaidSubscription(UserKey.identified(960))
+        _ = await store.assignChat(chatID: -960, to: UserKey.identified(960))
         await store.setDailyPremiumLimit(3)
 
         let batch = await store.drainDirtyBatch()
@@ -59,11 +59,11 @@ final class StorePersistenceTests: XCTestCase {
 
     func testMergeKeepsTheNewerRowAndHonoursDeletes() {
         var older = PersistenceBatch()
-        older.tenants = [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "old/model"))]
-        older.chats = [ChatRow(chatID: -1, meta: nil, ownerKey: "#1")]
+        older.tenants = [TenantRow(key: UserKey.identified(1), snapshot: makeTenantSnapshot(model: "old/model"))]
+        older.chats = [ChatRow(chatID: -1, meta: nil, ownerKey: UserKey.identified(1))]
         older.configs = [.markup(10)]
         var newer = PersistenceBatch()
-        newer.tenants = [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "new/model"))]
+        newer.tenants = [TenantRow(key: UserKey.identified(1), snapshot: makeTenantSnapshot(model: "new/model"))]
         newer.deletedChats = [-1]
         newer.configs = [.markup(20)]
 
@@ -83,9 +83,9 @@ final class StorePersistenceTests: XCTestCase {
     /// A row written and then deleted must not come back, and vice versa.
     func testMergeResurrectsARowWrittenAfterItsDelete() {
         var older = PersistenceBatch()
-        older.deletedTenants = ["#1"]
+        older.deletedTenants = [UserKey.identified(1)]
         var newer = PersistenceBatch()
-        newer.tenants = [TenantRow(username: "#1", snapshot: makeTenantSnapshot(model: "m"))]
+        newer.tenants = [TenantRow(key: UserKey.identified(1), snapshot: makeTenantSnapshot(model: "m"))]
 
         let merged = PersistenceBatch.merged(older: older, newer: newer)
         XCTAssertEqual(merged.tenants.count, 1)
@@ -104,11 +104,11 @@ final class StorePersistenceTests: XCTestCase {
             snapshot: makeContextSnapshot(model: "restored/model")
         )]
         stored.tenants = [TenantRow(
-            username: "#970",
+            key: UserKey.identified(970),
             snapshot: makeTenantSnapshot(model: "tenant/model", paidUntil: paidUntil)
         )]
-        stored.chats = [ChatRow(chatID: -970, meta: nil, ownerKey: "#970")]
-        stored.wallets = ["#970": UserBalance(
+        stored.chats = [ChatRow(chatID: -970, meta: nil, ownerKey: UserKey.identified(970))]
+        stored.wallets = [UserKey.identified(970): UserBalance(
             balance: .usd(3), spentBilled: .usd(1), spentReal: .usd(0.5), toppedUp: .usd(3)
         )]
         stored.configs = PersistedGlobalConfigs(starsPrice: 777, markup: 42)
@@ -117,16 +117,16 @@ final class StorePersistenceTests: XCTestCase {
         let help = await store.fetchHelp(chatKey: ChatKey(chatID: -970, threadID: 0))
         XCTAssertEqual(help.model, "restored/model")
         let owner = await store.chatOwner(chatID: -970)
-        XCTAssertEqual(owner, "#970")
-        let subscription = await store.tenantSubscription(ownerUsername: "#970")
+        XCTAssertEqual(owner, UserKey.identified(970))
+        let subscription = await store.tenantSubscription(ownerKey: UserKey.identified(970))
         XCTAssertTrue(subscription.isActive)
         let markup = await store.markupPercent()
         XCTAssertEqual(markup, 42)
-        let pricing = await store.subscriptionPricing(username: nil)
+        let pricing = await store.subscriptionPricing(key: nil)
         XCTAssertEqual(pricing.stars, 777)
-        let wallet = await store.balance(username: "@sponsor")
+        let wallet = await store.balance(UserKey.pending("@sponsor")!)
         XCTAssertEqual(wallet?.toppedUp, .usd(3))
-        let label = await store.displayLabel(forKey: "#970")
+        let label = await store.displayLabel(forKey: UserKey.identified(970))
         XCTAssertEqual(label, "@sponsor")
     }
 
@@ -134,7 +134,7 @@ final class StorePersistenceTests: XCTestCase {
 
     private func makeTenantSnapshot(model: String, paidUntil: Date? = nil) -> TenantStateSnapshot {
         TenantStateSnapshot(
-            ownerUsername: "#1",
+            ownerKey: UserKey.identified(1),
             defaultModel: model,
             defaultRole: "role",
             defaultHistoryLength: 10,
@@ -143,8 +143,8 @@ final class StorePersistenceTests: XCTestCase {
             historyLengthPresets: [],
             rolePresets: [],
             whitelistedUserIDs: [],
-            adminUsernames: [],
-            licensedUsernames: [],
+            adminKeys: [],
+            licensedKeys: [],
             cumulativeUsage: nil,
             createdAt: nil,
             paidUntil: paidUntil
@@ -217,9 +217,9 @@ final class StoreFunnelTests: XCTestCase {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 981, username: "active", firstName: nil)
         await store.identifyUser(userID: 982, username: "lapsed", firstName: nil)
-        _ = await store.activatePaidSubscription(username: UserKey.forUserID(981))
-        _ = await store.activatePaidSubscription(username: UserKey.forUserID(982))
-        _ = await store.expireTenantSubscription(username: UserKey.forUserID(982))
+        _ = await store.activatePaidSubscription(UserKey.identified(981))
+        _ = await store.activatePaidSubscription(UserKey.identified(982))
+        _ = await store.expireTenantSubscription(UserKey.identified(982))
 
         var report = await store.funnelReport()
         XCTAssertEqual(report.sponsorsActive, 1)
@@ -227,8 +227,8 @@ final class StoreFunnelTests: XCTestCase {
         XCTAssertEqual(report.sponsorsUnlimited, 0, "the bot's own owners are not sponsors")
 
         await store.identifyUser(userID: 983, username: "forever", firstName: nil)
-        _ = await store.activatePaidSubscription(username: UserKey.forUserID(983))
-        _ = await store.setTenantUnlimited(username: UserKey.forUserID(983))
+        _ = await store.activatePaidSubscription(UserKey.identified(983))
+        _ = await store.setTenantUnlimited(UserKey.identified(983))
         report = await store.funnelReport()
         XCTAssertEqual(report.sponsorsUnlimited, 1)
     }

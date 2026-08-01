@@ -194,7 +194,7 @@ extension BotMenuHandler {
         let allowedFree = await state.allowedFreeModelIDs()
         let isPaid = allowedFree.map { !$0.contains(modelID) } ?? true
         let access = await state.paidModelAccess(
-            username: callback.from.username,
+            key: invokerKey(callback),
             userID: callback.from.id,
             chatID: chatKey.chatID
         )

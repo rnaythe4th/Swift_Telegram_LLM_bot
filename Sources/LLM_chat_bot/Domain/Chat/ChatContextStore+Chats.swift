@@ -6,14 +6,14 @@ import Foundation
 extension ChatContextStore {
     // MARK: - Chat listings
 
-    func privateChats(ownedBy owner: String? = nil) -> [(chatID: Int, threadID: Int64)] {
+    func privateChats(ownedBy owner: UserKey? = nil) -> [(chatID: Int, threadID: Int64)] {
         contexts.keys
             .filter { $0.chatID > 0 }
             .filter { owner == nil || chatOwnership[$0.chatID] == owner }
             .map { (chatID: $0.chatID, threadID: $0.threadID) }
     }
 
-    func groupChats(ownedBy owner: String? = nil) -> [(chatID: Int, threadID: Int64)] {
+    func groupChats(ownedBy owner: UserKey? = nil) -> [(chatID: Int, threadID: Int64)] {
         contexts.keys
             .filter { $0.chatID < 0 }
             .filter { owner == nil || chatOwnership[$0.chatID] == owner }
@@ -88,13 +88,13 @@ extension ChatContextStore {
     func chatsWorthKeeping() -> Set<Int> {
         var keep = Set(chatOwnership.keys)
         for (owner, tenant) in tenants where tenant.isActive {
-            if let userID = UserKey.userID(from: owner) { keep.insert(userID) }
+            if let userID = owner.userID { keep.insert(userID) }
         }
         for (key, wallet) in userBalances where wallet.balance.isPositive {
-            if let userID = UserKey.userID(from: key) { keep.insert(userID) }
+            if let userID = key.userID { keep.insert(userID) }
         }
-        for key in superAdminUsernames {
-            if let userID = UserKey.userID(from: key) { keep.insert(userID) }
+        for key in superAdminKeys {
+            if let userID = key.userID { keep.insert(userID) }
         }
         return keep
     }
@@ -141,22 +141,22 @@ extension ChatContextStore {
 
     // MARK: - Invite links (referral access under an admin's licence)
 
-    func inviteToken(owner: String) -> String? {
-        let u = userKeyOrRaw(owner)
-        return inviteRecords.first(where: { $0.value.ownerUsername == u })?.key
+    func inviteToken(owner: UserKey) -> String? {
+        let u = resolved(owner)
+        return inviteRecords.first(where: { $0.value.ownerKey == u })?.key
     }
 
     /// Replaces the owner's invite with a fresh token (old links stop working).
-    func regenerateInviteToken(owner: String) -> String? {
-        let u = userKeyOrRaw(owner)
+    func regenerateInviteToken(owner: UserKey) -> String? {
+        let u = resolved(owner)
         guard tenants[u] != nil else { return nil }
-        for stale in inviteRecords.filter({ $0.value.ownerUsername == u }).keys {
+        for stale in inviteRecords.filter({ $0.value.ownerKey == u }).keys {
             inviteRecords.removeValue(forKey: stale)
             dirtyInvites.remove(stale)
             deletedInvites.insert(stale)
         }
         let token = Self.makeInviteToken()
-        inviteRecords[token] = InviteRecord(ownerUsername: u, createdAt: Date())
+        inviteRecords[token] = InviteRecord(ownerKey: u, createdAt: Date())
         dirtyInvites.insert(token)
         deletedInvites.remove(token)
         return token
@@ -165,7 +165,7 @@ extension ChatContextStore {
     @discardableResult
     func revokeInviteToken(owner: String) -> Bool {
         let u = userKeyOrRaw(owner)
-        let stale = inviteRecords.filter { $0.value.ownerUsername == u }.keys
+        let stale = inviteRecords.filter { $0.value.ownerKey == u }.keys
         guard !stale.isEmpty else { return false }
         for token in stale {
             inviteRecords.removeValue(forKey: token)
@@ -178,10 +178,10 @@ extension ChatContextStore {
     /// Returns the issuing owner when the token is valid and their
     /// subscription is active.
     /// Owner key behind an invite token, if their subscription is still active.
-    func redeemInvite(token: String) -> String? {
+    func redeemInvite(token: String) -> UserKey? {
         guard let record = inviteRecords[token],
-              tenants[record.ownerUsername]?.isActive == true else { return nil }
-        return record.ownerUsername
+              tenants[record.ownerKey]?.isActive == true else { return nil }
+        return record.ownerKey
     }
 
     private static func makeInviteToken() -> String {

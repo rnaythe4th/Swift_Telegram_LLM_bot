@@ -13,7 +13,7 @@ import XCTest
 final class LedgerTests: XCTestCase {
 
     private static func receipt(
-        _ key: String = "#1",
+        _ key: UserKey = .identified(1),
         purpose: PurchasePurpose = .subscription,
         idempotencyKey: String = "charge-1"
     ) -> PaymentReceipt {
@@ -45,13 +45,13 @@ final class LedgerTests: XCTestCase {
         let attempts = 16
 
         let delivery = Self.receipt()
-        let defaults = TenantDefaults(ownerUsername: "#1", model: "m", role: "r", historyLength: 10)
+        let defaults = TenantDefaults(ownerKey: UserKey.identified(1), model: "m", role: "r", historyLength: 10)
         let winners = await withTaskGroup(of: Bool.self) { group -> Int in
             for _ in 0..<attempts {
                 group.addTask {
                     (try? await ledger.inTransaction { transaction in
                         guard try await transaction.claimPayment(delivery) else { return false }
-                        _ = try await transaction.extendSubscription("#1", days: 30, defaults: defaults)
+                        _ = try await transaction.extendSubscription(UserKey.identified(1), days: 30, defaults: defaults)
                         return true
                     }) ?? false
                 }
@@ -92,21 +92,21 @@ final class LedgerTests: XCTestCase {
     /// Paying never shortens access, and an unlimited tenant stays unlimited.
     func testExtensionNeverShortensAccess() async throws {
         let ledger = InMemoryLedger()
-        let defaults = TenantDefaults(ownerUsername: "#7", model: "m", role: "r", historyLength: 10)
+        let defaults = TenantDefaults(ownerKey: UserKey.identified(7), model: "m", role: "r", historyLength: 10)
 
         let first = try await ledger.inTransaction {
-            try await $0.extendSubscription("#7", days: 30, defaults: defaults)
+            try await $0.extendSubscription(UserKey.identified(7), days: 30, defaults: defaults)
         }
         XCTAssertTrue(first.isNew)
         let second = try await ledger.inTransaction {
-            try await $0.extendSubscription("#7", days: 30, defaults: defaults)
+            try await $0.extendSubscription(UserKey.identified(7), days: 30, defaults: defaults)
         }
         XCTAssertFalse(second.isNew)
         XCTAssertGreaterThan(second.paidUntil!, first.paidUntil!, "a renewal extends from the current end")
 
-        try await ledger.inTransaction { try await $0.setSubscription("#7", paidUntil: nil) }
+        try await ledger.inTransaction { try await $0.setSubscription(UserKey.identified(7), paidUntil: nil) }
         let third = try await ledger.inTransaction {
-            try await $0.extendSubscription("#7", days: 30, defaults: defaults)
+            try await $0.extendSubscription(UserKey.identified(7), days: 30, defaults: defaults)
         }
         XCTAssertNil(third.paidUntil, "an unlimited tenant stays unlimited")
         XCTAssertTrue(third.wasUnlimited)
@@ -117,11 +117,11 @@ final class LedgerTests: XCTestCase {
     func testDebitStopsAtZeroAndReportsTheShortfall() async throws {
         let ledger = InMemoryLedger()
         _ = try await ledger.inTransaction {
-            try await $0.credit("#2", .cents(10), kind: .topup, purchased: true, ref: nil)
+            try await $0.credit(UserKey.identified(2), .cents(10), kind: .topup, purchased: true, ref: nil)
         }
 
         let debit = try await ledger.inTransaction {
-            try await $0.debit("#2", upTo: .cents(25), real: .cents(20), ref: "gen-1")
+            try await $0.debit(UserKey.identified(2), upTo: .cents(25), real: .cents(20), ref: "gen-1")
         }
         XCTAssertEqual(debit.charged, .cents(10))
         XCTAssertEqual(debit.remaining, .zero)
@@ -133,7 +133,7 @@ final class LedgerTests: XCTestCase {
     func testJournalAlwaysAddsUpToTheBalance() async throws {
         let ledger = InMemoryLedger()
         for step in 0..<200 {
-            let key = "#\(Int.random(in: 1...5))"
+            let key = UserKey.identified(Int.random(in: 1...5))
             let amount = Int.random(in: 1...500)
             switch step % 3 {
             case 0:
@@ -159,12 +159,12 @@ final class LedgerTests: XCTestCase {
     func testOnlyPurchasedCreditMarksAPayer() async throws {
         let ledger = InMemoryLedger()
         let bonus = try await ledger.inTransaction {
-            try await $0.credit("#3", .cents(100), kind: .referral, purchased: false, ref: nil)
+            try await $0.credit(UserKey.identified(3), .cents(100), kind: .referral, purchased: false, ref: nil)
         }
         XCTAssertEqual(bonus.toppedUp, .zero)
 
         let purchase = try await ledger.inTransaction {
-            try await $0.credit("#3", .cents(500), kind: .topup, purchased: true, ref: nil)
+            try await $0.credit(UserKey.identified(3), .cents(500), kind: .topup, purchased: true, ref: nil)
         }
         XCTAssertEqual(purchase.toppedUp, .cents(500))
         XCTAssertEqual(purchase.balance, .cents(600))

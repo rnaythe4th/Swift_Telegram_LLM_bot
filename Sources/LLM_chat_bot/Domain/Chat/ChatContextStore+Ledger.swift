@@ -14,10 +14,10 @@ import Foundation
 
 extension ChatContextStore {
     /// What a tenant row needs if this payment is the one that creates it.
-    func tenantDefaults(forKey key: String) -> TenantDefaults {
+    func tenantDefaults(forKey key: UserKey) -> TenantDefaults {
         let source = tenants[key] ?? tenants[defaultOwnerKey]
         return TenantDefaults(
-            ownerUsername: key,
+            ownerKey: key,
             model: source?.defaultModel ?? initialDefaultModel,
             role: source?.defaultRole ?? initialDefaultRole,
             historyLength: source?.defaultHistoryLength ?? initialDefaultHistoryLength
@@ -62,7 +62,7 @@ extension ChatContextStore {
         }
 
         if tenants[receipt.payerKey] == nil {
-            registerTenant(username: receipt.payerKey)
+            registerTenant(receipt.payerKey)
         }
         let hadDiscount = tenants[receipt.payerKey]?.winbackDiscount
         mutateTenantByOwner(receipt.payerKey) { tenant in
@@ -97,7 +97,7 @@ extension ChatContextStore {
     /// reward, a super-admin grant. Only the cache moves; the row was already
     /// written by the transaction, so this must **not** mark the wallet dirty
     /// or the write-behind sync would add the same money a second time.
-    func applyCommittedCredit(key: String, amount: Money) {
+    func applyCommittedCredit(key: UserKey, amount: Money) {
         guard amount.isPositive else { return }
         var wallet = userBalances[key] ?? .empty
         wallet.balance += amount
@@ -106,7 +106,7 @@ extension ChatContextStore {
     }
 
     /// Mirrors a committed charge for one answer.
-    func applyCommittedCharge(key: String, debit: WalletDebit, real: Money) {
+    func applyCommittedCharge(key: UserKey, debit: WalletDebit, real: Money) {
         guard var wallet = userBalances[key] else { return }
         wallet.balance = debit.remaining
         wallet.spentBilled += debit.charged

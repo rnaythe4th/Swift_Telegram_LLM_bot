@@ -11,14 +11,14 @@ import Foundation
 /// anything while this is the ledger in use.
 actor InMemoryLedger: LedgerPort {
     private var claims: Set<String> = []
-    private var wallets: [String: UserBalance] = [:]
+    private var wallets: [UserKey: UserBalance] = [:]
     private var entries: [LedgerEntry] = []
-    private var subscriptions: [String: Date?] = [:]
-    private var discounts: [String: SubscriptionDiscount?] = [:]
+    private var subscriptions: [UserKey: Date?] = [:]
+    private var discounts: [UserKey: SubscriptionDiscount?] = [:]
 
     /// Where a fresh instance gets its starting wallets from — the store's
     /// restored cache, so a memory-only bot still knows what it knew.
-    init(wallets: [String: UserBalance] = [:]) {
+    init(wallets: [UserKey: UserBalance] = [:]) {
         self.wallets = wallets
     }
 
@@ -32,17 +32,17 @@ actor InMemoryLedger: LedgerPort {
         try await body(Transaction(ledger: self))
     }
 
-    func syncWallets(changed: [String: UserBalance], removed: [String]) async throws {
+    func syncWallets(changed: [UserKey: UserBalance], removed: [UserKey]) async throws {
         for key in removed { wallets.removeValue(forKey: key) }
         for (key, wallet) in changed { wallets[key] = wallet }
     }
 
-    func recentEntries(userKey: String, limit: Int) async throws -> [LedgerEntry] {
+    func recentEntries(userKey: UserKey, limit: Int) async throws -> [LedgerEntry] {
         entries.filter { $0.userKey == userKey }.suffix(limit).reversed()
     }
 
-    func reconcile() async throws -> [String] {
-        var sums: [String: Money] = [:]
+    func reconcile() async throws -> [UserKey] {
+        var sums: [UserKey: Money] = [:]
         for entry in entries { sums[entry.userKey, default: .zero] += entry.amount }
         return wallets.compactMap { key, wallet in
             (sums[key] ?? .zero) == wallet.balance ? nil : key
@@ -54,7 +54,7 @@ actor InMemoryLedger: LedgerPort {
     fileprivate func claim(_ key: String) -> Bool { claims.insert(key).inserted }
 
     fileprivate func applyCredit(
-        _ key: String,
+        _ key: UserKey,
         _ amount: Money,
         kind: LedgerEntryKind,
         purchased: Bool,
@@ -79,7 +79,7 @@ actor InMemoryLedger: LedgerPort {
         return wallet
     }
 
-    fileprivate func applyDebit(_ key: String, upTo amount: Money, real: Money, ref: String?) -> WalletDebit {
+    fileprivate func applyDebit(_ key: UserKey, upTo amount: Money, real: Money, ref: String?) -> WalletDebit {
         guard var wallet = wallets[key] else {
             return WalletDebit(charged: .zero, remaining: .zero, depleted: false)
         }
@@ -102,7 +102,7 @@ actor InMemoryLedger: LedgerPort {
         )
     }
 
-    fileprivate func applyExtension(_ key: String, days: Int) -> SubscriptionExtension {
+    fileprivate func applyExtension(_ key: UserKey, days: Int) -> SubscriptionExtension {
         let existing = subscriptions[key]
         guard let current = existing else {
             let until = Date().addingTimeInterval(TimeInterval(days) * 86_400)
@@ -117,11 +117,11 @@ actor InMemoryLedger: LedgerPort {
         return SubscriptionExtension(paidUntil: until, isNew: false, wasUnlimited: false)
     }
 
-    fileprivate func applySubscription(_ key: String, paidUntil: Date?) {
+    fileprivate func applySubscription(_ key: UserKey, paidUntil: Date?) {
         subscriptions[key] = .some(paidUntil)
     }
 
-    fileprivate func applyDiscount(_ key: String, _ discount: SubscriptionDiscount?) {
+    fileprivate func applyDiscount(_ key: UserKey, _ discount: SubscriptionDiscount?) {
         discounts[key] = .some(discount)
     }
 
@@ -138,26 +138,26 @@ actor InMemoryLedger: LedgerPort {
 
         @discardableResult
         func credit(
-            _ userKey: String, _ amount: Money, kind: LedgerEntryKind, purchased: Bool, ref: String?
+            _ userKey: UserKey, _ amount: Money, kind: LedgerEntryKind, purchased: Bool, ref: String?
         ) async throws -> UserBalance {
             await ledger.applyCredit(userKey, amount, kind: kind, purchased: purchased, ref: ref)
         }
 
-        func debit(_ userKey: String, upTo amount: Money, real: Money, ref: String?) async throws -> WalletDebit {
+        func debit(_ userKey: UserKey, upTo amount: Money, real: Money, ref: String?) async throws -> WalletDebit {
             await ledger.applyDebit(userKey, upTo: amount, real: real, ref: ref)
         }
 
         func extendSubscription(
-            _ userKey: String, days: Int, defaults: TenantDefaults
+            _ userKey: UserKey, days: Int, defaults: TenantDefaults
         ) async throws -> SubscriptionExtension {
             await ledger.applyExtension(userKey, days: days)
         }
 
-        func setSubscription(_ userKey: String, paidUntil: Date?) async throws {
+        func setSubscription(_ userKey: UserKey, paidUntil: Date?) async throws {
             await ledger.applySubscription(userKey, paidUntil: paidUntil)
         }
 
-        func setWinbackDiscount(_ userKey: String, _ discount: SubscriptionDiscount?) async throws {
+        func setWinbackDiscount(_ userKey: UserKey, _ discount: SubscriptionDiscount?) async throws {
             await ledger.applyDiscount(userKey, discount)
         }
     }

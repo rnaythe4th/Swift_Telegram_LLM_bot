@@ -13,7 +13,7 @@ extension BotMenuHandler {
         guard route.command == .pm else { return }
         guard let category = PresetCategory(rawValue: route.sub) else { return }
         await state.clearPending(chatKey: chatKey)
-        let canManageGlobal = await state.isAdmin(username: invokerKey(callback), chatID: chatKey.chatID)
+        let canManageGlobal = await state.isAdmin(invokerKey(callback), chatID: chatKey.chatID)
 
         guard let subAction = route.arg(2) else {
             try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))

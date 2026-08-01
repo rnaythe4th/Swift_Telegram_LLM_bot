@@ -5,7 +5,7 @@ enum EnvironmentKey: String {
     case deepseekKey = "DEEPSEEK_API_KEY"
     case routerApiKey = "ROUTER_API_KEY"
     case companyChatId = "COMPANY_CHAT_ID"
-    /// Owner's @username. The composition root should not know a person's name.
+    /// Owner's @invoker. The composition root should not know a person's name.
     case ownerUsername = "OWNER_USERNAME"
     /// `postgres://user:password@host:5432/database` — the **session** pooler
     /// or a direct connection, never the transaction pooler on 6543 (§1).

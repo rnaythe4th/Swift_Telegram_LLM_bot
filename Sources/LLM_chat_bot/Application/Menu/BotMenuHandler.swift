@@ -68,9 +68,8 @@ final class BotMenuHandler: Sendable {
     /// Storage key of whoever tapped the button, always resolvable: a callback
     /// always carries a userID, while a @username is optional and rentable. Role
     /// gates keyed off the raw handle locked out anyone without one — including
-    /// a super-admin whose record sits under `#<userID>` (CLAUDE.md §6). Store
-    /// APIs that take `username:` pass a key through unchanged.
-    func invokerKey(_ callback: CallbackQuery) -> String {
+    /// a super-admin whose record sits under `#<userID>` (CLAUDE.md §6).
+    func invokerKey(_ callback: CallbackQuery) -> UserKey {
         state.userKey(userID: callback.from.id)
     }
 
@@ -100,10 +99,10 @@ final class BotMenuHandler: Sendable {
         await state.notePendingInputOwner(invokerKey(callback), chatKey: chatKey)
     }
 
-    func sendMenu(chatKey: ChatKey, userID: Int? = nil, username: String? = nil) async {
-        let username = userID.map { self.state.userKey(userID: $0) } ?? username
+    func sendMenu(chatKey: ChatKey, userID: Int? = nil) async {
+        let invoker = userID.map { self.state.userKey(userID: $0) }
         await state.clearPending(chatKey: chatKey)
-        let screen = await renderPage(.main, chatKey: chatKey, username: username)
+        let screen = await renderPage(.main, chatKey: chatKey, invoker: invoker)
         _ = try? await telegram.sendMessage(
             .init(
                 chatID: chatKey.chatID,
@@ -236,7 +235,7 @@ final class BotMenuHandler: Sendable {
         // the button that led here is counted separately — that is how the
         // pain-point upsells get compared with the plain menu (steps 5 and 7).
         if page == .pay { await state.bumpPurchaseOpen(source: purchaseSource) }
-        let screen = await renderPage(page, chatKey: chatKey, username: state.userKey(userID: callback.from.id))
+        let screen = await renderPage(page, chatKey: chatKey, invoker: state.userKey(userID: callback.from.id))
         warnIfOversized(screen, page: page)
         try await editOrAnswer(callback: callback, message: message, screen: screen)
     }
@@ -309,7 +308,7 @@ final class BotMenuHandler: Sendable {
         )
     }
 
-    func renderPage(_ page: MenuPage, chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
+    func renderPage(_ page: MenuPage, chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         // Second line of defence for the paths that render without a callback
         // (a menu refreshed after text input): a personal page never draws its
         // contents into a group message.
@@ -324,46 +323,46 @@ final class BotMenuHandler: Sendable {
         // Same second line of defence for the restricted settings pages: this
         // path renders without a callback (a menu redrawn after a typed value),
         // so the nav gate above has not run.
-        if page.requiresOperator, !(await state.isAdmin(username: username, chatID: chatKey.chatID)) {
+        if page.requiresOperator, !(await state.isAdmin(invoker, chatID: chatKey.chatID)) {
             return MenuScreen(page.restrictedNotice, [navButtons()])
         }
         if page.requiresFullAccess,
-           !(await state.hasFullModelAccess(username: username, chatID: chatKey.chatID)) {
+           !(await state.hasFullModelAccess(key: invoker, chatID: chatKey.chatID)) {
             var rows: Keyboard = [[buyButton("⚡ Открыть тонкую настройку", source: .tuning)]]
             rows.row(navButtons())
             return MenuScreen(page.restrictedNotice, rows)
         }
         switch page {
         case .main:
-            return await renderMain(chatKey: chatKey, username: username)
+            return await renderMain(chatKey: chatKey, invoker: invoker)
         case .role:
             return await renderRole(chatKey: chatKey)
         case .model:
-            return await renderModel(chatKey: chatKey, username: username)
+            return await renderModel(chatKey: chatKey, invoker: invoker)
         case .temp:
             return await renderTemp(chatKey: chatKey)
         case .stats:
-            return await renderStats(chatKey: chatKey, username: username)
+            return await renderStats(chatKey: chatKey, invoker: invoker)
         case .history:
-            return await renderHistory(chatKey: chatKey, username: username)
+            return await renderHistory(chatKey: chatKey, invoker: invoker)
         case .provider:
             return await renderProvider(chatKey: chatKey)
         case .reasoning:
             return await renderReasoning(chatKey: chatKey)
         case .tuning:
-            return await renderTuning(chatKey: chatKey, username: username)
+            return await renderTuning(chatKey: chatKey, invoker: invoker)
         case .helpPage:
             return await renderHelp(chatKey: chatKey)
         case .pay:
-            return await renderPay(chatKey: chatKey, username: username)
+            return await renderPay(chatKey: chatKey, invoker: invoker)
         case .adminPanel:
-            return await renderAdminPanel(chatKey: chatKey, username: username)
+            return await renderAdminPanel(chatKey: chatKey, invoker: invoker)
         case .adminHelp:
             return renderAdminHelp()
         case .adminChats:
-            return await renderAdminChats(chatKey: chatKey, username: username)
+            return await renderAdminChats(chatKey: chatKey, invoker: invoker)
         case .adminUsers:
-            return await renderAdminUsers(chatKey: chatKey, username: username)
+            return await renderAdminUsers(chatKey: chatKey, invoker: invoker)
         case .adminWhitelist:
             return await renderAdminWhitelist(chatKey: chatKey)
         case .adminDefaults:
@@ -385,9 +384,9 @@ final class BotMenuHandler: Sendable {
         case .superTenants:
             return await renderSuperTenants(chatKey: chatKey)
         case .superAdmins:
-            return await renderSuperAdmins(chatKey: chatKey, username: username)
+            return await renderSuperAdmins(chatKey: chatKey, invoker: invoker)
         case .superSimulate:
-            return await renderSuperSimulate(chatKey: chatKey, username: username)
+            return await renderSuperSimulate(chatKey: chatKey, invoker: invoker)
         case .superChats:
             return await renderSuperChats(chatKey: chatKey)
         case .superAds:
@@ -413,7 +412,7 @@ final class BotMenuHandler: Sendable {
             // user's ID — that is whose link and wallet the page is about.
             return await renderReferral(chatKey: chatKey, userID: chatKey.chatID)
         case .adminInvite:
-            return await renderAdminInvite(chatKey: chatKey, username: username)
+            return await renderAdminInvite(chatKey: chatKey, invoker: invoker)
         case .close:
             return MenuScreen("Меню закрыто. Откройте снова — /menu", [])
         }
@@ -557,19 +556,19 @@ final class BotMenuHandler: Sendable {
 // restart; without one wired (tests, a bot with no database) they fall back to
 // the in-memory path, which is all there is to change anyway.
 extension BotMenuHandler {
-    func extendSubscription(username: String, days: Int) async -> Date? {
-        if let subscriptions { return await subscriptions.extend(username: username, days: days) }
-        return await state.extendTenantSubscription(username: username, days: days)
+    func extendSubscription(key: UserKey, days: Int) async -> Date? {
+        if let subscriptions { return await subscriptions.extend(key: key, days: days) }
+        return await state.extendTenantSubscription(key, days: days)
     }
 
-    func setSubscriptionUnlimited(username: String) async -> Bool {
-        if let subscriptions { return await subscriptions.setUnlimited(username: username) }
-        return await state.setTenantUnlimited(username: username)
+    func setSubscriptionUnlimited(key: UserKey) async -> Bool {
+        if let subscriptions { return await subscriptions.setUnlimited(key: key) }
+        return await state.setTenantUnlimited(key)
     }
 
-    func expireSubscription(username: String) async -> Bool {
-        if let subscriptions { return await subscriptions.expire(username: username) }
-        return await state.expireTenantSubscription(username: username)
+    func expireSubscription(key: UserKey) async -> Bool {
+        if let subscriptions { return await subscriptions.expire(key: key) }
+        return await state.expireTenantSubscription(key)
     }
 
     func clearWinbackDiscounts() async -> Int {

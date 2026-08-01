@@ -28,7 +28,7 @@ final class PostgresLedger: LedgerPort, Sendable {
         }
     }
 
-    func syncWallets(changed: [String: UserBalance], removed: [String]) async throws {
+    func syncWallets(changed: [UserKey: UserBalance], removed: [UserKey]) async throws {
         guard !changed.isEmpty || !removed.isEmpty else { return }
         let log = queryLogger
         try await client.withTransaction(logger: log) { db in
@@ -84,7 +84,7 @@ final class PostgresLedger: LedgerPort, Sendable {
         }
     }
 
-    func recentEntries(userKey: String, limit: Int) async throws -> [LedgerEntry] {
+    func recentEntries(userKey: UserKey, limit: Int) async throws -> [LedgerEntry] {
         let rows = try await client.query(
             """
             select kind, amount_nanos, balance_after_nanos, ref, created_at
@@ -108,7 +108,7 @@ final class PostgresLedger: LedgerPort, Sendable {
         return result
     }
 
-    func reconcile() async throws -> [String] {
+    func reconcile() async throws -> [UserKey] {
         // A wallet whose journal does not add up to its balance means something
         // wrote money without writing its reason. Left to a support ticket this
         // is unanswerable; found by a sweep it is one line in an alert.
@@ -123,9 +123,9 @@ final class PostgresLedger: LedgerPort, Sendable {
             """,
             logger: queryLogger
         )
-        var mismatched: [String] = []
+        var mismatched: [UserKey] = []
         for try await row in rows {
-            mismatched.append(try PostgresRandomAccessRow(row)["user_key"].decode(String.self))
+            mismatched.append(try PostgresRandomAccessRow(row)["user_key"].decode(UserKey.self))
         }
         return mismatched
     }
@@ -179,7 +179,7 @@ final class PostgresLedger: LedgerPort, Sendable {
 
         @discardableResult
         func credit(
-            _ userKey: String,
+            _ userKey: UserKey,
             _ amount: Money,
             kind: LedgerEntryKind,
             purchased: Bool,
@@ -222,7 +222,7 @@ final class PostgresLedger: LedgerPort, Sendable {
         }
 
         func debit(
-            _ userKey: String,
+            _ userKey: UserKey,
             upTo amount: Money,
             real: Money,
             ref: String?
@@ -265,7 +265,7 @@ final class PostgresLedger: LedgerPort, Sendable {
 
         /// Locks one wallet row and returns its balance, or nil when there is
         /// no such wallet yet.
-        private func lockedBalance(_ userKey: String) async throws -> Money? {
+        private func lockedBalance(_ userKey: UserKey) async throws -> Money? {
             let rows = try await connection.query(
                 "select balance_nanos from bot_wallet where user_key = \(userKey) for update",
                 logger: logger
@@ -277,7 +277,7 @@ final class PostgresLedger: LedgerPort, Sendable {
         }
 
         func extendSubscription(
-            _ userKey: String,
+            _ userKey: UserKey,
             days: Int,
             defaults: TenantDefaults
         ) async throws -> SubscriptionExtension {
@@ -292,7 +292,7 @@ final class PostgresLedger: LedgerPort, Sendable {
                 insert into bot_tenant (
                     user_key, owner_username, paid_until, default_model, default_role, default_history, created_at
                 ) values (
-                    \(userKey), \(defaults.ownerUsername), now() + (\(Double(days)) * interval '1 day'),
+                    \(userKey), \(defaults.ownerKey), now() + (\(Double(days)) * interval '1 day'),
                     \(defaults.model), \(defaults.role), \(defaults.historyLength), now()
                 )
                 on conflict (user_key) do update set
@@ -318,14 +318,14 @@ final class PostgresLedger: LedgerPort, Sendable {
             return SubscriptionExtension(paidUntil: nil, isNew: false, wasUnlimited: true)
         }
 
-        func setSubscription(_ userKey: String, paidUntil: Date?) async throws {
+        func setSubscription(_ userKey: UserKey, paidUntil: Date?) async throws {
             try await connection.query(
                 "update bot_tenant set paid_until = \(paidUntil), updated_at = now() where user_key = \(userKey)",
                 logger: logger
             )
         }
 
-        func setWinbackDiscount(_ userKey: String, _ discount: SubscriptionDiscount?) async throws {
+        func setWinbackDiscount(_ userKey: UserKey, _ discount: SubscriptionDiscount?) async throws {
             try await connection.query(
                 """
                 update bot_tenant
@@ -339,7 +339,7 @@ final class PostgresLedger: LedgerPort, Sendable {
         }
 
         private func writeEntry(
-            _ userKey: String,
+            _ userKey: UserKey,
             kind: LedgerEntryKind,
             amount: Money,
             balanceAfter: Money,

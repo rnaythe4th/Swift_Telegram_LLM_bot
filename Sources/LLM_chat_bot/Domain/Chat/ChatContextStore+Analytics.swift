@@ -45,7 +45,7 @@ extension ChatContextStore {
         let now = Date()
         let lead = Double(max(reminderConfigValue.daysBeforeExpiry, 1)) * 86_400
         var active = 0, expired = 0, unlimited = 0, expiringSoon = 0, offers = 0
-        for (owner, tenant) in tenants where !superAdminUsernames.contains(owner) {
+        for (owner, tenant) in tenants where !superAdminKeys.contains(owner) {
             if let until = tenant.paidUntil {
                 if until > now {
                     active += 1

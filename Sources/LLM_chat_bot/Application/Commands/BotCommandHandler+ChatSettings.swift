@@ -58,7 +58,7 @@ extension BotCommandHandler {
             }
             // A free-tier chat may still pick a paid model while today's premium
             // taste has units left — the cap enforces itself at generation time.
-            let access = await state.paidModelAccess(username: fromUser?.username, userID: fromUser?.id, chatID: chatKey.chatID)
+            let access = await state.paidModelAccess(key: actorKey(fromUser), userID: fromUser?.id, chatID: chatKey.chatID)
             // Unknown catalogue counts as paid, like the generation gate: while
             // OpenRouter is unreachable this must not become a way to run any
             // model for free.
@@ -230,7 +230,7 @@ extension BotCommandHandler {
     /// back door around the paywall — and around the cost controls behind it.
     func requireFullAccessForTuning(chatKey: ChatKey, fromUser: TelegramUser?) async -> Bool {
         let allowed = await state.hasFullModelAccess(
-            username: actorKey(fromUser),
+            key: actorKey(fromUser),
             userID: fromUser?.id,
             chatID: chatKey.chatID
         )
@@ -247,7 +247,7 @@ extension BotCommandHandler {
     /// Whoever runs the bot here: super-admin, or the admin whose licence pays
     /// for this chat.
     func requireOperatorForTuning(chatKey: ChatKey, fromUser: TelegramUser?, refusal: String) async -> Bool {
-        let allowed = await state.isAdmin(username: actorKey(fromUser), chatID: chatKey.chatID)
+        let allowed = await state.isAdmin(actorKey(fromUser), chatID: chatKey.chatID)
         guard allowed else {
             try? await sendUserFeedback(chatKey: chatKey, text: refusal)
             return false

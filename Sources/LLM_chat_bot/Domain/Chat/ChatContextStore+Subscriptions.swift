@@ -11,11 +11,11 @@ extension ChatContextStore {
     /// Payment path: creates the tenant if needed and extends the subscription
     /// by `days` from max(now, current end). An unlimited tenant stays
     /// unlimited — paying never shortens access.
-    func activatePaidSubscription(username: String, days: Int = ChatContextStore.subscriptionDays) -> SubscriptionActivation {
-        let u = userKeyOrRaw(username)
+    func activatePaidSubscription(_ key: UserKey, days: Int = ChatContextStore.subscriptionDays) -> SubscriptionActivation {
+        let u = resolved(key)
         let isNew = tenants[u] == nil
         if isNew {
-            registerTenant(username: u)
+            registerTenant(u)
         }
         guard var tenant = tenants[u] else { return .alreadyUnlimited }
 
@@ -33,12 +33,12 @@ extension ChatContextStore {
 
     /// True when the owner exists and the subscription hasn't expired.
     /// Expired tenants keep their admin panel (to renew) but lose paid models.
-    func tenantIsActive(_ ownerUsername: String) -> Bool {
-        tenants[userKeyOrRaw(ownerUsername)]?.isActive ?? false
+    func tenantIsActive(_ ownerKey: UserKey) -> Bool {
+        tenants[resolved(ownerKey)]?.isActive ?? false
     }
 
-    func tenantSubscription(ownerUsername: String) -> (exists: Bool, paidUntil: Date?, isActive: Bool) {
-        guard let tenant = tenants[userKeyOrRaw(ownerUsername)] else {
+    func tenantSubscription(ownerKey: UserKey) -> (exists: Bool, paidUntil: Date?, isActive: Bool) {
+        guard let tenant = tenants[resolved(ownerKey)] else {
             return (false, nil, false)
         }
         return (true, tenant.paidUntil, tenant.isActive)
@@ -46,8 +46,8 @@ extension ChatContextStore {
 
     /// Super-admin: extend by N days (from max(now, current end)).
     @discardableResult
-    func extendTenantSubscription(username: String, days: Int) -> Date? {
-        let u = userKeyOrRaw(username)
+    func extendTenantSubscription(_ key: UserKey, days: Int) -> Date? {
+        let u = resolved(key)
         guard var tenant = tenants[u] else { return nil }
         let base = max(Date(), tenant.paidUntil ?? Date())
         let until = base.addingTimeInterval(TimeInterval(days) * 86_400)
@@ -59,8 +59,8 @@ extension ChatContextStore {
 
     /// Super-admin: make the subscription unlimited.
     @discardableResult
-    func setTenantUnlimited(username: String) -> Bool {
-        let u = userKeyOrRaw(username)
+    func setTenantUnlimited(_ key: UserKey) -> Bool {
+        let u = resolved(key)
         guard var tenant = tenants[u] else { return false }
         tenant.paidUntil = nil
         tenants[u] = tenant
@@ -70,8 +70,8 @@ extension ChatContextStore {
 
     /// Super-admin: expire the subscription immediately.
     @discardableResult
-    func expireTenantSubscription(username: String) -> Bool {
-        let u = userKeyOrRaw(username)
+    func expireTenantSubscription(_ key: UserKey) -> Bool {
+        let u = resolved(key)
         guard u != defaultOwnerKey, var tenant = tenants[u] else { return false }
         tenant.paidUntil = Date()
         tenants[u] = tenant
@@ -92,15 +92,15 @@ extension ChatContextStore {
         dirtyConfigs.insert(.reminders)
     }
 
-    func remindersOptOut(username: String?) -> Bool {
-        guard let u = userKey(username: username) else { return false }
+    func remindersOptOut(_ key: UserKey?) -> Bool {
+        guard let u = key.map(resolved) else { return false }
         return tenants[u]?.remindersOptOut ?? false
     }
 
     /// Per-sponsor opt-out (toggle in their own admin panel).
     @discardableResult
-    func setRemindersOptOut(username: String, optOut: Bool) -> Bool {
-        let u = userKeyOrRaw(username)
+    func setRemindersOptOut(_ key: UserKey, optOut: Bool) -> Bool {
+        let u = resolved(key)
         guard tenants[u] != nil else { return false }
         mutateTenantByOwner(u) { $0.remindersOptOut = optOut }
         return true
@@ -116,7 +116,7 @@ extension ChatContextStore {
         // Super-admins own the bot rather than buy from it; selling the owner a
         // winback offer for their own product is noise, and the funnel already
         // leaves them out of the sponsor tallies.
-        for (owner, tenant) in tenants where !superAdminUsernames.contains(owner) {
+        for (owner, tenant) in tenants where !superAdminKeys.contains(owner) {
             guard let paidUntil = tenant.paidUntil, !tenant.remindersOptOut else { continue }
             // Flags belong to one cycle; a renewal invalidates them.
             let sent = tenant.noticeCycleUntil == paidUntil ? tenant.sentNotices : []
@@ -124,7 +124,7 @@ extension ChatContextStore {
                 continue
             }
             targets.append(SubscriptionNoticeTarget(
-                username: owner,
+                key: owner,
                 label: displayLabel(forKey: owner),
                 notice: notice,
                 paidUntil: paidUntil,
@@ -132,15 +132,15 @@ extension ChatContextStore {
                 groupChatIDs: ownedGroupChatIDs(owner: owner)
             ))
         }
-        return targets.sorted { $0.username < $1.username }
+        return targets.sorted { $0.key < $1.key }
     }
 
     /// Records a delivered notice against the cycle it was computed for. A
     /// renewal in between changes `paidUntil` → the mark is dropped, so the new
     /// cycle keeps its own reminder.
     @discardableResult
-    func markNoticeSent(username: String, notice: SubscriptionNotice, paidUntil: Date) -> Bool {
-        let u = userKeyOrRaw(username)
+    func markNoticeSent(key: UserKey, notice: SubscriptionNotice, paidUntil: Date) -> Bool {
+        let u = resolved(key)
         guard let tenant = tenants[u], tenant.paidUntil == paidUntil else { return false }
         mutateTenantByOwner(u) { state in
             if state.noticeCycleUntil != paidUntil {
@@ -155,8 +155,8 @@ extension ChatContextStore {
     /// Attaches a winback discount; the next subscription purchase by this user
     /// is priced with it on every payment method.
     @discardableResult
-    func grantWinbackDiscount(username: String, percent: Int, hours: Int, now: Date = Date()) -> SubscriptionDiscount? {
-        let u = userKeyOrRaw(username)
+    func grantWinbackDiscount(key: UserKey, percent: Int, hours: Int, now: Date = Date()) -> SubscriptionDiscount? {
+        let u = resolved(key)
         guard tenants[u] != nil, percent > 0, hours > 0 else { return nil }
         // A live offer is never re-issued. The sweep grants the discount before
         // sending, so a transient Telegram error (notice left unmarked, retried
@@ -173,16 +173,16 @@ extension ChatContextStore {
     }
 
     /// The discount honored right now, if any.
-    func subscriptionDiscount(username: String?, grace: TimeInterval = 0, now: Date = Date()) -> SubscriptionDiscount? {
-        guard let u = userKey(username: username), let discount = tenants[u]?.winbackDiscount else { return nil }
+    func subscriptionDiscount(key: UserKey?, grace: TimeInterval = 0, now: Date = Date()) -> SubscriptionDiscount? {
+        guard let u = key.map(resolved), let discount = tenants[u]?.winbackDiscount else { return nil }
         return discount.isActive(now: now, grace: grace) ? discount : nil
     }
 
     /// Clears the offer after a purchase (one-shot). Returns it when it was
     /// still valid, so the caller can count the winback conversion.
     @discardableResult
-    func consumeWinbackDiscount(username: String) -> SubscriptionDiscount? {
-        let u = userKeyOrRaw(username)
+    func consumeWinbackDiscount(_ key: UserKey) -> SubscriptionDiscount? {
+        let u = resolved(key)
         guard let discount = tenants[u]?.winbackDiscount else { return nil }
         mutateTenantByOwner(u) { $0.winbackDiscount = nil }
         return discount.isActive(grace: Self.checkoutDiscountGrace) ? discount : nil
@@ -190,7 +190,7 @@ extension ChatContextStore {
 
     /// Owners currently carrying an offer — the caller needs the list before
     /// clearing them, to write each one out.
-    func tenantsWithWinbackDiscount() -> [String] {
+    func tenantsWithWinbackDiscount() -> [UserKey] {
         tenants.compactMap { $0.value.winbackDiscount == nil ? nil : $0.key }
     }
 
@@ -215,7 +215,7 @@ extension ChatContextStore {
     ///   quotes the same numbers on every payment method a real offer would,
     ///   card included.
     func subscriptionPricing(
-        username: String?,
+        key: UserKey?,
         grace: TimeInterval = 0,
         now: Date = Date(),
         applying: SubscriptionDiscount? = nil
@@ -238,7 +238,7 @@ extension ChatContextStore {
             externalLabelFull: externalPrice.map { externalCurrency.format(minorUnits: $0) },
             externalLabel: externalPrice.map { externalCurrency.format(minorUnits: $0) }
         )
-        guard let discount = applying ?? subscriptionDiscount(username: username, grace: grace, now: now) else {
+        guard let discount = applying ?? subscriptionDiscount(key: key, grace: grace, now: now) else {
             return pricing
         }
         pricing.discount = discount
@@ -266,15 +266,15 @@ extension ChatContextStore {
     /// A DM the person blocked (`my_chat_member` → kicked) is not a channel:
     /// every send there fails with 403, so returning it would make the sweep
     /// retry the same dead address on every pass.
-    func privateChatID(forKey key: String) -> Int? {
-        if let userID = UserKey.userID(from: key) {
+    func privateChatID(forKey key: UserKey) -> Int? {
+        if let userID = key.userID {
             guard let meta = chatMetaByID[userID], meta.type == "private", meta.botRemoved != true else { return nil }
             return userID
         }
         for (chatID, meta) in chatMetaByID
         where chatID > 0 && meta.type == "private"
             && meta.botRemoved != true
-            && meta.username?.lowercased() == key {
+            && meta.username.flatMap(UserKey.pending) == key {
             return chatID
         }
         return nil
@@ -283,8 +283,8 @@ extension ChatContextStore {
     /// Group chats the owner's licence covers *and* the bot can still post to.
     /// A chat it was kicked out of stays owned (re-adding restores it) but is
     /// not a delivery channel, so broadcasts skip it instead of burning a send.
-    func ownedGroupChatIDs(owner: String) -> [Int] {
-        let u = userKeyOrRaw(owner)
+    func ownedGroupChatIDs(owner: UserKey) -> [Int] {
+        let u = resolved(owner)
         return chatOwnership
             .filter { $0.key < 0 && $0.value == u && chatMetaByID[$0.key]?.botRemoved != true }
             .map(\.key)
@@ -300,14 +300,14 @@ extension ChatContextStore {
         var stats = SubscriptionLifecycleStats()
         // Same population the sweep works on — a page that lists people the
         // sweep will never contact reads as a bug report.
-        for (owner, tenant) in tenants where !superAdminUsernames.contains(owner) {
+        for (owner, tenant) in tenants where !superAdminKeys.contains(owner) {
             guard let paidUntil = tenant.paidUntil else { continue }
             stats.sponsors += 1
             let reachable = privateChatID(forKey: owner) != nil || !ownedGroupChatIDs(owner: owner).isEmpty
             if !reachable { stats.unreachable += 1 }
             if tenant.remindersOptOut { stats.optedOut += 1 }
             let row = SubscriptionLifecycleStats.Row(
-                username: owner,
+                key: owner,
                 label: displayLabel(forKey: owner),
                 paidUntil: paidUntil,
                 reachable: reachable,

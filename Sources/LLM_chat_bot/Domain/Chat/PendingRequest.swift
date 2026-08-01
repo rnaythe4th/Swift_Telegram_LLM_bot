@@ -31,7 +31,7 @@ struct PendingRequest: Sendable {
     /// Storage key of whoever armed the wait. The wait itself is keyed by chat
     /// (the menu message it redraws lives there), but in a group the next
     /// message can come from anyone — and it must not be swallowed.
-    var owner: String?
+    var owner: UserKey?
     /// Menu message to redraw once the value lands.
     let menuMessageID: Int
     let kind: PendingKind

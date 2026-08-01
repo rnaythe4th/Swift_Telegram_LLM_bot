@@ -174,19 +174,19 @@ extension ChatContextStore {
     // MARK: - Initial preset seeding (called at boot)
 
     func setModelPresets(_ presets: [Preset]) {
-        mutateTenantByOwner(defaultOwnerUsername) { $0.modelPresets = presets }
+        mutateTenantByOwner(configuredOwnerKey) { $0.modelPresets = presets }
     }
 
     func setTempPresets(_ presets: [Preset]) {
-        mutateTenantByOwner(defaultOwnerUsername) { $0.tempPresets = presets }
+        mutateTenantByOwner(configuredOwnerKey) { $0.tempPresets = presets }
     }
 
     func setHistoryLengthPresets(_ presets: [Preset]) {
-        mutateTenantByOwner(defaultOwnerUsername) { $0.historyLengthPresets = presets }
+        mutateTenantByOwner(configuredOwnerKey) { $0.historyLengthPresets = presets }
     }
 
     func setRolePresets(_ presets: [Preset]) {
-        mutateTenantByOwner(defaultOwnerUsername) { $0.rolePresets = presets }
+        mutateTenantByOwner(configuredOwnerKey) { $0.rolePresets = presets }
     }
 
     // MARK: - Per-chat preset management

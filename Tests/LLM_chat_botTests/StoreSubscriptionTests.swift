@@ -5,20 +5,20 @@ import XCTest
 /// single source of prices every payment path reads.
 final class StoreSubscriptionTests: XCTestCase {
 
-    private func makeSponsor(_ store: ChatContextStore, userID: Int = 500, username: String = "sponsor") async -> String {
+    private func makeSponsor(_ store: ChatContextStore, userID: Int = 500, username: String = "sponsor") async -> UserKey {
         await store.identifyUser(userID: userID, username: username, firstName: nil)
-        return UserKey.forUserID(userID)
+        return UserKey.identified(userID)
     }
 
     func testFirstPaymentStartsAndSecondExtends() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
 
-        let first = await store.activatePaidSubscription(username: key)
+        let first = await store.activatePaidSubscription(key)
         guard case .started(let until) = first else { return XCTFail("expected .started, got \(first)") }
         XCTAssertEqual(until.timeIntervalSinceNow, Fixtures.days(30), accuracy: 60)
 
-        let second = await store.activatePaidSubscription(username: key)
+        let second = await store.activatePaidSubscription(key)
         guard case .extended(let extended) = second else { return XCTFail("expected .extended, got \(second)") }
         XCTAssertEqual(extended.timeIntervalSinceNow, Fixtures.days(60), accuracy: 60)
     }
@@ -28,11 +28,11 @@ final class StoreSubscriptionTests: XCTestCase {
     func testExpiredSubscriptionRestartsFromNow() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
-        _ = await store.expireTenantSubscription(username: key)
+        _ = await store.activatePaidSubscription(key)
+        _ = await store.expireTenantSubscription(key)
 
-        _ = await store.activatePaidSubscription(username: key)
-        let subscription = await store.tenantSubscription(ownerUsername: key)
+        _ = await store.activatePaidSubscription(key)
+        let subscription = await store.tenantSubscription(ownerKey: key)
         XCTAssertTrue(subscription.isActive)
         XCTAssertEqual(subscription.paidUntil?.timeIntervalSinceNow ?? 0, Fixtures.days(30), accuracy: 60)
     }
@@ -40,14 +40,14 @@ final class StoreSubscriptionTests: XCTestCase {
     func testUnlimitedTenantStaysUnlimited() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
-        _ = await store.setTenantUnlimited(username: key)
+        _ = await store.activatePaidSubscription(key)
+        _ = await store.setTenantUnlimited(key)
 
-        let outcome = await store.activatePaidSubscription(username: key)
+        let outcome = await store.activatePaidSubscription(key)
         guard case .alreadyUnlimited = outcome else {
             return XCTFail("expected .alreadyUnlimited, got \(outcome)")
         }
-        let subscription = await store.tenantSubscription(ownerUsername: key)
+        let subscription = await store.tenantSubscription(ownerKey: key)
         XCTAssertNil(subscription.paidUntil)
         XCTAssertTrue(subscription.isActive)
     }
@@ -57,20 +57,20 @@ final class StoreSubscriptionTests: XCTestCase {
     func testNoticeIsDueOncePerWaveAndClearedByRenewal() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
-        let paidUntil = await store.tenantSubscription(ownerUsername: key).paidUntil!
+        _ = await store.activatePaidSubscription(key)
+        let paidUntil = await store.tenantSubscription(ownerKey: key).paidUntil!
         let dayBefore = paidUntil.addingTimeInterval(-Fixtures.days(0.5))
 
         var due = await store.dueSubscriptionNotices(now: dayBefore)
         XCTAssertEqual(due.first?.notice, .expiring(daysBefore: 1))
         XCTAssertEqual(due.first?.label, "@sponsor")
 
-        _ = await store.markNoticeSent(username: key, notice: .expiring(daysBefore: 1), paidUntil: paidUntil)
+        _ = await store.markNoticeSent(key: key, notice: .expiring(daysBefore: 1), paidUntil: paidUntil)
         due = await store.dueSubscriptionNotices(now: dayBefore)
         XCTAssertTrue(due.isEmpty, "a delivered wave must not repeat inside its cycle")
 
-        _ = await store.extendTenantSubscription(username: key, days: 30)
-        let renewed = await store.tenantSubscription(ownerUsername: key).paidUntil!
+        _ = await store.extendTenantSubscription(key, days: 30)
+        let renewed = await store.tenantSubscription(ownerKey: key).paidUntil!
         due = await store.dueSubscriptionNotices(now: renewed.addingTimeInterval(-Fixtures.days(0.5)))
         XCTAssertEqual(due.first?.notice, .expiring(daysBefore: 1), "a new cycle gets its own reminder")
     }
@@ -79,9 +79,9 @@ final class StoreSubscriptionTests: XCTestCase {
     func testMarkForAnotherCycleIsRefused() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
+        _ = await store.activatePaidSubscription(key)
         let accepted = await store.markNoticeSent(
-            username: key, notice: .expiring(daysBefore: 1), paidUntil: Date(timeIntervalSince1970: 0)
+            key: key, notice: .expiring(daysBefore: 1), paidUntil: Date(timeIntervalSince1970: 0)
         )
         XCTAssertFalse(accepted)
     }
@@ -90,14 +90,14 @@ final class StoreSubscriptionTests: XCTestCase {
     func testSuperAdminIsNeverSoldTheBotsOwnProduct() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store, userID: 505, username: "staff")
-        _ = await store.activatePaidSubscription(username: key)
-        let paidUntil = await store.tenantSubscription(ownerUsername: key).paidUntil!
+        _ = await store.activatePaidSubscription(key)
+        let paidUntil = await store.tenantSubscription(ownerKey: key).paidUntil!
         let dayBefore = paidUntil.addingTimeInterval(-Fixtures.days(0.5))
 
         var due = await store.dueSubscriptionNotices(now: dayBefore)
         XCTAssertEqual(due.count, 1)
 
-        _ = await store.addSuperAdmin(target: key)
+        _ = await store.addSuperAdmin(key)
         due = await store.dueSubscriptionNotices(now: dayBefore)
         XCTAssertTrue(due.isEmpty)
     }
@@ -106,14 +106,14 @@ final class StoreSubscriptionTests: XCTestCase {
     /// restart their access.
     func testOwnerTenantIsUnlimitedFromTheStart() async {
         let store = Fixtures.makeStore()
-        await store.identifyUser(userID: Fixtures.ownerUserID, username: Fixtures.ownerUsername, firstName: nil)
-        let ownerKey = UserKey.forUserID(Fixtures.ownerUserID)
+        await store.identifyUser(userID: Fixtures.ownerUserID, username: Fixtures.ownerHandle, firstName: nil)
+        let ownerKey = UserKey.identified(Fixtures.ownerUserID)
 
-        let outcome = await store.activatePaidSubscription(username: ownerKey)
+        let outcome = await store.activatePaidSubscription(ownerKey)
         guard case .alreadyUnlimited = outcome else {
             return XCTFail("expected .alreadyUnlimited, got \(outcome)")
         }
-        let subscription = await store.tenantSubscription(ownerUsername: ownerKey)
+        let subscription = await store.tenantSubscription(ownerKey: ownerKey)
         XCTAssertTrue(subscription.isActive)
         XCTAssertNil(subscription.paidUntil)
     }
@@ -121,13 +121,13 @@ final class StoreSubscriptionTests: XCTestCase {
     func testOptOutSilencesTheSweepForThatSponsor() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
-        let paidUntil = await store.tenantSubscription(ownerUsername: key).paidUntil!
-        _ = await store.setRemindersOptOut(username: key, optOut: true)
+        _ = await store.activatePaidSubscription(key)
+        let paidUntil = await store.tenantSubscription(ownerKey: key).paidUntil!
+        _ = await store.setRemindersOptOut(key, optOut: true)
 
         let due = await store.dueSubscriptionNotices(now: paidUntil.addingTimeInterval(-Fixtures.days(0.5)))
         XCTAssertTrue(due.isEmpty)
-        let optedOut = await store.remindersOptOut(username: key)
+        let optedOut = await store.remindersOptOut(key)
         XCTAssertTrue(optedOut)
     }
 
@@ -138,11 +138,11 @@ final class StoreSubscriptionTests: XCTestCase {
     func testDiscountIsGrantedOncePerWindow() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
+        _ = await store.activatePaidSubscription(key)
         let now = Date()
 
-        let first = await store.grantWinbackDiscount(username: key, percent: 30, hours: 48, now: now)
-        let second = await store.grantWinbackDiscount(username: key, percent: 50, hours: 48, now: now.addingTimeInterval(3600))
+        let first = await store.grantWinbackDiscount(key: key, percent: 30, hours: 48, now: now)
+        let second = await store.grantWinbackDiscount(key: key, percent: 50, hours: 48, now: now.addingTimeInterval(3600))
         XCTAssertEqual(first?.expiresAt, second?.expiresAt)
         XCTAssertEqual(second?.percent, 30, "a percent changed mid-window applies to the next offer")
     }
@@ -150,24 +150,24 @@ final class StoreSubscriptionTests: XCTestCase {
     func testDiscountIsConsumedByAPurchase() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
-        _ = await store.grantWinbackDiscount(username: key, percent: 30, hours: 48)
+        _ = await store.activatePaidSubscription(key)
+        _ = await store.grantWinbackDiscount(key: key, percent: 30, hours: 48)
 
-        let consumed = await store.consumeWinbackDiscount(username: key)
+        let consumed = await store.consumeWinbackDiscount(key)
         XCTAssertEqual(consumed?.percent, 30)
-        let afterwards = await store.subscriptionDiscount(username: key)
+        let afterwards = await store.subscriptionDiscount(key: key)
         XCTAssertNil(afterwards)
     }
 
     func testPricingAppliesTheDiscountToEveryMethod() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
+        _ = await store.activatePaidSubscription(key)
         await store.setStarsPrice(1000)
         await store.setCryptoPriceUsdCents(1000)
-        _ = await store.grantWinbackDiscount(username: key, percent: 30, hours: 48)
+        _ = await store.grantWinbackDiscount(key: key, percent: 30, hours: 48)
 
-        let pricing = await store.subscriptionPricing(username: key)
+        let pricing = await store.subscriptionPricing(key: key)
         XCTAssertTrue(pricing.hasDiscount)
         XCTAssertEqual(pricing.starsFull, 1000)
         XCTAssertEqual(pricing.stars, 700)
@@ -178,11 +178,11 @@ final class StoreSubscriptionTests: XCTestCase {
     func testPricingWithoutAUserIsThePriceList() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
+        _ = await store.activatePaidSubscription(key)
         await store.setStarsPrice(1000)
-        _ = await store.grantWinbackDiscount(username: key, percent: 30, hours: 48)
+        _ = await store.grantWinbackDiscount(key: key, percent: 30, hours: 48)
 
-        let pricing = await store.subscriptionPricing(username: nil)
+        let pricing = await store.subscriptionPricing(key: nil)
         XCTAssertFalse(pricing.hasDiscount)
         XCTAssertEqual(pricing.stars, 1000)
     }
@@ -191,15 +191,15 @@ final class StoreSubscriptionTests: XCTestCase {
     func testPreviewDiscountChangesNothingStored() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
+        _ = await store.activatePaidSubscription(key)
         await store.setStarsPrice(1000)
 
         let preview = await store.subscriptionPricing(
-            username: key,
+            key: key,
             applying: SubscriptionDiscount(percent: 50, expiresAt: Date().addingTimeInterval(3600))
         )
         XCTAssertEqual(preview.stars, 500)
-        let stored = await store.subscriptionDiscount(username: key)
+        let stored = await store.subscriptionDiscount(key: key)
         XCTAssertNil(stored)
     }
 
@@ -208,8 +208,8 @@ final class StoreSubscriptionTests: XCTestCase {
         let a = await makeSponsor(store, userID: 501, username: "a")
         let b = await makeSponsor(store, userID: 502, username: "b")
         for key in [a, b] {
-            _ = await store.activatePaidSubscription(username: key)
-            _ = await store.grantWinbackDiscount(username: key, percent: 30, hours: 48)
+            _ = await store.activatePaidSubscription(key)
+            _ = await store.grantWinbackDiscount(key: key, percent: 30, hours: 48)
         }
         let cleared = await store.clearAllWinbackDiscounts()
         XCTAssertEqual(cleared, 2)
@@ -220,7 +220,7 @@ final class StoreSubscriptionTests: XCTestCase {
     func testGroupChannelsSkipChatsTheBotWasRemovedFrom() async {
         let store = Fixtures.makeStore()
         let key = await makeSponsor(store)
-        _ = await store.activatePaidSubscription(username: key)
+        _ = await store.activatePaidSubscription(key)
         _ = await store.assignChat(chatID: -900, to: key)
         _ = await store.assignChat(chatID: -901, to: key)
 

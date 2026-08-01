@@ -32,15 +32,15 @@ final class StoreBillingTests: XCTestCase {
     func testPurchasedCreditIsTrackedApartFromBonuses() async {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 20, username: "payer", firstName: nil)
-        let key = UserKey.forUserID(20)
+        let key = UserKey.identified(20)
 
         _ = await store.creditBalance(key: key, amount: .usd(1))      // referral bonus
-        var wallet = await store.balance(username: key)
+        var wallet = await store.balance(key)
         XCTAssertEqual(wallet?.balance, .usd(1))
         XCTAssertEqual(wallet?.toppedUp, .zero)
 
         _ = await store.creditPurchasedBalance(key: key, amount: .usd(5))
-        wallet = await store.balance(username: key)
+        wallet = await store.balance(key)
         XCTAssertEqual(wallet?.balance, .usd(6))
         XCTAssertEqual(wallet?.toppedUp, .usd(5))
     }
@@ -48,9 +48,9 @@ final class StoreBillingTests: XCTestCase {
     func testBillingKeyIgnoresEmptyWallets() async {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 22, username: "broke", firstName: nil)
-        let key = UserKey.forUserID(22)
-        _ = await store.setBalanceAmount(username: key, amount: .usd(0))
-        let billing = await store.billingKey(username: "broke", userID: 22)
+        let key = UserKey.identified(22)
+        _ = await store.setBalanceAmount(key: key, amount: .usd(0))
+        let billing = await store.billingKey(key: UserKey.pending("broke")!, userID: 22)
         XCTAssertNil(billing)
     }
 
@@ -61,10 +61,10 @@ final class StoreBillingTests: XCTestCase {
         let store = Fixtures.makeStore()
         await store.setMarkupPercent(30)
         await store.identifyUser(userID: 23, username: "u", firstName: nil)
-        let key = UserKey.forUserID(23)
+        let key = UserKey.identified(23)
         _ = await store.creditPurchasedBalance(key: key, amount: .usd(1))
 
-        let projected = await store.projectedBalanceAfterCharge(username: key, realCost: .usd(0.5))
+        let projected = await store.projectedBalanceAfterCharge(key: key, realCost: .usd(0.5))
 
         let ledger = InMemoryLedger()
         _ = try? await ledger.inTransaction {
@@ -146,25 +146,25 @@ final class StoreBillingTests: XCTestCase {
         await store.setDailyPremiumLimit(1)
         await store.identifyUser(userID: 34, username: "free", firstName: nil)
 
-        guard case .dailyTaste(let remaining, _) = await store.paidModelAccess(username: "free", userID: 34, chatID: 34) else {
+        guard case .dailyTaste(let remaining, _) = await store.paidModelAccess(key: UserKey.pending("free")!, userID: 34, chatID: 34) else {
             return XCTFail("free tier with units left may still pick a smart model")
         }
         XCTAssertEqual(remaining, 1)
 
         _ = await store.consumeDailyPremium(chatID: 34, userID: 34, isGroup: false)
-        guard case .none = await store.paidModelAccess(username: "free", userID: 34, chatID: 34) else {
+        guard case .none = await store.paidModelAccess(key: UserKey.pending("free")!, userID: 34, chatID: 34) else {
             return XCTFail("spent allowance leaves free models only")
         }
 
-        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(34), amount: .usd(3))
-        guard case .full = await store.paidModelAccess(username: "free", userID: 34, chatID: 34) else {
+        _ = await store.creditPurchasedBalance(key: UserKey.identified(34), amount: .usd(3))
+        guard case .full = await store.paidModelAccess(key: UserKey.pending("free")!, userID: 34, chatID: 34) else {
             return XCTFail("a positive balance lifts the ceiling")
         }
     }
 
     // MARK: - Lapsed wallets
 
-    private func makeLapsedStore() async -> (ChatContextStore, key: String) {
+    private func makeLapsedStore() async -> (ChatContextStore, key: UserKey) {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 50, username: "lapsed", firstName: nil)
         // A DM is the only channel for a wallet notice.
@@ -172,9 +172,9 @@ final class StoreBillingTests: XCTestCase {
             chatID: 50,
             info: ChatMetaInfo(type: "private", title: nil, username: "lapsed", firstName: nil)
         )
-        let key = UserKey.forUserID(50)
+        let key = UserKey.identified(50)
         _ = await store.creditPurchasedBalance(key: key, amount: .usd(5))
-        _ = await store.setBalanceAmount(username: key, amount: .usd(0))
+        _ = await store.setBalanceAmount(key: key, amount: .usd(0))
         return (store, key)
     }
 
@@ -200,7 +200,7 @@ final class StoreBillingTests: XCTestCase {
         XCTAssertTrue(afterSend.isEmpty)
 
         _ = await store.creditPurchasedBalance(key: key, amount: .usd(5))
-        _ = await store.setBalanceAmount(username: key, amount: .usd(0))
+        _ = await store.setBalanceAmount(key: key, amount: .usd(0))
         let afterTopUp = await store.dueWalletWinbacks(now: later.addingTimeInterval(Fixtures.days(30)))
         XCTAssertEqual(afterTopUp.count, 1, "coming back and lapsing again is a new cycle")
     }
@@ -213,8 +213,8 @@ final class StoreBillingTests: XCTestCase {
             chatID: 51,
             info: ChatMetaInfo(type: "private", title: nil, username: "bonus", firstName: nil)
         )
-        _ = await store.creditBalance(key: UserKey.forUserID(51), amount: .usd(1))
-        _ = await store.setBalanceAmount(username: UserKey.forUserID(51), amount: .usd(0))
+        _ = await store.creditBalance(key: UserKey.identified(51), amount: .usd(1))
+        _ = await store.setBalanceAmount(key: UserKey.identified(51), amount: .usd(0))
 
         let due = await store.dueWalletWinbacks(now: Date().addingTimeInterval(Fixtures.days(60)))
         XCTAssertTrue(due.isEmpty)
@@ -222,7 +222,7 @@ final class StoreBillingTests: XCTestCase {
 
     func testWalletWithMoneyLeftIsNotLapsed() async {
         let (store, key) = await makeLapsedStore()
-        _ = await store.setBalanceAmount(username: key, amount: .usd(1))
+        _ = await store.setBalanceAmount(key: key, amount: .usd(1))
         let due = await store.dueWalletWinbacks(now: Date().addingTimeInterval(Fixtures.days(60)))
         XCTAssertTrue(due.isEmpty)
     }

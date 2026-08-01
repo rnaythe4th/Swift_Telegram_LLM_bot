@@ -133,7 +133,7 @@ extension BotMenuHandler {
             }
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             // Renders the real texts with real prices; sends nothing to sponsors.
-            for preview in await reminderService.previewTexts(username: invokerKey(callback)) {
+            for preview in await reminderService.previewTexts(key: invokerKey(callback)) {
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,

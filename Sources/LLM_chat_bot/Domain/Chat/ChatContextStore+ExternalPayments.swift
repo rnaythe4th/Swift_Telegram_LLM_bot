@@ -86,12 +86,12 @@ extension ChatContextStore {
     /// order: the vendor's page is already sitting on the payer's screen, and
     /// two live orders mean two possible payments for one purchase.
     func openExternalOrder(
-        payerKey: String,
+        payerKey: UserKey,
         purpose: PurchasePurpose,
         methodCode: String?,
         now: Date = Date()
     ) -> ExternalPaymentOrder? {
-        let key = userKeyOrRaw(payerKey)
+        let key = resolved(payerKey)
         return _externalOrders.values.first {
             $0.isOpen
                 && $0.expiresAt > now

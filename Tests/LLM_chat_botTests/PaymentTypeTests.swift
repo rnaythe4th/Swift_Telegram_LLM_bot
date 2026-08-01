@@ -61,7 +61,7 @@ final class CryptoAmountTests: XCTestCase {
     func testRemainingAmountDrivesMatching() {
         var invoice = CryptoInvoice(
             id: "i1",
-            username: "#1",
+            ownerKey: .identified(1),
             userChatID: 1,
             asset: .usdtTon,
             receivingAddress: "addr",
@@ -89,7 +89,7 @@ final class CryptoAmountTests: XCTestCase {
     /// Invoices written before credit packs existed must keep working.
     func testLegacyInvoiceIsASubscription() throws {
         let json = """
-        {"id":"i1","username":"#1","userChatID":1,"asset":"usdt_ton","receivingAddress":"a",
+        {"id":"i1","ownerKey":"#1","userChatID":1,"asset":"usdt_ton","receivingAddress":"a",
          "exactAmountAtomic":1000000,"accumulatedAtomic":0,"quotedPriceUsdCents":100,
          "rateAtomicPerUsdCentMicro":10000,"slotOffset":0,"status":"open","linkedSenders":[],
          "createdAt":0,"expiresAt":1,"creditedTxHashes":[]}

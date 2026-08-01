@@ -71,6 +71,14 @@ struct MenuRoute {
         arg(index).flatMap { MenuPage(rawValue: $0.lowercased()) }
     }
 
+    /// A `UserKey` that this button is carrying back. The payload is our own
+    /// key making a round trip through Telegram, so it is read the same total
+    /// way a stored value is (`init(storageValue:)`): a truncated or edited
+    /// payload addresses no record instead of becoming an arbitrary key.
+    func userKey(_ index: Int) -> UserKey? {
+        arg(index).map { UserKey(storageValue: $0) }
+    }
+
     /// The token every handler switches on first. Missing reads as `""`, which
     /// lands in `default` — the same place a bounds guard used to send it.
     var sub: String { arg(1) ?? "" }

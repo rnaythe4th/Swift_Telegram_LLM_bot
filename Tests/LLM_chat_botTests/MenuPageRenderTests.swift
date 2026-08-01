@@ -56,11 +56,11 @@ final class MenuPageRenderTests: XCTestCase {
     }
 
     /// Every page, in a DM and in a group, for the owner and for a stranger.
-    private func everyRendering() -> [(page: MenuPage, chat: ChatKey, user: String)] {
-        var cases: [(MenuPage, ChatKey, String)] = []
+    private func everyRendering() -> [(page: MenuPage, chat: ChatKey, user: UserKey)] {
+        var cases: [(MenuPage, ChatKey, UserKey)] = []
         for page in MenuPage.allCases {
             for chat in [ChatKey(chatID: plainID, threadID: 0), ChatKey(chatID: -7_200, threadID: 0)] {
-                for user in [UserKey.forUserID(ownerID), UserKey.forUserID(plainID)] {
+                for user in [UserKey.identified(ownerID), UserKey.identified(plainID)] {
                     cases.append((page, chat, user))
                 }
             }
@@ -75,7 +75,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// rendered fine and did nothing at all when tapped.
     func testEveryButtonOnEveryPageRoutesToAKnownCommand() async {
         for (page, chat, user) in everyRendering() {
-            let markup = await menu.renderPage(page, chatKey: chat, username: user).markup
+            let markup = await menu.renderPage(page, chatKey: chat, invoker: user).markup
             for action in menuActions(markup) {
                 XCTAssertNotNil(
                     MenuRoute(action: action),
@@ -88,7 +88,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// A navigation button must point at a page that exists.
     func testEveryNavigationButtonPointsAtARealPage() async {
         for (page, chat, user) in everyRendering() {
-            let markup = await menu.renderPage(page, chatKey: chat, username: user).markup
+            let markup = await menu.renderPage(page, chatKey: chat, invoker: user).markup
             for action in menuActions(markup) {
                 guard let route = MenuRoute(action: action), route.command == .nav else { continue }
                 XCTAssertNotNil(
@@ -103,7 +103,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// which reaches the user as a menu that stopped working.
     func testEveryPageRendersText() async {
         for (page, chat, user) in everyRendering() {
-            let text = await menu.renderPage(page, chatKey: chat, username: user).text
+            let text = await menu.renderPage(page, chatKey: chat, invoker: user).text
             XCTAssertFalse(
                 text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 "\(page) rendered an empty body (chat \(chat.chatID))"
@@ -116,7 +116,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// of super-admin settings that simply is not there.
     func testEveryPageFitsInOneMessage() async {
         for (page, chat, user) in everyRendering() {
-            let screen = await menu.renderPage(page, chatKey: chat, username: user)
+            let screen = await menu.renderPage(page, chatKey: chat, invoker: user)
             XCTAssertTrue(
                 screen.fitsInOneMessage,
                 "\(page) is \(screen.text.count) chars and would be cut off"
@@ -130,7 +130,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// премиуму" from seven buttons and "← Назад" from three more.
     func testBackButtonsNameTheirDestination() async {
         for (page, chat, user) in everyRendering() {
-            let markup = await menu.renderPage(page, chatKey: chat, username: user).markup
+            let markup = await menu.renderPage(page, chatKey: chat, invoker: user).markup
             for button in markup.inline_keyboard.flatMap({ $0 }) where button.text.hasPrefix("←") {
                 guard let data = button.callback_data,
                       case .menu(let action)? = BotCallbackAction(rawData: data),
@@ -151,10 +151,10 @@ final class MenuPageRenderTests: XCTestCase {
     /// shared message, so whatever it renders, everyone reads.
     func testPersonalPagesRefuseToRenderInAGroup() async {
         let group = ChatKey(chatID: -7_300, threadID: 0)
-        await store.creditBalance(username: UserKey.forUserID(ownerID), amount: .usd(12.34))
+        await store.creditBalance(key: UserKey.identified(ownerID), amount: .usd(12.34))
 
         for page in MenuPage.allCases where page.isPersonal {
-            let text = await menu.renderPage(page, chatKey: group, username: UserKey.forUserID(ownerID)).text
+            let text = await menu.renderPage(page, chatKey: group, invoker: UserKey.identified(ownerID)).text
             XCTAssertEqual(text, page.privateOnlyNotice, "\(page) rendered its contents into a group")
             XCTAssertFalse(text.contains("12.34"), "\(page) leaked a wallet into a group")
         }
@@ -165,18 +165,18 @@ final class MenuPageRenderTests: XCTestCase {
     /// because a menu redrawn after a typed value never passes that gate.
     func testRestrictedPagesRefuseAFreeChat() async {
         let chat = ChatKey(chatID: plainID, threadID: 0)
-        let stranger = UserKey.forUserID(plainID)
+        let stranger = UserKey.identified(plainID)
 
         for page in MenuPage.allCases where page.requiresFullAccess {
-            let screen = await menu.renderPage(page, chatKey: chat, username: stranger)
+            let screen = await menu.renderPage(page, chatKey: chat, invoker: stranger)
             XCTAssertEqual(screen.text, page.restrictedNotice, "\(page) rendered its controls for a free chat")
         }
 
         // A wallet is enough — the line is "pays for something", not "has a
         // subscription" (CLAUDE.md §6, `hasFullModelAccess`).
-        await store.creditBalance(username: stranger, amount: .usd(1.0))
+        await store.creditBalance(key: stranger, amount: .usd(1.0))
         for page in MenuPage.allCases where page.requiresFullAccess {
-            let screen = await menu.renderPage(page, chatKey: chat, username: stranger)
+            let screen = await menu.renderPage(page, chatKey: chat, invoker: stranger)
             XCTAssertNotEqual(screen.text, page.restrictedNotice, "\(page) still refused a paying chat")
         }
     }
@@ -187,7 +187,7 @@ final class MenuPageRenderTests: XCTestCase {
         let chat = ChatKey(chatID: plainID, threadID: 0)
 
         let strangerActions = await menuActions(
-            menu.renderPage(.history, chatKey: chat, username: UserKey.forUserID(plainID)).markup
+            menu.renderPage(.history, chatKey: chat, invoker: UserKey.identified(plainID)).markup
         )
         XCTAssertFalse(
             strangerActions.contains { $0.hasPrefix("history:length") || $0 == "history:custom" },
@@ -195,7 +195,7 @@ final class MenuPageRenderTests: XCTestCase {
         )
 
         let ownerActions = await menuActions(
-            menu.renderPage(.history, chatKey: chat, username: UserKey.forUserID(ownerID)).markup
+            menu.renderPage(.history, chatKey: chat, invoker: UserKey.identified(ownerID)).markup
         )
         XCTAssertTrue(
             ownerActions.contains { $0 == "history:custom" },
@@ -207,7 +207,7 @@ final class MenuPageRenderTests: XCTestCase {
     /// chat: a ceiling nobody can see is a ceiling nobody pays to lift.
     func testSettingsPageOffersModesAndMarksLockedOnes() async {
         let chat = ChatKey(chatID: plainID, threadID: 0)
-        let screen = await menu.renderPage(.main, chatKey: chat, username: UserKey.forUserID(plainID))
+        let screen = await menu.renderPage(.main, chatKey: chat, invoker: UserKey.identified(plainID))
 
         let picks = menuActions(screen.markup).filter { $0.hasPrefix("mode:pick:") }
         XCTAssertFalse(picks.isEmpty, "the settings page offers no modes at all")
@@ -218,10 +218,10 @@ final class MenuPageRenderTests: XCTestCase {
 
     /// The purchase page in a group is a price list, not somebody's account.
     func testGroupPurchasePageCarriesNoPersonalNumbers() async {
-        await store.creditBalance(username: UserKey.forUserID(ownerID), amount: .usd(9.87))
+        await store.creditBalance(key: UserKey.identified(ownerID), amount: .usd(9.87))
         let group = ChatKey(chatID: -7_400, threadID: 0)
 
-        let text = await menu.renderPage(.pay, chatKey: group, username: UserKey.forUserID(ownerID)).text
+        let text = await menu.renderPage(.pay, chatKey: group, invoker: UserKey.identified(ownerID)).text
         XCTAssertFalse(text.contains("9.87"), "the shared purchase page showed a member's balance")
     }
 }

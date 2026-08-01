@@ -41,6 +41,6 @@ struct ChatMetaInfo: Codable, Sendable, Equatable {
 /// One reusable invite link owned by an admin. Redeeming grants the visitor
 /// paid-model access under that admin's licence.
 struct InviteRecord: Codable, Sendable, Equatable {
-    var ownerUsername: String
+    var ownerKey: UserKey
     var createdAt: Date
 }

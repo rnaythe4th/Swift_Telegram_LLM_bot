@@ -15,10 +15,17 @@ import Foundation
 ///
 /// Usernames cannot contain `#` (Telegram allows a–z, 0–9 and `_`), so the two
 /// key shapes can never collide.
-enum UserKey {
+///
+/// It is a type rather than a `String` because the difference between "a key"
+/// and "some text about a person" is invisible to the reader and expensive to
+/// get wrong. A username, a display label, a model id and a key used to be one
+/// type; the rules that kept them apart lived in prose, and one of them has
+/// already been broken once — the handle resolver stopped accepting `#<userID>`
+/// and every role gate silently answered "no" to everyone already identified.
+/// There is no public `init(String)`: text that arrives from a command, an
+/// update field or an unvalidated column cannot become a key by assignment.
+struct UserKey: Hashable, Sendable, Comparable, Codable, CustomStringConvertible {
     static let idPrefix = "#"
-
-    static func forUserID(_ userID: Int) -> String { "\(idPrefix)\(userID)" }
 
     /// Characters a Telegram username is made of. Anything a pending key is
     /// built from has to fit here — the key is not just a label: it is written
@@ -26,13 +33,21 @@ enum UserKey {
     /// syntax of their own that a free-form string could reach into.
     private static let usernameCharacters = Set("abcdefghijklmnopqrstuvwxyz0123456789_")
 
-    /// Key for a person we have not identified yet. Empty username → nil, so a
-    /// blank never becomes a key everyone shares.
-    ///
-    /// Rejects anything that is not username-shaped, so a hand-typed
-    /// `/tenant adduser` argument cannot forge an identified key (`#12345`,
-    /// which the `#` would otherwise allow) or smuggle punctuation downstream.
-    static func pending(_ username: String?) -> String? {
+    private let raw: String
+
+    private init(unchecked raw: String) { self.raw = raw }
+
+    /// Key of somebody the bot has actually seen. Rename-proof.
+    static func identified(_ userID: Int) -> UserKey {
+        UserKey(unchecked: "\(idPrefix)\(userID)")
+    }
+
+    /// A Telegram handle in its one canonical spelling: lowercased, no `@`, and
+    /// only if it is actually username-shaped. Separate from the key itself
+    /// because a handle is *data* (deep links, denormalised labels) while a key
+    /// is an address — the whole point of this type is that the two stopped
+    /// being the same `String`.
+    static func normalizedHandle(_ username: String?) -> String? {
         guard let raw = username?.trimmingCharacters(in: .whitespaces).lowercased(), !raw.isEmpty else {
             return nil
         }
@@ -43,24 +58,69 @@ enum UserKey {
         return bare
     }
 
+    /// Key for a person we have not identified yet. Empty username → nil, so a
+    /// blank never becomes a key everyone shares.
+    ///
+    /// Rejects anything that is not username-shaped, so a hand-typed
+    /// `/tenant adduser` argument cannot forge an identified key (`#12345`,
+    /// which the `#` would otherwise allow) or smuggle punctuation downstream.
+    static func pending(_ username: String?) -> UserKey? {
+        normalizedHandle(username).map { UserKey(unchecked: $0) }
+    }
+
     /// Last-resort key for text that is not username-shaped: everything outside
     /// the username alphabet is dropped rather than carried into storage. The
     /// result addresses no real record (which is the correct outcome for a
     /// typo), but it is safe to put in a URL filter or a message.
-    static func sanitizedPendingFallback(_ raw: String) -> String {
-        String(raw.lowercased().filter { usernameCharacters.contains($0) }.prefix(32))
+    static func sanitizedPendingFallback(_ raw: String) -> UserKey {
+        UserKey(unchecked: String(raw.lowercased().filter { usernameCharacters.contains($0) }.prefix(32)))
     }
 
-    static func userID(from key: String) -> Int? {
-        guard key.hasPrefix(idPrefix) else { return nil }
-        let digits = key.dropFirst(idPrefix.count)
+    /// Rebuilds a key from something already stored. Deliberately total: a value
+    /// that matches neither shape is sanitised rather than rejected, because one
+    /// unreadable row must never take a whole restore down with it. The
+    /// sanitised result addresses no real record, which is the honest outcome.
+    init(storageValue value: String) {
+        if let identified = UserKey.parsedUserID(value) {
+            self = .identified(identified)
+        } else {
+            self = UserKey.pending(value) ?? .sanitizedPendingFallback(value)
+        }
+    }
+
+    private static func parsedUserID(_ value: String) -> Int? {
+        guard value.hasPrefix(idPrefix) else { return nil }
+        let digits = value.dropFirst(idPrefix.count)
         // `Int(_:)` accepts a leading `+`/`-`, which would make `#-1` and `#1`
         // two spellings that both parse — keys must have exactly one form.
         guard !digits.isEmpty, digits.allSatisfy({ $0.isNumber }) else { return nil }
         return Int(digits)
     }
 
-    static func isIdentified(_ key: String) -> Bool { key.hasPrefix(idPrefix) }
+    var userID: Int? { UserKey.parsedUserID(raw) }
+
+    var isIdentified: Bool { raw.hasPrefix(UserKey.idPrefix) }
+
+    /// The one way out to a `String`, named after the only thing it is for:
+    /// a column value or a JSON field. Interface text goes through
+    /// `displayLabel(forKey:)` instead — a key is not something a user reads.
+    var storageValue: String { raw }
+
+    /// Deliberately *not* the bare key: interpolating a key into a message is a
+    /// mistake, and `UserKey(#12345)` in the output says so out loud instead of
+    /// looking like an intentional label.
+    var description: String { "UserKey(\(raw))" }
+
+    static func < (lhs: UserKey, rhs: UserKey) -> Bool { lhs.raw < rhs.raw }
+
+    init(from decoder: Decoder) throws {
+        self.init(storageValue: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(raw)
+    }
 }
 
 /// What we last knew about a person behind a `UserKey`.
@@ -134,10 +194,10 @@ struct UserDirectory: Codable, Sendable {
     private(set) var identities: [Int: UserIdentity] = [:]
     private(set) var byUsername: [String: Int] = [:]
     /// Key of the bot's owner, pinned the first time the person configured as
-    /// owner (`ownerUsername` in env) talks to the bot. Without this the owner
+    /// owner (`ownerKey` in env) talks to the bot. Without this the owner
     /// would be recognised only by their configured @username — and would lose
     /// root the moment they changed it.
-    var rootKey: String?
+    var rootKey: UserKey?
 
     static let empty = UserDirectory()
 
@@ -147,7 +207,7 @@ struct UserDirectory: Codable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        rootKey = try container.decodeIfPresent(String.self, forKey: .rootKey)
+        rootKey = try container.decodeIfPresent(UserKey.self, forKey: .rootKey)
         let stored = try container.decodeIfPresent([String: UserIdentity].self, forKey: .identities) ?? [:]
         for (key, identity) in stored {
             let id = Int(key) ?? identity.userID
@@ -199,10 +259,10 @@ struct UserDirectory: Codable, Sendable {
     /// Drops the least recently seen identities that hold no state.
     /// `protectedKeys` are the `UserKey`s currently attached to a tenant,
     /// wallet, chat, licence or super-admin role — those are never evicted.
-    mutating func prune(protectedKeys: Set<String>) {
+    mutating func prune(protectedKeys: Set<UserKey>) {
         guard identities.count > Self.maxIdentities else { return }
         let droppable = identities
-            .filter { !protectedKeys.contains(UserKey.forUserID($0.key)) }
+            .filter { !protectedKeys.contains(UserKey.identified($0.key)) }
             .sorted { $0.value.seenAt < $1.value.seenAt }
         var overflow = identities.count - Self.maxIdentities
         for entry in droppable where overflow > 0 {
@@ -216,7 +276,7 @@ struct UserDirectory: Codable, Sendable {
 
     func userID(forUsername username: String?) -> Int? {
         guard let name = UserKey.pending(username) else { return nil }
-        return byUsername[name]
+        return byUsername[name.storageValue]
     }
 
     /// How far `seenAt` has to move before the row is worth rewriting. The
@@ -234,7 +294,7 @@ struct UserDirectory: Codable, Sendable {
     /// writing out.
     @discardableResult
     mutating func record(userID: Int, username: String?, firstName: String?, now: Date = Date()) -> (changed: Bool, previousUsername: String?, seenAtAdvanced: Bool) {
-        let normalized = UserKey.pending(username)
+        let normalized = UserKey.normalizedHandle(username)
         var identity = identities[userID]
             ?? UserIdentity(userID: userID, username: nil, firstName: nil, seenAt: now, firstSeenAt: now)
         let previous = identity.username
@@ -266,11 +326,12 @@ struct UserDirectory: Codable, Sendable {
     /// Label for a stored key, for the interface. Identified people are shown
     /// by their current username; a pending record is shown by the username it
     /// was created with.
-    func displayLabel(forKey key: String) -> String {
+    func displayLabel(forKey key: UserKey) -> String {
         // A pending key is a handle somebody typed into `/tenant adduser`, so it
         // is no more trustworthy than a display name — escape it the same way.
-        guard let userID = UserKey.userID(from: key) else {
-            return "@\(UserIdentity.sanitizeName(key) ?? key)"
+        guard let userID = key.userID else {
+            let handle = key.storageValue
+            return "@\(UserIdentity.sanitizeName(handle) ?? handle)"
         }
         return identities[userID]?.displayLabel ?? "id \(userID)"
     }
@@ -300,8 +361,8 @@ struct UserDirectory: Codable, Sendable {
 
     /// Bare username (no `@`) behind a key, when there is one. Used where a
     /// username is needed as data — deep links, mentions in prompts.
-    func username(forKey key: String) -> String? {
-        guard let userID = UserKey.userID(from: key) else { return key }
+    func username(forKey key: UserKey) -> String? {
+        guard let userID = key.userID else { return key.storageValue }
         return identities[userID]?.username
     }
 }

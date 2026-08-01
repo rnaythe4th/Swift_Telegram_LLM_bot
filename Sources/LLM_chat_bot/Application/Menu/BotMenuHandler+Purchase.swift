@@ -4,9 +4,9 @@ import Foundation
 // card and crypto.
 
 extension BotMenuHandler {
-    /// `username` is needed to quote the same price the invoice will charge —
+    /// `invoker` is needed to quote the same price the invoice will charge —
     /// a winback discount (roadmap step 8) is per user.
-    func sendCryptoAssetChoice(chatKey: ChatKey, username: String? = nil) async {
+    func sendCryptoAssetChoice(chatKey: ChatKey, invoker: UserKey? = nil) async {
         guard let service = cryptoService else {
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
@@ -34,7 +34,7 @@ extension BotMenuHandler {
         }
         rows.row([menuButton("✕ Отмена", command: .close)])
 
-        let pricing = await state.subscriptionPricing(username: username)
+        let pricing = await state.subscriptionPricing(key: invoker)
         let cents = pricing.cryptoCents ?? 0
         let usd = String(format: "%.2f", Double(cents) / 100.0)
         var priceLine = "Сумма к оплате: <b>$\(usd)</b>"
@@ -77,7 +77,7 @@ extension BotMenuHandler {
         }
     }
 
-    func renderPay(chatKey: ChatKey, username: String?) async -> MenuScreen {
+    func renderPay(chatKey: ChatKey, invoker: UserKey?) async -> MenuScreen {
         // Selling is switched off while state is not durable (§4.3). The page
         // still opens and still explains what premium is — it just does not
         // offer a button that would take money the bot cannot keep.
@@ -95,10 +95,10 @@ extension BotMenuHandler {
         // (CLAUDE.md §17). In a group we quote the price list and keep every
         // personal number for the DM.
         let isGroup = chatKey.chatID < 0
-        let personalKey: String? = isGroup ? nil : username
+        let personalKey: UserKey? = isGroup ? nil : invoker
         // Prices come from one place so a winback discount (roadmap step 8) is
         // quoted here exactly as it will be charged.
-        let pricing = await state.subscriptionPricing(username: personalKey)
+        let pricing = await state.subscriptionPricing(key: personalKey)
         let starsPrice = pricing.stars
         let cryptoCents = pricing.cryptoCents
         let cryptoAssets: [CryptoAsset] = await {
@@ -118,7 +118,7 @@ extension BotMenuHandler {
 
         if isGroup {
             // Public facts only: who (if anyone) already pays for this chat.
-            if let sponsor = await state.chatSponsor(chatID: chatKey.chatID, askerUsername: nil) {
+            if let sponsor = await state.chatSponsor(chatID: chatKey.chatID, asker: nil) {
                 lines.append("✅ Здесь премиум уже работает — его открыл <b>\(sponsor)</b>.")
                 lines.append("")
                 lines.append("""
@@ -140,9 +140,9 @@ extension BotMenuHandler {
             }
             lines.append("")
             lines.append("<i>Цены — общие. Ваш баланс, срок вашей подписки и личные скидки видны только в личке с ботом: /menu.</i>")
-        } else if let username = personalKey {
-            if await state.isTenant(username: username) {
-                let sub = await state.tenantSubscription(ownerUsername: username)
+        } else if let invoker = personalKey {
+            if await state.isTenant(invoker) {
+                let sub = await state.tenantSubscription(ownerKey: invoker)
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 if sub.paidUntil == nil {
                     lines.append("✅ У вас <b>бессрочный</b> доступ — покупать нечего.")
@@ -159,7 +159,7 @@ extension BotMenuHandler {
                 // Someone else already opened this chat: credit them and pitch
                 // what a purchase would still add (roadmap step 3) instead of
                 // selling access this person already enjoys here.
-                let access = await state.chatAccessStatus(chatID: chatKey.chatID, username: username)
+                let access = await state.chatAccessStatus(chatID: chatKey.chatID, key: invoker)
                 if let payer = access.payerUsername {
                     lines.append("✅ Здесь премиум уже работает — его открыл <b>\(payer)</b>.")
                     lines.append("")
@@ -181,7 +181,7 @@ extension BotMenuHandler {
                     """)
                 }
             }
-            if let wallet = await state.balance(username: username) {
+            if let wallet = await state.balance(invoker) {
                 lines.append("")
                 lines.append("💰 Баланс · <b>\(wallet.balance.formatted())</b>" + (wallet.balance.isPositive ? "" : " <i>(исчерпан)</i>"))
                 lines.append("<i>С баланса списывается стоимость каждого ответа — обычно доли цента. Подписка при этом не нужна. Подробнее — /balance.</i>")
@@ -243,7 +243,7 @@ extension BotMenuHandler {
             // costs its own face value.
             let creditsAvailable = await state.starsCreditsEnabled() || !cryptoAssets.isEmpty
                 || card.creditsEnabled || external.creditsEnabled
-            if username != nil, creditsAvailable {
+            if invoker != nil, creditsAvailable {
                 lines.append("")
                 lines.append("💰 <b>Не готовы на месяц?</b> Пополните баланс — с него списывается стоимость каждого ответа, обычно доли цента. Доступны любые модели, подписка не нужна.")
                 let packRow = CreditPack.centsOptions.map {
@@ -422,16 +422,16 @@ extension BotMenuHandler {
     ) async throws {
         switch route.sub {
         case "stars":
-            // Identity is the userID; a @username is not needed to buy.
+            // Identity is the userID; a @invoker is not needed to buy.
             let starsKey = state.userKey(userID: callback.from.id)
             // Winback discount, when live, is already baked into the price.
-            let starsPricing = await state.subscriptionPricing(username: starsKey)
+            let starsPricing = await state.subscriptionPricing(key: starsKey)
             guard let price = starsPricing.stars, price > 0 else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Stars-оплата отключена")
                 return
             }
             // Unlimited tenants have nothing to buy; expiring ones renew.
-            let starsSub = await state.tenantSubscription(ownerUsername: starsKey)
+            let starsSub = await state.tenantSubscription(ownerKey: starsKey)
             if starsSub.exists, starsSub.paidUntil == nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас бессрочный доступ")
                 return
@@ -452,12 +452,12 @@ extension BotMenuHandler {
         case "card":
             let card = await state.cardConfig()
             let cardKey = state.userKey(userID: callback.from.id)
-            let cardPricing = await state.subscriptionPricing(username: cardKey)
+            let cardPricing = await state.subscriptionPricing(key: cardKey)
             guard card.isEnabled, let token = card.providerToken, let minorUnits = cardPricing.cardMinorUnits else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Оплата картой отключена")
                 return
             }
-            let cardSub = await state.tenantSubscription(ownerUsername: cardKey)
+            let cardSub = await state.tenantSubscription(ownerKey: cardKey)
             if cardSub.exists, cardSub.paidUntil == nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас бессрочный доступ")
                 return
@@ -490,7 +490,7 @@ extension BotMenuHandler {
         switch route.sub {
         case "crypto":
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
-            await sendCryptoAssetChoice(chatKey: chatKey, username: state.userKey(userID: callback.from.id))
+            await sendCryptoAssetChoice(chatKey: chatKey, invoker: state.userKey(userID: callback.from.id))
 
         case "ccrypto":
             // Credit pack via crypto → pick asset (cents carried in callback).
@@ -531,7 +531,7 @@ extension BotMenuHandler {
             let creditKey = state.userKey(userID: callback.from.id)
             do {
                 let invoice = try await service.createOrRefreshInvoice(
-                    username: creditKey,
+                    invoker: creditKey,
                     userChatID: chatKey.chatID,
                     asset: asset,
                     purpose: .credit(cents: cents)
@@ -555,14 +555,14 @@ extension BotMenuHandler {
                 return
             }
             let cryptoKey = state.userKey(userID: callback.from.id)
-            let cryptoSub = await state.tenantSubscription(ownerUsername: cryptoKey)
+            let cryptoSub = await state.tenantSubscription(ownerKey: cryptoKey)
             if cryptoSub.exists, cryptoSub.paidUntil == nil {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "У вас бессрочный доступ")
                 return
             }
             do {
                 let invoice = try await service.createOrRefreshInvoice(
-                    username: cryptoKey,
+                    invoker: cryptoKey,
                     userChatID: chatKey.chatID,
                     asset: asset
                 )
@@ -595,7 +595,7 @@ extension BotMenuHandler {
             }
             // An invoice names an address and an exact amount — a hand-made
             // callback should not be able to read someone else's.
-            guard invoice.username == invokerKey(callback) else {
+            guard invoice.ownerKey == invokerKey(callback) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notYourInvoice)
                 return
             }
@@ -610,7 +610,7 @@ extension BotMenuHandler {
             }
             // Invoices are filed under a UserKey (`#12345`), so comparing a raw
             // handle was true for everyone — nobody could cancel their own.
-            guard invoice.username == invokerKey(callback) else {
+            guard invoice.ownerKey == invokerKey(callback) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notYourInvoice)
                 return
             }

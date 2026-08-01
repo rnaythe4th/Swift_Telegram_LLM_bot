@@ -128,7 +128,7 @@ extension BotCommandHandler {
                 return
             }
             // Renders the real texts with real prices; nothing goes to sponsors.
-            for preview in await reminderService.previewTexts(username: actorKey(fromUser)) {
+            for preview in await reminderService.previewTexts(key: actorKey(fromUser)) {
                 _ = try? await telegram.sendMessage(.init(
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,

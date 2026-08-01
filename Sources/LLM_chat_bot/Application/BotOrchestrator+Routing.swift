@@ -124,7 +124,7 @@ extension BotOrchestrator {
         )
         await state.autoAssignIfNeeded(
             chatID: chatKey.chatID,
-            senderUsername: callback.from.username,
+            senderKey: state.userKey(userID: callback.from.id),
             senderUserID: callback.from.id
         )
 
@@ -238,7 +238,7 @@ extension BotOrchestrator {
         // welcome credit them rather than pitch them something they own.
         await state.autoAssignIfNeeded(
             chatID: update.chat.id,
-            senderUsername: update.from.username,
+            senderKey: state.userKey(userID: update.from.id),
             senderUserID: update.from.id
         )
 
@@ -252,7 +252,7 @@ extension BotOrchestrator {
     /// on different paths.
     private func sendGroupWelcome(chatID: Int) async {
         guard await state.claimGroupGreeting(chatID: chatID) else { return }
-        let sponsor = await state.chatSponsor(chatID: chatID, askerUsername: nil)
+        let sponsor = await state.chatSponsor(chatID: chatID, asker: nil)
         let welcome = GroupWelcomePresenter.welcome(
             sponsor: sponsor,
             onboarding: await state.onboardingConfig()
@@ -270,12 +270,12 @@ extension BotOrchestrator {
     }
 
     private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
-        let senderUsername = message.from?.username
+        let senderKey = message.from.map { state.userKey(userID: $0.id) }
         let senderUserID = message.from?.id
         let isPrivate = message.chat.type == "private"
 
         // Identity first: this is what keeps a wallet, a subscription and a
-        // licence attached to the person rather than to a rentable @username.
+        // licence attached to the person rather than to a rentable @invoker.
         if let from = message.from {
             await state.identifyUser(userID: from.id, username: from.username, firstName: from.first_name)
         }
@@ -313,13 +313,13 @@ extension BotOrchestrator {
         }
 
         // Auto-assign unowned private chat to sender's tenant if they own one
-        await state.autoAssignIfNeeded(chatID: chatKey.chatID, senderUsername: senderUsername, senderUserID: senderUserID)
+        await state.autoAssignIfNeeded(chatID: chatKey.chatID, senderKey: senderKey, senderUserID: senderUserID)
 
         if try await commandHandler.handleIfCommand(text: message.text, chatKey: chatKey, fromUser: message.from, isPrivate: isPrivate) {
             return
         }
 
-        if let text = message.text, await menuHandler.processTextInput(text: text, chatKey: chatKey, userID: message.from?.id, username: message.from?.username) {
+        if let text = message.text, await menuHandler.processTextInput(text: text, chatKey: chatKey, userID: message.from?.id) {
             return
         }
 

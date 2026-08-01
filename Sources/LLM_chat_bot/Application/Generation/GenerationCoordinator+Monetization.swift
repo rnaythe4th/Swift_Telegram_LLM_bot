@@ -163,7 +163,7 @@ extension GenerationCoordinator {
         if try await applySpendCap(chatKey: chatKey) == false { return nil }
 
         let hasAccess = await state.hasFullModelAccess(
-            username: origin.user?.username,
+            key: origin.userKey,
             userID: origin.user?.id,
             chatID: chatKey.chatID
         )
@@ -312,17 +312,17 @@ extension GenerationCoordinator {
     func resolveBillingMode(
         origin: GenerationOrigin,
         chatKey: ChatKey
-    ) async -> (billedTo: String?, adEligible: Bool) {
+    ) async -> (billedTo: UserKey?, adEligible: Bool) {
         let covered = await state.hasSubscriptionCoverage(
-            username: origin.user?.username,
+            key: origin.userKey,
             userID: origin.user?.id,
             chatID: chatKey.chatID
         )
         // Wallet key, not a handle: charges follow the person through a rename
         // and work for someone who never set a @username.
-        var billedTo: String? = nil
+        var billedTo: UserKey? = nil
         if !covered {
-            billedTo = await state.billingKey(username: origin.user?.username, userID: origin.user?.id)
+            billedTo = await state.billingKey(key: origin.userKey, userID: origin.user?.id)
         }
         return (billedTo, !covered && billedTo == nil)
     }
@@ -335,7 +335,7 @@ extension GenerationCoordinator {
     /// That costs the owner fractions of a cent; charging without a durable
     /// record would cost a customer their balance with nothing to show for it,
     /// and there is no version of that trade worth making.
-    func chargeForAnswer(billedTo: String?, cost: (real: Money, billed: Money), generationID: GenerationID) async -> Bool {
+    func chargeForAnswer(billedTo: UserKey?, cost: (real: Money, billed: Money), generationID: GenerationID) async -> Bool {
         guard let billedTo, cost.billed.isPositive else { return false }
         do {
             let debit = try await ledger.inTransaction { transaction in
@@ -393,19 +393,19 @@ extension GenerationCoordinator {
                 guard try await transaction.claim("refsignup:\(userID)") else { return }
                 if payout.inviterReward.isPositive {
                     try await transaction.credit(
-                        UserKey.forUserID(payout.inviterUserID), payout.inviterReward,
+                        UserKey.identified(payout.inviterUserID), payout.inviterReward,
                         kind: .referral, purchased: false, ref: "refsignup:\(userID)"
                     )
                 }
                 if payout.inviteeReward.isPositive {
                     try await transaction.credit(
-                        UserKey.forUserID(userID), payout.inviteeReward,
+                        UserKey.identified(userID), payout.inviteeReward,
                         kind: .referral, purchased: false, ref: "refsignup:\(userID):friend"
                     )
                 }
             }
-            await state.applyCommittedCredit(key: UserKey.forUserID(payout.inviterUserID), amount: payout.inviterReward)
-            await state.applyCommittedCredit(key: UserKey.forUserID(userID), amount: payout.inviteeReward)
+            await state.applyCommittedCredit(key: UserKey.identified(payout.inviterUserID), amount: payout.inviterReward)
+            await state.applyCommittedCredit(key: UserKey.identified(userID), amount: payout.inviteeReward)
         } catch {
             logger.error("referral payout for \(payout.inviterUsername) not credited: \(error)")
             return
@@ -456,7 +456,7 @@ extension GenerationCoordinator {
         streamMeta: StreamMeta?,
         fallbackModel: String,
         options: GenerationOptions,
-        billedTo: String?,
+        billedTo: UserKey?,
         hasContent: Bool,
         sponsorLine: String?
     ) async -> String {
@@ -464,7 +464,7 @@ extension GenerationCoordinator {
         var balanceAfter: Money?
         if let billedTo, hasContent {
             let realCost = Money.usd(streamMeta?.usage?.cost ?? 0)
-            balanceAfter = await state.projectedBalanceAfterCharge(username: billedTo, realCost: realCost)
+            balanceAfter = await state.projectedBalanceAfterCharge(key: billedTo, realCost: realCost)
         }
         return ResponseFooterFormatter.formatFooter(
             meta: streamMeta,
@@ -483,9 +483,9 @@ extension GenerationCoordinator {
     /// when the asker is the sponsor themselves. Repeats at most once an hour
     /// per chat (the store owns that timer) — under every single answer the
     /// credit stops reading as status and starts reading as clutter.
-    func sponsorCreditLine(chatID: Int, askerUsername: String?, isPrivate: Bool) async -> String? {
+    func sponsorCreditLine(chatID: Int, asker: UserKey?, isPrivate: Bool) async -> String? {
         guard !isPrivate else { return nil }
-        guard let sponsor = await state.chatSponsorForCredit(chatID: chatID, askerUsername: askerUsername) else {
+        guard let sponsor = await state.chatSponsorForCredit(chatID: chatID, asker: asker) else {
             return nil
         }
         return "⚡ премиум для чата открыл \(sponsor)"

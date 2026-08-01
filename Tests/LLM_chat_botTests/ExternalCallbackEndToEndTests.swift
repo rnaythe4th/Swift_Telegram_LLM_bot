@@ -99,7 +99,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         // FreeKassa retries until it reads exactly this.
         XCTAssertEqual(ack, "YES")
 
-        let subscription = await store.tenantSubscription(ownerUsername: store.userKey(userID: payerID))
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
         XCTAssertTrue(subscription.isActive, "the payment must open premium")
         let call = await telegram.waitForCall("sendMessage", containing: "Оплата получена")
         XCTAssertNotNil(call, "the payer has to be told, in the chat they paid from")
@@ -120,10 +120,10 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         )
         let params = notification(orderID: checkout.order.id, amount: "499.00", paymentID: "222")
         _ = await service.handleCallback(vendor: .freekassa, parameters: params)
-        let first = await store.tenantSubscription(ownerUsername: store.userKey(userID: payerID)).paidUntil
+        let first = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID)).paidUntil
 
         _ = await service.handleCallback(vendor: .freekassa, parameters: params)
-        let second = await store.tenantSubscription(ownerUsername: store.userKey(userID: payerID)).paidUntil
+        let second = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID)).paidUntil
 
         XCTAssertEqual(first, second, "a redelivered notification must not extend the subscription")
         let report = await store.funnelReport()
@@ -146,7 +146,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
             vendor: .freekassa,
             parameters: notification(orderID: checkout.order.id, amount: "475.00", paymentID: "333")
         )
-        let wallet = await store.balance(username: store.userKey(userID: payerID))
+        let wallet = await store.balance(store.userKey(userID: payerID))
         XCTAssertEqual(wallet?.balance, .usd(5))
         // Paid with real money: this is what makes a lapsed wallet worth an
         // offer later (§7 «Возврат по балансу»).
@@ -170,7 +170,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         guard case .rejected = verdict else {
             return XCTFail("an unsigned notification must be rejected, got \(verdict)")
         }
-        let subscription = await store.tenantSubscription(ownerUsername: store.userKey(userID: payerID))
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
         XCTAssertFalse(subscription.isActive)
     }
 
@@ -189,7 +189,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
             vendor: .freekassa,
             parameters: notification(orderID: checkout.order.id, amount: "1.00", paymentID: "555")
         )
-        let subscription = await store.tenantSubscription(ownerUsername: store.userKey(userID: payerID))
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
         XCTAssertFalse(subscription.isActive)
         let call = await telegram.waitForCall("sendMessage", containing: "не совпала")
         XCTAssertNotNil(call)

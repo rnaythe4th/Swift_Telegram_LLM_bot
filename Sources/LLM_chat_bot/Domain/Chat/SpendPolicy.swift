@@ -86,9 +86,9 @@ struct SpendPolicy: Codable, Sendable, Equatable {
 struct DailySpendLedger: Sendable {
     private(set) var day: Int
     private(set) var total: Money
-    private(set) var byTenant: [String: Money]
+    private(set) var byTenant: [UserKey: Money]
 
-    init(day: Int = FunnelDailyLog.dayNumber(), total: Money = .zero, byTenant: [String: Money] = [:]) {
+    init(day: Int = FunnelDailyLog.dayNumber(), total: Money = .zero, byTenant: [UserKey: Money] = [:]) {
         self.day = day
         self.total = total
         self.byTenant = byTenant
@@ -96,7 +96,7 @@ struct DailySpendLedger: Sendable {
 
     /// Adds real provider cost. Rolls over to a fresh day on the first record
     /// after UTC midnight, so no separate timer is needed.
-    mutating func record(_ amount: Money, tenant: String, now: Date = Date()) {
+    mutating func record(_ amount: Money, tenant: UserKey, now: Date = Date()) {
         rollOverIfNeeded(now: now)
         guard amount.isPositive else { return }
         total += amount
@@ -111,7 +111,7 @@ struct DailySpendLedger: Sendable {
         byTenant = [:]
     }
 
-    func spent(tenant: String) -> Money { byTenant[tenant] ?? .zero }
+    func spent(tenant: UserKey) -> Money { byTenant[tenant] ?? .zero }
 }
 
 /// What was spent today, ready to print.

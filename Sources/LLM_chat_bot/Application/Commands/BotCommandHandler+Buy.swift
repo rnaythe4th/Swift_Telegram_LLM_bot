@@ -38,16 +38,16 @@ extension BotCommandHandler {
             return
         }
         guard let buyerID = fromUser?.id else { return }
-        // Purchases identify the buyer by userID, so a @username is optional.
-        let username = state.userKey(userID: buyerID)
+        // Purchases identify the buyer by userID, so a @invoker is optional.
+        let invoker = state.userKey(userID: buyerID)
         await state.bumpPurchaseOpen(source: .command)
         // Prices for this user: a live winback discount (roadmap step 8) is
         // already applied, so quotes here match what checkout will charge.
-        let pricing = await state.subscriptionPricing(username: username)
+        let pricing = await state.subscriptionPricing(key: invoker)
         // Existing tenant: unlimited → nothing to buy; with an expiry →
         // the same purchase flow extends the subscription.
-        if await state.isTenant(username: username) {
-            let sub = await state.tenantSubscription(ownerUsername: username)
+        if await state.isTenant(invoker) {
+            let sub = await state.tenantSubscription(ownerKey: invoker)
             if sub.paidUntil == nil {
                 try await sendUserFeedback(chatKey: chatKey, text: "✅ У вас бессрочный доступ к боту.")
                 return
@@ -83,7 +83,7 @@ extension BotCommandHandler {
                 return
             }
             if cryptoAvailable {
-                await menuHandler.sendCryptoAssetChoice(chatKey: chatKey, username: username)
+                await menuHandler.sendCryptoAssetChoice(chatKey: chatKey, invoker: invoker)
                 return
             }
             if cardAvailable, let token = card.providerToken, let minorUnits = pricing.cardMinorUnits {

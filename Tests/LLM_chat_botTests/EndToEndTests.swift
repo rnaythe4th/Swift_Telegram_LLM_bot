@@ -304,15 +304,15 @@ final class EndToEndTests: XCTestCase {
         await orchestrator.dispatch(update: message("/start ref_\(ownerID)", userID: friendID, username: "friend"))
         _ = await telegram.waitForCall("sendMessage")
 
-        var inviterWallet = await store.balance(username: UserKey.forUserID(ownerID))
+        var inviterWallet = await store.balance(UserKey.identified(ownerID))
         XCTAssertNil(inviterWallet, "binding alone must not pay")
 
         await orchestrator.dispatch(update: message("первый вопрос", userID: friendID, username: "friend"))
         _ = await telegram.waitForCall("sendMessage", containing: "ответ модели")
-        try await waitUntil { await self.store.balance(username: UserKey.forUserID(self.ownerID)) != nil }
+        try await waitUntil { await self.store.balance(UserKey.identified(self.ownerID)) != nil }
 
-        inviterWallet = await store.balance(username: UserKey.forUserID(ownerID))
-        let friendWallet = await store.balance(username: UserKey.forUserID(friendID))
+        inviterWallet = await store.balance(UserKey.identified(ownerID))
+        let friendWallet = await store.balance(UserKey.identified(friendID))
         XCTAssertEqual(inviterWallet?.balance, ReferralConfig.default.inviterReward)
         XCTAssertEqual(friendWallet?.balance, ReferralConfig.default.inviteeReward)
     }
@@ -423,7 +423,7 @@ final class EndToEndTests: XCTestCase {
         let stillPending = await store.hasAnyPendingInput(chatKey: chatKey)
         XCTAssertTrue(stillPending, "a rejected value must leave the prompt armed")
         let owner = await store.pendingInputOwner(chatKey: chatKey)
-        XCTAssertEqual(owner, UserKey.forUserID(ownerID), "the retry prompt lost its owner")
+        XCTAssertEqual(owner, UserKey.identified(ownerID), "the retry prompt lost its owner")
     }
 
     /// Buttons the bot sends outside the menu — the greeting, the daily-limit

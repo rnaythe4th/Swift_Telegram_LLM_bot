@@ -48,7 +48,7 @@ extension BotOrchestrator {
                 // price (roadmap step 8). The grace window honors an invoice
                 // opened moments before the offer ran out.
                 let pricing = await state.subscriptionPricing(
-                    username: state.userKey(userID: query.from.id),
+                    key: state.userKey(userID: query.from.id),
                     grace: ChatContextStore.checkoutDiscountGrace
                 )
                 if query.currency == "XTR" {
@@ -83,7 +83,7 @@ extension BotOrchestrator {
         // charge ID is what makes activation idempotent, and `fulfil` checks it.
         let chargeID = payment.telegram_payment_charge_id
 
-        // The payer is identified by userID, so a missing @username is no
+        // The payer is identified by userID, so a missing @invoker is no
         // longer a dead end — the money lands on their account either way.
         guard let payer = message.from else {
             // Nobody to credit. Telegram will not tell us who paid on a retry

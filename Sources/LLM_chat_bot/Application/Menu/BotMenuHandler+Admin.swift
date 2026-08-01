@@ -69,7 +69,7 @@ extension BotMenuHandler {
         }
     }
 
-    func renderAdminPanel(chatKey: ChatKey, username: String?) async -> MenuScreen {
+    func renderAdminPanel(chatKey: ChatKey, invoker: UserKey?) async -> MenuScreen {
         let defaults = await state.getDefaults(chatID: chatKey.chatID)
         let whitelist = await state.listWhitelisted(chatID: chatKey.chatID)
         let admins = await state.listAdmins(chatID: chatKey.chatID)
@@ -79,7 +79,6 @@ extension BotMenuHandler {
         let globalTemps = await state.tempPresets(chatID: chatKey.chatID).count
         let globalHist = await state.historyLengthPresets(chatID: chatKey.chatID).count
 
-        let invoker = await state.userKey(username: username)
         let chatOwner = await state.chatOwner(chatID: chatKey.chatID)
         let isOwnChat = invoker != nil && chatOwner == invoker
         let chatStatusLine: String
@@ -90,12 +89,12 @@ extension BotMenuHandler {
         }
 
         let licensedChats: [Int]
-        let licensedUsers: [(key: String, label: String)]
+        let licensedUsers: [(key: UserKey, label: String)]
         let usage: CumulativeUsage
         if let invoker {
             licensedChats = await state.chatsOwnedBy(invoker)
-            licensedUsers = await state.licensedUsers(ownerUsername: invoker)
-            usage = await state.tenantUsage(ownerUsername: invoker)
+            licensedUsers = await state.licensedUsers(ownerKey: invoker)
+            usage = await state.tenantUsage(ownerKey: invoker)
         } else {
             licensedChats = []
             licensedUsers = []
@@ -144,7 +143,7 @@ extension BotMenuHandler {
         // arrive and can switch it off for themselves (roadmap step 8).
         var reminderLine: String? = nil
         if let invoker {
-            let sub = await state.tenantSubscription(ownerUsername: invoker)
+            let sub = await state.tenantSubscription(ownerKey: invoker)
             if !sub.exists {
                 subscriptionLine = "💳 Премиум · <i>не оплачен — /buy</i>"
             } else if let until = sub.paidUntil {
@@ -154,7 +153,7 @@ extension BotMenuHandler {
                     : "💳 Премиум · <b>⛔ закончился \(f.string(from: until))</b> · продлить /buy"
 
                 let reminders = await state.reminderConfig()
-                let optedOut = await state.remindersOptOut(username: invoker)
+                let optedOut = await state.remindersOptOut(invoker)
                 if optedOut {
                     reminderLine = "🔕 Напоминания о продлении · <b>выключены</b>"
                 } else if reminders.enabled, sub.isActive,
@@ -168,7 +167,7 @@ extension BotMenuHandler {
                 } else if reminders.enabled {
                     reminderLine = "🔔 Напоминания о продлении · <b>включены</b>"
                 }
-                if let discount = await state.subscriptionDiscount(username: invoker) {
+                if let discount = await state.subscriptionDiscount(key: invoker) {
                     let df = DateFormatter(); df.dateFormat = "dd.MM HH:mm"
                     subscriptionLine += "\n🎁 Скидка <b>−\(discount.percent)%</b> действует до <b>\(df.string(from: discount.expiresAt))</b>"
                 }
@@ -210,8 +209,8 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
-    func renderAdminChats(chatKey: ChatKey, username: String?) async -> MenuScreen {
-        guard let invoker = await state.userKey(username: username) else {
+    func renderAdminChats(chatKey: ChatKey, invoker owner: UserKey?) async -> MenuScreen {
+        guard let invoker = owner else {
             return MenuScreen(Self.unknownAccountNotice, [[backButton(to: .adminPanel)]])
         }
         let invokerLabel = await state.displayLabel(forKey: invoker)
@@ -309,16 +308,16 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
-    func renderAdminUsers(chatKey: ChatKey, username: String?) async -> MenuScreen {
-        guard let invoker = await state.userKey(username: username) else {
+    func renderAdminUsers(chatKey: ChatKey, invoker owner: UserKey?) async -> MenuScreen {
+        guard let invoker = owner else {
             return MenuScreen(Self.unknownAccountNotice, [[backButton(to: .adminPanel)]])
         }
         let invokerLabel = await state.displayLabel(forKey: invoker)
-        let users = await state.licensedUsers(ownerUsername: invoker)
+        let users = await state.licensedUsers(ownerKey: invoker)
 
         var rows: Keyboard = [
             [menuButton("🔗 Ссылка-приглашение", page: .adminInvite)],
-            [menuButton("➕ Добавить по @username", .tenant, "adduserprompt")],
+            [menuButton("➕ Добавить по @invoker", .tenant, "adduserprompt")],
         ]
         for (i, user) in users.prefix(40).enumerated() {
             rows.row([
@@ -339,18 +338,18 @@ extension BotMenuHandler {
 
         \(listText)
 
-        <i>Этим людям умные модели доступны за ваш счёт в любом чате с ботом. Проще всего — дать им ссылку-приглашение (кнопка выше). Командой: <code>/tenant adduser @username</code>.</i>
+        <i>Этим людям умные модели доступны за ваш счёт в любом чате с ботом. Проще всего — дать им ссылку-приглашение (кнопка выше). Командой: <code>/tenant adduser @invoker</code>.</i>
         """
         return MenuScreen(text, rows)
     }
 
-    func renderAdminInvite(chatKey: ChatKey, username: String?) async -> MenuScreen {
+    func renderAdminInvite(chatKey: ChatKey, invoker owner: UserKey?) async -> MenuScreen {
         // The invite is filed under the caller's storage key, like every other
         // per-person record — a raw handle would miss anyone without one.
-        guard let invoker = await state.userKey(username: username) else {
+        guard let invoker = owner else {
             return MenuScreen(Self.unknownAccountNotice, [[backButton(to: .adminPanel)]])
         }
-        guard await state.isTenant(username: invoker) else {
+        guard await state.isTenant(invoker) else {
             return MenuScreen(
                 "🔗 <b>Ссылка-приглашение</b>\n\nОна появится, как только у вас будет активный премиум: по ссылке умные модели работают за ваш счёт.",
                 [

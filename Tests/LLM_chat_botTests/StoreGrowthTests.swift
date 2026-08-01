@@ -23,7 +23,7 @@ final class StoreReferralTests: XCTestCase {
         XCTAssertEqual(inviteeReward, ReferralConfig.default.inviteeReward)
 
         // Binding alone pays nothing — that is what makes farming expensive.
-        var inviterWallet = await store.balance(username: UserKey.forUserID(100))
+        var inviterWallet = await store.balance(UserKey.identified(100))
         XCTAssertNil(inviterWallet)
 
         await store.identifyUser(userID: 200, username: "friend", firstName: nil)
@@ -37,7 +37,7 @@ final class StoreReferralTests: XCTestCase {
         // between the credit and the stamp cannot pay the pair twice (§10.2).
         // `EndToEndTests.testReferralDeepLinkPaysAfterFirstAnswer` covers the
         // whole path, wallets included.
-        inviterWallet = await store.balance(username: UserKey.forUserID(100))
+        inviterWallet = await store.balance(UserKey.identified(100))
         XCTAssertNil(inviterWallet, "crediting here as well would pay the bonus twice")
     }
 
@@ -80,7 +80,7 @@ final class StoreReferralTests: XCTestCase {
     func testExistingUserCannotBeInvited() async {
         let store = await makePair()
         // The "friend" already has a wallet — they are not a new user.
-        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(200), amount: .usd(1))
+        _ = await store.creditPurchasedBalance(key: UserKey.identified(200), amount: .usd(1))
         let outcome = await store.bindReferral(invitedUserID: 200, invitedUsername: nil, inviterUserID: 100)
         XCTAssertEqual(outcome, .notNewUser)
         let overview = await store.referralOverview()
@@ -228,7 +228,7 @@ final class StoreTrafficSourceTests: XCTestCase {
     /// it is.
     func testExistingUserIsNotAnAcquisition() async {
         let store = Fixtures.makeStore()
-        _ = await store.creditPurchasedBalance(key: UserKey.forUserID(302), amount: .usd(1))
+        _ = await store.creditPurchasedBalance(key: UserKey.identified(302), amount: .usd(1))
         let outcome = await store.bindTrafficSource(userID: 302, tag: "vk", username: nil)
         XCTAssertEqual(outcome, .knownUser)
     }

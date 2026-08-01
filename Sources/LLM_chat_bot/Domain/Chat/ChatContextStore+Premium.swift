@@ -92,8 +92,8 @@ extension ChatContextStore {
     /// free-tier chat with units left today must be able to *choose* a smart
     /// model: otherwise the daily taste is reachable only by chats that happened
     /// to have a paid model set before the cap parked it, and nobody can opt in.
-    func paidModelAccess(username: String?, userID: Int?, chatID: Int) -> PaidModelAccess {
-        if hasFullModelAccess(username: username, userID: userID, chatID: chatID) { return .full }
+    func paidModelAccess(key: UserKey?, userID: Int?, chatID: Int) -> PaidModelAccess {
+        if hasFullModelAccess(key: key, userID: userID, chatID: chatID) { return .full }
         let left = remainingDailyPremium(chatID: chatID, userID: userID, isGroup: chatID < 0)
         return left.remaining > 0 ? .dailyTaste(remaining: left.remaining, limit: left.limit) : .none
     }

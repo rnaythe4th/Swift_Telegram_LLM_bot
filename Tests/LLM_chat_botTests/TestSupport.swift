@@ -5,12 +5,18 @@ import Foundation
 // Telegram — the state actor and the domain types are pure by construction.
 
 enum Fixtures {
-    static let ownerUsername = "owner"
+    /// The @username the bot is configured with, and the key that handle
+    /// resolves to once the owner has been seen.
+    static let ownerHandle = "owner"
     static let ownerUserID = 1_000
+    static var ownerKey: UserKey { .identified(ownerUserID) }
+
+    /// Any key, for tests that only need "somebody".
+    static func key(_ userID: Int) -> UserKey { .identified(userID) }
 
     /// A store wired the way `main` wires it, minus the ports.
     static func makeStore(
-        ownerUsername: String = Fixtures.ownerUsername,
+        ownerUsername: String = Fixtures.ownerHandle,
         ownerUserID: Int? = Fixtures.ownerUserID,
         model: String = "test/model",
         defaultHistoryLength: Int = 10

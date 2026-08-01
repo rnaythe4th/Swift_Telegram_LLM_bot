@@ -24,6 +24,11 @@ struct GenerationOrigin: Sendable {
     /// Message the reply should quote; nil = plain reply.
     let replyToMessageID: Int?
 
+    /// Storage key of whoever asked. Built from the userID, which every update
+    /// carries — a @username is optional, and a gate keyed off one locks out
+    /// everybody who never set it (CLAUDE.md §6).
+    var userKey: UserKey? { user.map { UserKey.identified($0.id) } }
+
     init(user: TelegramUser?, isPrivate: Bool, replyToMessageID: Int?) {
         self.user = user
         self.isPrivate = isPrivate
@@ -143,7 +148,8 @@ final class GenerationCoordinator: Sendable {
     }
     
     func processContent(origin: GenerationOrigin, content: UserInputContent, chatKey: ChatKey) async throws {
-        let username = origin.user?.username
+        let handle = origin.user?.username
+        let askerKey = origin.userKey
 
         // Funnel: count this chat's first real message (activation, once per chat).
         await state.markFirstMessageIfNeeded(chatKey: chatKey)
@@ -154,7 +160,7 @@ final class GenerationCoordinator: Sendable {
         // Attribution alone pays nothing, so a farm of idle accounts earns
         // nothing; both notices are delivered to DMs (see the method).
         if let userID = origin.user?.id {
-            await payReferralIfDue(userID: userID, username: username)
+            await payReferralIfDue(userID: userID, username: handle)
             // Paid traffic: a click that never produced an answer is not an
             // activation, so the campaign is credited here rather than at
             // /start. Idempotent — this runs on every turn.
@@ -186,8 +192,8 @@ final class GenerationCoordinator: Sendable {
         await metrics?.increment(MetricName.generationsStarted)
         
         var processedContent = content
-        if let username, let text = processedContent.text, !text.isEmpty {
-            processedContent.text = "Тебе пишет @\(username): \(text)"
+        if let handle, let text = processedContent.text, !text.isEmpty {
+            processedContent.text = "Тебе пишет @\(handle): \(text)"
         }
         
         let hasAttachments = !processedContent.attachments.isEmpty
@@ -200,11 +206,11 @@ final class GenerationCoordinator: Sendable {
             chatKey: chatKey,
             generationID: generationID,
             content: historyContent,
-            username: username
+            username: handle
         )
         
         let messages: [ChatMessage] = hasAttachments
-            ? Array(snapshot.messages.dropLast()) + [ChatMessage.userContent(processedContent, username: username)]
+            ? Array(snapshot.messages.dropLast()) + [ChatMessage.userContent(processedContent, username: handle)]
             : snapshot.messages
         
         let provider = snapshot.provider
@@ -226,7 +232,7 @@ final class GenerationCoordinator: Sendable {
 
             let sponsorLine = await sponsorCreditLine(
                 chatID: chatKey.chatID,
-                askerUsername: origin.user?.username,
+                asker: askerKey,
                 isPrivate: origin.isPrivate
             )
 

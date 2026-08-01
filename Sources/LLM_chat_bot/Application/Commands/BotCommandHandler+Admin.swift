@@ -111,7 +111,7 @@ extension BotCommandHandler {
         // `chatOwnership` stores a UserKey (`#12345`), so a raw handle would
         // never match and the licence owner would see an empty list. Filtering
         // is off entirely for a super-admin (nil = every chat).
-        let ownerFilter: String? = isSuperAdmin ? nil : await ownerKey(for: fromUser)
+        let ownerFilter: UserKey? = isSuperAdmin ? nil : await ownerKey(for: fromUser)
         let groups = await state.groupChats(ownedBy: ownerFilter)
         let privates = await state.privateChats(ownedBy: ownerFilter)
 
@@ -153,7 +153,7 @@ extension BotCommandHandler {
         // `chatOwnership` stores a UserKey (`#12345`), so a raw handle would
         // never match and the licence owner would see an empty list. Filtering
         // is off entirely for a super-admin (nil = every chat).
-        let ownerFilter: String? = isSuperAdmin ? nil : await ownerKey(for: fromUser)
+        let ownerFilter: UserKey? = isSuperAdmin ? nil : await ownerKey(for: fromUser)
         let privates = await state.privateChats(ownedBy: ownerFilter)
 
         if privates.isEmpty {

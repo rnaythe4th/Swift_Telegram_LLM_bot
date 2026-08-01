@@ -233,9 +233,9 @@ struct SubscriptionDiscount: Codable, Sendable, Equatable {
 
 /// One notice the sweep decided to send, with the channels it can go out on.
 struct SubscriptionNoticeTarget: Sendable {
-    /// Storage key of the sponsor — pass it back to the store as `username:`,
+    /// Storage key of the sponsor — pass it back to the store,
     /// keys round-trip unchanged. Use `label` for anything a person reads.
-    let username: String
+    let key: UserKey
     /// Ready-to-print name: `@username` / first name / `id <n>`.
     let label: String
     let notice: SubscriptionNotice
@@ -286,7 +286,7 @@ struct SubscriptionPricing: Sendable {
 struct SubscriptionLifecycleStats: Sendable {
     struct Row: Sendable {
         /// Storage key; `label` is what the interface prints.
-        let username: String
+        let key: UserKey
         let label: String
         let paidUntil: Date
         /// Reachable = has a DM with the bot or at least one covered group.

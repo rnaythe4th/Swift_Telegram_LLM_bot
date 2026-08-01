@@ -100,7 +100,7 @@ final class PostgresIntegrationTests: XCTestCase {
 
     func testPaymentIsClaimedExactlyOnceAcrossConcurrentDeliveries() async throws {
         let receipt = PaymentReceipt(
-            payerKey: "#42", payerUserID: 42, chatID: 42,
+            payerKey: UserKey.identified(42), payerUserID: 42, chatID: 42,
             purpose: .subscription, idempotencyKey: "charge-x", method: .stars
         )
         let ledger = self.ledger!
@@ -122,13 +122,13 @@ final class PostgresIntegrationTests: XCTestCase {
     func testAFailedTransactionLeavesNoTrace() async throws {
         struct Boom: Error {}
         let receipt = PaymentReceipt(
-            payerKey: "#43", payerUserID: 43, chatID: 43,
+            payerKey: UserKey.identified(43), payerUserID: 43, chatID: 43,
             purpose: .credit(cents: 500), idempotencyKey: "charge-y", method: .card
         )
         do {
             try await ledger.inTransaction { transaction in
                 _ = try await transaction.claimPayment(receipt)
-                _ = try await transaction.credit("#43", .cents(500), kind: .topup, purchased: true, ref: nil)
+                _ = try await transaction.credit(UserKey.identified(43), .cents(500), kind: .topup, purchased: true, ref: nil)
                 throw Boom()
             }
             XCTFail("the transaction should have thrown")
@@ -138,17 +138,17 @@ final class PostgresIntegrationTests: XCTestCase {
         }
 
         let wallets = try await persistence.loadEverything().wallets
-        XCTAssertNil(wallets["#43"], "a rolled-back credit must not exist")
+        XCTAssertNil(wallets[UserKey.identified(43)], "a rolled-back credit must not exist")
         let claimedAgain = try await ledger.inTransaction { try await $0.claimPayment(receipt) }
         XCTAssertTrue(claimedAgain, "a rolled-back claim must be available to the redelivery")
     }
 
     func testDebitStopsAtZeroAndTheJournalAddsUp() async throws {
         _ = try await ledger.inTransaction {
-            try await $0.credit("#44", .cents(10), kind: .topup, purchased: true, ref: "top")
+            try await $0.credit(UserKey.identified(44), .cents(10), kind: .topup, purchased: true, ref: "top")
         }
         let debit = try await ledger.inTransaction {
-            try await $0.debit("#44", upTo: .cents(25), real: .cents(20), ref: "gen")
+            try await $0.debit(UserKey.identified(44), upTo: .cents(25), real: .cents(20), ref: "gen")
         }
         XCTAssertEqual(debit.charged, .cents(10))
         XCTAssertEqual(debit.remaining, .zero)
@@ -161,21 +161,21 @@ final class PostgresIntegrationTests: XCTestCase {
     /// Paying never shortens access, and the end date is computed by the
     /// database so two renewals cannot read the same one.
     func testRenewalExtendsFromTheCurrentEnd() async throws {
-        let defaults = TenantDefaults(ownerUsername: "#45", model: "m", role: "r", historyLength: 10)
+        let defaults = TenantDefaults(ownerKey: UserKey.identified(45), model: "m", role: "r", historyLength: 10)
         let first = try await ledger.inTransaction {
-            try await $0.extendSubscription("#45", days: 30, defaults: defaults)
+            try await $0.extendSubscription(UserKey.identified(45), days: 30, defaults: defaults)
         }
         XCTAssertTrue(first.isNew)
         let second = try await ledger.inTransaction {
-            try await $0.extendSubscription("#45", days: 30, defaults: defaults)
+            try await $0.extendSubscription(UserKey.identified(45), days: 30, defaults: defaults)
         }
         XCTAssertFalse(second.isNew)
         let gap = second.paidUntil!.timeIntervalSince(first.paidUntil!)
         XCTAssertEqual(gap, 30 * 86_400, accuracy: 60)
 
-        try await ledger.inTransaction { try await $0.setSubscription("#45", paidUntil: nil) }
+        try await ledger.inTransaction { try await $0.setSubscription(UserKey.identified(45), paidUntil: nil) }
         let third = try await ledger.inTransaction {
-            try await $0.extendSubscription("#45", days: 30, defaults: defaults)
+            try await $0.extendSubscription(UserKey.identified(45), days: 30, defaults: defaults)
         }
         XCTAssertNil(third.paidUntil, "unlimited stays unlimited")
         XCTAssertTrue(third.wasUnlimited)
@@ -188,25 +188,25 @@ final class PostgresIntegrationTests: XCTestCase {
     /// unreadable, and one unreadable row took the whole restore down and
     /// dropped the bot into memory-only mode, where it stops selling.
     func testATenantCreatedByAPaymentCanBeReadBack() async throws {
-        let defaults = TenantDefaults(ownerUsername: "#46", model: "m/model", role: "роль", historyLength: 12)
+        let defaults = TenantDefaults(ownerKey: UserKey.identified(46), model: "m/model", role: "роль", historyLength: 12)
         _ = try await ledger.inTransaction {
-            try await $0.extendSubscription("#46", days: 30, defaults: defaults)
+            try await $0.extendSubscription(UserKey.identified(46), days: 30, defaults: defaults)
         }
 
         let stored = try await persistence.loadEverything()
-        guard let tenant = stored.tenants.first(where: { $0.username == "#46" }) else {
+        guard let tenant = stored.tenants.first(where: { $0.key == UserKey.identified(46) }) else {
             return XCTFail("the tenant a payment created is missing")
         }
         XCTAssertEqual(tenant.snapshot.defaultModel, "m/model")
         XCTAssertTrue(tenant.snapshot.modelPresets.isEmpty)
-        XCTAssertTrue(tenant.snapshot.adminUsernames.isEmpty)
+        XCTAssertTrue(tenant.snapshot.adminKeys.isEmpty)
         XCTAssertEqual(tenant.snapshot.cumulativeUsage, .zero)
         XCTAssertNotNil(tenant.snapshot.paidUntil)
 
         // And the store has to accept it.
         let store = Fixtures.makeStore()
         await store.restore(from: stored)
-        let subscription = await store.tenantSubscription(ownerUsername: "#46")
+        let subscription = await store.tenantSubscription(ownerKey: UserKey.identified(46))
         XCTAssertTrue(subscription.isActive)
     }
 
@@ -215,12 +215,12 @@ final class PostgresIntegrationTests: XCTestCase {
     /// the money transaction, so they are deliberately absent from the columns
     /// a flush updates — this is what proves it.
     func testWriteBehindDoesNotUndoAPaidRenewal() async throws {
-        let key = UserKey.forUserID(47)
+        let key = UserKey.identified(47)
         // The payment path creates the tenant with a real end date.
         let extended = try await ledger.inTransaction {
             try await $0.extendSubscription(
                 key, days: 30,
-                defaults: TenantDefaults(ownerUsername: key, model: "m", role: "r", historyLength: 10)
+                defaults: TenantDefaults(ownerKey: key, model: "m", role: "r", historyLength: 10)
             )
         }
         let paidUntil = try XCTUnwrap(extended.paidUntil)
@@ -233,7 +233,7 @@ final class PostgresIntegrationTests: XCTestCase {
         try await persistence.apply(await store.drainDirtyBatch())
 
         let reloaded = try await persistence.loadEverything()
-        let tenant = try XCTUnwrap(reloaded.tenants.first { $0.username == key })
+        let tenant = try XCTUnwrap(reloaded.tenants.first { $0.key == key })
         XCTAssertEqual(tenant.snapshot.defaultRole, "новая роль")
         XCTAssertEqual(
             tenant.snapshot.paidUntil?.timeIntervalSince1970 ?? 0,
@@ -249,21 +249,21 @@ final class PostgresIntegrationTests: XCTestCase {
     func testPayingAnUnlimitedTenantLeavesThemUnlimited() async throws {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 48, username: "granted", firstName: nil)
-        let key = UserKey.forUserID(48)
-        await store.registerTenant(username: key)
+        let key = UserKey.identified(48)
+        await store.registerTenant(key)
         try await persistence.apply(await store.drainDirtyBatch())
 
         let extended = try await ledger.inTransaction {
             try await $0.extendSubscription(
                 key, days: 30,
-                defaults: TenantDefaults(ownerUsername: key, model: "m", role: "r", historyLength: 10)
+                defaults: TenantDefaults(ownerKey: key, model: "m", role: "r", historyLength: 10)
             )
         }
         XCTAssertTrue(extended.wasUnlimited)
         XCTAssertNil(extended.paidUntil)
 
         let stored = try await persistence.loadEverything()
-        let tenant = try XCTUnwrap(stored.tenants.first { $0.username == key })
+        let tenant = try XCTUnwrap(stored.tenants.first { $0.key == key })
         XCTAssertNil(tenant.snapshot.paidUntil, "an open-ended tenant must stay open-ended")
     }
 
@@ -277,15 +277,15 @@ final class PostgresIntegrationTests: XCTestCase {
             state: store, ledger: ledger, logger: SilentLogger(), alerter: nil
         )
         await store.identifyUser(userID: 60, username: "granted", firstName: nil)
-        let key = UserKey.forUserID(60)
-        await store.registerTenant(username: key)
+        let key = UserKey.identified(60)
+        await store.registerTenant(key)
         try await persistence.apply(await store.drainDirtyBatch())
 
-        let extended = await writer.extend(username: key, days: 30)
+        let extended = await writer.extend(key: key, days: 30)
         let until = try XCTUnwrap(extended)
         var reloaded = Fixtures.makeStore()
         await reloaded.restore(from: try await persistence.loadEverything())
-        var subscription = await reloaded.tenantSubscription(ownerUsername: key)
+        var subscription = await reloaded.tenantSubscription(ownerKey: key)
         XCTAssertEqual(
             subscription.paidUntil?.timeIntervalSince1970 ?? 0,
             until.timeIntervalSince1970,
@@ -293,18 +293,18 @@ final class PostgresIntegrationTests: XCTestCase {
             "an extension has to outlive the process that made it"
         )
 
-        let expired = await writer.expire(username: key)
+        let expired = await writer.expire(key: key)
         XCTAssertTrue(expired)
         reloaded = Fixtures.makeStore()
         await reloaded.restore(from: try await persistence.loadEverything())
-        subscription = await reloaded.tenantSubscription(ownerUsername: key)
+        subscription = await reloaded.tenantSubscription(ownerKey: key)
         XCTAssertFalse(subscription.isActive, "an expiry has to outlive it too")
 
-        let unlimited = await writer.setUnlimited(username: key)
+        let unlimited = await writer.setUnlimited(key: key)
         XCTAssertTrue(unlimited)
         reloaded = Fixtures.makeStore()
         await reloaded.restore(from: try await persistence.loadEverything())
-        subscription = await reloaded.tenantSubscription(ownerUsername: key)
+        subscription = await reloaded.tenantSubscription(ownerKey: key)
         XCTAssertNil(subscription.paidUntil)
         XCTAssertTrue(subscription.isActive)
     }
@@ -318,17 +318,17 @@ final class PostgresIntegrationTests: XCTestCase {
             state: store, ledger: ledger, logger: SilentLogger(), alerter: nil
         )
         await store.identifyUser(userID: 61, username: "lapsed", firstName: nil)
-        let key = UserKey.forUserID(61)
-        await store.registerTenant(username: key)
-        _ = await writer.extend(username: key, days: 30)
+        let key = UserKey.identified(61)
+        await store.registerTenant(key)
+        _ = await writer.extend(key: key, days: 30)
         try await persistence.apply(await store.drainDirtyBatch())
 
-        let issued = await writer.grantWinback(username: key, percent: 30, hours: 48)
+        let issued = await writer.grantWinback(key: key, percent: 30, hours: 48)
         let granted = try XCTUnwrap(issued)
 
         let reloaded = Fixtures.makeStore()
         await reloaded.restore(from: try await persistence.loadEverything())
-        let discount = await reloaded.subscriptionDiscount(username: key)
+        let discount = await reloaded.subscriptionDiscount(key: key)
         XCTAssertEqual(discount?.percent, granted.percent)
         XCTAssertEqual(
             discount?.expiresAt.timeIntervalSince1970 ?? 0,
@@ -337,10 +337,10 @@ final class PostgresIntegrationTests: XCTestCase {
             "the deadline must not restart with the process"
         )
 
-        _ = await writer.consumeWinback(username: key)
+        _ = await writer.consumeWinback(key: key)
         let after = Fixtures.makeStore()
         await after.restore(from: try await persistence.loadEverything())
-        let consumed = await after.subscriptionDiscount(username: key)
+        let consumed = await after.subscriptionDiscount(key: key)
         XCTAssertNil(consumed, "a one-shot offer must stay consumed")
     }
 
@@ -352,13 +352,13 @@ final class PostgresIntegrationTests: XCTestCase {
     func testRetentionDropsIdleChatsAndKeepsCustomers() async throws {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 70, username: "sponsor", firstName: nil)
-        let sponsor = UserKey.forUserID(70)
-        await store.registerTenant(username: sponsor)
+        let sponsor = UserKey.identified(70)
+        await store.registerTenant(sponsor)
         _ = await store.assignChat(chatID: -70, to: sponsor)
         _ = try await ledger.inTransaction {
             try await $0.extendSubscription(
                 sponsor, days: 30,
-                defaults: TenantDefaults(ownerUsername: sponsor, model: "m", role: "r", historyLength: 10)
+                defaults: TenantDefaults(ownerKey: sponsor, model: "m", role: "r", historyLength: 10)
             )
         }
 
@@ -397,7 +397,7 @@ final class PostgresIntegrationTests: XCTestCase {
     func testForgetErasesTheConversationButNotTheMoney() async throws {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 72, username: "payer", firstName: nil)
-        let key = UserKey.forUserID(72)
+        let key = UserKey.identified(72)
         let chat = ChatKey(chatID: 72, threadID: 0)
         await store.setModelOnly(chatKey: chat, model: "some/model")
         _ = try await ledger.inTransaction {
@@ -424,12 +424,12 @@ final class PostgresIntegrationTests: XCTestCase {
     func testTheWholeStateSurvivesAFlushAndReload() async throws {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 900, username: "sponsor", firstName: "S")
-        _ = await store.registerTenant(username: UserKey.forUserID(900))
+        _ = await store.registerTenant(UserKey.identified(900))
         await store.recordChatMeta(
             chatID: -900,
             info: ChatMetaInfo(type: "supergroup", title: "Команда", username: nil, firstName: nil)
         )
-        _ = await store.assignChat(chatID: -900, to: UserKey.forUserID(900))
+        _ = await store.assignChat(chatID: -900, to: UserKey.identified(900))
         await store.setMarkupPercent(42)
         await store.setDailyPremiumLimit(7)
         await store.setSpendPolicy(SpendPolicy(
@@ -438,7 +438,7 @@ final class PostgresIntegrationTests: XCTestCase {
         await store.setModelOnly(chatKey: ChatKey(chatID: -900, threadID: 0), model: "some/model")
         await store.bumpFunnel(.paid)
         _ = await store.consumeDailyPremium(chatID: -900, userID: 900, isGroup: true)
-        _ = await store.regenerateInviteToken(owner: UserKey.forUserID(900))
+        _ = await store.regenerateInviteToken(owner: UserKey.identified(900))
 
         try await persistence.apply(await store.drainDirtyBatch())
 
@@ -453,18 +453,18 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertEqual(policy.dailyGlobalCap, .cents(1000))
         XCTAssertEqual(policy.onTenantCap, .refuse)
         let owner = await reloaded.chatOwner(chatID: -900)
-        XCTAssertEqual(owner, UserKey.forUserID(900))
+        XCTAssertEqual(owner, UserKey.identified(900))
         let label = await reloaded.chatDisplayLabel(chatID: -900)
         XCTAssertEqual(label, "Команда")
         let help = await reloaded.fetchHelp(chatKey: ChatKey(chatID: -900, threadID: 0))
         XCTAssertEqual(help.model, "some/model")
-        let identity = await reloaded.displayLabel(forKey: UserKey.forUserID(900))
+        let identity = await reloaded.displayLabel(forKey: UserKey.identified(900))
         XCTAssertEqual(identity, "@sponsor")
         let funnel = await reloaded.funnelReport()
         XCTAssertEqual(funnel.todayCounters[FunnelEvent.paid.rawValue], 1)
         let remaining = await reloaded.remainingDailyPremium(chatID: -900, userID: 900, isGroup: true)
         XCTAssertEqual(remaining.remaining, 6, "the spent allowance must not come back on restart")
-        let token = await reloaded.inviteToken(owner: UserKey.forUserID(900))
+        let token = await reloaded.inviteToken(owner: UserKey.identified(900))
         XCTAssertNotNil(token)
     }
 
@@ -475,16 +475,16 @@ final class PostgresIntegrationTests: XCTestCase {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 901, username: "a", firstName: nil)
         await store.identifyUser(userID: 902, username: "b", firstName: nil)
-        _ = await store.registerTenant(username: UserKey.forUserID(901))
-        _ = await store.registerTenant(username: UserKey.forUserID(902))
+        _ = await store.registerTenant(UserKey.identified(901))
+        _ = await store.registerTenant(UserKey.identified(902))
         try await persistence.apply(await store.drainDirtyBatch())
 
-        _ = await store.removeTenant(username: UserKey.forUserID(901))
+        _ = await store.removeTenant(UserKey.identified(901))
         try await persistence.apply(await store.drainDirtyBatch())
 
-        let tenants = try await persistence.loadEverything().tenants.map(\.username)
-        XCTAssertFalse(tenants.contains(UserKey.forUserID(901)))
-        XCTAssertTrue(tenants.contains(UserKey.forUserID(902)), "the other tenant must survive")
+        let tenants = try await persistence.loadEverything().tenants.map(\.key)
+        XCTAssertFalse(tenants.contains(UserKey.identified(901)))
+        XCTAssertTrue(tenants.contains(UserKey.identified(902)), "the other tenant must survive")
     }
 
     /// Only one process may write. This is the guarantee a lease with a TTL

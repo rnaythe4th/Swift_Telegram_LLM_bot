@@ -51,7 +51,7 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
-    func renderModel(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
+    func renderModel(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let globalPresets = await state.modelPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .model, chatKey: chatKey)
@@ -61,7 +61,7 @@ extension BotMenuHandler {
         // Group menus are one shared message, so the legend and the upsell
         // describe the chat's access, never the tapper's own (CLAUDE.md §13).
         let hasFullAccess = await state.hasFullModelAccess(
-            username: chatKey.chatID < 0 ? nil : username,
+            key: chatKey.chatID < 0 ? nil : invoker,
             chatID: chatKey.chatID
         )
         let restrictionsActive = effectiveFreeModels != nil
@@ -202,7 +202,7 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
-    func renderStats(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
+    func renderStats(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let testModeOn = help.testModeSuffix != nil
         let testLabel: String = {
@@ -219,8 +219,8 @@ extension BotMenuHandler {
         // Storage reports and the test-mode suffix are operator tools: for a
         // regular user they are two switches that explain nothing and do
         // nothing they want. They stay one tap away for whoever runs the bot.
-        let isSuper = await state.isSuperAdmin(username: username)
-        let isChatAdmin = await state.isAdmin(username: username, chatID: chatKey.chatID)
+        let isSuper = await state.isSuperAdmin(invoker)
+        let isChatAdmin = await state.isAdmin(invoker, chatID: chatKey.chatID)
         let isOperator = isSuper || isChatAdmin
         if isOperator || help.backupNotify || testModeOn {
             rows.row([menuButton("\(toggleMark(help.backupNotify)) Отчёты о сохранении", .stats, "toggle", "backup")])
@@ -250,13 +250,13 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
-    func renderHistory(chatKey: ChatKey, username: String? = nil) async -> MenuScreen {
+    func renderHistory(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         // Memory length multiplies the cost of *every* answer: each extra
         // remembered message is re-sent to the model on each turn. It is the
         // owner's lever, not a user preference — the picker is operator-only,
         // the value and "what does it remember" stay visible to everyone.
-        let isOperator = await state.isAdmin(username: username, chatID: chatKey.chatID)
+        let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
         let globalPresets = isOperator ? await state.historyLengthPresets(chatID: chatKey.chatID) : []
         let chatPresets = isOperator ? await state.chatPresets(category: .history, chatKey: chatKey) : []
         var rows: Keyboard = []

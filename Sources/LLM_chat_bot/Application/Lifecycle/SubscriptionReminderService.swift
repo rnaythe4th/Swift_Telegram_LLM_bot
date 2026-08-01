@@ -49,18 +49,18 @@ actor SubscriptionReminderService {
     /// Grants (and stores) a winback offer. Falls back to the cache-only path
     /// when no writer is wired — the tests and a memory-only bot, where there
     /// is nothing to store it in anyway.
-    private func grantDiscount(username: String, percent: Int, hours: Int) async -> SubscriptionDiscount? {
+    private func grantDiscount(invoker: UserKey, percent: Int, hours: Int) async -> SubscriptionDiscount? {
         if let subscriptions {
-            return await subscriptions.grantWinback(username: username, percent: percent, hours: hours)
+            return await subscriptions.grantWinback(key: invoker, percent: percent, hours: hours)
         }
-        return await state.grantWinbackDiscount(username: username, percent: percent, hours: hours)
+        return await state.grantWinbackDiscount(key: invoker, percent: percent, hours: hours)
     }
 
-    private func clearDiscount(_ username: String) async {
+    private func clearDiscount(_ invoker: UserKey) async {
         if let subscriptions {
-            _ = await subscriptions.consumeWinback(username: username)
+            _ = await subscriptions.consumeWinback(key: invoker)
         } else {
-            _ = await state.consumeWinbackDiscount(username: username)
+            _ = await state.consumeWinbackDiscount(invoker)
         }
     }
     private let logger: LoggerPort
@@ -141,7 +141,7 @@ actor SubscriptionReminderService {
             switch await deliver(target: target, config: config) {
             case .sent:
                 await state.markNoticeSent(
-                    username: target.username,
+            key: target.key,
                     notice: target.notice,
                     paidUntil: target.paidUntil
                 )
@@ -159,7 +159,7 @@ actor SubscriptionReminderService {
                 // sweep doesn't reconsider it every hour; the count keeps
                 // silent sponsors visible to the super-admin.
                 await state.markNoticeSent(
-                    username: target.username,
+            key: target.key,
                     notice: target.notice,
                     paidUntil: target.paidUntil
                 )
@@ -264,7 +264,7 @@ actor SubscriptionReminderService {
         var discount: SubscriptionDiscount?
         if target.notice.isWinback, config.winbackDiscountPercent > 0 {
             discount = await grantDiscount(
-                username: target.username,
+                invoker: target.key,
                 percent: config.winbackDiscountPercent,
                 hours: config.winbackOfferHours
             )
@@ -273,8 +273,8 @@ actor SubscriptionReminderService {
         // not. A winback offer belongs to one account, so quoting it to a chat
         // where anyone may tap "renew" would advertise a price the payer is not
         // going to be charged.
-        let pricing = await state.subscriptionPricing(username: target.username)
-        let listPricing = await state.subscriptionPricing(username: nil)
+        let pricing = await state.subscriptionPricing(key: target.key)
+        let listPricing = await state.subscriptionPricing(key: nil)
         var delivered = false
         var deadChannels = 0
         var attempted = 0
@@ -307,7 +307,7 @@ actor SubscriptionReminderService {
         // The notice is about to be marked handled, and nobody saw the offer —
         // so the discount it granted is withdrawn too. Otherwise a price cut
         // nobody was ever told about waits for them at checkout.
-        if discount != nil { await clearDiscount(target.username) }
+        if discount != nil { await clearDiscount(target.key) }
         return .noChannel
     }
 
@@ -465,18 +465,18 @@ actor SubscriptionReminderService {
 
     /// Renders both notices for a super-admin without touching any state, so
     /// the wording and the buttons can be checked before real sends go out.
-    func previewTexts(username: String?) async -> [(text: String, markup: InlineKeyboardMarkup)] {
+    func previewTexts(key: UserKey?) async -> [(text: String, markup: InlineKeyboardMarkup)] {
         let config = await state.reminderConfig()
         // List price: a preview must not inherit the previewing admin's own
         // live winback offer, or it stops showing what sponsors will see.
-        let pricing = await state.subscriptionPricing(username: nil)
-        let label = username.map { "@\($0)" } ?? "—"
+        let pricing = await state.subscriptionPricing(key: nil)
+        let label = key == nil ? "—" : await state.displayLabel(forKey: key!)
         var previews: [(text: String, markup: InlineKeyboardMarkup)] = []
 
         for days in config.expiryReminderDays.sorted(by: >) {
             let notice = SubscriptionNotice.expiring(daysBefore: days)
             let target = SubscriptionNoticeTarget(
-                username: username ?? "",
+                key: key ?? UserKey.sanitizedPendingFallback("preview"),
                 label: label,
                 notice: notice,
                 paidUntil: Date().addingTimeInterval(Double(days) * 86_400),
@@ -498,11 +498,11 @@ actor SubscriptionReminderService {
                 expiresAt: Date().addingTimeInterval(Double(config.winbackOfferHours) * 3600)
               )
             : nil
-        let discountedPricing = await state.subscriptionPricing(username: nil, applying: previewDiscount)
+        let discountedPricing = await state.subscriptionPricing(key: nil, applying: previewDiscount)
         let winbackDay = config.winbackDays.first ?? 1
         let winbackNotice = SubscriptionNotice.winback(dayOffset: winbackDay)
         let winback = SubscriptionNoticeTarget(
-            username: username ?? "",
+                key: key ?? UserKey.sanitizedPendingFallback("preview"),
             label: label,
             notice: winbackNotice,
             paidUntil: Date().addingTimeInterval(-Double(winbackDay) * 86_400),

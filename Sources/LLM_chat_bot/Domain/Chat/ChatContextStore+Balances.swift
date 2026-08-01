@@ -36,13 +36,13 @@ extension ChatContextStore {
             : usage.totalCost.multiplied(byPercent: markupPercentValue)
     }
 
-    func balance(username: String?) -> UserBalance? {
-        guard let u = userKey(username: username) else { return nil }
+    func balance(_ key: UserKey?) -> UserBalance? {
+        guard let u = key.map(resolved) else { return nil }
         return userBalances[u]
     }
 
-    func hasPositiveBalance(username: String?) -> Bool {
-        balance(username: username)?.balance.isPositive ?? false
+    func hasPositiveBalance(_ key: UserKey?) -> Bool {
+        balance(key)?.balance.isPositive ?? false
     }
 
     /// Key of the wallet that should pay for this person's answers, or nil when
@@ -52,22 +52,15 @@ extension ChatContextStore {
     /// "Has money" means at least `minimumBillableBalance`, not "more than
     /// zero": sub-cent dust cannot pay for an answer, and billing against it
     /// means the answer costs more than the wallet held (§4.4).
-    func billingKey(username: String?, userID: Int?) -> String? {
-        userKeys(username: username, userID: userID)
+    func billingKey(key: UserKey?, userID: Int?) -> UserKey? {
+        userKeys(key: key, userID: userID)
             .first { (userBalances[$0]?.balance ?? .zero) >= Self.minimumBillableBalance }
     }
 
     /// Adds (or subtracts, for corrections) to the user's balance. Creates the
     /// wallet on first credit.
     @discardableResult
-    func creditBalance(username: String, amount: Money) -> UserBalance {
-        creditBalance(key: userKeyOrRaw(username), amount: amount)
-    }
-
-    /// Same, for a caller that already holds the person's key — the referral
-    /// payout, which addresses wallets by userID and never by @username.
-    @discardableResult
-    func creditBalance(key: String, amount: Money) -> UserBalance {
+    func creditBalance(key: UserKey, amount: Money) -> UserBalance {
         var wallet = userBalances[key] ?? .empty
         // A correction may be negative; a wallet may not. The same floor is a
         // `check` constraint on the column (§2.1).
@@ -84,12 +77,7 @@ extension ChatContextStore {
     /// what tells the super-admin who is a customer (§7 «Возврат по балансу»).
     /// Topping up also reopens the lapse cycle: coming back earns a new notice.
     @discardableResult
-    func creditPurchasedBalance(username: String, amount: Money) -> UserBalance {
-        creditPurchasedBalance(key: userKeyOrRaw(username), amount: amount)
-    }
-
-    @discardableResult
-    func creditPurchasedBalance(key: String, amount: Money) -> UserBalance {
+    func creditPurchasedBalance(key: UserKey, amount: Money) -> UserBalance {
         var wallet = creditBalance(key: key, amount: amount)
         wallet.toppedUp = wallet.toppedUp + amount
         wallet.lapsedNoticeAt = nil
@@ -117,13 +105,13 @@ extension ChatContextStore {
             guard wallet.toppedUp.isPositive, wallet.lapsedNoticeAt == nil else { continue }
             // The bot's owners are not sold the bot's own product — same rule
             // the subscription sweep follows.
-            guard !superAdminUsernames.contains(key) else { continue }
+            guard !superAdminKeys.contains(key) else { continue }
             // Still has money, or is covered by a subscription: not lapsed.
             guard wallet.balance <= Self.lapsedWalletThreshold else { continue }
             if let tenant = tenants[key] {
                 if tenant.isActive || tenant.remindersOptOut { continue }
             }
-            guard let userID = UserKey.userID(from: key),
+            guard let userID = key.userID,
                   let chatID = privateChatID(forKey: key) else { continue }
             // Idle for long enough. `seenAt` is refreshed on every update, so
             // somebody who is still around never lands here.
@@ -153,7 +141,7 @@ extension ChatContextStore {
     /// Stamps a delivered lapsed-wallet offer, so it goes out once per lapse.
     /// Only called after a successful send — a failed one is retried next sweep.
     @discardableResult
-    func markWalletWinbackSent(key: String, now: Date = Date()) -> Bool {
+    func markWalletWinbackSent(key: UserKey, now: Date = Date()) -> Bool {
         guard var wallet = userBalances[key] else { return false }
         wallet.lapsedNoticeAt = now
         userBalances[key] = wallet
@@ -174,8 +162,8 @@ extension ChatContextStore {
     }
 
     @discardableResult
-    func setBalanceAmount(username: String, amount: Money) -> UserBalance {
-        let u = userKeyOrRaw(username)
+    func setBalanceAmount(key: UserKey, amount: Money) -> UserBalance {
+        let u = resolved(key)
         var wallet = userBalances[u] ?? .empty
         wallet.balance = amount.clampedToZero
         wallet.updatedAt = Date()
@@ -185,8 +173,8 @@ extension ChatContextStore {
     }
 
     @discardableResult
-    func removeBalance(username: String) -> Bool {
-        let key = userKeyOrRaw(username)
+    func removeBalance(_ target: UserKey) -> Bool {
+        let key = resolved(target)
         guard userBalances.removeValue(forKey: key) != nil else { return false }
         dirtyWallets.remove(key)
         deletedWallets.insert(key)
@@ -196,12 +184,12 @@ extension ChatContextStore {
     /// One wallet changed in the cache. The row itself is written through the
     /// ledger transaction; this set is what carries a change that happened
     /// outside one (a rename adopting a wallet) to storage.
-    func markWalletDirty(_ key: String) {
+    func markWalletDirty(_ key: UserKey) {
         dirtyWallets.insert(key)
         deletedWallets.remove(key)
     }
 
-    func allBalances() -> [(key: String, label: String, wallet: UserBalance)] {
+    func allBalances() -> [(key: UserKey, label: String, wallet: UserBalance)] {
         userBalances
             .map { (key: $0.key, label: displayLabel(forKey: $0.key), wallet: $0.value) }
             .sorted { $0.label < $1.label }
@@ -210,8 +198,8 @@ extension ChatContextStore {
     /// What the footer will show as the post-charge balance. The real charge is
     /// a ledger transaction (`LedgerTransaction.debit`); the formula here is the
     /// same one, floor included, so the projection and the deduction agree.
-    func projectedBalanceAfterCharge(username: String, realCost: Money) -> Money {
-        let current = userBalances[userKeyOrRaw(username)]?.balance ?? .zero
+    func projectedBalanceAfterCharge(key: UserKey, realCost: Money) -> Money {
+        let current = userBalances[resolved(key)]?.balance ?? .zero
         return (current - realCost.multiplied(byPercent: markupPercentValue)).clampedToZero
     }
 

@@ -62,13 +62,13 @@ extension ChatContextStore {
 
     /// What the sponsor sees on their own panel. A ceiling nobody can see is not
     /// a protection, it is an unexplained downgrade of something they paid for.
-    func spendStatusLine(forKey key: String) -> String? {
+    func spendStatusLine(forKey key: UserKey) -> String? {
         let policy = spendPolicyValue
         guard policy.hasTenantCap else { return nil }
         var ledger = dailySpendValue
         ledger.rollOverIfNeeded()
         dailySpendValue = ledger
-        let spent = ledger.spent(tenant: userKeyOrRaw(key))
+        let spent = ledger.spent(tenant: resolved(key))
         return "📊 Расход за сегодня · <b>\(spent.formatted(fractionDigits: 2))</b> из \(policy.dailyPerTenantCap.formatted(fractionDigits: 2))"
     }
 }

@@ -56,7 +56,7 @@ extension ChatContextStore {
     /// Display label of a user we know by ID — for referral texts, which name
     /// the other side of the pair.
     func displayLabel(forUserID userID: Int) -> String {
-        userDirectoryValue.displayLabel(forKey: UserKey.forUserID(userID))
+        userDirectoryValue.displayLabel(forKey: UserKey.identified(userID))
     }
 
     /// Whether we have ever met this person. Used to refuse a referral link
@@ -79,7 +79,7 @@ extension ChatContextStore {
         if userTenantMap[userID] != nil { return true }
         // Check both the permanent key and any record still pending under the
         // username they arrived with.
-        var keys = [UserKey.forUserID(userID)]
+        var keys = [UserKey.identified(userID)]
         if let pending = UserKey.pending(username) { keys.append(pending) }
         for key in keys {
             if tenants[key] != nil { return true }
@@ -116,7 +116,7 @@ extension ChatContextStore {
             return .unknownInviter
         }
         let inviterLabel = displayLabel(forUserID: inviterUserID)
-        let invited = UserKey.pending(invitedUsername)
+        let invited = UserKey.normalizedHandle(invitedUsername)
 
         guard !hasPriorBotActivity(userID: invitedUserID, username: invitedUsername) else {
             referralLedgerValue.refusedNotNew += 1
@@ -159,7 +159,7 @@ extension ChatContextStore {
         // Both wallets are addressed by userID, so a missing or changed
         // @username can no longer hold a payout back — the labels below are
         // only what the notifications will say.
-        let invited = UserKey.pending(username) ?? record.invitedUsername
+        let invited = UserKey.normalizedHandle(username) ?? record.invitedUsername
         if let invited { record.invitedUsername = invited }
         record.inviterUsername = displayLabel(forUserID: record.inviterUserID)
 
