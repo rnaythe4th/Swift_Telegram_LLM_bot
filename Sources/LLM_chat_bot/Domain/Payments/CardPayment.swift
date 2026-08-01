@@ -70,8 +70,10 @@ enum FiatCurrency: String, Codable, Sendable, CaseIterable {
 /// provider: YooKassa, Stripe, Smart Glocal, …). Managed entirely from the
 /// super-admin menu; the provider token is stored in bot state, not in env.
 struct CardPaymentConfig: Codable, Sendable {
-    /// Token issued by BotFather after connecting a payment provider.
-    var providerToken: String?
+    /// Token issued by BotFather after connecting a payment provider. Sealed
+    /// (§5.6): it is a live payment credential, and it stays in the form the
+    /// row holds it so a missing key cannot cost the merchant the token.
+    var providerToken: SealedSecret?
     var currency: FiatCurrency
     /// Subscription price in minor units (cents/kopecks); nil = sales off.
     var priceMinorUnits: Int?
@@ -88,7 +90,7 @@ struct CardPaymentConfig: Codable, Sendable {
         case providerToken, currency, priceMinorUnits, usdRateMinorUnits
     }
 
-    init(providerToken: String?, currency: FiatCurrency, priceMinorUnits: Int?, usdRateMinorUnits: Int?) {
+    init(providerToken: SealedSecret?, currency: FiatCurrency, priceMinorUnits: Int?, usdRateMinorUnits: Int?) {
         self.providerToken = providerToken
         self.currency = currency
         self.priceMinorUnits = priceMinorUnits
@@ -101,7 +103,7 @@ struct CardPaymentConfig: Codable, Sendable {
     /// rest of their configuration.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        providerToken = try c.decodeIfPresent(String.self, forKey: .providerToken).map(SecretBox.open)
+        providerToken = try c.decodeIfPresent(SealedSecret.self, forKey: .providerToken)
         currency = (try? c.decode(FiatCurrency.self, forKey: .currency)) ?? .rub
         priceMinorUnits = try c.decodeIfPresent(Int.self, forKey: .priceMinorUnits)
         usdRateMinorUnits = try c.decodeIfPresent(Int.self, forKey: .usdRateMinorUnits)
@@ -109,21 +111,26 @@ struct CardPaymentConfig: Codable, Sendable {
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encodeIfPresent(providerToken.map(SecretBox.seal), forKey: .providerToken)
+        try c.encodeIfPresent(providerToken, forKey: .providerToken)
         try c.encode(currency, forKey: .currency)
         try c.encodeIfPresent(priceMinorUnits, forKey: .priceMinorUnits)
         try c.encodeIfPresent(usdRateMinorUnits, forKey: .usdRateMinorUnits)
     }
 
+    /// The token, or nil when there is none — or when it was sealed under a key
+    /// this process does not have, which must read as "not configured" rather
+    /// than send an empty token to Telegram.
+    var token: String? { providerToken?.value }
+
     var isEnabled: Bool {
-        guard let token = providerToken, !token.isEmpty else { return false }
+        guard token != nil else { return false }
         return (priceMinorUnits ?? 0) > 0
     }
 
     /// Card top-ups need a token and an FX rate; the subscription price is
     /// irrelevant to them.
     var creditsEnabled: Bool {
-        guard let token = providerToken, !token.isEmpty else { return false }
+        guard token != nil else { return false }
         return (usdRateMinorUnits ?? 0) > 0
     }
 
@@ -145,13 +152,18 @@ struct CardPaymentConfig: Codable, Sendable {
 
     /// Token masked for display: enough to recognize, useless to steal.
     var maskedToken: String? {
-        guard let token = providerToken, !token.isEmpty else { return nil }
+        guard let token else { return nil }
         guard token.count > 14 else { return String(repeating: "•", count: token.count) }
         return "\(token.prefix(10))…\(token.suffix(4))"
     }
 
     /// True for tokens BotFather marks as test-mode (`:TEST:` segment).
     var isTestToken: Bool {
-        providerToken?.contains(":TEST:") ?? false
+        token?.contains(":TEST:") ?? false
     }
+
+    /// Stored, but sealed under a key this process does not have. Worth its own
+    /// line on the settings page: "не задано" would send the owner back to the
+    /// provider for a token that is still in the row — the key is what is gone.
+    var tokenIsUnreadable: Bool { providerToken?.isUnreadable ?? false }
 }

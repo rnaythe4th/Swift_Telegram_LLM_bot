@@ -10,6 +10,16 @@ import Foundation
 // card and crypto pages follow.
 
 extension BotMenuHandler {
+    /// How a stored signing word appears on the page. Three states, not two:
+    /// a word that is in the row but sealed under a key this process does not
+    /// have is neither "set" nor "missing", and telling the owner "не задано"
+    /// would send them to the vendor's cabinet for a value that never left.
+    static func secretLine(_ secret: SealedSecret?) -> String {
+        guard let secret else { return "<i>не задано</i>" }
+        if secret.isUnreadable { return Texts.secretUnreadable }
+        return ExternalPaymentConfig.mask(secret.value).map { "<code>\($0)</code>" } ?? "<i>не задано</i>"
+    }
+
     // MARK: - Super-admin actions
 
     func handleExternalPayAdminAction(
@@ -52,7 +62,7 @@ extension BotMenuHandler {
             try await promptExternal(
                 kind: .externalSecret,
                 title: "🔑 \(config.vendor.secretLabel)",
-                current: ExternalPaymentConfig.mask(config.secretWord).map { "<code>\($0)</code>" } ?? "<i>не задано</i>",
+                current: Self.secretLine(config.secretWord),
                 hint: "Подписывает ссылку на оплату. Скопируйте из кабинета \(config.vendor.displayName) → настройки кассы.",
                 chatKey: chatKey,
                 callback: callback,
@@ -63,7 +73,7 @@ extension BotMenuHandler {
             try await promptExternal(
                 kind: .externalCallbackSecret,
                 title: "🔐 \(config.vendor.callbackSecretLabel)",
-                current: ExternalPaymentConfig.mask(config.callbackSecret).map { "<code>\($0)</code>" } ?? "<i>не задано</i>",
+                current: Self.secretLine(config.callbackSecret),
                 hint: "Проверяет уведомления об оплате. Именно оно решает, включать ли доступ, — поэтому оно другое, чем первое.",
                 chatKey: chatKey,
                 callback: callback,
@@ -246,8 +256,8 @@ extension BotMenuHandler {
 
         <b>Реквизиты</b>
         \(vendor.merchantIDLabel): \(config.merchantID.map { "<code>\($0)</code>" } ?? "<i>не задан</i>")
-        \(vendor.secretLabel): \(ExternalPaymentConfig.mask(config.secretWord).map { "<code>\($0)</code>" } ?? "<i>не задано</i>")
-        \(vendor.callbackSecretLabel): \(ExternalPaymentConfig.mask(config.callbackSecret).map { "<code>\($0)</code>" } ?? "<i>не задано</i>")
+        \(vendor.secretLabel): \(Self.secretLine(config.secretWord))
+        \(vendor.callbackSecretLabel): \(Self.secretLine(config.callbackSecret))
 
         <b>URL оповещения</b> <i>(вставить в кабинет кассы)</i>
         \(callbackLine)

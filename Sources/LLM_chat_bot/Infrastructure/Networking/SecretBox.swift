@@ -75,50 +75,99 @@ enum SecretBox {
     static func isUnreadable(_ stored: String) -> Bool {
         stored.hasPrefix(prefix) && open(stored).isEmpty
     }
+
+    /// What a stored value should look like on its way back to the row: sealed
+    /// if it is still plaintext from before a key existed, and **untouched**
+    /// otherwise — including when this process cannot open it.
+    ///
+    /// Ciphertext we cannot read still belongs to whoever holds the key.
+    /// Re-sealing it would need the plaintext we do not have, and writing what
+    /// we *do* have (nothing) turns one deploy without `STATE_ENCRYPTION_KEY`
+    /// into permanently lost merchant credentials.
+    static func resealingPlaintext(_ stored: String) -> String {
+        stored.hasPrefix(prefix) ? stored : seal(stored)
+    }
 }
 
-/// A stored string that is encrypted at rest and masked everywhere else.
+/// A payment credential in the form the row holds it: ciphertext under the
+/// current key, ciphertext under a key this process does not have, or plaintext
+/// written before a key was ever configured.
 ///
-/// The type is what keeps this honest: `description` never yields the value, so
-/// an accidental interpolation into a log line or a menu page prints `‹secret›`
-/// rather than the card token. Reading it takes saying so.
-@propertyWrapper
-struct Secret: Codable, Sendable, Equatable, CustomStringConvertible {
-    /// Ciphertext as stored. Encoding and decoding go through this, so the
-    /// value is sealed exactly once on its way out and opened on its way in.
-    private var sealed: String
+/// Keeping the *sealed* form rather than the opened one is the whole point.
+/// `SecretBox.open` answers "" for a value it cannot decrypt, so a type that
+/// kept only that answer would write "" back the next time its document is
+/// saved: a rollback, a fresh environment or a rotated key would destroy the
+/// merchant credentials for good — including for the deploy that brings the key
+/// back — and nothing would say so, because an unreadable secret already reads
+/// as "not configured".
+///
+/// The type is also what keeps the plaintext from leaking by accident: there is
+/// no way to get it by interpolation (`description` prints `‹secret›`), and no
+/// way to overwrite it with a plain `String` — assigning one does not compile,
+/// which is what makes the round trip "read plaintext, write it back" —
+/// the shape of the bug above — impossible to write by mistake.
+struct SealedSecret: Codable, Sendable, Equatable, CustomStringConvertible, ExpressibleByStringLiteral {
+    /// Exactly what belongs in the column.
+    private var stored: String
 
-    var wrappedValue: String {
-        get { SecretBox.open(sealed) }
-        set { sealed = SecretBox.seal(newValue) }
+    init(_ plaintext: String) {
+        let trimmed = plaintext.trimmingCharacters(in: .whitespacesAndNewlines)
+        stored = SecretBox.seal(trimmed)
+        Self.registerForRedaction(trimmed)
     }
 
-    var projectedValue: Secret { self }
+    /// Literals only, for the settings the tests and defaults spell out. A
+    /// `String` variable — the shape a decoded-then-reassigned secret takes —
+    /// stays uninhabitable on purpose.
+    init(stringLiteral value: StringLiteralType) { self.init(value) }
 
-    init(wrappedValue: String) {
-        self.sealed = SecretBox.seal(wrappedValue)
+    /// The credential, or nil when it is empty or sealed under another key.
+    /// Callers read nil as "not configured", which is the fail-closed answer: a
+    /// checkout that cannot sign must not run.
+    var value: String? {
+        let opened = SecretBox.open(stored)
+        return opened.isEmpty ? nil : opened
     }
 
-    var isEmpty: Bool { wrappedValue.isEmpty }
+    /// Set, but not openable with the current key. A different problem from
+    /// "never configured" and a different line on the settings page: the value
+    /// is still in the row, and the key is what has to come back.
+    var isUnreadable: Bool { SecretBox.isUnreadable(stored) }
 
-    /// Set but not openable with the current key.
-    var isUnreadable: Bool { SecretBox.isUnreadable(sealed) }
+    var description: String {
+        if isUnreadable { return "‹unreadable›" }
+        return value == nil ? "" : "‹secret›"
+    }
 
-    var description: String { wrappedValue.isEmpty ? "" : "‹secret›" }
+    /// Equal when they mean the same thing. AES-GCM picks a fresh nonce per
+    /// seal, so two seals of one secret never share ciphertext.
+    static func == (lhs: SealedSecret, rhs: SealedSecret) -> Bool {
+        if lhs.stored == rhs.stored { return true }
+        guard let lhsValue = lhs.value, let rhsValue = rhs.value else { return false }
+        return lhsValue == rhsValue
+    }
 
     // MARK: - Codable
 
     init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        // Stored as-is: already ciphertext, or plaintext written before a key
-        // was configured.
-        sealed = try container.decode(String.self)
+        stored = try decoder.singleValueContainer().decode(String.self)
+        Self.registerForRedaction(value)
+    }
+
+    /// A secret has to be redactable from the moment it exists, whether it was
+    /// typed into a settings page or read back out of the row on restore — a
+    /// transport error quotes the request it failed on, and for the checkout
+    /// that request carries the signing word (§15). Doing it in the two
+    /// initialisers is what makes it cover every sealed field, including ones
+    /// added later, with nowhere to forget it.
+    private static func registerForRedaction(_ plaintext: String?) {
+        guard let plaintext, !plaintext.isEmpty else { return }
+        SecretRedactor.shared.register([plaintext])
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
-        // Re-seal on the way out, so a value that was plaintext before the key
-        // existed becomes encrypted the first time its document is rewritten.
-        try container.encode(SecretBox.seal(SecretBox.open(sealed)))
+        try container.encode(SecretBox.resealingPlaintext(stored))
     }
 }
+

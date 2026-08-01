@@ -86,7 +86,7 @@ extension BotCommandHandler {
                 await menuHandler.sendCryptoAssetChoice(chatKey: chatKey, invoker: invoker)
                 return
             }
-            if cardAvailable, let token = card.providerToken, let minorUnits = pricing.cardMinorUnits {
+            if cardAvailable, let token = card.token, let minorUnits = pricing.cardMinorUnits {
                 try await telegram.sendInvoice(.init(
                     chatID: chatKey.chatID,
                     title: "Премиум-доступ · \(ChatContextStore.subscriptionDays) дней\(discountNote)",

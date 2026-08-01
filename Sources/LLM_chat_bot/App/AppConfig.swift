@@ -36,11 +36,19 @@ enum EnvironmentKey: String {
 enum AppConfigError: LocalizedError {
     case missingEnvironment(EnvironmentKey)
     case badEncryptionKey
+    case badWebhookSecret
 
     var errorDescription: String? {
         switch self {
         case .missingEnvironment(let key):
             return "Missing env: \(key.rawValue)"
+        case .badWebhookSecret:
+            return """
+                \(EnvironmentKey.webhookSecret.rawValue) must be 1–256 characters of A-Z, a-z, 0-9, \
+                `_` or `-` — Telegram rejects anything else. Refusing to start: setWebhook would fail, \
+                the bot would quietly fall back to long polling, and the only sign would be one line in \
+                the log of a bot that otherwise looks healthy.
+                """
         case .badEncryptionKey:
             return """
                 \(EnvironmentKey.stateEncryptionKey.rawValue) must be 32 bytes of base64 \
@@ -115,6 +123,11 @@ struct AppConfig: Sendable {
 
         let updateMode = optionalEnv(.updateMode).flatMap { UpdateMode(rawValue: $0.lowercased()) } ?? .auto
 
+        let webhookSecret = optionalEnv(.webhookSecret)
+        if let webhookSecret, !isValidWebhookSecret(webhookSecret) {
+            throw AppConfigError.badWebhookSecret
+        }
+
         return .init(
             telegramToken: telegramToken,
             deepseekKey: deepseekKey,
@@ -131,7 +144,7 @@ struct AppConfig: Sendable {
             tonapiKey: optionalEnv(.tonapiKey),
             updateMode: updateMode,
             webhookPublicURL: webhookPublicURL,
-            webhookSecret: optionalEnv(.webhookSecret),
+            webhookSecret: webhookSecret,
             metricsToken: optionalEnv(.metricsToken),
             ownerUserID: optionalEnv(.ownerUserID).flatMap { Int($0) }.flatMap { $0 > 0 ? UserID($0) : nil },
             maxConcurrentGenerations: Int(optionalEnv(.maxConcurrentGenerations) ?? "") ?? 64,
@@ -148,6 +161,28 @@ struct AppConfig: Sendable {
     /// does not match that path, and Telegram then delivers into a 404 forever.
     /// Nothing looks wrong — `/ready` is 200, the log says "webhook registered"
     /// — the bot simply never hears from anyone again.
+    /// Telegram's rule for `secret_token`: 1–256 characters, and only
+    /// `A-Z a-z 0-9 _ -`.
+    ///
+    /// Checked here rather than discovered at `setWebhook`, because the failure
+    /// is invisible in exactly the way that matters: the call fails, the bot
+    /// falls back to long polling, everything keeps working, and the webhook
+    /// the deployment was built around is simply never registered.
+    static func isValidWebhookSecret(_ value: String) -> Bool {
+        guard (1...256).contains(value.count) else { return false }
+        return value.utf8.allSatisfy { byte in
+            switch byte {
+            case UInt8(ascii: "A")...UInt8(ascii: "Z"),
+                 UInt8(ascii: "a")...UInt8(ascii: "z"),
+                 UInt8(ascii: "0")...UInt8(ascii: "9"),
+                 UInt8(ascii: "_"), UInt8(ascii: "-"):
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     static func normalizedOrigin(_ raw: String) -> String {
         var value = raw.trimmingCharacters(in: .whitespaces)
         while value.hasSuffix("/") { value.removeLast() }

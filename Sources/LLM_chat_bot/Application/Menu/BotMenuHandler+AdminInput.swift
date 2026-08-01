@@ -546,12 +546,12 @@ extension BotMenuHandler {
                 toast = "✓ \(label) удалено"
             } else {
                 await state.updateExternalPaymentConfig {
-                    if isCallback { $0.callbackSecret = trimmed } else { $0.secretWord = trimmed }
+                    // Sealing it also registers it for redaction: the word was
+                    // typed into a chat and any transport error touching the
+                    // checkout URL would quote it back (§15).
+                    let secret = SealedSecret(trimmed)
+                    if isCallback { $0.callbackSecret = secret } else { $0.secretWord = secret }
                 }
-                // The secret was typed into a chat and will be quoted back by
-                // any transport error that touches the checkout URL — register
-                // it for redaction the moment it exists (§15).
-                SecretRedactor.shared.register([trimmed])
                 toast = "✓ \(label) сохранено. <b>Удалите своё сообщение с секретом из чата.</b>"
             }
 

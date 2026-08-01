@@ -38,7 +38,7 @@ extension ChatContextStore {
 
     func setCardProviderToken(_ token: String?) {
         let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        _cardConfig.providerToken = trimmed.isEmpty ? nil : trimmed
+        _cardConfig.providerToken = trimmed.isEmpty ? nil : SealedSecret(trimmed)
         dirtyConfigs.insert(.card)
     }
 

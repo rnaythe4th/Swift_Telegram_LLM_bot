@@ -352,7 +352,7 @@ extension BotMenuHandler {
 
         let tokenLine = card.maskedToken.map { masked in
             "<code>\(masked)</code>" + (card.isTestToken ? " · <b>ТЕСТОВЫЙ</b>" : "")
-        } ?? "<i>не задан</i>"
+        } ?? (card.tokenIsUnreadable ? Texts.secretUnreadable : "<i>не задан</i>")
         let priceLine = card.priceLabel.map { "<b>\($0)</b>" } ?? "<i>не задана</i>"
         let statusLine = card.isEnabled
             ? "🟢 Оплата картой <b>включена</b>."
@@ -361,7 +361,7 @@ extension BotMenuHandler {
         // they can be on while subscription sales are off and vice versa.
         var creditsLine = card.creditsEnabled
             ? "🟢 Пополнение баланса картой <b>включено</b> · \(card.usdRateLabel ?? "")"
-            : "🔴 Пополнение баланса картой <b>выключено</b>" + (card.providerToken == nil ? " — нужен токен" : " — задайте курс")
+            : "🔴 Пополнение баланса картой <b>выключено</b>" + (card.token == nil ? " — нужен токен" : " — задайте курс")
         if card.creditsEnabled {
             let packs = CreditPack.centsOptions.compactMap { cents -> String? in
                 guard let minor = card.creditMinorUnits(cents: cents) else { return nil }

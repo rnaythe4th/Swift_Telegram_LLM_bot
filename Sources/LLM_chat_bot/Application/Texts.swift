@@ -59,4 +59,10 @@ enum Texts {
     /// A button whose payload no longer resolves — a menu message left over
     /// from an older build, or one whose target has since been deleted.
     static let staleButton = "Кнопка устарела — откройте меню заново: /menu"
+
+    /// A payment credential that is stored but sealed under a different
+    /// `STATE_ENCRYPTION_KEY`. Said out loud rather than shown as "не задано":
+    /// the value is still in the row, so the fix is the key, not another trip
+    /// to the vendor's cabinet.
+    static let secretUnreadable = "🔒 <i>не читается — сменился ключ шифрования</i>"
 }

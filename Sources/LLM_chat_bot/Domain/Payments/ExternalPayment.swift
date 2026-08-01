@@ -162,8 +162,11 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
     /// should not cost a trip to the merchant cabinet.
     var enabled: Bool
     var merchantID: String?
-    var secretWord: String?
-    var callbackSecret: String?
+    /// The two signing words, kept in the form the row holds them (§5.6): they
+    /// are the only things here worth stealing on their own, and a key that is
+    /// briefly missing must not be able to overwrite them with nothing.
+    var secretWord: SealedSecret?
+    var callbackSecret: SealedSecret?
     var currency: FiatCurrency
     /// Subscription price in minor units; nil = subscriptions not sold here.
     var priceMinorUnits: Int?
@@ -200,8 +203,8 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
         vendor: ExternalPaymentVendor,
         enabled: Bool,
         merchantID: String?,
-        secretWord: String?,
-        callbackSecret: String?,
+        secretWord: SealedSecret?,
+        callbackSecret: SealedSecret?,
         currency: FiatCurrency,
         priceMinorUnits: Int?,
         usdRateMinorUnits: Int?,
@@ -232,10 +235,11 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
         // The two signing words are the only thing here worth stealing on its
         // own, so they are encrypted at rest (§5.6). A value written before a
         // key was configured comes back unchanged; one written under a key that
-        // is now gone comes back empty, which reads as "not configured" rather
-        // than as a wrong secret at the vendor.
-        secretWord = try c.decodeIfPresent(String.self, forKey: .secretWord).map(SecretBox.open)
-        callbackSecret = try c.decodeIfPresent(String.self, forKey: .callbackSecret).map(SecretBox.open)
+        // is now gone reads as "not configured" rather than as a wrong secret
+        // at the vendor — and keeps its ciphertext, so restoring the key
+        // restores the checkout.
+        secretWord = try c.decodeIfPresent(SealedSecret.self, forKey: .secretWord)
+        callbackSecret = try c.decodeIfPresent(SealedSecret.self, forKey: .callbackSecret)
         currency = (try? c.decode(FiatCurrency.self, forKey: .currency)) ?? .rub
         priceMinorUnits = try c.decodeIfPresent(Int.self, forKey: .priceMinorUnits)
         usdRateMinorUnits = try c.decodeIfPresent(Int.self, forKey: .usdRateMinorUnits)
@@ -248,8 +252,8 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
         try c.encode(vendor, forKey: .vendor)
         try c.encode(enabled, forKey: .enabled)
         try c.encodeIfPresent(merchantID, forKey: .merchantID)
-        try c.encodeIfPresent(secretWord.map(SecretBox.seal), forKey: .secretWord)
-        try c.encodeIfPresent(callbackSecret.map(SecretBox.seal), forKey: .callbackSecret)
+        try c.encodeIfPresent(secretWord, forKey: .secretWord)
+        try c.encodeIfPresent(callbackSecret, forKey: .callbackSecret)
         try c.encode(currency, forKey: .currency)
         try c.encodeIfPresent(priceMinorUnits, forKey: .priceMinorUnits)
         try c.encodeIfPresent(usdRateMinorUnits, forKey: .usdRateMinorUnits)
@@ -261,8 +265,8 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
     /// on the vendor's side with a signature error nobody can read.
     var credentials: ExternalPaymentCredentials? {
         guard let merchantID = merchantID?.nonEmpty,
-              let secretWord = secretWord?.nonEmpty,
-              let callbackSecret = callbackSecret?.nonEmpty else { return nil }
+              let secretWord = secretWord?.value,
+              let callbackSecret = callbackSecret?.value else { return nil }
         return ExternalPaymentCredentials(
             merchantID: merchantID,
             secretWord: secretWord,
@@ -301,13 +305,23 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
         return "\(value.prefix(2))\(String(repeating: "•", count: max(3, value.count - 4)))\(value.suffix(2))"
     }
 
+    /// Either of the signing words is stored but sealed under a key this
+    /// process does not have. Shown as its own state, because "не задано"
+    /// would send the owner to the merchant cabinet for values that are still
+    /// in the row: what has to come back is `STATE_ENCRYPTION_KEY`.
+    var secretsAreUnreadable: Bool {
+        (secretWord?.isUnreadable ?? false) || (callbackSecret?.isUnreadable ?? false)
+    }
+
     /// Trims, drops empties, dedups method codes and caps the list. Applied on
     /// every set *and* on decode, so a hand-edited row cannot grow unbounded.
+    ///
+    /// The signing words are deliberately untouched: they normalise themselves
+    /// when they are set, and a normalisation pass that re-derived them from
+    /// their plaintext would erase whatever it could not decrypt.
     var normalized: ExternalPaymentConfig {
         var copy = self
         copy.merchantID = merchantID?.trimmed.nonEmpty
-        copy.secretWord = secretWord?.trimmed.nonEmpty
-        copy.callbackSecret = callbackSecret?.trimmed.nonEmpty
         copy.priceMinorUnits = priceMinorUnits.flatMap { $0 > 0 ? $0 : nil }
         copy.usdRateMinorUnits = usdRateMinorUnits.flatMap { $0 > 0 ? $0 : nil }
         var seen = Set<String>()

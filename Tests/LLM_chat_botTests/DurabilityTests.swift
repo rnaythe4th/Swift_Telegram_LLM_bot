@@ -81,6 +81,20 @@ final class PublicOriginTests: XCTestCase {
         let origin = AppConfig.normalizedOrigin("https://bot.example.com/")
         XCTAssertEqual(origin + WebhookEndpoint.path, "https://bot.example.com/telegram/webhook")
     }
+
+    /// Telegram accepts `A-Z a-z 0-9 _ -` and nothing else in `secret_token`.
+    /// A secret it rejects fails `setWebhook`, the bot falls back to long
+    /// polling and keeps working — which is exactly why the misconfiguration
+    /// has to be caught at boot instead of found later.
+    func testAWebhookSecretTelegramWouldRejectIsRejectedAtBoot() {
+        XCTAssertTrue(AppConfig.isValidWebhookSecret("Abc_123-xyz"))
+        XCTAssertTrue(AppConfig.isValidWebhookSecret(UUID().uuidString + UUID().uuidString))
+        XCTAssertFalse(AppConfig.isValidWebhookSecret("has space"))
+        XCTAssertFalse(AppConfig.isValidWebhookSecret("секрет"))
+        XCTAssertFalse(AppConfig.isValidWebhookSecret("colon:separated"))
+        XCTAssertFalse(AppConfig.isValidWebhookSecret(""))
+        XCTAssertFalse(AppConfig.isValidWebhookSecret(String(repeating: "a", count: 257)))
+    }
 }
 
 final class StateDurabilityTests: XCTestCase {
@@ -271,6 +285,86 @@ final class SecretBoxTests: XCTestCase {
         XCTAssertEqual(decoded.secretWord, "word-one")
         XCTAssertEqual(decoded.callbackSecret, "word-two")
         XCTAssertEqual(decoded.merchantID, "7012")
+    }
+
+    /// The rule the whole `SealedSecret` type exists for: a deploy that comes
+    /// up without the key — a rollback, a fresh environment, a rotated value —
+    /// must not be able to overwrite credentials it cannot read.
+    ///
+    /// The old code decoded the secret to "" and wrote that "" back on the next
+    /// save, so one settings edit under the wrong key destroyed the merchant's
+    /// signing words for good: bringing the key back recovered nothing, and
+    /// nothing said so, because an unreadable secret already reads as "not
+    /// configured".
+    func testASecretSealedUnderAnotherKeySurvivesBeingRewritten() throws {
+        SecretBox.configure(base64Key: Self.key)
+        var config = ExternalPaymentConfig.default
+        config.merchantID = "7012"
+        config.secretWord = "word-one"
+        config.callbackSecret = "word-two"
+        let original = try JSONEncoder().encode(config)
+
+        // A process that boots with a different key: the words read as absent…
+        let otherKey = Data(repeating: 9, count: 32).base64EncodedString()
+        SecretBox.configure(base64Key: otherKey)
+        var reopened = try JSONDecoder().decode(ExternalPaymentConfig.self, from: original)
+        XCTAssertNil(reopened.secretWord?.value, "a word we cannot open must read as not configured")
+        XCTAssertNil(reopened.credentials, "and the checkout must refuse to sign anything")
+        XCTAssertTrue(reopened.secretsAreUnreadable, "…but the page must be able to say why")
+
+        // …and that process saves the row for an unrelated reason.
+        reopened.priceMinorUnits = 59_900
+        let rewritten = try JSONEncoder().encode(reopened.normalized)
+
+        // The key comes back. So do the credentials.
+        SecretBox.configure(base64Key: Self.key)
+        let recovered = try JSONDecoder().decode(ExternalPaymentConfig.self, from: rewritten)
+        XCTAssertEqual(recovered.secretWord?.value, "word-one")
+        XCTAssertEqual(recovered.callbackSecret?.value, "word-two")
+        XCTAssertEqual(recovered.priceMinorUnits, 59_900, "the edit that triggered the save still applied")
+        XCTAssertNotNil(recovered.credentials)
+    }
+
+    /// Same rule for the card token, which travels a different code path (its
+    /// own `Codable`) to the same row.
+    func testTheCardTokenSurvivesARewriteUnderAnotherKey() throws {
+        SecretBox.configure(base64Key: Self.key)
+        var config = CardPaymentConfig.empty
+        config.providerToken = "390540012:LIVE:secret"
+        let original = try JSONEncoder().encode(config)
+
+        SecretBox.configure(base64Key: Data(repeating: 3, count: 32).base64EncodedString())
+        var reopened = try JSONDecoder().decode(CardPaymentConfig.self, from: original)
+        XCTAssertNil(reopened.token)
+        XCTAssertFalse(reopened.isEnabled, "no token means no card sales, whatever the price says")
+        XCTAssertTrue(reopened.tokenIsUnreadable)
+        reopened.priceMinorUnits = 49_900
+        let rewritten = try JSONEncoder().encode(reopened)
+
+        SecretBox.configure(base64Key: Self.key)
+        XCTAssertEqual(
+            try JSONDecoder().decode(CardPaymentConfig.self, from: rewritten).token,
+            "390540012:LIVE:secret"
+        )
+    }
+
+    /// A secret that comes back out of storage has to be redactable before
+    /// anything can quote it: a transport error prints the request it failed
+    /// on, and for the checkout that request carries the signing word. Only the
+    /// *typing* path used to register it, so every restart left the running
+    /// process with an unregistered secret.
+    func testDecodingASecretRegistersItForRedaction() throws {
+        SecretBox.configure(base64Key: Self.key)
+        var config = ExternalPaymentConfig.default
+        config.callbackSecret = "callback-word-from-storage"
+        let row = try JSONEncoder().encode(config)
+
+        _ = try JSONDecoder().decode(ExternalPaymentConfig.self, from: row)
+
+        XCTAssertFalse(
+            SecretRedactor.shared.redact("POST /pay?sign=callback-word-from-storage")
+                .contains("callback-word-from-storage")
+        )
     }
 
     func testCardTokenIsEncryptedInTheStoredRow() throws {

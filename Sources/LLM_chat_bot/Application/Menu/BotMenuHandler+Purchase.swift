@@ -372,7 +372,7 @@ extension BotMenuHandler {
                 return
             }
             let packCard = await state.cardConfig()
-            guard packCard.creditsEnabled, let token = packCard.providerToken,
+            guard packCard.creditsEnabled, let token = packCard.token,
                   let minorUnits = packCard.creditMinorUnits(cents: cents) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Пополнение картой отключено")
                 return
@@ -453,7 +453,7 @@ extension BotMenuHandler {
             let card = await state.cardConfig()
             let cardKey = state.userKey(userID: callback.from.id)
             let cardPricing = await state.subscriptionPricing(key: cardKey)
-            guard card.isEnabled, let token = card.providerToken, let minorUnits = cardPricing.cardMinorUnits else {
+            guard card.isEnabled, let token = card.token, let minorUnits = cardPricing.cardMinorUnits else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Оплата картой отключена")
                 return
             }

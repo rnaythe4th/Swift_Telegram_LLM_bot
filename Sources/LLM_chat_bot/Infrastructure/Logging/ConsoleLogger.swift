@@ -26,11 +26,15 @@ struct ConsoleLogger: LoggerPort {
         self.format = format
     }
 
+    /// Read through `EnvironmentKey` like every other setting: a logger that
+    /// spells its own variable names is a second place for `LOG_LEVEL` to be
+    /// misspelled, and the failure is invisible — the level silently stays at
+    /// its default.
     static func fromEnvironment() -> ConsoleLogger {
         let environment = ProcessInfo.processInfo.environment
         return ConsoleLogger(
-            minLevel: LogLevel(name: environment["LOG_LEVEL"] ?? "") ?? .info,
-            format: Format(name: environment["LOG_FORMAT"] ?? "")
+            minLevel: LogLevel(name: environment[EnvironmentKey.logLevel.rawValue] ?? "") ?? .info,
+            format: Format(name: environment[EnvironmentKey.logFormat.rawValue] ?? "")
         )
     }
 
