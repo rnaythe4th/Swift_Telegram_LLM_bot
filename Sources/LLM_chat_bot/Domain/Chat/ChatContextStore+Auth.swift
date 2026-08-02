@@ -203,9 +203,13 @@ extension ChatContextStore {
             return true
         }
         // Per-chat whitelisted user IDs (set by tenant owner for this chat).
-        if let chatID, let userID {
+        // An identified key *is* a userID (`#<id>`, §6), so a caller that only
+        // has the key still gets the guest checked: passing the id separately
+        // used to be the difference between the tap letting somebody in and the
+        // redraw a minute later telling the same person they have no access.
+        if let chatID, let account = userID ?? key?.userID {
             let tenant = tenantState(for: chatID)
-            if tenant.whitelistedUserIDs.contains(userID), tenant.isActive {
+            if tenant.whitelistedUserIDs.contains(account), tenant.isActive {
                 return true
             }
         }

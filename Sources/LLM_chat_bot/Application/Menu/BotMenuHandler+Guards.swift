@@ -45,13 +45,42 @@ extension BotMenuHandler {
                       refusal: refusal)
     }
 
-    /// Subscription, sponsor, licence or a positive balance — the line between
-    /// "picks a reference mode" and "takes the settings apart".
-    func hasFullAccess(_ callback: CallbackQuery, chatKey: ChatKey) async -> Bool {
-        await state.hasFullModelAccess(
-            key: invokerKey(callback),
-            userID: callback.from.id,
-            chatID: chatKey.chatID
+    /// Does this person meet the requirement, whatever it is? The one place the
+    /// four audiences are turned into store questions, so the tap gate
+    /// (`processAction`), the page gate (`showPage`) and the redraw gate
+    /// (`renderPage`) cannot drift into asking three different things.
+    ///
+    /// `userID` is taken from the key when the caller has none: the whitelist a
+    /// guest is on is keyed by userID, and dropping it made a redraw refuse
+    /// somebody the tap had just let in.
+    func satisfies(_ access: MenuAccess, chatKey: ChatKey, invoker: UserKey?, userID: UserID? = nil) async -> Bool {
+        switch access {
+        case .everyone:
+            return true
+        case .paidAccess:
+            return await state.hasFullModelAccess(
+                key: invoker,
+                userID: userID ?? invoker?.userID,
+                chatID: chatKey.chatID
+            )
+        case .chatOperator:
+            return await state.isAdmin(invoker, chatID: chatKey.chatID)
+        case .superAdmin:
+            return await state.isSuperAdmin(invoker)
+        }
+    }
+
+    /// Same question for a tap, with the refusal toast already sent.
+    func allow(
+        _ access: MenuAccess,
+        chatKey: ChatKey,
+        callback: CallbackQuery,
+        refusal: String
+    ) async -> Bool {
+        await require(
+            await satisfies(access, chatKey: chatKey, invoker: invokerKey(callback), userID: callback.from.id),
+            callback: callback,
+            refusal: refusal
         )
     }
 

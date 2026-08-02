@@ -225,7 +225,7 @@ extension BotCommandHandler {
     // MARK: - Gates shared with the menu
 
     /// Hand-tuning a setting a reference mode owns. The same line the menu
-    /// draws (`MenuPage.requiresFullAccess`): a free chat picks a mode, a
+    /// draws (`MenuPage.access == .paidAccess`): a free chat picks a mode, a
     /// paying one takes the settings apart. Without this the commands are a
     /// back door around the paywall — and around the cost controls behind it.
     func requireFullAccessForTuning(chatKey: ChatKey, fromUser: TelegramUser?) async -> Bool {

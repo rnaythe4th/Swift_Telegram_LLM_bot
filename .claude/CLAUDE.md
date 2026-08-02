@@ -67,7 +67,7 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
 - `Menu/` (§11): `MenuRoute` (`MenuCommand` + разбор/сборка `callback_data`),
   `MenuScreen` (текст+клавиатура, инвариант «влезает в одно сообщение»;
   `Keyboard`), `MenuPage` (каталог страниц + `backLabel`, `isPersonal`,
-  `requiresFullAccess`, `requiresOperator`), `SuperHelpSection`,
+  `access`/`MenuAccess`), `SuperHelpSection`,
   `BotMenuHandler+Guards` (`requireSuperAdmin/requireRootSuperAdmin/
   requireAdmin/requireOperator` — сами отвечают тостом), `BotMenuHandler`
   (диспетчер `processAction`, `showPage`/`renderPage`) + страницы по файлам:
@@ -707,14 +707,24 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
 `superreminders`, `superonboarding`, `supermodes`, `superspend`, `superref`,
 `supersrc`).
 
-- **Гейт `super*`-страниц перечисляет их поимённо** в обработчике `nav:` (не
-  через `default`): новая `super*`-страница обязана быть дописана в список,
-  иначе провалится в `default: break` и откроется всем. Закреплено тестом.
-- **Гейты тонкой настройки живут на `MenuPage`**: `requiresFullAccess` (`temp`,
-  `reasoning`) → отказ ведёт на страницу покупки (`PurchaseSource.tuning`);
-  `requiresOperator` (`provider`, ручки памяти) → суперадмин/админ чата. Оба
-  проверяются **дважды**: в `showPage` и в `renderPage`. Хаб `tuning` не закрыт.
-- **`MenuScreen`** — текст + клавиатура + `fitsInOneMessage`; `warnIfOversized`
+- **Гейт — данные, а не список имён**: `MenuAccess` (`everyone`/`paidAccess`/
+  `chatOperator`/`superAdmin`) висит на `MenuPage.access` и `MenuCommand.access`,
+  оба switch'а **исчерпывающие без `default`** — новая страница и новая команда
+  не собираются, пока не назовут аудиторию (рукописный перечень `super*` в
+  `nav:` открывал всё, что забыли дописать). Предикат один —
+  `satisfies(_:chatKey:invoker:userID:)`, и его спрашивают **трижды**: тап
+  (`processAction`, до всякого обработчика), показ (`showPage`/`nav:`) и
+  перерисовка (`renderPage`, идёт без callback после введённого текста —
+  минуты спустя, когда роль могли снять). Отказ `paidAccess` ведёт на страницу
+  покупки (`PurchaseSource.tuning`), отказ роли — тост. Хаб `tuning` открыт.
+  Частные `require…` внутри обработчиков остаются: это более тонкое правило
+  (чья заготовка, чей чат), а не дубль.
+- **Клавиатура живёт дольше прав**: сообщение с кнопками остаётся в чате после
+  истечения подписки и в группе общее для всех, поэтому настройка, множащая
+  цену ответа (`temp`, `reasoning`, `provider`, длина памяти), закрыта на
+  **тапе**, а не только на отрисовке страницы.
+- **`MenuScreen`** — текст + клавиатура + `fitsInOneMessage` (`length` —
+  UTF-16, как считает Telegram); `warnIfOversized`
   логирует переросшую страницу. Ряды копит `Keyboard` (`row`, `row(if:)`,
   `insertBeforeLast`, `extendLastRow`). Списки на `super*`-страницах режутся с
   явной строкой «показаны первые N» (editMessage обрезает после ~3900).
@@ -954,7 +964,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~503 теста; 483 без сети
+`swift test` — цель `LLM_chat_botTests`, ~509 тестов; 489 без сети
 (`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
 `TEST_DATABASE_URL`:
 

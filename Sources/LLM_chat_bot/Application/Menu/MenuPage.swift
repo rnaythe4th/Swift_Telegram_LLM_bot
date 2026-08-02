@@ -3,6 +3,32 @@ import Foundation
 // Every page of the inline menu. The raw value is what travels in
 // callback_data (`menu:nav:<page>`).
 
+/// The right a page or an action needs. One vocabulary for both, because both
+/// gates ask the same four questions — and because a keyboard outlives the
+/// rights of whoever it was drawn for: the message with the buttons stays in the
+/// chat after a subscription lapses, after a super-admin is removed, and in a
+/// group it is shared with everyone.
+enum MenuAccess: Sendable, Equatable {
+    case everyone
+    /// Premium, a sponsor, a licence or a positive balance.
+    case paidAccess
+    /// Whoever runs the bot here: the super-admin, or the admin whose licence
+    /// pays for this chat (`ChatContextStore.isAdmin` answers both).
+    case chatOperator
+    case superAdmin
+
+    /// Toast shown when the gate refuses. Never empty for a real refusal — a
+    /// button that goes quiet reads as a broken bot, not as a "no".
+    var refusal: String {
+        switch self {
+        case .everyone: return ""
+        case .paidAccess: return "⭐ Тонкая настройка — с премиумом или балансом"
+        case .chatOperator: return Texts.adminOnly
+        case .superAdmin: return Texts.superAdminOnly
+        }
+    }
+}
+
 enum MenuPage: String, CaseIterable {
     case main
     case role
@@ -62,43 +88,55 @@ enum MenuPage: String, CaseIterable {
         }
     }
 
-    /// Pages a free-tier chat may not open: the hand-tuning of settings the
-    /// reference modes own. Two reasons, and both matter.
+    /// Who may open this page.
     ///
-    /// Money: memory length and reasoning are per-answer cost multipliers, and
-    /// a free user turning them up spends the owner's money, not their own.
-    /// Sales: "разобрать настройки по винтикам" is a real thing to sell, it
-    /// costs nothing to give away with premium, and refusing it here is the
-    /// only paywall a user meets *while already trying to do something*.
+    /// The `switch` is exhaustive on purpose — no `default`. A gate written as
+    /// "these pages, by name, everything else is public" fails open: the page
+    /// added next release is not in the list, so it opens for anyone who taps
+    /// its button. Here a new page does not compile until it has named its
+    /// audience, which is the only version of this check that survives being
+    /// forgotten.
     ///
-    /// Checked twice, like `isPersonal` — at `showPage` and again at
-    /// `renderPage`, because a page can also be redrawn after a typed value.
-    /// Note that `.tuning` itself is *not* here. It is the hub, and a free user
-    /// must be able to open it and see what is inside: a locked door you can
-    /// look through sells, a door that will not open at all just annoys — the
-    /// same reason the ⭐ modes stay on the settings page.
-    var requiresFullAccess: Bool {
+    /// `.tuning` is deliberately public. It is the hub, and a free user must be
+    /// able to open it and see what is inside: a locked door you can look
+    /// through sells, a door that will not open at all just annoys — the same
+    /// reason the ⭐ modes stay on the settings page. The pages behind it that
+    /// actually multiply the price of an answer are not.
+    var access: MenuAccess {
         switch self {
-        case .temp, .reasoning: return true
-        default: return false
+        case .main, .role, .model, .stats, .history, .tuning, .helpPage, .pay,
+             .referral, .close:
+            return .everyone
+
+        // Money: style and reasoning are per-answer cost multipliers, and a free
+        // user turning them up spends the owner's money, not their own. Sales:
+        // "разобрать настройки по винтикам" is a real thing to sell, and this is
+        // the one paywall a person meets *while already trying to do something*.
+        case .temp, .reasoning:
+            return .paidAccess
+
+        // "Сервис ИИ" is plumbing — the wrong choice there silently disables
+        // reasoning and half the models. The admin pages are the licence
+        // owner's own settings.
+        case .provider, .adminPanel, .adminHelp, .adminChats, .adminUsers,
+             .adminWhitelist, .adminDefaults, .adminInvite:
+            return .chatOperator
+
+        case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard,
+             .superExternalPay, .superFreeModels, .superTenants, .superAdmins,
+             .superSimulate, .superChats, .superAds, .superBalances, .superFunnel,
+             .superReminders, .superOnboarding, .superModes, .superReferrals,
+             .superTraffic, .superSpend:
+            return .superAdmin
         }
     }
 
-    /// Pages only whoever runs the bot may open: the super-admin, or the admin
-    /// whose subscription pays for this chat. "Сервис ИИ" is plumbing — the
-    /// wrong choice there silently disables reasoning and half the models, and
-    /// no user has ever needed it.
-    var requiresOperator: Bool {
-        switch self {
-        case .provider: return true
-        default: return false
-        }
-    }
-
+    /// What the person is told when the gate refuses. Comes from the audience
+    /// unless the page has a better sentence of its own.
     var restrictedNotice: String {
         switch self {
         case .provider: return "🔒 Сервис ИИ настраивает владелец бота"
-        default: return "⭐ Тонкая настройка — с премиумом или балансом"
+        default: return access.refusal
         }
     }
 

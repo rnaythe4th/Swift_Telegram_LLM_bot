@@ -111,7 +111,7 @@ extension BotMenuHandler {
 
     /// Everything a mode sets, taken apart. The page opens for anyone; the
     /// controls that cost money carry a ⭐ and lead to the offer instead
-    /// (`MenuPage.requiresFullAccess`, enforced on both the nav path and the
+    /// (`MenuPage.access == .paidAccess`, enforced on both the nav path and the
     /// redraw-after-input path).
     func renderTuning(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)

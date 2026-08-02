@@ -26,7 +26,15 @@ struct MenuScreen {
 
     /// A page longer than this does not come back shortened — it comes back
     /// with the tail missing, which reads as settings that are not there.
-    var fitsInOneMessage: Bool { text.count <= MessageSplitter.telegramMaxChars }
+    ///
+    /// Measured in UTF-16 code units, because that is what Telegram counts and
+    /// what the gateway decides by: every menu page is emoji from its first
+    /// line, and an emoji is one `Character` and two of these. Counting
+    /// characters said a page fits while the API was already cutting it.
+    var fitsInOneMessage: Bool { length <= MessageSplitter.telegramMaxChars }
+
+    /// Length in the unit Telegram counts in.
+    var length: Int { text.utf16.count }
 }
 
 /// Rows of buttons, accumulated. Thin on purpose: it exists so a renderer says

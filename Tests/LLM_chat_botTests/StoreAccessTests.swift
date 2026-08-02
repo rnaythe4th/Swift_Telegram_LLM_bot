@@ -103,6 +103,21 @@ final class StoreAccessTests: XCTestCase {
         XCTAssertFalse(covered)
     }
 
+    /// An identified key *is* a userID, so a caller that has only the key must
+    /// get the same answer as one that also passes the id. The two used to
+    /// disagree: a tap (which carries the id) let a whitelisted guest in, and
+    /// the redraw a minute later (which carries only the key) refused them.
+    func testWhitelistedGuestIsFoundByTheKeyAlone() async {
+        let (store, sponsor) = await makeSponsoredStore()
+        _ = await store.assignChat(chatID: -303, to: sponsor)
+        await store.addToWhitelist(userID: 14, chatID: -303)
+
+        let withID = await store.hasFullModelAccess(key: UserKey.identified(14), userID: 14, chatID: -303)
+        let keyOnly = await store.hasFullModelAccess(key: UserKey.identified(14), chatID: -303)
+        XCTAssertTrue(withID)
+        XCTAssertTrue(keyOnly, "the key carries the userID the whitelist is keyed by")
+    }
+
     func testPositiveBalanceGivesFullAccessButNotSubscriptionCoverage() async {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 12, username: "payer", firstName: nil)

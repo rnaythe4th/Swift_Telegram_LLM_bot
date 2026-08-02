@@ -124,6 +124,20 @@ final class MenuPageRenderTests: XCTestCase {
         }
     }
 
+    /// "Fits" has to be measured the way Telegram measures — in UTF-16 code
+    /// units. Every menu page starts with an emoji and is full of them; counting
+    /// `Character`s said a page of emoji fits while the API was already cutting
+    /// it, and a truncated page is settings that are simply not there.
+    func testPageLengthIsMeasuredTheWayTelegramMeasuresIt() {
+        let emoji = String(repeating: "🟢", count: MessageSplitter.telegramMaxChars / 2 + 1)
+        let screen = MenuScreen(emoji)
+        XCTAssertLessThan(emoji.count, MessageSplitter.telegramMaxChars, "premise: it looks short in characters")
+        XCTAssertGreaterThan(screen.length, MessageSplitter.telegramMaxChars)
+        XCTAssertFalse(screen.fitsInOneMessage, "an emoji is two units, not one")
+
+        XCTAssertTrue(MenuScreen(String(repeating: "a", count: MessageSplitter.telegramMaxChars)).fitsInOneMessage)
+    }
+
     /// A "← …" button must name the page it actually opens. The label used to
     /// be typed next to the destination at every call site, so the two could
     /// drift apart — and had: the same page was reached by "← К моему
@@ -160,6 +174,48 @@ final class MenuPageRenderTests: XCTestCase {
         }
     }
 
+    /// The redraw path has to gate exactly like the tap path. It runs after a
+    /// typed value — minutes after the button was pressed, long enough for a
+    /// licence to lapse or a super-admin to be taken off the roster — and it
+    /// used to check only two of the four audiences, so an admin or super-admin
+    /// page was redrawn for whoever no longer had the right to see it.
+    func testRoleGatedPagesRefuseSomebodyWhoLostTheRole() async {
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
+        let stranger = UserKey.identified(plainID)
+
+        for page in MenuPage.allCases where page.access == .superAdmin || page.access == .chatOperator {
+            let screen = await menu.renderPage(page, chatKey: chat, invoker: stranger)
+            XCTAssertEqual(
+                screen.text,
+                page.restrictedNotice,
+                "\(page) drew the owner's settings for somebody without the role"
+            )
+        }
+
+        // …and still opens for the owner, or the gate would be a wall.
+        for page in MenuPage.allCases where page.access == .superAdmin || page.access == .chatOperator {
+            let screen = await menu.renderPage(page, chatKey: chat, invoker: UserKey.identified(ownerID))
+            XCTAssertNotEqual(screen.text, page.restrictedNotice, "\(page) refused the owner")
+        }
+    }
+
+    /// The audience of a page is data, not a list somebody remembers to update.
+    /// Every `super*` page must say so on the type — that is what both gates
+    /// read, and a page in the wrong bucket opens for everyone who taps it.
+    func testEverySuperPageDeclaresItsAudience() {
+        for page in MenuPage.allCases where page.rawValue.hasPrefix("super") {
+            XCTAssertEqual(page.access, .superAdmin, "\(page) is not gated as a super-admin page")
+        }
+        for page in MenuPage.allCases where page.rawValue.hasPrefix("admin") {
+            XCTAssertEqual(page.access, .chatOperator, "\(page) is not gated as an admin page")
+        }
+        // Every refusal says something: a button that goes quiet reads as a
+        // broken bot rather than as a "no".
+        for page in MenuPage.allCases where page.access != .everyone {
+            XCTAssertFalse(page.restrictedNotice.isEmpty, "\(page) refuses without a word")
+        }
+    }
+
     /// Hand-tuning is what premium unlocks. A free chat gets the offer instead
     /// of the controls — on the page itself, not only behind the nav gate,
     /// because a menu redrawn after a typed value never passes that gate.
@@ -167,7 +223,7 @@ final class MenuPageRenderTests: XCTestCase {
         let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
         let stranger = UserKey.identified(plainID)
 
-        for page in MenuPage.allCases where page.requiresFullAccess {
+        for page in MenuPage.allCases where page.access == .paidAccess {
             let screen = await menu.renderPage(page, chatKey: chat, invoker: stranger)
             XCTAssertEqual(screen.text, page.restrictedNotice, "\(page) rendered its controls for a free chat")
         }
@@ -175,7 +231,7 @@ final class MenuPageRenderTests: XCTestCase {
         // A wallet is enough — the line is "pays for something", not "has a
         // subscription" (CLAUDE.md §6, `hasFullModelAccess`).
         await store.seedBalance(key: stranger, amount: .usd(1.0))
-        for page in MenuPage.allCases where page.requiresFullAccess {
+        for page in MenuPage.allCases where page.access == .paidAccess {
             let screen = await menu.renderPage(page, chatKey: chat, invoker: stranger)
             XCTAssertNotEqual(screen.text, page.restrictedNotice, "\(page) still refused a paying chat")
         }

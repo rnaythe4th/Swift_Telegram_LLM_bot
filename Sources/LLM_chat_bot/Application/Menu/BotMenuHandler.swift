@@ -131,6 +131,16 @@ final class BotMenuHandler: Sendable {
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
+        // The floor under every action. A keyboard outlives the rights of
+        // whoever it was drawn for — an old menu message in a group is tapped by
+        // members who never had those rights, and a lapsed subscription leaves
+        // its buttons behind — so the tap is judged now, not when it was drawn.
+        // The handlers keep their own `require…` guards for the finer rules.
+        guard await allow(route.command.access,
+                          chatKey: chatKey,
+                          callback: callback,
+                          refusal: route.command.access.refusal) else { return }
+
         switch route.command {
         case .open, .close, .nav, .noop:
             try await processNavigationAction(route: route, chatKey: chatKey, callback: callback, message: message)
@@ -189,26 +199,20 @@ final class BotMenuHandler: Sendable {
                 try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
                 return
             }
-            if menuPage.requiresOperator {
-                guard await requireOperator(callback, chatKey: chatKey, refusal: menuPage.restrictedNotice) else { return }
-            } else if menuPage.requiresFullAccess, !(await hasFullAccess(callback, chatKey: chatKey)) {
-                // Sell rather than refuse. This is somebody actively reaching
-                // for something premium includes, which is the one moment a
-                // paywall is welcome instead of annoying (GROWTH.md P0.4).
+            // One gate for every page, read off the page itself (`MenuPage
+            // .access`). It used to be two hand-written lists of page names
+            // here, which is a gate that fails open: a page missing from the
+            // list fell through to `default: break` and opened for anyone.
+            if !(await satisfies(menuPage.access, chatKey: chatKey, invoker: invokerKey(callback), userID: callback.from.id)) {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: menuPage.restrictedNotice)
-                try await showPage(.pay, chatKey: chatKey, callback: callback, message: message, purchaseSource: .tuning)
+                // Sell rather than refuse, but only where there is something to
+                // sell: this is somebody actively reaching for what premium
+                // includes, the one moment a paywall is welcome instead of
+                // annoying (GROWTH.md P0.4). A missing *role* is not for sale.
+                if menuPage.access == .paidAccess {
+                    try await showPage(.pay, chatKey: chatKey, callback: callback, message: message, purchaseSource: .tuning)
+                }
                 return
-            }
-            switch menuPage {
-            // Every `super*` page belongs here — the buttons inside them are
-            // gated separately, but the pages themselves show the owner's
-            // configuration and numbers.
-            case .superAdmin, .superAdminHelp, .superStars, .superCrypto, .superCard, .superExternalPay, .superFreeModels, .superTenants, .superAdmins, .superSimulate, .superChats, .superAds, .superBalances, .superFunnel, .superReminders, .superOnboarding, .superModes, .superReferrals, .superTraffic, .superSpend:
-                guard await requireSuperAdmin(callback) else { return }
-            case .adminPanel, .adminHelp, .adminChats, .adminUsers, .adminWhitelist, .adminDefaults, .adminInvite:
-                guard await requireAdmin(callback, chatKey: chatKey) else { return }
-            default:
-                break
             }
             // `nav:pay:<source>` — the optional third token says which surface
             // sent the person here; anything unknown reads as the plain menu.
@@ -258,7 +262,7 @@ final class BotMenuHandler: Sendable {
     /// the page.
     private func warnIfOversized(_ screen: MenuScreen, page: MenuPage) {
         guard !screen.fitsInOneMessage else { return }
-        logger.warning("menu page \(page.rawValue) is \(screen.text.count) chars and will be truncated")
+        logger.warning("menu page \(page.rawValue) is \(screen.length) UTF-16 units and will be truncated")
     }
 
     private func closeMenu(callback: CallbackQuery, message: MaybeInaccessibleMessage) async throws {
@@ -331,15 +335,16 @@ final class BotMenuHandler: Sendable {
             rows.row(navButtons())
             return MenuScreen(page.privateOnlyNotice, rows)
         }
-        // Same second line of defence for the restricted settings pages: this
-        // path renders without a callback (a menu redrawn after a typed value),
-        // so the nav gate above has not run.
-        if page.requiresOperator, !(await state.isAdmin(invoker, chatID: chatKey.chatID)) {
-            return MenuScreen(page.restrictedNotice, [navButtons()])
-        }
-        if page.requiresFullAccess,
-           !(await state.hasFullModelAccess(key: invoker, chatID: chatKey.chatID)) {
-            var rows: Keyboard = [[buyButton("⚡ Открыть тонкую настройку", source: .tuning)]]
+        // Same second line of defence for every gated page, not just the two
+        // that used to be listed here. This path renders without a callback (a
+        // menu redrawn after a typed value), minutes after the button was
+        // tapped — long enough for a licence to lapse or a super-admin to be
+        // removed, and the page would have been drawn to them anyway.
+        if !(await satisfies(page.access, chatKey: chatKey, invoker: invoker)) {
+            var rows = Keyboard()
+            if page.access == .paidAccess {
+                rows.row([buyButton("⚡ Открыть тонкую настройку", source: .tuning)])
+            }
             rows.row(navButtons())
             return MenuScreen(page.restrictedNotice, rows)
         }

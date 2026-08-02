@@ -33,6 +33,48 @@ enum MenuCommand: String, CaseIterable {
     case spend
     // Help
     case sahelp
+
+    /// The right this action needs, regardless of the page it was drawn on.
+    ///
+    /// A page gate is not enough. The keyboard is a message: it stays in the
+    /// chat after the subscription that opened it lapses, after the super-admin
+    /// who drew it is removed, and in a group it is shared with every member —
+    /// so the tap has to be judged when it arrives, not when the button was
+    /// painted. `history` had this check and said so in a comment; `temp`,
+    /// `reasoning` and `provider` are the same class of setting and had none.
+    ///
+    /// Exhaustive on purpose: a new command names its audience or the build
+    /// stops. The individual handlers keep their own `require…` guards — this
+    /// is the floor, not a replacement for the finer rules inside (who owns
+    /// this preset, whose chat this is).
+    var access: MenuAccess {
+        switch self {
+        case .open, .close, .nav, .noop:
+            return .everyone
+
+        // Per-chat settings anyone in the chat may touch, plus the pickers whose
+        // finer rules (whose preset, whose chat) live in the handler.
+        case .role, .model, .stats, .reset, .help, .mode, .pm, .buy:
+            return .everyone
+
+        // Cost multipliers. `history` also carries an operator check inside for
+        // the length buttons, while its "clear" and "dump" stay open to the chat.
+        case .history:
+            return .everyone
+        case .temp, .reasoning:
+            return .paidAccess
+        case .provider:
+            return .chatOperator
+
+        case .tenant, .wl, .def:
+            return .chatOperator
+
+        case .smode, .sa, .stenant, .sim, .sinspect, .ads, .markup, .dailylimit,
+             .stars, .freemodels, .sbal, .crypto, .card, .extpay,
+             .funnel, .promo, .rem, .examples, .onb, .sref, .strf, .spend, .sahelp:
+            return .superAdmin
+        }
+    }
 }
 
 /// `<command>[:<arg>…]`, already split and validated.

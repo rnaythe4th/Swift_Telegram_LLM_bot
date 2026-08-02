@@ -281,6 +281,42 @@ final class EndToEndTests: XCTestCase {
         XCTAssertEqual(help.maxHistory, 12)
     }
 
+    /// A keyboard outlives the rights of whoever it was drawn for: the message
+    /// stays in the chat when a subscription lapses, and in a group everyone can
+    /// reach it. So the settings that multiply the price of an answer are gated
+    /// where the tap arrives, not only where the button is painted — the page
+    /// gate never sees a button that was drawn an hour ago.
+    func testCostMultiplyingTapsAreRefusedWithoutAccess() async throws {
+        let chat = ChatKey(chatID: userID.privateChat, threadID: 0)
+        await store.setDailyPremiumLimit(0)
+        let before = await store.fetchHelp(chatKey: chat)
+
+        for action in ["menu:temp:1.9", "menu:reasoning:set:high", "menu:provider:deepseek"] {
+            await telegram.reset()
+            await orchestrator.dispatch(update: callback(action))
+
+            let answered = await telegram.waitForCall("answerCallbackQuery")
+            let refusal = try XCTUnwrap(answered, "\(action): the tap was not answered at all")
+            XCTAssertTrue(
+                refusal.body.contains("премиум") || refusal.body.contains("Только"),
+                "\(action): expected a refusal, got: \(refusal.body)"
+            )
+        }
+
+        let after = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(after.temp, before.temp, "a free user changed the answer style")
+        XCTAssertEqual(after.provider, before.provider, "a free user changed the upstream service")
+        let reasoning = await store.reasoningEnabled(chatKey: chat)
+        XCTAssertFalse(reasoning, "a free user turned reasoning on")
+    }
+
+    /// The same taps must still work for whoever pays for the chat.
+    func testCostMultiplyingTapsWorkForTheOwner() async throws {
+        let chat = ChatKey(chatID: ownerID.privateChat, threadID: 0)
+        await orchestrator.dispatch(update: callback("menu:temp:1.9", userID: ownerID))
+        try await waitUntil { await self.store.fetchHelp(chatKey: chat).temp == 1.9 }
+    }
+
     /// The owner gets the page, and it carries the super-admin controls.
     func testSuperAdminPageOpensForTheOwner() async throws {
         await orchestrator.dispatch(update: callback("menu:nav:superadmin", userID: ownerID))
