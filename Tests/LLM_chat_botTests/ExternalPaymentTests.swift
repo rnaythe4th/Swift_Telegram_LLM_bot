@@ -139,6 +139,22 @@ final class ExternalPaymentSignatureTests: XCTestCase {
         XCTAssertNil(FiatCurrency.minorUnits(from: "abc"))
         XCTAssertEqual(FiatCurrency.decimalString(minorUnits: 49_900), "499.00")
     }
+
+    /// The amount arrives from outside the process. Anything it cannot express
+    /// has to come back as "malformed" — an overflow trap here would kill the
+    /// bot on every delivery of the same notification.
+    func testAbsurdAmountsAreRefusedRatherThanCrashing() {
+        XCTAssertNil(FiatCurrency.minorUnits(from: "99999999999999999999"))
+        XCTAssertNil(FiatCurrency.minorUnits(from: "100000000000000000"))
+        // The exact boundary: one more kopeck than `Int` can hold is malformed,
+        // and the largest amount that fits still parses.
+        XCTAssertEqual(FiatCurrency.minorUnits(from: "92233720368547758.07"), Int.max)
+        XCTAssertNil(FiatCurrency.minorUnits(from: "92233720368547758.08"))
+        // A sign is not part of an amount: "-0.50" must not read as 50 kopecks.
+        XCTAssertNil(FiatCurrency.minorUnits(from: "-0.50"))
+        XCTAssertNil(FiatCurrency.minorUnits(from: "+5"))
+        XCTAssertNil(FiatCurrency.minorUnits(from: "-5"))
+    }
 }
 
 final class ExternalPaymentConfigTests: XCTestCase {
@@ -202,6 +218,22 @@ final class ExternalPaymentConfigTests: XCTestCase {
         // Title is optional; the code doubles as one.
         XCTAssertEqual(ExternalPaymentMethod.parse("13")?.title, "13")
         XCTAssertNil(ExternalPaymentMethod.parse("   "))
+    }
+
+    /// Rail names and the merchant id are typed by a person and printed into a
+    /// message a payer receives. Unescaped, a `<` does not garble the receipt —
+    /// Telegram refuses the whole send and the payer gets no checkout at all.
+    func testTypedValuesAreEscapedWhereTheyBecomeMarkup() {
+        let method = ExternalPaymentMethod(code: "4<4", title: "Карта <РФ> & МИР")
+        XCTAssertEqual(method.escapedTitle, "Карта &lt;РФ&gt; &amp; МИР")
+        XCTAssertEqual(method.escapedCode, "4&lt;4")
+        // The button caption is not markup and keeps the text as typed.
+        XCTAssertEqual(method.title, "Карта <РФ> & МИР")
+
+        var config = ExternalPaymentConfig.default
+        config.merchantID = "70<12"
+        XCTAssertEqual(config.escapedMerchantID, "70&lt;12")
+        XCTAssertNil(ExternalPaymentConfig.default.escapedMerchantID)
     }
 
     func testSecretsAreMaskedForDisplay() {
@@ -289,26 +321,64 @@ final class ExternalPaymentStoreTests: XCTestCase {
         XCTAssertNil(otherPurpose)
     }
 
-    /// A notification is delivered until acknowledged, so the second one must
-    /// find nothing left to pay for.
-    func testAnOrderCanOnlyBePaidOnce() async {
+    /// A notification is delivered until acknowledged, so the same payment
+    /// arriving twice must find nothing left to pay for.
+    func testTheSamePaymentSettlesAnOrderOnlyOnce() async {
         let store = await configuredStore()
         await store.upsertExternalOrder(makeOrder(id: "a1", purpose: .subscription, method: nil))
-        let first = await store.markExternalOrderPaid(id: "a1", vendorPaymentID: "987")
-        XCTAssertEqual(first?.status, .paid)
-        let second = await store.markExternalOrderPaid(id: "a1", vendorPaymentID: "987")
-        XCTAssertNil(second)
+        guard case .settled(let first, let closedAs)? = await store.settleExternalOrder(id: "a1", vendorPaymentID: "987") else {
+            return XCTFail("the first notification has to settle the order")
+        }
+        XCTAssertEqual(first.status, .paid)
+        XCTAssertNil(closedAs, "an open order was settled in the ordinary way")
+        guard case .duplicate? = await store.settleExternalOrder(id: "a1", vendorPaymentID: "987") else {
+            return XCTFail("the same vendor payment must not be applied twice")
+        }
     }
 
-    func testExpiredOrdersStopBeingPayable() async {
+    /// The vendor's page stays payable after our own hour is up: a bank app
+    /// round-trip that finished late is real money against an order we had
+    /// written off. Refusing it would leave the payer charged with nothing.
+    func testMoneyArrivingAfterTheOrderExpiredIsStillSettled() async {
         let store = await configuredStore()
         var stale = makeOrder(id: "old", purpose: .subscription, method: nil)
         stale.expiresAt = Date().addingTimeInterval(-60)
         await store.upsertExternalOrder(stale)
         let expired = await store.expireDueExternalOrders()
         XCTAssertEqual(expired.count, 1)
-        let paid = await store.markExternalOrderPaid(id: "old", vendorPaymentID: "987")
-        XCTAssertNil(paid)
+        // Expired for the purposes of opening a checkout…
+        let openAgain = await store.openExternalOrder(
+            payerKey: UserKey.identified(42),
+            purpose: .subscription,
+            methodCode: nil
+        )
+        XCTAssertNil(openAgain, "an expired order must not be handed out as a live link")
+        // …but never a reason to keep money that arrived against it.
+        guard case .settled(let order, let closedAs)? = await store.settleExternalOrder(id: "old", vendorPaymentID: "987") else {
+            return XCTFail("a late payment must still be applied")
+        }
+        XCTAssertEqual(order.status, .paid)
+        XCTAssertEqual(closedAs, .expired, "the caller has to be able to say this one came in late")
+    }
+
+    /// Same rule for an order the payer closed here and then paid anyway: the
+    /// vendor's page was already open in their browser.
+    func testMoneyArrivingAfterTheOrderWasCancelledIsStillSettled() async {
+        let store = await configuredStore()
+        await store.upsertExternalOrder(makeOrder(id: "c1", purpose: .credit(cents: 500), method: nil))
+        let cancelled = await store.cancelExternalOrder(id: "c1")
+        XCTAssertTrue(cancelled)
+        guard case .settled(_, let closedAs)? = await store.settleExternalOrder(id: "c1", vendorPaymentID: "987") else {
+            return XCTFail("a cancelled order that was paid anyway must be applied")
+        }
+        XCTAssertEqual(closedAs, .cancelled)
+    }
+
+    /// An order that is gone entirely is the one case no retry can fix.
+    func testAnUnknownOrderSettlesNothing() async {
+        let store = await configuredStore()
+        let settlement = await store.settleExternalOrder(id: "nope", vendorPaymentID: "987")
+        XCTAssertNil(settlement)
     }
 
     /// The callback lands in whichever process is alive by then, so both the

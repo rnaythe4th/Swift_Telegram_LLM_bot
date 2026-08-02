@@ -72,12 +72,7 @@ struct Preset: Codable, Sendable, Equatable, Identifiable {
     var escapedValue: String { Self.escapedForMessage(value) }
     var escapedProvider: String? { provider.map(Self.escapedForMessage) }
 
-    static func escapedForMessage(_ raw: String) -> String {
-        raw
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-    }
+    static func escapedForMessage(_ raw: String) -> String { MessageText.escaped(raw) }
 }
 
 /// The four preset lists, wherever they appear (tenant-wide or per-chat).

@@ -34,12 +34,19 @@ enum FiatCurrency: String, Codable, Sendable, CaseIterable {
         return String(format: "%d.%02d %@", whole, frac, symbol)
     }
 
-    /// `499`, `499.00`, `499,5`, `1 499.90` → minor units.
+    /// `499`, `499.00`, `499,5`, `1 499.90` → minor units. nil for anything that
+    /// is not a plain non-negative decimal amount in this currency.
     ///
     /// Integer math on purpose: a payment gateway quotes the amount as a
     /// decimal string and signs that exact string, and `Double("0.29") * 100`
     /// is 28.999999999999996 — one rounding away from rejecting a real payment
     /// as an amount mismatch.
+    ///
+    /// The arithmetic reports overflow instead of trapping. This parses a field
+    /// that arrives from outside the process, and an amount too large to express
+    /// has to come back as "malformed" — a crash here would take the whole bot
+    /// down and hand the vendor a retry loop against a process that dies on
+    /// every delivery.
     static func minorUnits(from raw: String) -> Int? {
         let cleaned = raw
             .replacingOccurrences(of: " ", with: "")
@@ -47,16 +54,23 @@ enum FiatCurrency: String, Codable, Sendable, CaseIterable {
             .replacingOccurrences(of: ",", with: ".")
         guard !cleaned.isEmpty else { return nil }
         let parts = cleaned.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
-        guard let whole = Int(parts[0]), whole >= 0 else { return nil }
-        guard parts.count > 1 else { return whole * 100 }
+        // Digits only: `Int` would happily read "-0" and "+5", and a sign that
+        // survives into an amount is a sum nobody quoted.
+        let wholeText = parts[0]
+        guard !wholeText.isEmpty, wholeText.allSatisfy(\.isASCIIDigit), let whole = Int(wholeText) else { return nil }
+        let (scaled, overflow) = whole.multipliedReportingOverflow(by: 100)
+        guard !overflow else { return nil }
+        guard parts.count > 1 else { return scaled }
         let fraction = parts[1]
-        guard fraction.allSatisfy(\.isNumber) else { return nil }
+        guard fraction.allSatisfy(\.isASCIIDigit) else { return nil }
         // More than two decimals is not an amount in this currency; rounding it
         // silently would credit a different sum than the one that was paid.
         guard fraction.count <= 2 else { return nil }
         let padded = fraction + String(repeating: "0", count: 2 - fraction.count)
         guard let cents = Int(padded) else { return nil }
-        return whole * 100 + cents
+        let (total, sumOverflow) = scaled.addingReportingOverflow(cents)
+        guard !sumOverflow else { return nil }
+        return total
     }
 
     /// The decimal string a gateway is given and signs: always two decimals, so
@@ -64,6 +78,12 @@ enum FiatCurrency: String, Codable, Sendable, CaseIterable {
     static func decimalString(minorUnits: Int) -> String {
         String(format: "%d.%02d", minorUnits / 100, abs(minorUnits % 100))
     }
+}
+
+private extension Character {
+    /// `isNumber` also matches Arabic-Indic and full-width digits, which `Int`
+    /// then refuses anyway — an amount is ASCII digits or it is not an amount.
+    var isASCIIDigit: Bool { isASCII && isNumber }
 }
 
 /// Card acquiring configuration (Telegram Payments via a BotFather-connected

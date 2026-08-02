@@ -51,7 +51,7 @@ extension BotMenuHandler {
             try await promptExternal(
                 kind: .externalMerchantID,
                 title: "🏬 \(config.vendor.merchantIDLabel)",
-                current: config.merchantID.map { "<code>\($0)</code>" } ?? "<i>не задан</i>",
+                current: config.escapedMerchantID.map { "<code>\($0)</code>" } ?? "<i>не задан</i>",
                 hint: "Отправьте \(config.vendor.merchantIDLabel.lowercased()) одним сообщением — он указан в кабинете \(config.vendor.displayName) на странице кассы.",
                 chatKey: chatKey,
                 callback: callback,
@@ -117,7 +117,7 @@ extension BotMenuHandler {
         case "addmethod":
             let listing = config.methods.isEmpty
                 ? "<i>пусто — на странице кассы покупатель выберет сам</i>"
-                : config.methods.map { "• <code>\($0.code)</code> — \($0.title)" }.joined(separator: "\n")
+                : config.methods.map { "• <code>\($0.escapedCode)</code> — \($0.escapedTitle)" }.joined(separator: "\n")
             try await promptExternal(
                 kind: .externalMethodAdd,
                 title: "➕ Способ оплаты",
@@ -228,7 +228,7 @@ extension BotMenuHandler {
         let methodsLine = config.methods.isEmpty
             ? "<i>не заданы — покупатель выберет способ на странице кассы</i>"
             : config.methods
-                .map { "\(toggleMark($0.enabled)) \($0.title) · <code>\($0.code)</code>" }
+                .map { "\(toggleMark($0.enabled)) \($0.escapedTitle) · <code>\($0.escapedCode)</code>" }
                 .joined(separator: "\n")
 
         // Without this URL nothing arrives back and every payment hangs — so it
@@ -255,7 +255,7 @@ extension BotMenuHandler {
         \(packsLine)
 
         <b>Реквизиты</b>
-        \(vendor.merchantIDLabel): \(config.merchantID.map { "<code>\($0)</code>" } ?? "<i>не задан</i>")
+        \(vendor.merchantIDLabel): \(config.escapedMerchantID.map { "<code>\($0)</code>" } ?? "<i>не задан</i>")
         \(vendor.secretLabel): \(Self.secretLine(config.secretWord))
         \(vendor.callbackSecretLabel): \(Self.secretLine(config.callbackSecret))
 
@@ -341,7 +341,7 @@ extension BotMenuHandler {
             try await editOrAnswer(
                 callback: callback,
                 message: message,
-                screen: checkoutScreen(checkout, methodTitle: methods.first { $0.code == methodCode }?.title)
+                screen: checkoutScreen(checkout, methodTitle: methods.first { $0.code == methodCode }?.escapedTitle)
             )
         } catch {
             logger.error("external checkout failed: \(error)")
@@ -384,6 +384,9 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
+    /// `methodTitle` arrives already escaped (`ExternalPaymentMethod
+    /// .escapedTitle`): it is text a super-admin typed and this screen is the
+    /// one message a paying customer must receive.
     private func checkoutScreen(_ checkout: ExternalCheckout, methodTitle: String?) -> MenuScreen {
         let order = checkout.order
         let what: String

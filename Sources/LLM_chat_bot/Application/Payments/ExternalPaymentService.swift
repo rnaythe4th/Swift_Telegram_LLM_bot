@@ -89,14 +89,24 @@ actor ExternalPaymentService {
         // page is already on the payer's screen, and two live orders for one
         // purchase mean two payments waiting to happen. The amount has to match
         // too — a winback discount that expired between taps is a new price.
-        if let existing = await state.openExternalOrder(
+        let open = await state.openExternalOrders(
             payerKey: payerKey,
             purpose: purpose,
             methodCode: normalizedMethod
-        ), existing.amountMinorUnits == amountMinorUnits {
-            let url = try resolver.adapter(for: existing.vendor)
-                .checkoutURL(order: existing, credentials: credentials)
-            return ExternalCheckout(order: existing, url: url)
+        )
+        let reusable = open.first { $0.amountMinorUnits == amountMinorUnits }
+        // Whatever else is still open for this purchase quotes a price we no
+        // longer offer, and every open order is a page somebody can still pay.
+        // Closing them leaves exactly one live link per purchase — and if one of
+        // them is paid regardless, `settleExternalOrder` still credits it.
+        for stale in open where stale.id != reusable?.id {
+            await state.cancelExternalOrder(id: stale.id)
+            logger.info("external order \(stale.id) superseded: \(stale.amountLabel) → \(config.currency.format(minorUnits: amountMinorUnits))")
+        }
+        if let reusable {
+            let url = try resolver.adapter(for: reusable.vendor)
+                .checkoutURL(order: reusable, credentials: credentials)
+            return ExternalCheckout(order: reusable, url: url)
         }
 
         let now = Date()
@@ -210,13 +220,31 @@ actor ExternalPaymentService {
             return .acknowledged(adapter.acknowledgement)
         }
 
-        guard let paidOrder = await state.markExternalOrderPaid(
+        guard let settlement = await state.settleExternalOrder(
             id: order.id,
             vendorPaymentID: callback.vendorPaymentID
         ) else {
+            // The order vanished between the two lookups (a prune, a restore).
+            // No retry brings it back.
+            logger.error("external order \(order.id) disappeared mid-settlement (\(vendor.rawValue))")
+            return .acknowledged(adapter.acknowledgement)
+        }
+        let paidOrder: ExternalPaymentOrder
+        switch settlement {
+        case .duplicate:
             // Already settled — the vendor simply did not hear our first YES.
             await metrics.increment(MetricName.paymentsDeduplicated)
             return .acknowledged(adapter.acknowledgement)
+
+        case .settled(let order, let closedAs):
+            if let closedAs {
+                // Money against an order we had given up on: the payer finished
+                // in their bank app after the link expired, or paid a page they
+                // had cancelled here. It is still their money and it still buys
+                // what it was opened for — but it is worth saying out loud.
+                logger.warning("external order \(order.id) was \(closedAs.rawValue) when \(order.amountLabel) arrived — settling anyway")
+            }
+            paidOrder = order
         }
 
         let outcome = await fulfillment.fulfil(PaymentReceipt(

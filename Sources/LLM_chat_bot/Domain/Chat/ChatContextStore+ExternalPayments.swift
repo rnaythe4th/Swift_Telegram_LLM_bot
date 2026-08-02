@@ -81,39 +81,72 @@ extension ChatContextStore {
             .sorted { $0.createdAt < $1.createdAt }
     }
 
-    /// An open order for the same person and the same thing, still valid.
+    /// Every still-valid open order for the same person and the same purchase,
+    /// newest first. More than one can exist only when the price moved between
+    /// taps (a winback discount that expired), and the caller closes the
+    /// leftovers — but the order here is fixed rather than left to the
+    /// dictionary, because "which link does the payer hold" must not depend on
+    /// hash order.
+    func openExternalOrders(
+        payerKey: UserKey,
+        purpose: PurchasePurpose,
+        methodCode: String?,
+        now: Date = Date()
+    ) -> [ExternalPaymentOrder] {
+        let key = resolved(payerKey)
+        return _externalOrders.values
+            .filter {
+                $0.isOpen
+                    && $0.expiresAt > now
+                    && $0.payerKey == key
+                    && $0.purpose == purpose
+                    && $0.methodCode == methodCode
+                    && $0.currency == _externalPaymentConfig.currency
+                    && $0.vendor == _externalPaymentConfig.vendor
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    /// The open order for this purchase the payer most likely has on screen.
     /// Tapping "оплатить" twice must reuse the link rather than open a second
-    /// order: the vendor's page is already sitting on the payer's screen, and
-    /// two live orders mean two possible payments for one purchase.
+    /// order: the vendor's page is already sitting there, and two live orders
+    /// mean two possible payments for one purchase.
     func openExternalOrder(
         payerKey: UserKey,
         purpose: PurchasePurpose,
         methodCode: String?,
         now: Date = Date()
     ) -> ExternalPaymentOrder? {
-        let key = resolved(payerKey)
-        return _externalOrders.values.first {
-            $0.isOpen
-                && $0.expiresAt > now
-                && $0.payerKey == key
-                && $0.purpose == purpose
-                && $0.methodCode == methodCode
-                && $0.currency == _externalPaymentConfig.currency
-                && $0.vendor == _externalPaymentConfig.vendor
-        }
+        openExternalOrders(payerKey: payerKey, purpose: purpose, methodCode: methodCode, now: now).first
     }
 
-    /// Marks an order paid. Returns nil when the order is gone or no longer
-    /// open, so the caller can treat "already settled" as a duplicate
-    /// notification instead of paying twice.
-    func markExternalOrderPaid(id: String, vendorPaymentID: String, now: Date = Date()) -> ExternalPaymentOrder? {
-        guard var order = _externalOrders[id], order.isOpen else { return nil }
+    /// Applies a vendor notification to an order.
+    ///
+    /// Only the *same* vendor payment landing twice is a duplicate. An order we
+    /// had already closed — expired because the bank app took an hour,
+    /// cancelled because the payer tapped «отменить счёт» and then paid the page
+    /// anyway — is settled all the same: the money is real, the signature and
+    /// the amount were checked before we got here, and refusing it would leave
+    /// the payer charged with nothing to show. Paying twice is prevented one
+    /// layer down, by the idempotency key in `bot_payment`.
+    ///
+    /// nil means the order is gone entirely, which no retry can fix.
+    func settleExternalOrder(
+        id: String,
+        vendorPaymentID: String,
+        now: Date = Date()
+    ) -> ExternalOrderSettlement? {
+        guard var order = _externalOrders[id] else { return nil }
+        if order.status == .paid, order.vendorPaymentID == vendorPaymentID {
+            return .duplicate(order)
+        }
+        let closedAs: ExternalPaymentOrderStatus? = order.isOpen ? nil : order.status
         order.status = .paid
         order.paidAt = now
         order.vendorPaymentID = vendorPaymentID
         _externalOrders[id] = order
         markExternalOrderDirty(id)
-        return order
+        return .settled(order, closedAs: closedAs)
     }
 
     /// Puts an order back in play after a settlement that could not be

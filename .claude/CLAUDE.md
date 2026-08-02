@@ -330,10 +330,18 @@ then null`, ручное «+N дней» (`extendTenantSubscription` →
   подписывает ссылку словом 1, касса шлёт уведомление, подписанное словом 2, на
   `/payments/<vendor>`, бот отвечает `YES`. `credentials` возвращает тройку или
   nil (полунастроенный магазин не выдаёт ссылку). Счёт живёт час, повторный тап
-  переиспользует открытый; дедуп `ext:<vendor>:<paymentID>`. `fulfil` вернул
-  `.failed` → `reopenExternalOrder` и **не** `YES`. Подпись — единственная
+  переиспользует открытый (`openExternalOrders` — детерминированный список,
+  новые первыми; сменилась цена → старые счета закрываются, живая ссылка одна);
+  дедуп `ext:<vendor>:<paymentID>`. `fulfil` вернул
+  `.failed` → `reopenExternalOrder` и **не** `YES`. Уведомление судит
+  `settleExternalOrder` → `ExternalOrderSettlement`: дубль — только **тот же**
+  `vendorPaymentID`, а счёт, закрытый нами (`expired`/`cancelled`), — это
+  деньги, пришедшие поздно, и он зачисляется (`closedAs` идёт в лог).
+  Страница кассы живёт дольше нашего часа, и «не открыт» ≠ «уже оплачено».
+  Подпись — единственная
   аутентификация: сравнение константное (`SecretGuard`), нет подписи = неверная,
-  неподписанный POST → 400.
+  неподписанный POST → 400. Сумма уведомления парсится целочисленно
+  (`FiatCurrency.minorUnits`, переполнение и знак → `malformedCallback`).
 
 **`PaymentFulfillmentService.fulfil(_:)` — единственный post-payment путь** для
 всех рельсов: дедуп → активация/зачисление → `claimChatForPayment` → съедание
@@ -854,6 +862,11 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   сверяется с `remainingAtomic`.
 - Новый вход в кассу проверяет `StateDurability`.
 - Идемпотентность обязательна на каждом пути (charge_id / tx-хеш / `ext:…`).
+- Счёт, закрытый **нами** (истёк, отменён), — не повод не зачислить пришедшие
+  по нему деньги: дублем считается только повтор того же платежа вендора.
+- Сумма, пришедшая снаружи, парсится целыми числами и с проверкой переполнения:
+  негодное значение — ошибка разбора, а не трап (`Int(Double)` роняет процесс, и
+  вендор будет доставлять то же уведомление в цикле).
 
 **Доступ и роли**
 - «Можно ли модель без оплаты» — только `allowedFreeModelIDs()`, **nil =
@@ -904,8 +917,11 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   (`UserIdentity.displayLabel`, `sanitizeName`, `ChatMetaInfo.displayLabel`).
   То же для текста, который человек ввёл сам и который печатается в сообщение:
   хранится сырым (значение уезжает в модель), экранируется в точке, где
-  становится разметкой (`Preset.escapedDisplay`/`escapedValue`). Подпись кнопки
-  — не разметка, там сырой текст.
+  становится разметкой (одна реализация — `MessageText.escaped`; поверх неё
+  `Preset.escapedDisplay`/`escapedValue`, `ExternalPaymentMethod
+  .escapedTitle`/`escapedCode`, `ExternalPaymentConfig.escapedMerchantID`).
+  Подпись кнопки — не разметка, там сырой текст. Настройка, набранная
+  суперадмином, тоже чужой текст: `<` в ней роняет **весь** `sendMessage`.
 - Значения атрибутов экранируются целиком, включая кавычки
   (`escapeAttributeValue`); `href` — только `allowedURLSchemes` (http, https, tg,
   mailto, tel), иначе тег `<a>` отбрасывается вместе со схемой.
@@ -938,7 +954,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~497 тестов; 477 без сети
+`swift test` — цель `LLM_chat_botTests`, ~503 теста; 483 без сети
 (`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
 `TEST_DATABASE_URL`:
 
@@ -972,7 +988,8 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 ведёт на реальную страницу, влезает в одно сообщение, гейты, лимит 64 байта),
 `TelegramGatewayTests` (длина в UTF-16 на развилке «одним или резать»; какой
 отказ Bot API — успех), `MediaResolverTests` (бюджет вложений на ход),
-`PaymentTypeTests`, `ExternalPaymentTests`, `ExternalCallbackEndToEndTests`,
+`PaymentTypeTests`, `ExternalPaymentTests`, `ExternalCallbackEndToEndTests`
+(поздняя оплата закрытого счёта, одна живая ссылка на покупку, абсурдная сумма),
 `CryptoSettlementTests` (срок по времени перевода, хеш зачтён один раз,
 негодный курс TON), `EndToEndTests` + `FakeTelegram.swift` (апдейт входит в
 `dispatch`, проходит настоящие команды/меню/генерацию и настоящий

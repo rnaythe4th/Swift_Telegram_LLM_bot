@@ -335,6 +335,103 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         XCTAssertEqual(report.counters[FunnelEvent.paid.rawValue], 1, "the payment must count once, not twice")
     }
 
+    /// The vendor's page outlives our order: a payer who finishes in their bank
+    /// app after the hour is up has paid real money. Answering YES and crediting
+    /// nothing — which is what treating "not open" as a duplicate did — is the
+    /// one outcome this rail must never produce.
+    func testMoneyArrivingAfterTheOrderExpiredStillOpensPremium() async throws {
+        let checkout = try await service.createCheckout(
+            payerKey: store.userKey(userID: payerID),
+            payerUserID: payerID,
+            chatID: payerID.privateChat,
+            threadID: nil,
+            purpose: .subscription,
+            methodCode: nil
+        )
+        // The hour passes and somebody else's checkout sweeps the stale orders.
+        var stale = await store.externalOrder(id: checkout.order.id)!
+        stale.expiresAt = Date().addingTimeInterval(-60)
+        await store.upsertExternalOrder(stale)
+        let expired = await store.expireDueExternalOrders()
+        XCTAssertEqual(expired.count, 1)
+
+        let verdict = await service.handleCallback(
+            vendor: .freekassa,
+            parameters: notification(orderID: checkout.order.id, amount: "499.00", paymentID: "777")
+        )
+        guard case .acknowledged = verdict else {
+            return XCTFail("a late but valid payment must be acknowledged, got \(verdict)")
+        }
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertTrue(subscription.isActive, "the money arrived, so the access has to")
+        let call = await telegram.waitForCall("sendMessage", containing: "Оплата получена")
+        XCTAssertNotNil(call, "the payer still has to be told")
+
+        // And it is still one payment: the vendor's retry changes nothing.
+        _ = await service.handleCallback(
+            vendor: .freekassa,
+            parameters: notification(orderID: checkout.order.id, amount: "499.00", paymentID: "777")
+        )
+        let report = await store.funnelReport()
+        XCTAssertEqual(report.counters[FunnelEvent.paid.rawValue], 1)
+    }
+
+    /// A price that moved between two taps (a winback discount that ran out)
+    /// must leave exactly one payable link: two open orders for one purchase are
+    /// two payments waiting to happen, and which one gets reused must not depend
+    /// on dictionary order.
+    func testAPriceChangeLeavesOneLivePaymentLink() async throws {
+        let payerKey = store.userKey(userID: payerID)
+        let first = try await service.createCheckout(
+            payerKey: payerKey,
+            payerUserID: payerID,
+            chatID: payerID.privateChat,
+            threadID: nil,
+            purpose: .subscription,
+            methodCode: nil
+        )
+        XCTAssertEqual(first.order.amountMinorUnits, 49_900)
+
+        await store.updateExternalPaymentConfig { $0.priceMinorUnits = 59_900 }
+        let second = try await service.createCheckout(
+            payerKey: payerKey,
+            payerUserID: payerID,
+            chatID: payerID.privateChat,
+            threadID: nil,
+            purpose: .subscription,
+            methodCode: nil
+        )
+        XCTAssertNotEqual(second.order.id, first.order.id, "a new price is a new order")
+        XCTAssertEqual(second.order.amountMinorUnits, 59_900)
+
+        let superseded = await store.externalOrder(id: first.order.id)
+        XCTAssertEqual(superseded?.status, .cancelled, "the link at the old price must stop being payable")
+        let open = await store.openExternalOrders(payerKey: payerKey, purpose: .subscription, methodCode: nil)
+        XCTAssertEqual(open.map(\.id), [second.order.id])
+
+        // A third tap reuses the live order rather than opening yet another.
+        let third = try await service.createCheckout(
+            payerKey: payerKey,
+            payerUserID: payerID,
+            chatID: payerID.privateChat,
+            threadID: nil,
+            purpose: .subscription,
+            methodCode: nil
+        )
+        XCTAssertEqual(third.order.id, second.order.id)
+
+        // And if the payer pays the superseded page anyway, the money still lands.
+        let verdict = await service.handleCallback(
+            vendor: .freekassa,
+            parameters: notification(orderID: first.order.id, amount: "499.00", paymentID: "888")
+        )
+        guard case .acknowledged = verdict else {
+            return XCTFail("a payment against a superseded order must be applied, got \(verdict)")
+        }
+        let subscription = await store.tenantSubscription(ownerKey: payerKey)
+        XCTAssertTrue(subscription.isActive)
+    }
+
     func testNotificationURLIsTheOneTheCabinetNeeds() async {
         let url = await service.callbackURL(for: .freekassa)
         XCTAssertEqual(url, "https://bot.example.com/payments/freekassa")

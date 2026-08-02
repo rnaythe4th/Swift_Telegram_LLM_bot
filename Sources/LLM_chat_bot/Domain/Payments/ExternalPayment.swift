@@ -112,6 +112,16 @@ struct ExternalPaymentMethod: Codable, Sendable, Equatable, Identifiable {
     var title: String
     var enabled: Bool
 
+    /// The rail name as it goes into a message. Typed by a super-admin and read
+    /// by a payer, so it is escaped where it becomes markup (§17): a `<` in a
+    /// title would not garble the receipt, it would make Telegram refuse the
+    /// whole send and the payer would get no checkout at all. Button captions
+    /// are not markup and keep `title`.
+    var escapedTitle: String { MessageText.escaped(title) }
+
+    /// Same for the vendor's rail code, which is also typed by hand.
+    var escapedCode: String { MessageText.escaped(code) }
+
     init(code: String, title: String, enabled: Bool = true) {
         self.code = code
         self.title = title
@@ -293,6 +303,11 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
         return max(raw, currency.minMinorUnits)
     }
 
+    /// Merchant id as it goes into the settings message — typed by hand, so it
+    /// is escaped where it becomes markup, like every other value a person
+    /// entered (§17).
+    var escapedMerchantID: String? { merchantID.map(MessageText.escaped) }
+
     var priceLabel: String? { priceMinorUnits.map { currency.format(minorUnits: $0) } }
 
     var usdRateLabel: String? { usdRateMinorUnits.map { "$1 ≈ \(currency.format(minorUnits: $0))" } }
@@ -388,6 +403,25 @@ struct ExternalPaymentOrder: Codable, Sendable, Equatable, Identifiable {
         let raw = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         return String(raw.prefix(24))
     }
+}
+
+/// What a signed notification turns out to be for the order it names.
+///
+/// Two cases, and the distinction is the whole point: "this order is not open"
+/// is not the same statement as "this money has already been applied". A payer
+/// who finishes in their bank app an hour later, or who tapped «отменить счёт»
+/// and paid the still-open page anyway, sends real money against an order we
+/// had closed — collapsing that into "duplicate" acknowledges the vendor and
+/// credits nothing, which is the one outcome this rail must never produce.
+enum ExternalOrderSettlement: Sendable, Equatable {
+    /// Apply it. `closedAs` is nil for the ordinary case and names the status
+    /// the order carried when the money arrived late (`expired`, `cancelled`)
+    /// — worth a log line, never a reason to keep the money.
+    case settled(ExternalPaymentOrder, closedAs: ExternalPaymentOrderStatus?)
+    /// This exact vendor payment is already applied: the aggregator retries
+    /// until it hears the acknowledgement, and a lost `YES` must not buy a
+    /// second month.
+    case duplicate(ExternalPaymentOrder)
 }
 
 /// Config + open orders in one row (`bot_config` → `external_payments`).

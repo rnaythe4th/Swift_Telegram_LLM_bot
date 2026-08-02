@@ -538,7 +538,7 @@ extension BotMenuHandler {
                 toast = "✓ \(config.vendor.merchantIDLabel) удалён"
             } else {
                 await state.updateExternalPaymentConfig { $0.merchantID = trimmed }
-                toast = "✓ \(config.vendor.merchantIDLabel): <code>\(trimmed)</code>"
+                toast = "✓ \(config.vendor.merchantIDLabel): <code>\(MessageText.escaped(trimmed))</code>"
             }
 
         case .externalSecret, .externalCallbackSecret:
@@ -561,16 +561,18 @@ extension BotMenuHandler {
             }
 
         case .externalPrice:
-            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
-            guard let value = Double(normalized), value >= 0 else {
+            // Parsed the same way an incoming amount is (`FiatCurrency
+            // .minorUnits`): integer math, no exponent notation, and a value too
+            // large to express comes back as "введите число" instead of
+            // trapping on the way into `Int`.
+            guard let minorUnits = FiatCurrency.minorUnits(from: trimmed) else {
                 toast = "⚠️ Введите число, например <code>499</code>, или <code>0</code> для отключения."
                 break
             }
-            if value == 0 {
+            if minorUnits == 0 {
                 await state.updateExternalPaymentConfig { $0.priceMinorUnits = nil }
                 toast = "✓ Подписка через кассу не продаётся."
             } else {
-                let minorUnits = Int((value * 100).rounded())
                 if minorUnits < config.currency.minMinorUnits {
                     toast = "⚠️ Минимум для \(config.currency.rawValue): \(config.currency.format(minorUnits: config.currency.minMinorUnits))"
                 } else {
@@ -580,16 +582,15 @@ extension BotMenuHandler {
             }
 
         case .externalUsdRate:
-            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
-            guard let value = Double(normalized), value >= 0 else {
+            guard let minorUnits = FiatCurrency.minorUnits(from: trimmed) else {
                 toast = "⚠️ Введите число, например <code>95</code>, или <code>0</code> для отключения."
                 break
             }
-            if value == 0 {
+            if minorUnits == 0 {
                 await state.updateExternalPaymentConfig { $0.usdRateMinorUnits = nil }
                 toast = "✓ Пополнение баланса через кассу отключено."
             } else {
-                await state.updateExternalPaymentConfig { $0.usdRateMinorUnits = Int((value * 100).rounded()) }
+                await state.updateExternalPaymentConfig { $0.usdRateMinorUnits = minorUnits }
                 let updated = await state.externalPaymentConfig()
                 toast = "✓ Курс: <b>\(updated.usdRateLabel ?? "—")</b>"
             }
@@ -601,7 +602,7 @@ extension BotMenuHandler {
             }
             let added = await state.addExternalPaymentMethod(method)
             toast = added
-                ? "✓ Способ добавлен: <b>\(method.title)</b> (<code>\(method.code)</code>)"
+                ? "✓ Способ добавлен: <b>\(method.escapedTitle)</b> (<code>\(method.escapedCode)</code>)"
                 : "⚠️ Такой код уже есть или список полон (максимум \(ExternalPaymentConfig.maxMethods))."
 
         default:
