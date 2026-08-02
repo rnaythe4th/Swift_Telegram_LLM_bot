@@ -8,6 +8,14 @@ struct IncomingCryptoTransfer: Sendable {
     let timestamp: Date
 }
 
+/// Where a scan stopped, in whole unix seconds.
+///
+/// The bound is **inclusive**: everything at `lastSeenUnix` is offered again on
+/// the next pass. A chain puts several transfers in the same second all the
+/// time, and an indexer does not publish them in the same instant — so an
+/// exclusive bound silently dropped every transfer that shared its second with
+/// one already seen, which on a blockchain means the money is gone. Re-offering
+/// costs nothing: a credit is made once-only by tx hash, not by the clock.
 struct ExplorerCursor: Sendable {
     var lastSeenUnix: Int
 }
@@ -144,7 +152,7 @@ final class TonExplorer: Sendable {
 
         for event in resp.events {
             if event.in_progress == true { continue }
-            if event.timestamp <= cursor.lastSeenUnix { continue }
+            if event.timestamp < cursor.lastSeenUnix { continue }
             if event.timestamp > maxTs { maxTs = event.timestamp }
             for action in event.actions {
                 if action.status != nil && action.status != "ok" { continue }
@@ -261,7 +269,7 @@ final class EvmExplorer: Sendable {
 
         for tx in txs {
             guard let ts = Int(tx.timeStamp) else { continue }
-            if ts <= cursor.lastSeenUnix { continue }
+            if ts < cursor.lastSeenUnix { continue }
             if ts > maxTs { maxTs = ts }
             if tx.contractAddress.lowercased() != normalizedContract { continue }
             if tx.to.lowercased() != normalizedAddress { continue }
@@ -318,7 +326,7 @@ final class TronExplorer: Sendable {
     func fetchIncoming(asset: CryptoAsset, address: String, since cursor: ExplorerCursor) async throws -> ([IncomingCryptoTransfer], ExplorerCursor) {
         precondition(asset == .usdtTrx)
         guard let contract = asset.contractAddress else { return ([], cursor) }
-        let minMs = (cursor.lastSeenUnix == 0 ? 0 : (cursor.lastSeenUnix + 1) * 1000)
+        let minMs = max(0, cursor.lastSeenUnix) * 1000
         let urlString = "\(baseURL)/v1/accounts/\(address)/transactions/trc20?only_confirmed=true&only_to=true&limit=200&min_timestamp=\(minMs)&contract_address=\(contract)"
         let spec = HTTPRequestSpec(
             url: urlString,
@@ -346,7 +354,7 @@ final class TronExplorer: Sendable {
             if tx.to.lowercased() != normalizedAddress { continue }
             guard let amount = Int64(tx.value), amount > 0 else { continue }
             let tsSec = Int(tx.block_timestamp / 1000)
-            if tsSec <= cursor.lastSeenUnix { continue }
+            if tsSec < cursor.lastSeenUnix { continue }
             if tsSec > maxTs { maxTs = tsSec }
             transfers.append(IncomingCryptoTransfer(
                 asset: asset,

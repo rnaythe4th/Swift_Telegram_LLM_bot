@@ -62,9 +62,15 @@ final class FakeTelegram: @unchecked Sendable {
     }
 
     /// Makes the Bot API refuse the matching calls, the way it does when the
-    /// bot loses the right to post mid-answer.
-    func refuse(_ method: String, containing needle: String) async {
-        await recorder.refuse(method: method) { $0.contains(needle) }
+    /// bot loses the right to post mid-answer. `description` is the Bot API's
+    /// own wording — the callers that tell one refusal from another («message
+    /// is not modified») read exactly that string.
+    func refuse(
+        _ method: String,
+        containing needle: String,
+        description: String = "Bad Request: refused by test"
+    ) async {
+        await recorder.refuse(method: method, description: description) { $0.contains(needle) }
     }
 
     func calls(_ method: String) async -> [TelegramCall] { await recorder.calls(method) }
@@ -134,14 +140,14 @@ final class FakeTelegram: @unchecked Sendable {
 private actor CallRecorder {
     private var recorded: [TelegramCall] = []
     private var nextMessageID = 1_000
-    private var refusals: [(method: String, matches: @Sendable (String) -> Bool)] = []
+    private var refusals: [(method: String, description: String, matches: @Sendable (String) -> Bool)] = []
 
     func all() -> [TelegramCall] { recorded }
     func calls(_ method: String) -> [TelegramCall] { recorded.filter { $0.method == method } }
     func reset() { recorded.removeAll() }
 
-    func refuse(method: String, matching: @escaping @Sendable (String) -> Bool) {
-        refusals.append((method, matching))
+    func refuse(method: String, description: String, matching: @escaping @Sendable (String) -> Bool) {
+        refusals.append((method, description, matching))
     }
 
     func record(head: HTTPRequestHead, body: Data) -> AppHTTPResponse {
@@ -154,8 +160,9 @@ private actor CallRecorder {
         // A Bot API that says no. Real ones do — a bot removed from the chat,
         // a group that went read-only — and the paths that matter are the ones
         // where the bot is mid-answer when it happens.
-        if refusals.contains(where: { $0.method == method && $0.matches(text) }) {
-            return .json(#"{"ok":false,"error_code":400,"description":"Bad Request: refused by test"}"#)
+        if let refusal = refusals.first(where: { $0.method == method && $0.matches(text) }) {
+            let escaped = refusal.description.replacingOccurrences(of: "\"", with: "\\\"")
+            return .json(#"{"ok":false,"error_code":400,"description":"\#(escaped)"}"#)
         }
 
         switch method {

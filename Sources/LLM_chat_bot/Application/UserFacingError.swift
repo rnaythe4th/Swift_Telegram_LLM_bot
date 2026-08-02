@@ -47,6 +47,9 @@ enum UserFacingError {
             switch media {
             case .missingFilePath:
                 return "Telegram не отдал файл. Попробуйте отправить его ещё раз."
+            case .attachmentsTooHeavy(let limitBytes):
+                let megabytes = limitBytes / (1 << 20)
+                return "Вложения слишком тяжёлые — за один запрос бот берёт не больше \(megabytes) МБ. Отправьте их по частям."
             }
         }
 

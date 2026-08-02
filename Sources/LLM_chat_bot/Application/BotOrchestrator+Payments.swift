@@ -44,6 +44,23 @@ extension BotOrchestrator {
                         && query.total_amount == card.creditMinorUnits(cents: cents)
                 }
             } else {
+                // An unlimited tenant has nothing a subscription could add, and
+                // `fulfil` would take the money and answer `.alreadyUnlimited`
+                // — paid for, nothing granted, nothing to refund. Every button
+                // that opens a subscription invoice already refuses them, but
+                // the *invoice message* those buttons produced stays tappable in
+                // the chat for ever, and "unlimited" can be granted after it was
+                // sent. This is the last point at which no money has moved.
+                let payerKey = state.userKey(userID: query.from.id)
+                let subscription = await state.tenantSubscription(ownerKey: payerKey)
+                if subscription.exists, subscription.paidUntil == nil {
+                    try await telegram.answerPreCheckoutQuery(
+                        queryID: query.id,
+                        ok: false,
+                        errorMessage: "У вас уже бессрочный доступ — платить не нужно."
+                    )
+                    return
+                }
                 // Subscription: accept the list price or this user's winback
                 // price (roadmap step 8). The grace window honors an invoice
                 // opened moments before the offer ran out.

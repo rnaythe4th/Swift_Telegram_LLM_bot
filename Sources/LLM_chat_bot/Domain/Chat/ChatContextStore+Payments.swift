@@ -144,6 +144,21 @@ extension ChatContextStore {
         _cryptoInvoices.values.filter { $0.isAwaitingFunds && $0.asset == asset }
     }
 
+    /// Invoices a transfer sent at `moment` may still settle — including ones
+    /// the expiry sweep has already closed, because the sweep runs on the clock
+    /// and the money left before it (`CryptoInvoice.acceptsFunds(sentAt:)`).
+    func settleableCryptoInvoices(asset: CryptoAsset, sentAt moment: Date) -> [CryptoInvoice] {
+        _cryptoInvoices.values.filter { $0.asset == asset && $0.acceptsFunds(sentAt: moment) }
+    }
+
+    /// Whether this transfer has already been credited to an invoice we still
+    /// hold. Asking only the invoices *awaiting funds* meant a hash re-seen
+    /// after its own invoice closed looked brand new — and the matcher would
+    /// then settle somebody else's invoice with money that was already spent.
+    func isCryptoTxCredited(_ txHash: String) -> Bool {
+        _cryptoInvoices.values.contains { $0.creditedTxHashes.contains(txHash) }
+    }
+
     func openCryptoInvoiceForUser(key: UserKey, asset: CryptoAsset, purpose: CryptoInvoicePurpose) -> CryptoInvoice? {
         let u = resolved(key)
         return _cryptoInvoices.values.first { invoice in

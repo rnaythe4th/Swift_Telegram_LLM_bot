@@ -151,6 +151,23 @@ struct CryptoInvoice: Codable, Sendable, Identifiable {
     var isAwaitingFunds: Bool { status.isAwaitingFunds }
     var isSettled: Bool { status.isSettled }
 
+    /// Whether a transfer that left the payer's wallet at `moment` still
+    /// settles this invoice.
+    ///
+    /// Expiry is decided by when the money was sent, not by when the poller got
+    /// around to looking: between the two sit the chain's confirmation delay and
+    /// up to a full poll interval, and the invoice counts «Срок: N мин» down in
+    /// front of the payer — so paying in the last minute of the window is the
+    /// normal case, not the odd one. Judging by the clock expired those
+    /// payments before they could be matched and orphaned the money, which on a
+    /// blockchain means for good: there is no redelivery.
+    func acceptsFunds(sentAt moment: Date) -> Bool {
+        switch status {
+        case .open, .partial, .expired: return moment < expiresAt
+        case .paid, .cancelled: return false
+        }
+    }
+
     /// Purpose with the legacy default applied (nil → subscription).
     var resolvedPurpose: CryptoInvoicePurpose { purpose ?? .subscription }
 }

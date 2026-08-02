@@ -612,6 +612,57 @@ final class EndToEndTests: XCTestCase {
         XCTAssertTrue(answers.isEmpty, "a service message is not a question: \(answers.map(\.body))")
     }
 
+    // MARK: - Nothing is sold to somebody who already owns it
+
+    /// An unlimited tenant paying for a subscription gets nothing for the money
+    /// and there is no refund: `fulfil` claims the charge, `extendSubscription`
+    /// keeps `paid_until` null, and the payer is told «ничего не изменилось».
+    /// Every button that opens a subscription invoice already refuses them —
+    /// but the invoice *message* those buttons produced stays tappable in the
+    /// chat for ever, and unlimited access can be granted after it was sent.
+    /// `pre_checkout_query` is the last point at which no money has moved.
+    func testAnUnlimitedTenantIsNotChargedForASubscription() async throws {
+        await store.setStarsPrice(100)
+        let payerID: UserID = 4_700
+        await store.registerTenant(.identified(payerID))
+
+        await orchestrator.dispatch(update: preCheckout(payload: "buy_access", stars: 100, userID: payerID))
+
+        let call = await telegram.waitForCall("answerPreCheckoutQuery")
+        let answer = try XCTUnwrap(call)
+        XCTAssertTrue(answer.contains("\"ok\":false"), "the charge must be refused: \(answer.body)")
+        XCTAssertTrue(answer.contains("бессрочный"), "and the payer told why: \(answer.body)")
+    }
+
+    /// The same gate must not stand in the way of an ordinary renewal.
+    func testAnExpiringSubscriptionStillPassesPreCheckout() async throws {
+        await store.setStarsPrice(100)
+        let payerID: UserID = 4_701
+        _ = await store.activatePaidSubscription(.identified(payerID))
+
+        await orchestrator.dispatch(update: preCheckout(payload: "buy_access", stars: 100, userID: payerID))
+
+        let call = await telegram.waitForCall("answerPreCheckoutQuery")
+        let answer = try XCTUnwrap(call)
+        XCTAssertTrue(answer.contains("\"ok\":true"), "a renewal must go through: \(answer.body)")
+    }
+
+    private func preCheckout(payload: String, stars: Int, userID: UserID) -> TelegramUpdate {
+        TelegramUpdate(
+            update_id: Int.random(in: 1...1_000_000),
+            message: nil,
+            callback_query: nil,
+            pre_checkout_query: TelegramPreCheckoutQuery(
+                id: "pcq-\(Int.random(in: 1...100_000))",
+                from: Fixtures.user(id: userID, username: "payer"),
+                currency: "XTR",
+                total_amount: stars,
+                invoice_payload: payload
+            ),
+            my_chat_member: nil
+        )
+    }
+
     /// The service message Telegram posts in a group the moment it becomes a
     /// supergroup: no text, no author, only the id everything moves to.
     private func migrationNotice(from oldChatID: ChatID, to newChatID: ChatID) -> TelegramUpdate {

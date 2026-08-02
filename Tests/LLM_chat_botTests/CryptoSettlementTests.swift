@@ -251,4 +251,97 @@ final class CryptoSettlementTests: XCTestCase {
         let stillThere = await store.cryptoInvoice(id: "oldest")
         XCTAssertNotNil(stillThere)
     }
+
+    // MARK: - The deadline belongs to the payer, not to the poller
+
+    /// A transfer sent inside the window but *seen* after it. Between the two
+    /// sit the chain's confirmation delay and up to a full poll interval, and
+    /// the invoice counts «Срок: N мин» down in front of the payer — so paying
+    /// in the last minute is the normal case. Expiring by the clock threw that
+    /// money away, and a blockchain has no redelivery to recover it with.
+    func testAPaymentSentBeforeExpiryIsCreditedEvenWhenSeenAfterIt() async {
+        var late = invoice("inv-late", status: .open, createdAt: Date().addingTimeInterval(-1_900))
+        late.expiresAt = Date().addingTimeInterval(-100)
+        await store.upsertCryptoInvoice(late)
+
+        let result = await makeService(ledger: InMemoryLedger()).applyIncomingTransfer(
+            asset: .usdtTon,
+            amountAtomic: 5_000_000,
+            fromAddress: "UQsender",
+            recipientAddress: address,
+            txHash: "0xlate",
+            timestamp: Date().addingTimeInterval(-200)
+        )
+
+        guard case .fullyPaid = result else {
+            return XCTFail("money sent inside the window must still be credited, got \(result)")
+        }
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertTrue(subscription.isActive)
+    }
+
+    /// The other half of the same rule: money that left *after* the deadline
+    /// does not settle an invoice the sweep has not got to yet.
+    func testAPaymentSentAfterExpiryIsNotCredited() async {
+        var late = invoice("inv-late", status: .open, createdAt: Date().addingTimeInterval(-1_900))
+        late.expiresAt = Date().addingTimeInterval(-100)
+        await store.upsertCryptoInvoice(late)
+
+        let result = await makeService(ledger: InMemoryLedger()).applyIncomingTransfer(
+            asset: .usdtTon,
+            amountAtomic: 5_000_000,
+            fromAddress: "UQsender",
+            recipientAddress: address,
+            txHash: "0xtoolate",
+            timestamp: Date()
+        )
+
+        guard case .unmatched = result else {
+            return XCTFail("a transfer sent after the deadline must not settle the invoice, got \(result)")
+        }
+    }
+
+    /// A tx hash is credited once, and the invoice it paid is closed by then —
+    /// so «have I seen this hash» has to be asked of every invoice, not only of
+    /// those still awaiting funds. Asking the open ones meant a hash re-offered
+    /// by the explorer (same-second boundary, a re-scan) looked brand new and
+    /// settled somebody else's invoice with money that was already spent.
+    func testACreditedTransferCannotSettleASecondInvoice() async {
+        await openInvoice()
+        let first = await deliver(makeService(ledger: InMemoryLedger()), txHash: "0xonce")
+        guard case .fullyPaid = first else {
+            return XCTFail("premise: the first invoice is paid, got \(first)")
+        }
+
+        // Someone else's invoice, same asset, same outstanding amount.
+        var other = invoice("inv-2", status: .open, createdAt: Date())
+        other.ownerKey = store.userKey(userID: 9_101)
+        await store.upsertCryptoInvoice(other)
+
+        let again = await deliver(makeService(ledger: InMemoryLedger()), txHash: "0xonce")
+        guard case .alreadyCredited = again else {
+            return XCTFail("a hash already credited must be recognised, got \(again)")
+        }
+        let untouched = await store.cryptoInvoice(id: "inv-2")
+        XCTAssertEqual(untouched?.status, .open, "nobody else's invoice may be closed by it")
+    }
+
+    // MARK: - A rate that is not a rate
+
+    /// The TON quote comes from a third party and is used as a divisor whose
+    /// result is narrowed to `Int64`. Zero gives infinity, and narrowing
+    /// infinity **traps** — one broken response would take the process down
+    /// every time somebody tapped «TON».
+    func testAnImplausibleTonRateIsRefusedRatherThanConverted() {
+        XCTAssertNil(CryptoPaymentService.tonAtomicPerUsdCentMicro(rate: 0))
+        XCTAssertNil(CryptoPaymentService.tonAtomicPerUsdCentMicro(rate: -3))
+        XCTAssertNil(CryptoPaymentService.tonAtomicPerUsdCentMicro(rate: .nan))
+        XCTAssertNil(CryptoPaymentService.tonAtomicPerUsdCentMicro(rate: .infinity))
+        XCTAssertNil(CryptoPaymentService.tonAtomicPerUsdCentMicro(rate: 1e-30))
+
+        // A real quote still converts: at $2.50/TON one cent is 0.004 TON, i.e.
+        // 4 000 000 nanoTON — carried here scaled by 10⁶.
+        let micro = CryptoPaymentService.tonAtomicPerUsdCentMicro(rate: 2.5)
+        XCTAssertEqual(micro, 4_000_000 * 1_000_000)
+    }
 }

@@ -14,6 +14,16 @@ struct TelegramAPIError: Error, LocalizedError {
         if let migrateToChatID { parts.append("migrate_to_chat_id=\(migrateToChatID)") }
         return parts.joined(separator: " | ")
     }
+
+    /// Telegram's way of saying the edit had nothing to do: the message already
+    /// reads exactly this. The caller's postcondition holds, so this is not a
+    /// failure — and it is reachable in the middle of a normal answer, because
+    /// Telegram strips trailing whitespace before comparing: a chunk of two
+    /// newlines arriving after a pause is an edit to a message Telegram
+    /// considers unchanged.
+    var isEditWithNothingToChange: Bool {
+        statusCode == 400 && descriptionText.lowercased().contains("message is not modified")
+    }
 }
 
 final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
@@ -156,7 +166,13 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
     
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage {
         let html = TelegramHTMLFormatter.helper(text: request.text)
-        if html.count <= MessageSplitter.charLimit {
+        // Telegram counts UTF-16 code units and takes 4096 of them. Counting
+        // `Character`s here said a message of emoji fits at half its true size
+        // (a family emoji is one Character and eleven code units), and it spent
+        // the footer reserve a second time on top — so a message just inside
+        // `charLimit` skipped the splitter entirely and came back as 400
+        // «message is too long», with that whole part of the answer lost.
+        if html.utf16.count <= MessageSplitter.telegramMaxChars {
             return try await sendSingle(request, html: html)
         }
         var remaining = request.text
@@ -280,9 +296,17 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
         // counts sends (20/min), and the streaming edit loop would eat all of
         // it, stalling the reply mid-generation.
         await rateLimiter?.waitForEditSlot()
-        try await with429Retry {
-            let raw = try await network.perform(spec)
-            try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
+        do {
+            try await with429Retry {
+                let raw = try await network.perform(spec)
+                try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
+            }
+        } catch let error as TelegramAPIError where error.isEditWithNothingToChange {
+            // The message already says this. Reporting it as a failure aborted
+            // whole answers: the streaming loop rethrows anything that is not a
+            // rate limit, and the catch replaces the placeholder with an error,
+            // throwing away everything streamed so far.
+            return
         }
     }
     

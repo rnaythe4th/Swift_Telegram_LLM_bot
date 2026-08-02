@@ -141,7 +141,9 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   тега/сущности), `+Sanitizer` (политика: какие теги/атрибуты выживают),
   головной (`render`, стек тегов, белый список схем `href`, экранирование
   значений атрибутов).
-- `Telegram/TelegramMediaResolver.swift` — медиа → base64/data-URL.
+- `Telegram/TelegramMediaResolver.swift` — медиа → base64/data-URL; бюджет
+  `turnByteBudget` (20 МиБ на ход) резервируется по `file_size` **до** скачивания
+  и досчитывается по факту.
 - `Providers/`: `OpenRouterProviderAdapter`, `DeepSeekProviderAdapter` (+
   `*APIModels`), `OpenAIStreamDecoding` (`OpenAICompatibleStreamChunk` +
   `OpenAIStreamAccumulator` — общая машина потока), `ProviderStreamErrorPayload`
@@ -309,10 +311,17 @@ then null`, ручное «+N дней» (`extendTenantSubscription` →
   `amountDelta` (один адрес, уникальная дельта суммы по слотам; слотов нет →
   `slotsExhausted`, тихий откат на слот 0 запрещён) или `uniqueAddress` (пул).
   `CryptoPaymentService` — инвойсы/курсы/матчинг, `CryptoPaymentMonitor` — поллинг
-  эксплореров (30 с). Курсоры сканирования персистятся
+  эксплореров (30 с). Курс TON санируется на границе (`plausibleTonUsdRate`,
+  `tonAtomicPerUsdCentMicro` на `Int64(exactly:)`) — 0/`NaN`/абсурд не кэшируется
+  и не конвертируется; курс фиксируется на выставлении и лежит в инвойсе.
+  Курсоры сканирования персистятся
   (`CryptoConfigSnapshot.explorerCursors`, ключ `"<asset>:<address>"`); адрес без
   курсора сканируется на 45 мин назад; курсор двигается **после** зачисления
-  пачки и только вперёд. `applyMatch` зовёт `fulfil` первым, `.paid` пишет только
+  пачки, только вперёд и **включительно** (пограничная секунда пересматривается —
+  однократность держит хеш, а не часы: `isCryptoTxCredited` спрашивает все
+  инвойсы). Срок инвойса судится по времени **перевода**, а не по часам поллера
+  (`CryptoInvoice.acceptsFunds(sentAt:)`). `applyMatch` зовёт `fulfil` первым,
+  `.paid` пишет только
   на успехе, иначе `.deferred` (инвойс остаётся `open`, курсор не двигается).
   «Деньги в полёте» — `CryptoInvoiceStatus.isAwaitingFunds` (`open`|`partial`),
   такой инвойс не прунится никогда; закрытые режет `pruneCryptoInvoices`
@@ -881,7 +890,16 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 - Персональная цена не уходит в общий чат; `isPersonal`-страницы в группе не
   рендерятся.
 - Draft — только личка; финальный текст обязательно `sendMessage`.
-- `editMessage` — через `waitForEditSlot()`, не `waitForMessageSlot`.
+- `editMessage` — через `waitForEditSlot()`, не `waitForMessageSlot`. «Ошибка»
+  `message is not modified` — успех (`TelegramAPIError
+  .isEditWithNothingToChange`): постусловие выполнено, а раннер стрима роняет
+  ход на всём, что не 429. Остальные отказы остаются ошибками.
+- Длина сообщения меряется в UTF-16 **везде**, включая развилку «слать одним или
+  резать» (`sendMessage`) — она стоит до `chunkFittingHTML` и до
+  `MessageSplitter`.
+- Вложения качаются в пределах `TelegramMediaResolver.turnByteBudget`: альбом —
+  16 файлов, медиа резолвится **до** `generationLimiter.acquire()`, поэтому
+  больше ничто в пайплайне их не считает.
 - Имя пользователя — чужой текст: экранирование живёт в источнике меток
   (`UserIdentity.displayLabel`, `sanitizeName`, `ChatMetaInfo.displayLabel`).
   То же для текста, который человек ввёл сам и который печатается в сообщение:
@@ -920,7 +938,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~484 теста; 464 без сети
+`swift test` — цель `LLM_chat_botTests`, ~497 тестов; 477 без сети
 (`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
 `TEST_DATABASE_URL`:
 
@@ -952,8 +970,11 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 `MenuRouteTests`, `MenuPageRenderTests` (рендер
 **каждой** страницы личка/группа × владелец/юзер: маршруты существуют, `nav:`
 ведёт на реальную страницу, влезает в одно сообщение, гейты, лимит 64 байта),
+`TelegramGatewayTests` (длина в UTF-16 на развилке «одним или резать»; какой
+отказ Bot API — успех), `MediaResolverTests` (бюджет вложений на ход),
 `PaymentTypeTests`, `ExternalPaymentTests`, `ExternalCallbackEndToEndTests`,
-`CryptoSettlementTests`, `EndToEndTests` + `FakeTelegram.swift` (апдейт входит в
+`CryptoSettlementTests` (срок по времени перевода, хеш зачтён один раз,
+негодный курс TON), `EndToEndTests` + `FakeTelegram.swift` (апдейт входит в
 `dispatch`, проходит настоящие команды/меню/генерацию и настоящий
 `TelegramHTTPGateway`, приземляется в локальный дублёр Bot API; подделаны только
 модель и загрузчик медиа; цикл по `MenuPage.allCases` требует отказа обычному

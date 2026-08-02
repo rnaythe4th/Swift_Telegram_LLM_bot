@@ -120,7 +120,15 @@ actor CryptoPaymentService {
         }
 
         let rateMicro = try await atomicPerUsdCentMicro(asset: asset)
-        let baseAmount = (Int64(priceCents) * rateMicro) / 1_000_000
+        // Both halves come from outside this file — the price is a number a
+        // super-admin typed, the rate is a third party's answer — and `Int64`
+        // multiplication traps on overflow rather than wrapping.
+        let (scaled, overflowed) = Int64(priceCents).multipliedReportingOverflow(by: rateMicro)
+        guard !overflowed else { throw CryptoPaymentError.rateUnavailable(asset.symbol) }
+        let baseAmount = scaled / 1_000_000
+        // An invoice for nothing is settled by nothing: `accumulatedAtomic >=
+        // exactAmountAtomic` holds before a single unit arrives.
+        guard baseAmount > 0 else { throw CryptoPaymentError.rateUnavailable(asset.symbol) }
 
         let mode = await state.cryptoMatchMode()
         let receivingAddress: String
@@ -209,10 +217,33 @@ actor CryptoPaymentService {
             return 10_000_000_000
         case .tonNative:
             let rate = try await fetchTonUsdRate()
-            // atomicPerCent = 10_000_000 / rate; * 1_000_000 micro
-            let micro = 10_000_000_000_000.0 / rate
-            return Int64(micro.rounded())
+            guard let micro = Self.tonAtomicPerUsdCentMicro(rate: rate) else {
+                logger.error("TON rate \(rate) yields no usable atomic conversion")
+                throw CryptoPaymentError.rateUnavailable("TON")
+            }
+            return micro
         }
+    }
+
+    /// A quote outside these bounds is not a rate, it is a broken response.
+    /// The conversion below divides by it and narrows the result to `Int64`:
+    /// zero gives infinity, and narrowing infinity **traps** — so one
+    /// implausible answer from the rate provider took the whole process down
+    /// every time somebody tapped «TON», and, once cached, kept doing it for
+    /// five minutes after the provider had recovered.
+    static let plausibleTonUsdRate: ClosedRange<Double> = 0.001...1_000_000
+
+    /// Atomic units per USD cent, ×10⁶, for a TON price quote — or nil when the
+    /// quote is not a price the invoice can be built from.
+    ///
+    /// `Int64(exactly:)` rather than `Int64(_:)`: the same conversion with the
+    /// trap turned into a value the caller can answer with «попробуйте другую
+    /// монету».
+    static func tonAtomicPerUsdCentMicro(rate: Double) -> Int64? {
+        guard rate.isFinite, plausibleTonUsdRate.contains(rate) else { return nil }
+        // atomicPerCent = 10_000_000 / rate; * 1_000_000 micro
+        guard let micro = Int64(exactly: (10_000_000_000_000.0 / rate).rounded()), micro > 0 else { return nil }
+        return micro
     }
 
     private func fetchTonUsdRate() async throws -> Double {
@@ -229,16 +260,25 @@ actor CryptoPaymentService {
             let theOpenNetwork: Entry
             enum CodingKeys: String, CodingKey { case theOpenNetwork = "the-open-network" }
         }
+        let quoted: Double
         do {
-            let resp = try await network.send(spec, as: CoinGeckoResp.self)
-            tonUsdRate = resp.theOpenNetwork.usd
-            tonRateFetchedAt = Date()
-            return resp.theOpenNetwork.usd
+            quoted = try await network.send(spec, as: CoinGeckoResp.self).theOpenNetwork.usd
         } catch {
             logger.error("CoinGecko TON rate fetch failed: \(error)")
             if let r = tonUsdRate { return r }
             throw CryptoPaymentError.rateUnavailable("TON")
         }
+        // Sanity is checked here, at the boundary, so the implausible number
+        // never reaches the cache: caching it would keep quoting invoices from
+        // it long after the provider started answering properly again.
+        guard quoted.isFinite, Self.plausibleTonUsdRate.contains(quoted) else {
+            logger.error("CoinGecko quoted an implausible TON rate (\(quoted)) — not caching it")
+            if let r = tonUsdRate { return r }
+            throw CryptoPaymentError.rateUnavailable("TON")
+        }
+        tonUsdRate = quoted
+        tonRateFetchedAt = Date()
+        return quoted
     }
 
     // MARK: - Incoming transfer matching
@@ -251,12 +291,19 @@ actor CryptoPaymentService {
         txHash: String,
         timestamp: Date
     ) async -> CryptoApplyResult {
-        await sweepExpired()
-
-        let openInvoices = await state.openCryptoInvoices(asset: asset)
-        if openInvoices.contains(where: { $0.creditedTxHashes.contains(txHash) }) {
+        // Deliberately no expiry sweep first. The sweep closes invoices by the
+        // clock, and this transfer left the payer's wallet before the poller
+        // looked — closing it here is exactly how a payment made inside the
+        // window ended up orphaned. The monitor sweeps once per cycle instead,
+        // and `acceptsFunds(sentAt:)` decides the deadline per transfer.
+        //
+        // Whether this transfer was already credited is asked of every invoice
+        // we hold, not only of those still awaiting funds: its own invoice is
+        // closed by now, and «not found» here would let it settle a stranger's.
+        if await state.isCryptoTxCredited(txHash) {
             return .alreadyCredited
         }
+        let openInvoices = await state.settleableCryptoInvoices(asset: asset, sentAt: timestamp)
 
         let mode = await state.cryptoMatchMode()
 
