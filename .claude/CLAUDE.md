@@ -1,1280 +1,523 @@
-# LLM Telegram Bot — архитектура и возможности
+# LLM Telegram Bot — архитектура
 
-Telegram-бот на Swift (server-side, без Vapor), отвечающий пользователям через LLM
-с потоковой генерацией. Мультитенантный SaaS: одна кодовая база обслуживает
-множество «виртуальных копий» бота (тенантов), у каждого своя память чатов,
-настройки, пресеты, статистика и биллинг. Состояние переживает рестарты
-(write-behind в Postgres, деньги — в транзакциях), выдерживает сотни
-параллельных чатов и
-работает под лимитами Telegram API.
+Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памятью, потоковой
+генерацией и мультитенантным биллингом. Одна кодовая база = много «виртуальных
+копий» (тенантов) со своими настройками, лицензиями и деньгами. Состояние
+переживает рестарты (write-behind в Postgres; деньги — в транзакциях).
 
-> Этот файл — источник правды по архитектуре. При изменении кода держи его в
-> актуальном состоянии.
+> Источник правды по архитектуре. Меняешь код — держи файл в актуальном виде.
 
 ---
 
-## 1. TL;DR — что умеет бот
+## 1. Стек, сборка, деплой
 
-- **LLM-чат** с памятью на каждый чат (история, роль/system prompt, модель,
-  температура, длина истории, reasoning, провайдер).
-- **Режимы**: эталонные связки настроек от суперадмина — один тап меняет модель,
-  стиль, память и обдумывание. 🆓 работают у всех, ⭐ видны всем, но требуют
-  премиума/баланса; поштучная настройка — тоже часть премиума.
-- **Стриминг ответов**: в личке — нативные анимированные draft'ы (Bot API 9.3+),
-  в группах — редактирование сообщения по мере генерации. Кнопка «⏹ Остановить».
-- **Мультимодальность**: текст, фото (в т.ч. альбомы), голос, видео — если
-  провайдер поддерживает.
-- **Мультитенантность и роли**: суперадмины, админы (владельцы лицензий),
-  обычные пользователи. Каждый тенант — изолированная копия настроек.
-- **Монетизация**: подписки (30 дней) через Telegram Stars / карту / крипту;
-  pay-as-you-go балансы с наценкой; реклама во free-tier чатах.
-- **Удержание**: напоминания спонсору перед концом подписки (несколько волн) и
-  winback-офферы со срочной скидкой после истечения; отдельно — возврат тех, у
-  кого закончился оплаченный баланс (расписание настраивается суперадмином).
-- **Онбординг**: кнопки-примеры в приветствии — тап запускает готовый запрос и
-  бот сразу отвечает (набор примеров правится суперадмином из меню).
-- **Рост**: двусторонний реферал — по ссылке `?start=ref_<userID>` друг и
-  пригласивший получают бонус на баланс после первого реального ответа, а когда
-  друг впервые оплачивает — пригласившему приходит бонус за конверсию (награды и
-  антифрод-лимит настраиваются суперадмином).
-- **Управление**: слэш-команды + богатое inline-меню (`/menu`).
-- **Надёжность**: webhook с очередью Telegram, дедупликация updates,
-  идемпотентность платежей, graceful shutdown, rate limiting, health-эндпоинты.
+- Swift 6.2, strict concurrency (акторы + `Sendable`), executable target.
+- Зависимости: `async-http-client`, `swift-nio` (NIOPosix/NIOHTTP1/
+  NIOFoundationCompat), `swift-crypto` (MD5/HMAC подписей кассы), `postgres-nio`.
+  **Vapor нет** — HTTP-сервер и клиент собраны на NIO напрямую.
+- Платформа `.macOS(.v13)`; прод — Linux в Docker (`swift:6.2-bookworm`).
+- Сборка: `swift build -c release --product LLM_chat_bot`. Тесты: `swift test`
+  (`Tests/LLM_chat_botTests/`, см. §14).
+- Деплой: Docker → Railway (`DEPLOY.md`), healthcheck `/ready` (503 до конца
+  restore и при draining) → редеплой без потери апдейтов.
+- Схему БД бот мигрирует сам на старте.
 
 ---
 
-## 2. Стек и сборка
+## 2. Слои (Ports & Adapters)
 
-- **Язык**: Swift 6.2, strict concurrency (акторы + `Sendable`). Executable target.
-- **Зависимости** (`Package.swift`): `async-http-client`, `swift-nio`
-  (`NIOPosix`, `NIOHTTP1`, `NIOFoundationCompat`), `swift-crypto` (`Crypto` —
-  MD5/HMAC подписей внешней кассы, §7), `postgres-nio` (`PostgresNIO` — драйвер
-  Postgres, §10). **Никакого Vapor** — HTTP-сервер и клиент собраны напрямую на
-  NIO/AsyncHTTPClient; `postgres-nio` лежит в организации vapor, но это
-  самостоятельный драйвер на NIO и рантайма Vapor не тянет.
-- **Платформа**: `.macOS(.v13)`; в проде — Linux в Docker (`swift:6.2-bookworm`).
-- **Сборка**: `swift build -c release --product LLM_chat_bot`.
-- **Тесты**: `swift test` (цель `LLM_chat_botTests`, `Tests/LLM_chat_botTests/`). См. §19.
-- **Деплой**: Docker → Railway (см. `DEPLOY.md`), состояние в Postgres
-  (`DATABASE_URL`; Supabase — обычный провайдер Postgres, см. §10 про
-  session-режим пула).
-
----
-
-## 3. Архитектура: слои (Ports & Adapters / гексагональная)
-
-Каталог `Sources/LLM_chat_bot/` разбит на 4 слоя. Зависимости направлены внутрь:
-Infrastructure → Application → Domain. Application общается с внешним миром только
-через **порты** (протоколы), реализуемые адаптерами в Infrastructure.
-
-```
-App/            — точка входа, конфиг из env, сборка графа зависимостей
-Application/    — оркестрация, юз-кейсы, порты, runtime-механика
-Domain/         — чистые модели состояния и бизнес-правила (акторы/структуры)
-Infrastructure/ — адаптеры: Telegram, LLM-провайдеры, Postgres, HTTP, крипто-эксплореры
-```
+Зависимости внутрь: Infrastructure → Application → Domain. Application ходит
+наружу только через порты (`Application/Ports/`).
 
 ### App/
-- `LLM_chat_bot.swift` — `@main`. Только **последовательность старта**: собрать
-  граф (`AppAssembly.build`), поднять HTTP-сервер, восстановить состояние,
-  поставить обработчики SIGTERM/SIGINT, запустить оркестратор.
-- `AppAssembly.swift` — **composition root**: весь граф зависимостей собирается
-  здесь вручную, фабриками (`makeTelegram`, `makeStore` + сев пресетов,
-  `makePersistence`, `makeOrchestrator`, `makeCryptoMonitor`, `resolveMode`,
-  `makeHTTPServer`), плюс `registerSecrets` (редакция секретов до первой строки
-  лога, §15). Константы бота: владелец по умолчанию `maythe4th`, дефолтный
-  system prompt, `formatOptions`.
-- `AppConfig.swift` — загрузка и валидация переменных окружения (см. §15).
+- `LLM_chat_bot.swift` — `@main`, только последовательность старта: `AppAssembly.build`
+  → HTTP-сервер → restore → SIGTERM/SIGINT → оркестратор.
+- `AppAssembly.swift` — composition root (весь граф вручную: `makeTelegram`,
+  `makeStore`+сев пресетов, `makePersistence`, `makeOrchestrator`,
+  `makeCryptoMonitor`, `resolveMode`, `makeHTTPServer`, `registerSecrets`).
+  Константы: владелец по умолчанию `maythe4th`, дефолтный system prompt.
+- `AppConfig.swift` — env (§13).
 
 ### Application/
-- `BotOrchestrator.swift` — центральный координатор: только зависимости и `init`
-  (сборка `BotMenuHandler`/`BotCallbackHandler`/`BotCommandHandler`/
-  `GenerationCoordinator`). Тело — по темам:
-  `+Lifecycle.swift` (boot с миграцией, run-loop webhook/polling, фоновые циклы,
-  graceful shutdown, `/metrics`-отчёт), `+Routing.swift` (`dispatch` — вход для
-  всех апдейтов, `route` — пайплайн сообщения, `my_chat_member`, тап по примеру
-  онбординга), `+Payments.swift` (`pre_checkout_query`, `successful_payment` обе
-  ветки, реферальный бонус за конверсию).
-- `ChatUpdateDispatcher.swift` — актор, **сериализует сообщения per-chat**
-  (в рамках одного чата обработка строго по очереди, разные чаты — параллельно).
-  Очередь на чат ограничена (16); переполнение → дроп с одним предупреждением.
-- `Telegram/MessageRouting.swift` — `MessageRoutingPolicy`: решает, реагировать ли
-  на сообщение (личка — всегда; группа — только reply боту или @-упоминание),
-  и нормализует текст (убирает @упоминание).
-- `Telegram/TelegramPhotoAlbumBuffer.swift` — склейка `media_group` (альбомов) в
-  один синтетический апдейт.
-- `Telegram/OnboardingPresenter.swift` — рендер кнопок-примеров онбординга
-  (клавиатура, приглашение, эхо запроса, HTML-escape). См. §7 «Онбординг».
-- `Telegram/ReferralPresenter.swift` — текст и кнопка бонуса за оплату друга
-  (§7 «Реферал»): его шлют оба платёжных пути, поэтому копия одна.
-- `Telegram/GroupWelcomePresenter.swift` — единственное приветствие группы
-  (§7 «Вирусный рост»). Два входа (`my_chat_member` и `/start <payload>` от
-  `?startgroup=`) рендерят один и тот же текст; вариант зависит от того, покрыт
-  ли чат чьей-то подпиской (спонсора благодарим, а не продаём ему).
-- `Generation/GenerationCoordinator.swift` — весь пайплайн генерации ответа:
-  проверка доступа к модели, выбор режима биллинга, snapshot истории, запуск
-  стрима (draft или edit), сборка футера, показ рекламы. См. §9.
-  Вход в пайплайн — `GenerationOrigin` (кто спросил, личка ли, на что отвечать):
-  строится из `TelegramMessage` либо синтезируется для тапа по примеру
-  (`runReadyPrompt`). Рядом — `+Streaming.swift` (draft/edit-раннеры, разбивка
-  длинных ответов) и `+Monetization.swift` (гейт дневного премиума
-  `resolveDailyPremium` и выбор режима биллинга `resolveBillingMode`, реклама,
-  офферы при лимите и пустом балансе, реферальная выплата, футер).
-- `Generation/DraftStreamer.swift` — «печатающая машинка» через `sendMessageDraft`.
-- `Commands/` — `CommandParser.swift` (парсинг `/cmd@bot`+suffix) и
-  `BotCommandHandler.swift` — обвязка, гейты ролей, `handleIfCommand`. Тела
-  команд разнесены по `BotCommandHandler+*.swift`: `Dispatch` (**только** switch
-  команда → обработчик), `ChatSettings` (тела команд настроек чата: роль, модель,
-  стиль, память, тумблеры под ответом, сервис ИИ, обдумывание), `Start`
-  (`/start`, диплинки, приветствия), `Referral`,
-  `Info` (`/chatid`, `/inspect`, `/history`), `Onboarding`, `Balance`,
-  `Reminders`, `Ads`, `Admin` (whitelist/defaults/chats/users/presets),
-  `Tenant`, `SuperAdmin` (`/superadmin`, `/simulate`, крипта, free-модели),
-  `Buy`. См. §12.
-- `Callbacks/` — `BotCallbackAction.swift` (типы callback_data: `stop`, `menu`,
-  `faq`, `ex:<id>` — пример онбординга) и `BotCallbackHandler.swift` (роутинг
-  нажатий кнопок).
-- `Menu/` — inline-меню (§13). `MenuRoute.swift` — `MenuCommand` (команды
-  диспетчера) + `MenuRoute` (разбор и сборка `callback_data`),
-  `MenuScreen.swift` — `MenuScreen` (текст + клавиатура страницы, инвариант
-  «влезает в одно сообщение») и `Keyboard` (накопитель рядов кнопок),
-  `MenuPage.swift` — каталог страниц (+ `backLabel`: подпись кнопки «назад»
-  живёт у страницы-назначения, а не у каждой кнопки; + `requiresFullAccess` /
-  `requiresOperator` — гейты страниц тонкой настройки, §13),
-  `SuperHelpSection.swift` — справка суперадмина по разделам,
-  `BotMenuHandler+Guards.swift` — гейты ролей (`requireSuperAdmin` /
-  `requireRootSuperAdmin` / `requireAdmin` / `requireOperator`: сами отвечают
-  тостом при отказе) + `hasFullAccess`,
-  `BotMenuHandler.swift` — обвязка, диспетчер callback'ов
-  (`processAction` → девять групповых обработчиков), `showPage`/`renderPage`.
-  Страницы и действия — по `BotMenuHandler+*.swift`: `MainPage`, `ChatSettings`
-  (действия) + `ChatSettingsPages` (их рендеры),
-  `Modes` (режимы: выбор режима юзером, страница «⚙️ Тонкая настройка» и
-  супер-страница «🎛 Режимы бота» — §«Режимы»), `Purchase`, `Presets`, `Admin`,
-  `Tenants` (тенанты, кошельки, суперадмины, симуляция, inspect — страницы и
-  кнопки), `SuperAdmin` (диспетчер `super*`-действий + наценка, премиум-лимит,
-  сама панель), `PaymentSettings` (Stars/карта/крипта/free-модели), `Retention`,
-  `Onboarding`, `Referral`, `Growth` (воронка, реклама, источники), `Help`,
-  `TextInput` (значения, набранные после кнопки: владелец → `switch` по
-  `PendingKind` → применить), `AdminInput`
-  (`AdminPendingInputKind` → семь групп по теме).
-- `Texts.swift` — каталог пользовательских строк, встречающихся больше одного
-  раза (отказы гейтов, подписи кнопок, «не найдено»). **Только литералы**: всё,
-  что называет человека или чат, собирается на месте через
-  `displayLabel`/`sanitizeName` (§17) — каталог не должен стать вторым,
-  неэкранированным путём чужого текста в HTML-сообщение бота.
-- `Formatting/ResponseFooterFormatter.swift` — футер под ответом (токены, стоимость
-  ×markup, модель, остаток баланса).
-- `Payments/` — `PaymentFulfillmentService.swift` (**что происходит после
-  прихода денег — один раз на все способы**: дедуп, активация/зачисление,
-  claim чата, winback, воронка, реферальный бонус, атрибуция `src_`, `flushNow`;
-  §7/§17), `CryptoPaymentService.swift` (инвойсы, курсы, матчинг),
-  `CryptoPaymentMonitor.swift` (поллинг блокчейнов),
-  `ExternalPaymentService.swift` (внешняя касса: открыть счёт, подписать ссылку,
-  разобрать уведомление вендора; §7 «Внешняя касса»),
-  `SubscriptionWriter.swift` / `WalletWriter.swift` (**единственные** пути,
-  которыми срок подписки и кошелёк меняются вне платежа: обе колонки принадлежат
-  денежной транзакции, и write-behind их не пишет — §10.2).
-- `Lifecycle/SubscriptionReminderService.swift` — фоновый свип подписок:
-  напоминание перед истечением + winback-офферы со скидкой. См. §7/§14.
-- `Persistence/PersistenceCoordinator.swift` — write-behind: дренаж грязных
-  сущностей и запись раз в 2с; `flushNow()` для платежей; ретрай слиянием. См. §10.
-- `Providers/ProviderGatewayRegistry.swift` — реестр `ServiceProvider → адаптер`.
-- `Runtime/` — механика масштабирования (см. §11): `UpdateIntake` (дедуп + альбомы),
-  `GenerationLimiter` (глобальный семафор), `TelegramRateLimiter` (token-bucket),
-  `RuntimeMetrics` (счётчики), `Concurrency.swift` (`LockedValue`, `RuntimeFlags`).
-- `SessionRegistry.swift` — актор активных генераций (для остановки и graceful shutdown).
-- `ModelPriceMonitor.swift` — фоновый мониторинг цен/бесплатности моделей OpenRouter.
-- `UserFacingError.swift` — перевод ошибок в понятные пользователю сообщения.
-- `Ports/` — протоколы: `TelegramGatewayPort`, `ProviderGatewayPort`,
-  `StatePersistencePort`, `MediaResolverPort`, `LoggerPort` (+ `LogContext`:
-  чат/тема/юзер/генерация — корреляция вместо грепа по времени),
-  `ConfigRegistry.swift` (`ConfigName`, `ConfigKey<Value>`, `Config`,
-  `StoredConfig`, `ConfigDocuments` — §5.4),
-  `ExternalCheckoutPort` (+ `ExternalCheckoutResolver`: подписать ссылку,
-  проверить уведомление — обе операции чистые, сети нет) + модели портов.
+- `BotOrchestrator.swift` — координатор (зависимости + init). Тело по темам:
+  `+Lifecycle` (boot с миграцией, run-loop webhook/polling, фоновые циклы,
+  graceful shutdown, `/metrics`-отчёт), `+Routing` (`dispatch`/`route`,
+  `my_chat_member`, тап по примеру), `+Payments` (`pre_checkout_query`,
+  `successful_payment`).
+- `ChatUpdateDispatcher.swift` — актор, сериализует сообщения **per-chat**
+  (очередь 16, переполнение → дроп с одним предупреждением).
+- `Telegram/`: `MessageRouting` (`MessageRoutingPolicy` — реагировать ли:
+  личка всегда, группа только reply/@-упоминание; нормализация текста),
+  `TelegramPhotoAlbumBuffer` (склейка `media_group`), `OnboardingPresenter`,
+  `ReferralPresenter`, `GroupWelcomePresenter`.
+- `Generation/`: `GenerationCoordinator` (весь пайплайн ответа, §7) +
+  `+Streaming` (draft/edit-раннеры, разбивка длинных ответов) +
+  `+Monetization` (`resolveDailyPremium`, `resolveBillingMode`, реклама, офферы,
+  реферальная выплата, футер); `DraftStreamer` (`sendMessageDraft`);
+  `StreamWatchdog` (стрим без событий 75 с → обрыв; общий потолок 600 с —
+  молчащий провайдер иначе держит слот генерации и ломает shutdown-окно).
+- `Commands/`: `CommandParser` (`/cmd@bot`+суффикс), `BotCommandHandler`
+  (обвязка, гейты, `handleIfCommand`) + `+Dispatch` (только switch) +
+  `+ChatSettings/Start/Referral/Info/Onboarding/Balance/Reminders/Ads/Admin/
+  Tenant/SuperAdmin/Buy`.
+- `Callbacks/`: `BotCallbackAction` (`stop`, `menu`, `faq`, `ex:<id>`),
+  `BotCallbackHandler`.
+- `Menu/` (§11): `MenuRoute` (`MenuCommand` + разбор/сборка `callback_data`),
+  `MenuScreen` (текст+клавиатура, инвариант «влезает в одно сообщение»;
+  `Keyboard`), `MenuPage` (каталог страниц + `backLabel`, `isPersonal`,
+  `requiresFullAccess`, `requiresOperator`), `SuperHelpSection`,
+  `BotMenuHandler+Guards` (`requireSuperAdmin/requireRootSuperAdmin/
+  requireAdmin/requireOperator` — сами отвечают тостом), `BotMenuHandler`
+  (диспетчер `processAction`, `showPage`/`renderPage`) + страницы по файлам:
+  `MainPage`, `ChatSettings`(+`ChatSettingsPages`), `Modes`, `Purchase`,
+  `Presets`, `Admin`, `Tenants`, `SuperAdmin`, `PaymentSettings`, `ExternalPay`,
+  `Retention`, `Onboarding`, `Referral`, `Growth`, `Spend`, `Help`,
+  `TextInput`, `AdminInput`.
+- `Texts.swift` — каталог повторяющихся строк. **Только литералы**: всё, что
+  называет человека/чат, собирается на месте через `displayLabel`/`sanitizeName`.
+- `Formatting/ResponseFooterFormatter.swift` — футер (токены, стоимость ×markup,
+  модель, остаток баланса).
+- `Payments/`: `PaymentFulfillmentService` (**единственный** post-payment путь,
+  §5), `CryptoPaymentService`, `CryptoPaymentMonitor`, `ExternalPaymentService`,
+  `SubscriptionWriter`/`WalletWriter` (единственные пути изменения `paid_until`
+  и кошелька вне платежа), `InMemoryLedger` (тот же контракт без durability).
+- `Lifecycle/`: `SubscriptionReminderService` (свип подписок: напоминания,
+  winback, возврат по балансу), `RetentionService` (суточный прунинг переписок),
+  `OwnerAlerter` (`OwnerAlert`: databaseDown, volatileMode, notWriter,
+  ledgerMismatch, modelCatalogueDown, spendCapReached).
+- `Persistence/PersistenceCoordinator.swift` — write-behind (§8.1).
+- `Providers/ProviderGatewayRegistry.swift` — `ServiceProvider → адаптер`.
+- `Runtime/`: `UpdateIntake` (дедуп + альбомы), `GenerationLimiter` (глобальный
+  FIFO-семафор), `TelegramRateLimiter` (token-bucket), `RuntimeMetrics`,
+  `StateDurability`, `Concurrency` (`LockedValue`, `RuntimeFlags`).
+- `SessionRegistry.swift` — активные генерации (стоп, graceful shutdown).
+- `ModelPriceMonitor.swift` — цены/бесплатность моделей OpenRouter.
+- `UserFacingError.swift` — ошибки → русский текст пользователю.
+- `Ports/`: `TelegramGatewayPort`, `ProviderGatewayPort`, `StatePersistencePort`,
+  `LedgerPort`, `MediaResolverPort`, `LoggerPort` (+`LogContext`: чат/тема/юзер/
+  генерация), `ConfigRegistry` (`ConfigName`, `ConfigKey<Value>`, `Config`,
+  `StoredConfig`, `ConfigDocuments`), `ExternalCheckoutPort`.
 
 ### Domain/
-- `Chat/ChatContextStore.swift` — **сердце системы**, актор: хранилище состояния,
-  dirty-наборы и boot-обвязка. См. §5. Логика разнесена по
-  `ChatContextStore+*.swift` (все — расширения того же актора, поэтому поля
-  `internal`, но за пределами этих файлов их никто не трогает):
-  `Identity` (UserKey ↔ ник, `adoptRecords`), `Tenants`, `Subscriptions`
-  (активация, цены, расписание напоминаний), `Auth` (роли + резолв доступа),
-  `Presets`, `ChatContext` (память чата и её мутации), `Chats` (списки, мета,
-  инвайты), `PendingInput` (единственный слот ожидания + его владелец),
-  `Payments` (Stars/карта/крипта/курсоры), `ExternalPayments` (внешняя касса:
-  реквизиты, цены, способы, счета),
-  `Models` (что разрешено без оплаты + фолбэк), `Premium` (дневная порция),
-  `Modes` (эталонные режимы + их применение к чату), `Analytics`
-  (воронка + `src_`), `Onboarding`, `Referral`, `Balances`, `Ads`.
-- `Chat/ChatContextTypes.swift` — value-типы стора: `TenantState`, `ChatContext`,
+- `Chat/ChatContextStore.swift` — актор, **единственный владелец состояния**
+  (§3). Логика в расширениях `ChatContextStore+*`: `Identity`, `Tenants`,
+  `Subscriptions`, `Auth`, `Presets`, `ChatContext`, `Chats`, `PendingInput`,
+  `Payments`, `ExternalPayments`, `Models`, `Premium`, `Modes`, `Analytics`,
+  `Onboarding`, `Referral`, `Balances`, `Ads`, `Spend`, `Ledger`
+  (`applyCommitted*` — обновление кэша после коммита), `Persistence`
+  (экспорт/импорт строк).
+- `Chat/ChatContextTypes.swift` — `TenantState`, `ChatContext`,
   `GenerationSnapshot`, `HelpData`, `TenantStatsRow`, `SimulatedRole`.
-- `Chat/ChatContextStore+Persistence.swift` — экспорт/импорт строк (dirty-дренаж,
-  restore), изоляция кода персистентности от основного актора.
-- `Chat/BotStateSnapshot.swift` — `CumulativeUsage`, снапшот-DTO (`*Snapshot`),
-  legacy-блоб для одноразовой миграции.
-- `Chat/ChatMessageTypes.swift` — `ChatMessage`/`ChatMessageContent` (text | parts),
-  мультимодальные части (image/audio/video), сборка user-сообщения.
-- `Chat/ChatSessionTypes.swift` — `ChatKey` (chatID+threadID), `GenerationID`.
-- `Chat/PresetTypes.swift` — `Preset`, `PresetCategory`, `PresetInput`
-  (что правит редактор заготовок), `AdminPendingInput(Kind)`.
-- `Chat/PendingRequest.swift` — **одно ожидание ввода на чат**: `PendingKind`
-  (все виды «ждём текст»: пресет, цены Stars, крипта, free-модель, админские) и
-  `PendingRequest` (владелец + меню-сообщение + вид). См. §13.
-- `Chat/ChatMetaInfo.swift` — человекочитаемая идентичность чата + `InviteRecord`.
-- `Chat/UserDirectory.swift` — **идентичность пользователя**: `UserKey`
-  (стабильный ключ хранения), `UserIdentity`, `UserDirectory` (userID ↔
-  @username + `rootKey`). См. §6 «Идентичность».
-- `Chat/UserBalance.swift` — кошелёк pay-as-you-go + `ChatAccessStatus`.
-- `Chat/AdCampaign.swift` — рекламная кампания (частота + пейсинг).
-- `Chat/SubscriptionLifecycle.swift` — `SubscriptionReminderConfig` (расписание
-  напоминаний/winback + чистое решение «что слать» — `dueNotice`),
-  `SubscriptionNotice`, `SubscriptionDiscount`, `SubscriptionPricing`,
-  `SubscriptionLifecycleStats`.
-- `Chat/ModePreset.swift` — **режимы** (§«Режимы»): `ModeTier` (🆓 `free` /
-  ⭐ `premium`; неизвестное значение декодится как `premium` — fail-closed),
-  `ModePreset` (id, название, подпись, модель + пин сервиса, стиль, память,
-  обдумывание, опциональная роль, тариф, вкл/выкл, счётчик тапов) и
-  `ModePresetConfig` (вкл/выкл, список, `defaultModeID` — «рабочий режим»,
-  границы и нормализация, `freeTierModelIDs`).
-- `Chat/Onboarding.swift` — `OnboardingExample` (id, подпись кнопки, готовый
-  запрос, вкл/выкл, счётчик тапов) и `OnboardingConfig` (вкл/выкл, показывать ли
-  в группах, список примеров + границы и нормализация). См. §7 «Онбординг».
-- `Chat/TrafficSource.swift` — атрибуция платного трафика (§7 «Источники»):
-  `TrafficSourceLink` (диплинк `src_<метка>`, санитайз метки до `[a-z0-9_-]`),
-  `TrafficSourceAttribution` (кто пришёл, откуда, дошёл ли до ответа и до
-  оплаты), `TrafficSourceTally`/`TrafficSourceLedger` (агрегаты по кампаниям +
-  прунинг), `TrafficSourceBindOutcome`, `TrafficSourceOverview`.
-- `Chat/Referral.swift` — двусторонний реферал (§7 «Реферал»): `ReferralLink`
-  (диплинк `ref_<userID>`, share-URL), `ReferralConfig` (вкл/выкл, награды обеим
-  сторонам, лимит наград на человека), `ReferralRecord`/`ReferralTally`/
-  `ReferralLedger` (журнал привязок + агрегаты + прунинг), `ReferralBindOutcome`,
-  `ReferralPayout`, `ReferralUserStats`, `ReferralOverview`.
-- `Chat/MediaTypes.swift`, `UserInputContent.swift` — медиа-рефы и вход юзера.
+- `Chat/`: `ChatMessageTypes` (`ChatMessage`/`ChatMessageContent`: text|parts),
+  `ChatSessionTypes` (`ChatKey` = chatID+threadID, `GenerationID`),
+  `Identifiers` (`ChatID`/`UserID`), `UserDirectory` (`UserKey`, `UserIdentity`),
+  `UserBalance` (+`ChatAccessStatus`), `ChatMetaInfo` (+`InviteRecord`),
+  `PresetTypes`, `PendingRequest` (`PendingKind` + владелец + TTL),
+  `ModePreset`, `Onboarding`, `Referral`, `TrafficSource`, `AdCampaign`,
+  `SubscriptionLifecycle`, `SpendPolicy`, `CreditPack`, `FunnelMetrics`,
+  `MediaTypes`, `UserInputContent`, `PersistedSnapshots` (DTO строк/конфигов).
+- `Money.swift` — USD в **наноданных долларах** (`Int64`, приватный init,
+  только именованные фабрики). Целочисленность нужна для граничных сравнений
+  (`> .zero`) и сходимости с журналом; насыщение вместо переполнения, `NaN` → 0.
 - `Providers/ProviderTypes.swift` — `ServiceProvider`, `ProviderCapabilities`,
   `StreamUsageSummary`/`StreamMeta`, `ProviderStreamEvent`, `GenerationOptions`,
   `ReasoningEffort`.
-- `Payments/PurchasePurpose.swift` — `subscription | credit(cents:)`: к этим
-  двум случаям сводится любой платёж, поэтому fulfilment общий (§17).
-- `Payments/CryptoPayment.swift` — сети/активы/инвойсы крипты + форматтер сумм.
-- `Payments/CardPayment.swift` — `FiatCurrency` (RUB/USD/EUR + парсер и рендер
-  сумм в minor units) и конфиг карточного эквайринга.
-- `Payments/ExternalPayment.swift` — внешняя касса (§7): `ExternalPaymentVendor`
-  (вендор → адаптер, подписи, дефолтные способы), `ExternalPaymentMethod`
-  (рельс на странице кассы: код вендора + название), `ExternalPaymentConfig`
-  (реквизиты, валюта, цены, список способов; `credentials` — единственный вход
-  в адаптер), `ExternalPaymentOrder`/`ExternalPaymentSnapshot`,
-  `ExternalPaymentEndpoint` (`/payments/<vendor>`), `ExternalPaymentError`.
+- `Payments/`: `PurchasePurpose` (`subscription | credit(cents:)`),
+  `CryptoPayment`, `CardPayment` (`FiatCurrency` + minor units),
+  `ExternalPayment` (вендор, способы, конфиг, счета, эндпоинт, ошибки).
 
 ### Infrastructure/
-- `Telegram/TelegramHTTPGateway.swift` — реализация `TelegramGatewayPort`: все
-  вызовы Bot API (sendMessage/editMessage/sendMessageDraft/sendInvoice/
-  answerPreCheckoutQuery/getFile/download/…), маппинг API-DTO → доменных моделей,
-  ретрай 429, применение rate limiter'а.
-- `Telegram/TelegramApiModels.swift` — сырые DTO Bot API.
-- `Telegram/TelegramHTMLFormatter.swift` — санитизация/конвертация в Telegram HTML,
-  три стадии по файлам: `+Tokenizer.swift` (`tokenize` — чтение: где кончается
-  тег, тег ли это вообще, сущность ли это `&…;`), `+Sanitizer.swift` (`sanitize` —
-  политика: выживает ли тег и с какими атрибутами; разбор атрибутов),
-  головной файл (`render` — сборка со стеком открытых тегов + белый список схем
-  `href` и экранирование значений атрибутов).
-- `Telegram/TelegramMediaResolver.swift` — скачивание медиа → base64/data-URL.
-- `Providers/OpenRouterProviderAdapter.swift`, `DeepSeekProviderAdapter.swift` +
-  их `*APIModels.swift` — адаптеры LLM (SSE-стриминг). См. §8.
-- `Persistence/PostgresStatePersistence.swift` — write-behind поверх
-  PostgresNIO: построчная загрузка, батч одной транзакцией, миграции схемы.
-  `PostgresLedger.swift` — деньги в транзакциях (кошельки, журнал,
-  идемпотентность платежей, срок подписки). `WriterLock.swift` — advisory lock
-  единственного писателя. `PostgresSchema.swift` — версионированная схема.
-  `DatabaseEndpoint.swift` — разбор `DATABASE_URL`. См. §10.
-- `Networking/NetworkClient.swift` — обёртка AsyncHTTPClient: `send`, `ssePayloads`
-  (парсер SSE), лимиты на размер тела.
-- `Networking/AppHTTPServer.swift` — минимальный NIO HTTP-сервер (`/health`,
-  `/ready`, `/metrics`, webhook).
-- `Payments/CryptoExplorers.swift` — `TonExplorer`, `EvmExplorer` (ETH/BSC,
-  Etherscan V2 multichain по chainID), `TronExplorer`.
-- `Payments/FreeKassaCheckoutAdapter.swift` — внешняя касса FreeKassa (SCI):
-  подписанная ссылка `pay.fk.money` и проверка уведомления;
-  `ExternalCheckoutRegistry.swift` — `vendor → адаптер` **исчерпывающим
-  switch'ем** (новый вендор не соберётся без адаптера);
-  `PaymentSignature.swift` — MD5-подпись (схема вендора, не наш выбор).
-- `Networking/URLForm.swift` — `application/x-www-form-urlencoded` в обе
-  стороны: касса говорит формами, а не JSON.
-- `Logging/ConsoleLogger.swift` — `LoggerPort`: уровень из `LOG_LEVEL`, формат из
-  `LOG_FORMAT` (`json` — одна JSON-строка на событие, её индексирует хостовый
-  поиск логов; иначе человекочитаемо). Контекст строки (`LogContext`: чат, тема,
-  юзер, генерация) печатается как `[chat=… user=…]` или как поля JSON.
-
-> Файл `Infrastructure/Networking/HealthCheckServer.swift` **удалён** — заменён
-> на `AppHTTPServer.swift`.
+- `Telegram/TelegramHTTPGateway.swift` — `TelegramGatewayPort`: все вызовы Bot
+  API (sendMessage/editMessage/sendMessageDraft/sendInvoice/
+  answerPreCheckoutQuery/getFile/download/…), маппинг DTO, ретрай 429, rate
+  limiter, `chunkFittingHTML`.
+- `Telegram/TelegramApiModels.swift` — сырые DTO.
+- `Telegram/TelegramHTMLFormatter*.swift` — три стадии: `+Tokenizer` (чтение
+  тега/сущности), `+Sanitizer` (политика: какие теги/атрибуты выживают),
+  головной (`render`, стек тегов, белый список схем `href`, экранирование
+  значений атрибутов).
+- `Telegram/TelegramMediaResolver.swift` — медиа → base64/data-URL.
+- `Providers/`: `OpenRouterProviderAdapter`, `DeepSeekProviderAdapter` (+
+  `*APIModels`), `ProviderStreamErrorPayload` (§6).
+- `Persistence/`: `PostgresStatePersistence` (построчная загрузка, батч одной
+  транзакцией, миграции), `PostgresLedger` (деньги в транзакциях),
+  `WriterLock` (advisory lock единственного писателя), `PostgresSchema`,
+  `DatabaseEndpoint` (разбор `DATABASE_URL`).
+- `Networking/`: `NetworkClient` (AsyncHTTPClient: `send`, `ssePayloads`,
+  лимиты тела), `AppHTTPServer` (NIO: `/health`, `/ready`, `/metrics`, webhook,
+  `/payments/<vendor>`), `SecretBox` (шифрование секретов в БД, `SealedSecret`),
+  `SecretGuard` (`constantTimeEquals`), `URLForm`.
+- `Payments/`: `CryptoExplorers` (`TonExplorer`, `EvmExplorer` — Etherscan V2 по
+  chainID, `TronExplorer`), `FreeKassaCheckoutAdapter`,
+  `ExternalCheckoutRegistry` (vendor → адаптер исчерпывающим switch),
+  `PaymentSignature` (MD5 — схема вендора).
+- `Logging/ConsoleLogger.swift` — `LOG_LEVEL`, `LOG_FORMAT=json`, `LogContext`.
 
 ---
 
-## 4. Жизненный цикл апдейта
+## 3. Жизненный цикл апдейта
 
 ```
-Telegram
-  │  (webhook POST /telegram/webhook  ИЛИ  long polling getUpdates)
-  ▼
-AppHTTPServer / runPollingLoop
-  │  проверка secret-заголовка, 503 пока не ready / при draining
-  ▼
-UpdateIntake.enqueue([updates])
-  │  дедуп по update_id (кольцевой буфер 2048) + склейка альбомов (holdback 750мс)
-  ▼
-BotOrchestrator.dispatch(update:)
-  ├─ callback_query `ex:` → handleOnboardingExample (тап по примеру = обычный запрос:
-  │                        учёт тапа, эхо запроса в чат, затем per-chat очередь)
-  ├─ callback_query      → BotCallbackHandler (в обход per-chat очереди: stop должен прерывать)
-  ├─ pre_checkout_query  → handlePreCheckoutQuery (цена: полная или winback-скидочная
-  │                        → answerPreCheckoutQuery)
-  ├─ my_chat_member      → handleMyChatMemberUpdate (вход в группу → отметка
-  │                        присутствия, autoAssign на добавившего, funnel,
-  │                        разовое приветствие; выход → пометка «бот удалён»;
-  │                        личка → блок/разблок бота, приветствия нет)
-  └─ message             → ChatUpdateDispatcher.submit(chatKey) { route(message) }
-                              │  (сериализация per-chat, очередь ≤16)
-                              ▼
-                          BotOrchestrator.route(message:)
-                            1. recordChatMeta (title/@username для админ-тулинга)
-                            2. successful_payment? → handleSuccessfulPayment (идемпотентно)
-                            3. /buy или /start (через `CommandParser`, не по префиксу)? → пропустить до access-gate
-                               (`/start ref_<userID>` → привязка реферала, §7)
-                            4. autoAssignIfNeeded (привязать чат к тенанту отправителя)
-                            5. BotCommandHandler.handleIfCommand → true? стоп
-                            6. BotMenuHandler.processTextInput → true? стоп (ждали ввод)
-                            7. GenerationCoordinator.handleIfNeeded → LLM-ответ
+Telegram → webhook POST /telegram/webhook | long polling getUpdates
+  → AppHTTPServer / runPollingLoop     (secret-заголовок; 503 пока не ready / draining)
+  → UpdateIntake.enqueue               (дедуп update_id, кольцевой буфер 2048; альбомы holdback 750мс)
+  → BotOrchestrator.dispatch
+     ├─ callback `ex:`      → handleOnboardingExample → per-chat очередь (запускает генерацию)
+     ├─ callback_query      → BotCallbackHandler  (МИМО очереди: «Стоп» обязан прерывать)
+     ├─ pre_checkout_query  → handlePreCheckoutQuery (валидация цены, durability-гейт)
+     ├─ my_chat_member      → вход в группу (присутствие, autoAssign, funnel, приветствие)
+     │                        / выход (botRemoved) / личка (блок-разблок)
+     └─ message             → ChatUpdateDispatcher.submit(chatKey) { route(message) }
+            route: 1 recordChatMeta → 2 successful_payment → 3 /start|/buy до гейта
+                   → 4 autoAssignIfNeeded → 5 BotCommandHandler.handleIfCommand
+                   → 6 BotMenuHandler.processTextInput → 7 GenerationCoordinator.handleIfNeeded
 ```
 
-Ключевое: **callback'и минуют per-chat очередь** — иначе кнопка «Стоп» не смогла
-бы отменить генерацию, которая эту очередь и держит. Исключение — `ex:` (пример
-онбординга): он **запускает** генерацию, поэтому идёт через ту же очередь, что и
-обычное сообщение (порядок в чате не ломается).
-
-**Вход в группу приходит дважды.** Ссылка `?startgroup=<payload>` заставляет
-Telegram и прислать `my_chat_member`, и запостить в чат `/start <payload>`. Пути
-разные (первый — вне очереди, второй — через неё), порядок не гарантирован,
-поэтому оба зовут `ChatContextStore.claimGroupGreeting(chatID:)` — кто первый,
-тот и здоровается (окно 10 мин, `_groupGreetedAt`, in-memory). `/start` в группе
-никогда не шлёт личное приветствие — только групповое.
+Вход в группу приходит **дважды** (`my_chat_member` + `/start <payload>` от
+`?startgroup=`), пути разные и порядок не гарантирован → оба зовут
+`claimGroupGreeting(chatID:)` (окно 10 мин, in-memory). `/start` в группе никогда
+не шлёт личное приветствие.
 
 ---
 
-## 5. Доменное состояние: `ChatContextStore`
+## 4. Состояние: `ChatContextStore`
 
-Актор — единственный владелец всего изменяемого состояния. Всё наружу отдаётся
-через `async`-методы; внешний код никогда не трогает поля напрямую.
+Актор — единственный владелец изменяемого состояния; наружу только `async`-методы.
 
-**Что хранит:**
-- `contexts: [ChatKey: ChatContext]` — память каждого чата (по chatID+threadID).
-- `tenants: [String: TenantState]` — тенанты (ключ = `UserKey`, §6).
-- `chatOwnership: [Int: String]` — какой чат какому тенанту принадлежит (`UserKey`).
-- `userTenantMap: [Int: String]` — userID → тенант (`UserKey`, для автопривязки).
-- Глобальные конфиги: суперадмины, цена Stars, крипто-конфиг, карта, free-модели,
-  processed payments, polling offset, метаданные чатов, инвайты, реклама, markup%,
-  балансы пользователей, счётчики воронки (`funnelCounters` + подневные бакеты
-  `funnelDailyValue`, §11), дневной премиум-лимит
-  (`dailyPremiumLimitValue`, §7/§9) и израсходованные дневные порции
-  (`premiumDailyUsage`, §9), настройки само-рекламы (`selfPromoConfigValue`, §7),
-  расписание напоминаний/winback
-  (`reminderConfigValue`, §7/§14), примеры онбординга + их тапы
-  (`onboardingConfigValue`, §7 «Онбординг»), эталонные режимы
-  (`modeConfigValue`, §7 «Режимы»), настройки реферала
-  (`referralConfigValue`) и журнал привязок (`referralLedgerValue`, §7 «Реферал»).
-- **In-memory без персиста** (сброс при рестарте некритичен): `_groupGreetedAt` —
-  антидубль группового приветствия (§4); `_sponsorCreditShownAt` — троттлинг
-  строки спонсора под ответами (§7). Дневной счётчик премиум-вкуса
-  (`premiumDailyUsage`) раньше был здесь же — теперь **персистится** (§9):
-  редеплой не должен раздавать всем новую порцию, это главный драйвер конверсии.
-  Строка остаётся маленькой: записи прошлых суток прунятся при каждой записи и
-  при restore.
-- **Dirty-tracking**: `dirtyContexts`, `dirtyTenants`, `deletedTenants`,
-  `dirtyOwnership`, `deletedOwnership`, `dirtyConfigs` (+ `deleted*`). Любая
-  мутация помечает грязным — это то, что дренирует `PersistenceCoordinator`.
+**Хранит**: `contexts: [ChatKey: ChatContext]`, `tenants: [UserKey-строка:
+TenantState]`, `chatOwnership: [ChatID: tenant]`, `userTenantMap`, кошельки,
+метаданные чатов, инвайты, крипто-инвойсы, счета кассы, журнал реферала,
+атрибуции `src_`, счётчики воронки (общие + подневные), дневной расход премиума,
+и глобальные конфиги (§8.3).
 
-**`ChatContext`** (память одного чата): `role`, `history: [ChatMessage]`,
-`pendingTurns`, `model` (+`modelProviderRouting`), `temp`, `maxHistory`,
-`showStats`/`showCost`/`showModel`, `provider`, `suffix` (test-mode),
-`reasoningEffort`, `backupNotify`, `cumulativeUsage`, per-chat пресеты, счётчики
-рекламы, `funnelFirstMessageCounted` (флаг воронки: первое сообщение чата
-засчитано), `downgradedFromModel` (платная модель, отложенная дневным лимитом —
-возвращается сама, когда доступ появился; см. §9), `activeModeID` (в каком
-эталонном режиме чат сейчас — сбрасывается любой ручной правкой настройки,
-которой владеет режим, §7 «Режимы»).
+**Dirty-tracking**: `dirtyContexts`, `dirtyTenants`, `dirtyOwnership`,
+`dirtyConfigs`, `dirtyWallets` + соответствующие `deleted*`. Любая мутация метит
+грязным — это дренирует `PersistenceCoordinator`.
 
-**Кто платит за чат**: `chatAccessStatus(chatID:username:userID:)` →
-`ChatAccessStatus` (`ownSubscription` / `sponsored(@X)` / `guest(@X)` / `balance`
-/ `free`). Тот же порядок приоритетов, что у `hasSubscriptionCoverage`, но с
-именем плательщика — меню и страница покупки благодарят спонсора вместо того,
-чтобы продавать уже открытый доступ (§7 «Спонсор-герой»).
+**In-memory без персиста**: `_groupGreetedAt` (антидубль приветствия),
+`_sponsorCreditShownAt` (троттлинг строки спонсора, 1 ч на чат).
 
-**`pendingTurns`** — важный механизм: пока идёт генерация, user-сообщение висит в
-`pending`; при завершении (`completed`/`cancelled`) `flushResolvedTurns`
-дописывает пары user+assistant в `history` **по порядку**. Это позволяет
-параллельно копить несколько запросов и не портить порядок истории.
-`visibleHistory` = обрезанная (`trimHistory`, system-сообщение всегда первым)
-история + незакрытые ходы, **развёрнутые по их состоянию**: `pending` даёт
-вопрос, `completed` — вопрос **и ответ** (он уже получен, просто ждёт своей
-очереди в историю), `cancelled` — ничего. Иначе три сообщения подряд в одном
-чате дают модели вопрос без ответа, и она отвечает на него второй раз, а снятый
-«Стопом» вопрос всё равно уходит в запрос.
+**`ChatContext`**: `role`, `history: [ChatMessage]`, `pendingTurns`, `model`
+(+`modelProviderRouting`), `temp`, `maxHistory`, `showStats/showCost/showModel`,
+`provider`, `suffix` (test-mode), `reasoningEffort`, `backupNotify`,
+`cumulativeUsage`, per-chat пресеты, счётчики рекламы,
+`funnelFirstMessageCounted`, `downgradedFromModel` (платная модель, отложенная
+дневным лимитом), `activeModeID`.
 
-**Память чата ограничена дважды**: числом сообщений (`maxHistory`,
-`ChatContext.historyRange` = 1…50) и размером (`ChatContext.historyByteBudget`,
-200 КБ UTF-8). Обе границы применяет `trimHistory` — единственный путь и в
-запрос, и в сохраняемую переписку, поэтому лимит из строки старого билда тоже не
-пролезает. Бюджет набирается от новейшего сообщения назад; system вне бюджета
-(это роль), новейшее сообщение выживает всегда. Без второй границы один
-разогнавшийся ответ модели переотправлялся провайдеру на **каждом** следующем
-ходу чата — счёт растёт молча.
+**`pendingTurns`**: пока идёт генерация, user-сообщение висит в pending; на
+`completed`/`cancelled` `flushResolvedTurns` дописывает пары user+assistant в
+`history` **по порядку**. `visibleHistory` = `trimHistory(history)` + незакрытые
+ходы, развёрнутые по состоянию: `pending` → вопрос, `completed` → вопрос и
+ответ, `cancelled` → ничего.
+
+**Память ограничена дважды**: числом сообщений (`ChatContext.historyRange`
+1…50) и байтами (`historyByteBudget` 200 КБ UTF-8). Обе границы применяет
+`trimHistory` — единственный путь и в запрос, и в сохраняемую переписку. Бюджет
+набирается от новейшего назад; system вне бюджета, новейшее сообщение выживает.
 
 **`TenantState`**: `ownerUsername`, дефолты (модель/роль/длина истории), 4 набора
-глобальных (тенант-скоуп) пресетов, `whitelistedUserIDs`, `adminUsernames`,
-`licensedUsernames`, `cumulativeUsage`, `createdAt`, **`paidUntil`** (nil =
-бессрочно). `isActive = paidUntil == nil || paidUntil > now`.
-Жизненный цикл подписки (§7 «Напоминания»): `noticeCycleUntil` + `sentNotices`
-(какие письма уже ушли в текущем сроке — продление меняет `paidUntil` и обнуляет
-набор), `winbackDiscount` (одноразовая скидка), `remindersOptOut` (спонсор
-отписался сам).
+глобальных пресетов, `whitelistedUserIDs`, `adminUsernames`, `licensedUsernames`,
+`cumulativeUsage`, `createdAt`, `paidUntil` (nil = бессрочно;
+`isActive = paidUntil == nil || paidUntil > now`), `noticeCycleUntil`,
+`sentNotices`, `winbackDiscount`, `remindersOptOut`.
 
-**Роутинг тенанта**: `tenantState(for: chatID)` = тенант из `chatOwnership` или
-дефолтный владелец. Мутации дефолтов/пресетов идут через `mutateTenant(for:)`.
+`tenantState(for: chatID)` = тенант из `chatOwnership` или дефолтный владелец;
+мутации дефолтов/пресетов — через `mutateTenant(for:)`.
 
 ---
 
-## 6. Мультитенантность и роли
+## 5. Идентичность, роли, монетизация
 
-### Идентичность: `UserKey`, а не @username
+### 5.1 `UserKey`, а не @username
+Ник арендуемый, поэтому всё про человека (кошелёк, подписка, лицензия, роль,
+владение чатами, инвойсы) лежит под `UserKey`:
+- `#<userID>` — человек попал боту на глаза;
+- голый lowercase-ник — про человека только рассказали (`/tenant adduser`);
+  при первом сообщении `identifyUser` переносит запись под `#<userID>`.
+Ник не может содержать `#` → формы не пересекаются.
 
-Telegram-ник **арендуемый**: его меняют, освобождают, и его может занять другой
-человек. Поэтому всё, что бот хранит про человека — кошелёк, подписка, лицензия,
-роль суперадмина, владение чатами, крипто-инвойсы — лежит под `UserKey`:
+`UserDirectory` (таблица `bot_user` + конфиг `root_owner`): userID ↔ ник/имя,
+`firstSeenAt`/`seenAt`, `rootKey` (пин владельца). `identifyUser(userID:
+username:firstName:)` зовётся на **каждом** апдейте: обновляет директорию,
+`adoptRecords` (переносит всё с ожидающего ника на `#<userID>`; кошельки
+**складываются** целиком, включая `toppedUpUsd` и максимумы отметок), освежает
+денормализованные ники, прунит директорию не трогая тех, за кем что-то числится.
+`seenAt` персистится с троттлингом 15 мин (новый человек и смена ника — сразу).
 
-- `#<userID>` — как только человек хоть раз попал боту на глаза (обычный случай);
-- голый lowercase-ник — пока про человека только **рассказали**
-  (`/tenant adduser @кто-то`, кого бот не видел). Такая запись «ждёт»: при первом
-  же сообщении `identifyUser` переносит её под `#<userID>`.
+API стора принимает **ключ**, не текст (`UserKey` без публичного
+`init(String)`). Границы: `userKey(forHandle:)` / `userKeyOrRaw(_:)` (только там,
+где человек набрал имя; санитайз до `[a-z0-9_]`), `resolved(_:)` (pending →
+идентифицированный; для `#<id>` тождественна), `storageValue` (только колонка/
+JSON). Наружу — `displayLabel(forKey:)` (`@ник` / имя / `id 12345`); списочные
+методы отдают пары `(key, label)`. `UserKey.description` печатает `UserKey(#42)`.
+`ChatID`/`UserID` — тоже типы; «id лички = userID» живёт только в
+`ChatID.privateChat(with:)` / `UserID.privateChat`; вместо `chatID < 0` —
+`isGroup`/`isPrivate`. Целочисленные литералы id разрешены только в тестах.
+@username пользователю **не нужен** нигде: резолв идёт по `userKeys(username:
+userID:)`, userID первичен.
 
-Ник не может содержать `#`, поэтому две формы ключа не пересекаются.
+### 5.2 Роли
+- **Суперадмины** (root по умолчанию `@maythe4th`, пин `OWNER_USER_ID`): цены,
+  методы оплаты, дефолтные пресеты, free-модели, наценка, реклама, режимы,
+  балансы, лимиты расходов, статистика. `rootSuperAdmin` — единственный, кто
+  добавляет/удаляет суперадминов.
+- **Админы** (владельцы лицензий = оплатившие): свои дефолты, глобальные
+  пресеты, выдача платного доступа своим чатам/юзерам.
+- **Обычные** — только бесплатные модели + per-chat пресеты.
 
-**`UserDirectory`** (`bot_config` → `user_directory`) — переводчик между ключами и
-никами: `identities` (userID → ник/имя/когда виделись), производный индекс
-`byUsername` (перестраивается на декоде — один ник не может указывать на двоих) и
-`rootKey` (ключ владельца бота, закрепляется при первой же встрече — иначе root
-терялся бы при смене ника, которым бот сконфигурирован).
+`hasSubscriptionCoverage`: (1) сам активный тенант, (2) в `licensedUsernames`
+активного тенанта, (3) чат в `chatOwnership` активного тенанта, (4) userID в
+`whitelistedUserIDs`. `chatAccessStatus(chatID:username:userID:)` →
+`ownSubscription | sponsored(@X) | guest(@X) | balance | free` (тот же порядок +
+имя плательщика). `hasFullModelAccess` = подписка ИЛИ положительный баланс.
+`autoAssignIfNeeded` — непривязанный чат закрепляется за тенантом отправителя.
+Инвайты: `InviteRecord` (токен → owner), диплинк `/start <token>`, один активный
+токен на владельца. `/simulate`: `isSuperAdmin` учитывает симуляцию,
+`isActuallySuperAdmin` — нет; снятие роли суперадмина снимает и симуляцию
+(иначе она вернётся вместе с ролью).
 
-**`ChatContextStore.identifyUser(userID:username:firstName:)`** вызывается на
-**каждом** апдейте (сообщение, callback, pre_checkout, `my_chat_member`). Он:
-1. обновляет директорию;
-2. `adoptRecords` — переносит всё, что лежало под ожидающим ником (тенант,
-   кошелёк, владение чатами, `userTenantMap`, суперадминство, списки гостей и
-   админов, инвайты, симуляция роли, крипто-инвойсы) на `#<userID>`. Если
-   кошелёк есть под обоими ключами, они **складываются целиком** — включая
-   `toppedUpUsd` (признак «платил реальные деньги», §7) и `lapsedNoticeAt`/
-   `updatedAt` по максимуму: потерянный `toppedUpUsd` превратил бы клиента
-   обратно в незнакомца, а потерянная отметка — послала бы второй оффер;
-3. освежает денормализованные ники (`TenantState.ownerUsername`, журнал
-   реферала) — списки показывают текущий ник;
-4. прунит директорию (`maxIdentities` 10 000), **никогда** не выбрасывая тех, за
-   кем что-то числится (`keysHoldingState`: тенанты, кошельки, владение чатами,
-   суперадмины, инвайты, лицензии и админы тенантов, пригласившие из журнала
-   реферала **и его агрегаты** (`tallies` живут дольше записей), владельцы
-   открытых крипто-инвойсов, симуляция роли, `userTenantMap`).
+### 5.3 Оплата
+Подписка 30 дней: активация продлевает от `max(now, paidUntil)`.
+`activatePaidSubscription` создаёт тенанта при первой оплате. Истёкший тенант
+сохраняет админ-панель, но его чаты откатываются на бесплатные модели.
+**Бессрочный остаётся бессрочным** на всех трёх путях: оплата →
+`.alreadyUnlimited`, SQL `extendSubscription` → `case when paid_until is null
+then null`, ручное «+N дней» (`extendTenantSubscription` →
+`SubscriptionExtensionOutcome.alreadyUnlimited`) ничего не пишет.
 
-**Когда директория попадает в базу.** Строка `user_directory` — одна на всех (до
-10 000 записей), писать её на каждое сообщение нельзя. Поэтому `record` отдельно
-сообщает, что сдвинулся `seenAt` (`seenAtAdvanced`, троттлинг
-`UserDirectory.seenAtPersistInterval` = 15 мин; новый человек и смена ника пишутся
-сразу). Без этого «когда виделись» жило бы только в памяти и на рестарте
-откатывалось: возврат по балансу (§7) писал бы «давно вас не было» активному
-человеку, а D1/D7 (§11) систематически занижались.
+Способы (всё настраивается из супер-меню, не в env; см. `PAYMENTS_SETUP.md`):
+- **Stars** — `sendInvoice`(XTR) → `pre_checkout_query` → `successful_payment`.
+- **Карта** — Telegram Payments, `CardPaymentConfig` (токен BotFather, валюта,
+  цена в minor units) в состоянии бота.
+- **Крипта** — TON/BSC/ETH/TRON, нативный TON + USDT. `CryptoMatchMode`:
+  `amountDelta` (один адрес, уникальная дельта суммы по слотам; слотов нет →
+  `slotsExhausted`, тихий откат на слот 0 запрещён) или `uniqueAddress` (пул).
+  `CryptoPaymentService` — инвойсы/курсы/матчинг, `CryptoPaymentMonitor` — поллинг
+  эксплореров (30 с). Курсоры сканирования персистятся
+  (`CryptoConfigSnapshot.explorerCursors`, ключ `"<asset>:<address>"`); адрес без
+  курсора сканируется на 45 мин назад; курсор двигается **после** зачисления
+  пачки и только вперёд. `applyMatch` зовёт `fulfil` первым, `.paid` пишет только
+  на успехе, иначе `.deferred` (инвойс остаётся `open`, курсор не двигается).
+  «Деньги в полёте» — `CryptoInvoiceStatus.isAwaitingFunds` (`open`|`partial`),
+  такой инвойс не прунится никогда; закрытые режет `pruneCryptoInvoices`
+  (кап 200, как у счетов кассы), кроме того, который пишут прямо сейчас.
+- **Внешняя касса** (`ExternalPaymentConfig`, вендор FreeKassa SCI): бот
+  подписывает ссылку словом 1, касса шлёт уведомление, подписанное словом 2, на
+  `/payments/<vendor>`, бот отвечает `YES`. `credentials` возвращает тройку или
+  nil (полунастроенный магазин не выдаёт ссылку). Счёт живёт час, повторный тап
+  переиспользует открытый; дедуп `ext:<vendor>:<paymentID>`. `fulfil` вернул
+  `.failed` → `reopenExternalOrder` и **не** `YES`. Подпись — единственная
+  аутентификация: сравнение константное (`SecretGuard`), нет подписи = неверная,
+  неподписанный POST → 400.
 
-**API стора принимает ключ, а не текст** (§5.1 PRE_PROD_PROPOSALS). `UserKey` —
-тип без публичного `init(String)`, поэтому передать ник вместо ключа больше не
-компилируется. Границы:
+**`PaymentFulfillmentService.fulfil(_:)` — единственный post-payment путь** для
+всех рельсов: дедуп → активация/зачисление → `claimChatForPayment` → съедание
+winback-скидки → счётчики воронки → реферальный бонус за конверсию →
+`recordTrafficSourcePayment` → `flushNow()`. Путь строит `PaymentReceipt`,
+получает `PaymentFulfillmentOutcome` и рисует **только текст** своего канала.
+Идемпотентность: charge_id (Stars/карта), tx-хеш (крипта), `ext:…` (касса).
+`claimChatForPayment` не отбирает группу у активного спонсора
+(`ChatClaimOutcome.keptSponsor`); ручная привязка — `assignChat`.
 
-- **текст → ключ**: `userKey(forHandle:)` (nil, если не похоже на ник) и
-  `userKeyOrRaw(_:)` (всегда, с санитайзом). Только там, где человек **набрал**
-  имя: `/tenant adduser`, ввод в меню;
-- **ключ → лучший ключ**: `resolved(_:)` — ведёт pending-ключ к
-  идентифицированному, а идентифицированный возвращает как есть. Его зовут
-  методы стора, и именно он держит round-trip, на котором стоят ролевые гейты;
-- **ключ → строка**: `storageValue` — колонка или JSON-поле, больше ничего.
-  В интерфейс ключ не попадает никогда (`displayLabel(forKey:)`);
-  `description` печатает `UserKey(#42)`, чтобы случайная интерполяция бросалась
-  в глаза.
+**Кредиты** (`CreditPack`, $2/$5/$10): payload `credits_<центы>`, зачисление
+`credit(purchased: true)` (только этот флаг = реальная оплата, `toppedUpUsd`).
+Свои выключатели у каждого способа: Stars `starsPerUsd`, карта
+`usdRateMinorUnits`, крипта — адреса. Пакеты не зависят от продажи подписки.
 
-> Раньше это было одно правило прозой, и оно уже ломалось: резолвер строился на
-> `UserKey.pending`, который отвергает `#`, и `#<userID>` в нём превращался в
-> nil — `isSuperAdmin`/`isAdmin`/`isTenantOwner`/`isRootSuperAdmin`/
-> `simulatedRole`/`balance` молча отвечали «нет» **всем**, кто уже опознан, а
-> меню и команды передают туда именно ключ (`invokerKey`, `actorKey`). Теперь
-> это тождественная функция, и она закреплена тестом (§19).
+**Наценка** `markupPercentValue` (дефолт 30%): `priceMultiplier() = 1 + %/100` —
+через неё идут **все** видимые цены и списания (`billedCost`, футер,
+`chargeBalance`).
 
-**Ник — это данные, а не адрес.** `UserKey.normalizedHandle(_:)` даёт
-канонический ник (lowercase, без `@`) для диплинков и денормализованных подписей;
-ключ строится из него отдельно. Раньше обе роли играла одна `String`.
+**Цена подписки — только `subscriptionPricing(username:)`** (Stars/крипта/карта/
+касса), чтобы winback-скидка была показана и списана одинаково. Параметр
+`applying:` даёт гипотетическую скидку (предпросмотр). В группу цена берётся с
+`username: nil` (прайс-лист, не персональная скидка).
 
-**`ChatID` / `UserID` — тоже типы** (§5.3). Конвенция «id лички численно равен
-userID» живёт ровно в `ChatID.privateChat(with:)` / `UserID.privateChat`, а
-`isGroup`/`isPrivate` заменили разбросанные `chatID < 0`. Оба декодятся прямо с
-провода; `.value` берут только SQL и Bot API — два места, которые действительно
-говорят числами.
+### 5.4 Режимы (`ModePreset` / `ModePresetConfig`)
+Эталонные связки настроек от суперадмина: модель (+пин сервиса), стиль, память,
+обдумывание, опционально роль. `ModeTier`: `free` 🆓 / `premium` ⭐ (неизвестное
+значение декодится как `premium`). ⭐ видны всем; тап без доступа открывает
+страницу покупки (`PurchaseSource.mode`) и считает `funnel(.capHit)`. Модель
+🆓-режима автоматически попадает в `allowedFreeModelIDs()`. `defaultModeID` —
+«рабочий режим», первый кандидат в `fallbackFreeModel()`. `applyMode` пишет весь
+бандл или ничего; счётчик тапов ставит обработчик кнопки, не `applyMode`. Любая
+ручная правка модели/стиля/памяти/обдумывания снимает `activeModeID`. Формат
+ввода: `Название | Подпись | модель | стиль | память | обдумывание`, модель `-` =
+любая бесплатная, `id@сервис` = пин апстрима. Новый режим создаётся с ⭐. Конфиг
+глобальный (`Config.modes`).
 
-**В интерфейсе всегда ник.** Ключ наружу не показывается никогда: всё идёт через
-`displayLabel(forKey:)` → `@ник` / имя / `id 12345`. Списочные методы отдают пары
-`(key, label)` (`listSuperAdmins`, `listAdmins`, `licensedUsers`, `allBalances`,
-`listTenants`), у строк-снимков есть поле `label` (`TenantStatsRow`,
-`SubscriptionNoticeTarget`, `SubscriptionLifecycleStats.Row`), а `chatSponsor` и
-`ChatAccessStatus` сразу возвращают готовую подпись.
+### 5.5 Дневной премиум-вкус, лимиты расходов
+`consumeDailyPremium` — бесплатная порция платных ответов в сутки (группа: на
+чат, личка: на userID; UTC-сутки; лимит `dailyPremiumLimitValue`, дефолт 5, 0 =
+выключено). Счётчик **персистится** (`bot_premium_usage`). Порция возвращается
+(`refundDailyPremium`) везде, где зовётся `cancelPendingTurn`.
+`paidModelAccess(username:userID:chatID:)` → `.full/.dailyTaste/.none` — единый
+гейт пикеров модели.
 
-**Следствие для пользователя: @username больше не нужен.** Оплата, кошелёк,
-подписка, реферал и инвайты работают у человека вообще без ника — раньше это были
-тупики («задайте @username, иначе доступ не включится»). Резолв доступа
-(`hasSubscriptionCoverage`, `chatAccessStatus`, `hasFullModelAccess`,
-`billingKey`) идёт по списку кандидатов `userKeys(username:userID:)`, где userID
-первичен.
+`SpendPolicy` (`Config.spendPolicy`): дневной потолок расходов у провайдеров
+глобально и на тенанта + `CapResponse` при достижении; дефолт «без лимита».
+Достигнут → платные модели выключаются до полуночи, владельцу — `OwnerAlert
+.spendCapReached`. Расход считает `DailySpendLedger` (в памяти, перекат суток по
+UTC на первой записи), пополняет `recordProviderSpend` из `appendAssistant`.
+Потолок проверяется **первым** в `resolveDailyPremium`, до дневной порции, и
+возвращает `SpendCapOutcome`: `clear` / `capped` / `abandon`. Пока потолок
+держит (`capped`), `restoreDowngradedModel` **не зовётся** ни по одной из двух
+причин (полный доступ, новые сутки с остатком порции) — иначе гейт снимает сам
+себя на том же ходу. Бесплатные модели не гейтятся никогда.
 
-
-Три роли (см. также `.claude/CLAUDE.md`-историю продуктовой спеки ниже):
-
-- **Суперадмины** (root по умолчанию `@maythe4th`) — владельцы бота. Могут всё:
-  цена подписки, методы оплаты, дефолтные пресеты, free-модели, наценка, реклама,
-  балансы, статистика по всем тенантам. `rootSuperAdmin` (@maythe4th) —
-  единственный, кто добавляет/удаляет других суперадминов.
-- **Админы** (владельцы лицензий) — оплатившие пользователи. Получают свою
-  виртуальную копию бота: свои дефолты, глобальные пресеты, могут выдавать доступ
-  к платным моделям своим чатам/пользователям. Не могут «суперадминские» вещи.
-  Суперадмин обладает всеми возможностями админа.
-- **Обычные пользователи** — доступ только к бесплатным моделям, если владелец
-  лицензии не открыл платный доступ для их чата/лички. Могут заводить per-chat
-  пресеты для быстрого переключения параметров.
-
-**Лицензирование доступа к платным моделям** (`hasSubscriptionCoverage`):
-1. пользователь сам активный тенант; либо
-2. он в `licensedUsernames` активного тенанта; либо
-3. чат привязан (`chatOwnership`) к активному тенанту → доступ всем участникам; либо
-4. userID в `whitelistedUserIDs` активного тенанта этого чата.
-
-**Автопривязка** (`autoAssignIfNeeded`): непривязанный чат автоматически
-закрепляется за тенантом отправителя (по username или userID). Так админ,
-добавивший бота в группу, сразу открывает ей платные модели.
-
-**Инвайты**: `InviteRecord` (токен → owner). Диплинк `/start <token>` даёт
-посетителю доступ под лицензией админа (пока подписка активна). Один активный
-токен на владельца (`regenerateInviteToken` инвалидирует старый).
-
-**Симуляция ролей** (`/simulate`): суперадмин может «прикинуться» админом или
-обычным юзером для тестирования (реклама, биллинг). `isSuperAdmin` возвращает
-false во время симуляции; `isActuallySuperAdmin` игнорирует симуляцию (для самой
-команды `/simulate`).
-
----
-
-## 7. Монетизация
-
-**Подписки** (30 дней, `subscriptionDays`): активация продлевает от
-`max(now, paidUntil)` — оплата никогда не сокращает срок. `activatePaidSubscription`
-создаёт тенанта при первой оплате. Истёкший тенант сохраняет админ-панель
-(в UI — «⚡ Мой премиум», чтобы продлить), но его чаты/юзеры откатываются на
-бесплатные модели.
-
-**Способы оплаты** (всё настраивается из бота, см. `PAYMENTS_SETUP.md`):
-- **💫 Telegram Stars** — работает сразу. Цена (`starsPrice`) в супер-меню.
-  Поток: `/buy` → `sendInvoice` (XTR) → `pre_checkout_query` (валидация цены) →
-  `successful_payment`.
-- **💳 Карта** — Telegram Payments через провайдера (YooKassa/Stripe/…).
-  `CardPaymentConfig` (токен из BotFather, валюта RUB/USD/EUR, цена в minor units)
-  хранится в состоянии бота, не в env. Токен маскируется при показе.
-- **🪙 Крипта** — TON / BSC / ETH / TRON, нативный TON + USDT (TON/BSC/ERC20/TRC20).
-  Два режима матчинга (`CryptoMatchMode`): `amountDelta` (один адрес на сеть,
-  инвойсы различаются уникальной дельтой суммы через slot-оффсеты) и
-  `uniqueAddress` (пул предвыделенных адресов, по одному на инвойс).
-  `CryptoPaymentService` создаёт инвойсы, тянет курс (TON через CoinGecko),
-  считает атомарные суммы; `CryptoPaymentMonitor` поллит блокчейн-эксплореры,
-  матчит входящие переводы, засчитывает частичные платежи, при полной оплате
-  активирует подписку. **API-ключи эксплореров — единственные крипто-настройки
-  в env** (`TONAPI_KEY`, `ETHERSCAN_API_KEY`/`BSCSCAN_API_KEY`, `TRONGRID_API_KEY`).
-  - **Курсоры сканирования персистятся** (`CryptoConfigSnapshot.explorerCursors`,
-    ключ `"<asset>:<address>"`, unix-секунды): курсор, засеянный «сейчас» на
-    старте процесса, прятал бы каждый перевод, пришедший во время редеплоя —
-    деньги получены, инвойс протух, в логах пусто, а повторной доставки у
-    блокчейна (в отличие от Telegram) нет. Адрес без сохранённого курсора
-    сканируется **на 45 минут назад** (жизнь инвойса + запас); повторный скан
-    безопасен — дедуп по `creditedTxHashes`. Курсор двигается **после** зачисления
-    всей пачки (`advanceExplorerCursor`, только вперёд), иначе краш между записью
-    курсора и кредитом теряет платёж навсегда. Мёртвые ключи чистит
-    `pruneExplorerCursors` по списку опрашиваемых адресов.
-  - **Инвойс закрывается после зачисления, а не до него.** `applyMatch` зовёт
-    `fulfillment.fulfil` первым и только на успехе пишет `.paid`; если база
-    отказала — возвращается `CryptoApplyResult.deferred`, счёт остаётся `open`,
-    txHash не записан, а монитор **не двигает курсор** этого адреса. Обратный
-    порядок (закрыть, потом зачислять) делал платёж невосстановимым: следующий
-    скан матчит только открытые инвойсы, поэтому перевод переставал совпадать с
-    чем-либо, а повторной доставки у блокчейна нет. Двойной оплаты не будет —
-    однократность держит `claimPayment` внутри `fulfil`.
-  - **Слоты `amountDelta` не переиспользуются молча**: если свободного слота нет,
-    `createOrRefreshInvoice` бросает `CryptoPaymentError.slotsExhausted` (как
-    `poolExhausted` в режиме `uniqueAddress`). Прежний тихий откат на слот 0 давал
-    двум инвойсам одинаковую `exactAmountAtomic` — платёж одного закрывал подписку
-    другого. Тексты `CryptoPaymentError` идут пользователю как есть
-    (`UserFacingError` их не заворачивает).
-
-- **🏦 Внешняя касса** (`ExternalPaymentConfig`, `Domain/Payments/ExternalPayment.swift`)
-  — сторонний агрегатор держит платёжную страницу, и одна интеграция закрывает
-  то, чего нет ни в Telegram Payments (нужен провайдер и юрлицо), ни в голом
-  крипто-адресе: **Сбербанк Онлайн, СБП, карты РФ и зарубежные, крипта**.
-  Первый вендор — FreeKassa (SCI): бот подписывает ссылку секретным словом 1,
-  касса шлёт уведомление, подписанное словом 2, на `/payments/freekassa`
-  (§11), бот отвечает `YES` — иначе касса повторяет доставку.
-  - **Всё настраивается из бота** (страница «🏦 Внешняя касса», §13): ID
-    магазина, оба секретных слова, валюта, цена подписки, курс пополнений и
-    **список способов оплаты** (`код | название`, где код — ID платёжной
-    системы вендора). Набор рельсов — данные, а не релиз: агрегаторы заводят и
-    закрывают способы постоянно. Пустой список = покупатель выбирает на
-    странице кассы. Кнопка «↺ Стандартные» заполняет набор вендора.
-  - **Порог включения — реквизиты целиком**: `credentials` возвращает тройку
-    или nil, поэтому наполовину настроенный магазин не может выдать ссылку,
-    которая упадёт на стороне кассы с непонятной покупателю ошибкой.
-    Выключатель отдельно от реквизитов — выключить на день не значит идти в
-    кабинет за секретами заново.
-  - **Счёт живёт час и оплачивается один раз**: повторный тап «оплатить»
-    переиспользует открытый счёт (два живых счёта на одну покупку — это два
-    возможных платежа), а повторное уведомление ничего не начисляет
-    (`markExternalOrderPaid` + дедуп по `ext:<vendor>:<paymentID>`).
-    Недоплата не включает доступ: в чат уходит номер счёта, чтобы разобрались
-    руками.
-  - **Не зачислили — не подтверждаем.** Если `fulfil` вернул `.failed` (база не
-    приняла запись), счёт возвращается в `pending` (`reopenExternalOrder`), а
-    кассе уходит **не** `YES`: повторяет доставку только неподтверждённое
-    уведомление, а провести повтор может только снова открытый счёт. Прежний код
-    закрывал счёт и отвечал `YES` при любом исходе — ретрай-цикл кассы
-    заканчивался на покупке, которая ничего не купила.
-  - **Подпись — единственная аутентификация публичного эндпоинта**, поэтому
-    сравнение константное (`SecretGuard`), отсутствующая подпись = неверная, а
-    неподписанный POST получает 400 и ничего больше. Секретные слова
-    регистрируются в `SecretRedactor` в момент ввода (§15).
-  - Цена подписки идёт через `subscriptionPricing(username:)`
-    (`externalMinorUnits`), поэтому winback-скидка показана и списана одна и та
-    же; пакеты кредитов — через свой курс (`usdRateMinorUnits`), независимо от
-    цены подписки.
-
-Идемпотентность: `successful_payment` дедуплицируется по
-`telegram_payment_charge_id` (`processedPaymentChargeIDs`), крипта — по хешам
-транзакций (`creditedTxHashes`). Платежи всегда `flushNow()` — durability без
-ожидания debounce; у крипты координатор персистентности прокинут в
-`CryptoPaymentService` (`applyMatch` флашит после всех мутаций и **до**
-уведомлений, включая частичную оплату — накопитель тоже реальные деньги).
-
-**Pay-as-you-go балансы** (`UserBalance`, `userBalances`): альтернатива подписке.
-Пользователь с положительным балансом платит за каждое сообщение по marked-up
-цене. `spentRealUsd` (реальная стоимость провайдера) хранится рядом с
-`spentBilledUsd` → суперадмин видит маржу. `hasFullModelAccess` = подписка ИЛИ
-положительный баланс.
-
-**Кредиты / самостоятельное пополнение** (`CreditPack`, низкий порог первой
-оплаты): любой юзер покупает пакет ($2/$5/$10) через **Stars, крипту или карту**
-на странице покупки и в `/buy`. Инвойс с payload `credits_<центы>`;
-`handleSuccessfulPayment` по этому префиксу зачисляет номинал на баланс
-(`LedgerTransaction.credit(purchased: true)`), а не активирует подписку.
-`pre_checkout_query` проверяет
-credit-payload по живому курсу (Stars — `starsForCents`, карта —
-`CardPaymentConfig.creditMinorUnits`). Идемпотентность — по charge_id, как у
-подписок.
-
-- **Пакеты не зависят от цен подписки.** У каждого способа свой выключатель:
-  Stars — `starsPerUsd` (0 = не продавать; `starsCreditsEnabled`), крипта —
-  адреса, карта — `usdRateMinorUnits` (курс «сколько валюты за $1»,
-  «💱 Курс пополнений» на странице карты; 0 = выключено, `creditsEnabled`).
-  Раньше пакеты исчезали вместе с выключенной подпиской — это убивало самый
-  дешёвый вход. Пакет в валюте карты не опускается ниже минимума валюты.
-- Номинал пакета = сумма на балансе (маржа берётся при списании, §«Наценка»);
-  курс должен покрывать комиссию платёжного метода.
-
-**Наценка** (`markupPercentValue`, дефолт 30%): `priceMultiplier() = 1 + %/100`.
-**Все** видимые пользователю цены и списания идут через этот множитель
-(`billedCost`, футер, `chargeBalance`). Настраивается суперадмином (0–500%).
-
-**Спонсор-герой**: снимает проблему «безбилетника» — тот, кто платит за всех,
-получает публичный статус.
-
-- **Под ответами** в группе, покрытой чужой подпиской: `⚡ премиум для чата открыл
-  @{sponsor}` (`chatSponsorForCredit` → `sponsorCreditLine`; только группы, не сам
-  спонсор). Троттлинг — **не чаще раза в час на чат** (`sponsorCreditCooldown`,
-  in-memory): под каждым ответом строка превращается в шум.
-- **В меню и на странице покупки** — `ChatAccessStatus` (§5): «⚡ Премиум для чата
-  открыл @X — спасибо!». На странице покупки покрытому участнику не продают то,
-  что у него уже есть: оффер переписывается на «своя подписка нужна для лички и
-  ваших чатов».
-- **В приветствии группы** — если бота добавил действующий спонсор, чат сразу
-  привязывается к его подписке (`autoAssignIfNeeded` в `handleMyChatMemberUpdate`)
-  и приветствие благодарит, а не продаёт.
-- **При оплате**, открывшей чат, в чат летит публичное поздравление.
-- **Оплата не отбирает чужой чат.** Платёж привязывает чат через
-  `claimChatForPayment(chatID:payerKey:)`, а не через `assignChat`: группа,
-  которую уже оплачивает **активная** подписка другого человека, остаётся за ним
-  (`ChatClaimOutcome.keptSponsor`), а покупателю приходит «премиум активирован
-  для вас — в личке и ваших чатах; здесь премиум уже открыл @A». Иначе участник,
-  купивший себе подписку в чужой группе, молча уносил чат из `ownedGroupChatIDs`
-  спонсора — из его списка чатов, из напоминаний и из строки «премиум открыл @A»,
-  хотя платит по-прежнему спонсор. Личка покупателя (`chatID > 0`) всегда следует
-  за ним. Ручная привязка (`/tenant claim`, кнопки меню, `/simulate buy`) —
-  по-прежнему `assignChat`, она осознанная.
-
-**Дневной премиум-вкус** free-tier: см. §9 (гейт генерации) — `consumeDailyPremium`.
-Дневной лимит настраивается суперадмином (`setDailyPremiumLimit`, кнопка
-«🎁 Премиум-лимит/день» в супер-меню; 0 = премиум-вкус выключен). Остаток на
-сегодня видно в шапке `/menu` («умных ответов сегодня осталось · N из M») —
-счётчик, который убывает на глазах, и есть механика; статичное «5 в день» никому
-ничего не говорит.
-
-**Режимы** (`ModePreset`/`ModePresetConfig`, `Domain/Chat/ModePreset.swift`) —
-эталонные связки настроек, которые задаёт **суперадмин**: один тап меняет модель,
-стиль ответа, память, обдумывание и (по желанию) роль. Пользователь выбирает
-«🧠 Умный», а не «temperature 0.7 и reasoning=medium»: продать можно результат,
-а не поле формы.
-
-- **Тариф режима** — `ModeTier`: 🆓 (доступен всем) или ⭐ (нужен премиум, баланс
-  или дневная порция). ⭐-режимы **видны бесплатным всегда** — это и есть витрина
-  платного: потолок, которого не видно, никто не платит снимать (GROWTH.md §1).
-  Тап по ⭐ без доступа не отвечает тостом, а **открывает страницу покупки**
-  (`PurchaseSource.mode`) и считает `funnel(.capHit)`; с непотраченной дневной
-  порцией — применяется и называет остаток.
-- **🆓-режим расширяет бесплатный доступ**: его модель автоматически попадает в
-  `allowedFreeModelIDs()` (§9), даже если она платная. Так владелец покупает
-  приличное первое впечатление вместо мусорной бесплатной модели — расход его, и
-  цена модели поэтому напечатана прямо под режимом на супер-странице.
-- **Рабочий режим** (`defaultModeID`, 🎯): к нему ведут кнопка «↺ Рабочий режим»
-  (на главной и на странице модели, показывается только когда чат с него ушёл) и
-  «↺ Сбросить»; его модель — первый кандидат в `fallbackFreeModel()`. Бесплатные
-  модели действительно плохи, и выход из них обязан быть в один тап.
-- **`activeModeID`** на чате даёт ✓ у активного режима; любая ручная правка
-  модели/стиля/памяти/обдумывания его снимает, и шапка честно пишет «изменён
-  вручную». Повторный выбор того же режима **не чистит переписку** (модель не
-  сменилась).
-- **Тонкая настройка** (`MenuPage.tuning`) — те же настройки по отдельности.
-  Страница открывается всем (закрытая дверь, в которую видно, продаёт; наглухо
-  запертая — раздражает), но `🌡 Стиль ответа` и `🧠 Обдумывание` помечены ⭐ и
-  ведут на покупку (`MenuPage.requiresFullAccess`, `PurchaseSource.tuning`).
-  `📝 Память` и `🔌 Сервис ИИ` — только оператору (`requiresOperator`): память
-  переотправляется на каждом ходу и множит стоимость каждого ответа, сервис молча
-  решает, какие модели и какое обдумывание вообще доступны.
-- **Правится целиком из супер-меню** («🎛 Режимы бота», `MenuPage.superModes`):
-  тексты, модель, стиль, память, обдумывание, роль, тариф, порядок, рабочий режим,
-  вкл/выкл + счётчик тапов на каждом. Формат ввода —
-  `Название | Подпись | модель | стиль | память | обдумывание`; модель `-` =
-  «любая бесплатная» (резолвится в `fallbackFreeModel()` на применении, поэтому
-  режим переживает смену каталога), `id@сервис` — пин апстрима. Тариф и роль
-  правятся кнопками, не текстом: перенабирать их при каждой правке формулировки —
-  верный способ молча уронить тариф в 🆓.
-- **Новый режим создаётся с тарифом ⭐.** Режим, добавленный по ошибке, не должен
-  раздать самую дорогую модель всем бесплатным до того, как кто-нибудь заметит.
-- Хранение — одна строка `bot_config` (`Config.modes`), конфиг
-  **глобальный**, не тенант-скоуп: это настройки, за которые ручается владелец
-  бота, а не то, что переопределяет каждый купивший подписку.
-
-**Напоминания и winback** (`SubscriptionReminderService`, §14): фоновый свип
-сравнивает `paidUntil` с now и шлёт спонсору по одному сообщению на каждую волну
-за срок подписки: до конца — напоминания продлить (`expiryReminderDays`, дефолт
-за 3 дня и за 1 день), после истечения — winback-волны (`winbackDays`, дефолт +1 и
-+7 дней) с **срочной скидкой** (`SubscriptionDiscount`, дефолт −30% на 48 ч). Всё
-расписание — `SubscriptionReminderConfig` в `bot_config`
-(`Config.reminders`): вкл/выкл, дни до конца, дни winback, процент и срок
-скидки, интервал свипа, уведомлять ли чаты спонсора. Правится в супер-меню
-(«⏳ Напоминания и winback») и командой `/reminders`, без передеплоя.
-
-- **Волны до истечения** (`expiryReminderDays`, до 3 шт., дни 1–30): `dueNotice`
-  берёт **ближайшую** волну, чей срок наступил — «завтра» перебивает «за три дня»,
-  а пропущенная во время даунтайма волна не отправляется задним числом. Ключ
-  дедупа — `expiring<N>`; цикл, отмеченный старым однопоточным билдом (ключ
-  `expiring`), считается уже получившим самую широкую волну, поэтому апгрейд не
-  шлёт повтор. `daysBeforeExpiry` осталось как вычисляемый максимум (горизонт
-  «скоро истекут»). Публично в чаты уходит только самая широкая волна.
-- **Дедуп**: `noticeCycleUntil` + `sentNotices` на тенанте; отметка ставится только
-  после успешной доставки (иначе ретрай на следующем свипе, ограниченный окном
-  волны). Продление меняет `paidUntil` → набор отметок сбрасывается.
-- **Скидка** применяется ко всем способам оплаты через **единый источник цен**
-  `subscriptionPricing(username:)` (Stars / крипта / карта; карта не опускается ниже
-  минимума валюты). `pre_checkout_query` принимает и полную, и скидочную цену
-  (grace 1 ч — инвойс, открытый на границе срока). Покупка «съедает» скидку
-  (`consumeWinbackDiscount`) и считает `funnel(.winbackRedeemed)`.
-  Параметр `applying:` подставляет **гипотетическую** скидку, ничего не выдавая —
-  на нём построен предпросмотр, поэтому в нём честны и карта, и крипта.
-  **Выдаётся один раз на окно**: `grantWinbackDiscount` возвращает уже живую
-  скидку вместо новой (свип выдаёт её до отправки, и transient-ошибка иначе
-  двигала бы 48-часовой дедлайн вперёд на каждом проходе). Если ни один канал не
-  дожил до отправки, скидка снимается — оффер, которого человек не видел, не ждёт
-  его на кассе.
-- **Каналы**: личка спонсора (если он писал боту и **не заблокировал** бота) и —
-  опционально (`notifyChats`) — его группы (продлить может любой участник; не
-  более 10 чатов на волну, публично только первая winback-волна). Нет ни одного
-  канала → отметка ставится, счётчик «недоступны» растёт (видно суперадмину).
-  Отправка, упавшая с 403 (заблокировали/выгнали) или «chat not found», помечает
-  чат мёртвым (`setBotPresence(isMember:false)`) — следующий свип его уже не
-  увидит; транзиентные ошибки по-прежнему ретраятся.
-- **Цена в групповом сообщении — прайс-лист**, а не персональная скидка спонсора:
-  тапнуть «Продлить» там может любой участник, и он будет платить полную цену.
-- Суперадмины из свипа и из страницы мониторинга исключены — владельцу бота не
-  продают его же продукт.
-
-**Возврат по балансу** (`walletWinbackDays`, дефолт 7 дней; вторая половина того
-же свипа, §14): подписка истекает громко и получает winback, а pay-as-you-go
-баланс просто заканчивается — человек тихо уходит, и об этом ничего не говорит.
-
-- **Аудитория узкая намеренно**: только те, у кого `UserBalance.toppedUpUsd > 0`
-  (реальная оплата пакета, **не** реферальный бонус и не начисление суперадмина),
-  баланс ≈ 0, нет активной подписки, тишина ≥ N дней (`UserDirectory.seenAt`), не
-  суперадмин, не заблокировали бота и не отписались. Всем остальным оффер и так прилетает в
-  момент боли (пустой баланс, дневной лимит) — рассылка бесплатным покупает
-  только блокировки.
-- **Один раз на цикл**: `UserBalance.lapsedNoticeAt` ставится после успешной
-  доставки; **пополнение сбрасывает отметку** (`credit(purchased: true)`) — вернулся
-  и снова ушёл = новый цикл. Мёртвая личка (403) отмечается и закрывается как
-  «недоступен», а не ретраится.
-- Событие воронки `walletWinbackSent`; строка состояния (платили / готовы к
-  отправке / уже написали) — на странице «⏳ Напоминания и winback», ручка —
-  кнопка «💰 Возврат по балансу» и `/reminders wallet <дней>`.
-- **Контроль у спонсора**: кнопка «🔔 Напоминания о продлении» в его админ-панели
-  («⚡ Мой премиум») (`remindersOptOut`) + строка с датой ближайшего напоминания и
-  активной скидкой.
-
-**Вирусный рост** (роадмап шаг 4): кнопка «➕ Добавить в свой чат»
-(`t.me/<bot>?startgroup=add`) в `/start` и в меню; вход в группу ловится через
-`my_chat_member`.
-
-- Приветствие группы — одно на вход, через `GroupWelcomePresenter` (см. §4 про
-  двойную доставку и `claimGroupGreeting`).
-- **Удаление бота из группы** (`my_chat_member` → left/kicked) помечается в
-  `ChatMetaInfo.botRemoved` (персистится в `chat_meta`). Лицензия и история чата
-  сохраняются (вернут бота — всё на месте), но чат перестаёт быть каналом
-  доставки: `ownedGroupChatIDs` его не отдаёт, поэтому напоминания и winback
-  (§«Напоминания») не тратят отправки на мёртвые чаты. Флаг снимается сам при
-  повторном входе или при первом же сообщении из чата (`recordChatMeta`).
-- Воронка: `.start` считается **только в личке** — группа, доехавшая до `/start`,
-  это replay `?startgroup=`, и он уже учтён как `.addedToGroup`.
-
-**Реклама** (`AdCampaign`): показывается только во free-tier чатах (нет подписки
-и нет баланса). Два дросселя: частота (раз в N ответов + мин. интервал) и пейсинг
-(равномерное распределение показов по времени кампании). `nextAdToShow` атомарно
-решает, считает показ и ротирует кампании (least-shown first). Когда нет активной
-кампании суперадмина, слот заполняет встроенный **само-оффер** — реклама продаёт
-сам премиум.
-
-- Само-оффер настраивается целиком: `SelfPromoConfig` (`bot_config` →
-  `self_promo`) — вкл/выкл, текст, частота, пауза и счётчик показов. Кампания
-  (`AdCampaign.selfPromo(config)`) остаётся синтетической, персистится только
-  конфиг. Правится на странице «📣 Реклама» и командой `/ads promo`
-  (`on|off|text|freq|reset`).
-- Под текстом бот сам рисует кнопку **«⚡ Открыть премиум»** (в личке — плюс
-  «🎁 Пригласить друга»): оффер, который заканчивается на «напишите /buy», теряет
-  всех, кто не готов печатать. Тап помечен источником `promo` (§11).
-- Показы считаются: `impressions` в конфиге + событие воронки `promoShown`.
-  Страница «📣 Реклама» показывает состояние слота (🟢 показывается / 🟡 занят
-  платной кампанией / ⚪ выключена), частоту, паузу, счётчик и сам текст.
-
-**Онбординг с примерами** (`OnboardingConfig`/`OnboardingExample`, роадмап шаг 9):
-пустой чат после `/start` — главная точка отвала, поэтому приветствие несёт
-кнопки-примеры (`✍️ Написать пост`, `💡 Объяснить простыми словами`, `🌍 Перевести`).
-
-- **Тап = обычный запрос**: `callback_data` = `ex:<id>` → `handleOnboardingExample`
-  считает тап, шлёт эхо запроса в чат (`<blockquote>`, Telegram не умеет писать «от
-  имени юзера») и ставит генерацию в **per-chat очередь** через
-  `GenerationCoordinator.runReadyPrompt` c синтетическим `GenerationOrigin`.
-  Обходится только `MessageRoutingPolicy` (тап и есть явное обращение); дневной
-  лимит, биллинг, реклама, история и футер работают как для набранного текста.
-  В **группе** эхо подписано тем, кто тапнул (`tapEcho(example:asker:)`) — иначе
-  вопрос из ниоткуда и ответ на него читаются как разговор бота с самим собой.
-  Callback сразу отвечает тостом: кнопка, которая «ничего не делает», тапается ещё раз.
-- **Где показывается**: приветствие `/start`, приветствие при входе в группу
-  (`showInGroups`; тап активирует весь чат сразу), кнопка «💡 Примеры-запросы» в
-  главном меню и команда `/examples` (приветствие быстро уезжает вверх).
-- **Размещение примера** (`OnboardingPlacement`: `everywhere` / `privateOnly` /
-  `groupsOnly`) — личка и общий чат просят разного: `activeExamples(inGroup:)`
-  фильтрует набор под комнату, `OnboardingPresenter.exampleRows(_:inGroup:)`
-  рендерит только подходящие. Кнопка «📍» на странице супер-меню циклит значение.
-  Неизвестное значение поля декодится как `everywhere` (через сырую строку) —
-  чужой билд не должен уносить весь конфиг вместе с текстами и счётчиками.
-- **Ничего не захардкожено**: набор, тексты, порядок, размещение и вкл/выкл
-  каждого примера правятся суперадмином на странице «💡 Примеры-запросы»
-  (`superonboarding`) или командой `/examples`; лежит в `bot_config`
-  (`Config.onboarding`), границы (`maxExamples` 6, длина подписи/запроса)
-  нормализуются на set и на decode. Предпросмотр показывает набор **той комнаты**,
-  где его открыли. Есть «↺ Стандартные».
-- **Мониторинг**: счётчик тапов на каждом примере (персистится) + доля от всех
-  тапов на странице; воронка `onboardingShown` → `exampleTapped` (вовлечение) в
-  «📊 Воронка», `/metrics` и `/examples stats`.
-- Изменение текста примера сохраняет его `id` и счётчик тапов — уже отправленные
-  приветствия продолжают работать, статистика не обнуляется.
-
-**Двусторонний реферал** (`Domain/Chat/Referral.swift`, роадмап шаг 10): у каждого
-пользователя есть личная ссылка `t.me/<bot>?start=ref_<userID>` (userID, а не
-@username — не ломается при смене ника). Друг переходит, пишет первый вопрос — и
-**обе стороны** получают бонус на pay-as-you-go баланс (дефолт $1 + $1).
-
-- **Две фазы**: `/start ref_<id>` → `bindReferral` (только привязка, деньги не
-  платятся) → первый реальный ответ → `redeemReferralIfDue` в
-  `GenerationCoordinator.processContent` (кредит обоим кошелькам + уведомления
-  обеим сторонам). Награда сразу даёт «премиум по факту»: положительный баланс =
-  `hasFullModelAccess`, поэтому тот же первый ответ уже идёт на платной модели.
-  Ответ засчитывается **в любом чате** (друг, сразу ушедший в группу, сделал ровно
-  то, чего мы хотели), но **оба уведомления уходят в личку**: награда личная, а
-  «вас пригласил @X» в общем чате рассказывает то, чего человек не выбирал.
-- **Третья фаза — бонус за конверсию** (`payingFriendBonusCents`, дефолт $2):
-  когда приглашённый **впервые платит** (подписка или пакет, любым способом),
-  пригласившему разово капает бонус — `redeemReferralPaymentBonus` зовётся из
-  `handleSuccessfulPayment` (Stars/карта) и из `CryptoPaymentService.applyMatch`,
-  до `flushNow`, так что бонус durable вместе с платежом. Идемпотентность —
-  `ReferralRecord.paidBonusAt`. Награда за регистрацию покупает регистрации, эта —
-  клиентов, поэтому **антифрод-лимит на неё не действует**: деньги уже пришли.
-  `ReferralTally.paidConversions` — главное число программы (окупается ли она) и
-  первый ключ сортировки топа пригласивших.
-- **Антифрод** (всё в сторе, одна актор-транзакция): самоприглашение отклоняется
-  (по userID и по username); одна привязка на человека **навсегда**
-  (`records[invitedUserID]`); награда только «новому» — у кого нет личного чата с
-  оборотом, кошелька, лицензии (`hasPriorBotActivity`); деньги — только после
-  первого реального ответа (пустая ферма аккаунтов не окупается); лимит
-  оплаченных приглашений на одного пригласившего (`maxRewardsPerInviter`, дефолт
-  20; сверх — привязка есть, выплаты нет, счётчик «отклонено лимитом» растёт).
-- **Лимит проговаривается заранее**: `bindReferral` проверяет тэлли пригласившего
-  и при исчерпанном лимите возвращает `.boundWithoutReward` — приглашение
-  засчитывается, но другу **не обещают** денег, которых он не получит (лимит
-  перепроверяется на выплате, так что поднятие лимита оплатит зависшую пару).
-  На своей странице `/ref` пригласивший тоже видит «бонусы исчерпаны».
-- **Кошельки по userID**: @username не нужен ни одной из сторон (см. §6) —
-  `.unknownInviter` означает только «автор ссылки боту ни разу не писал».
-  Ники в журнале денормализованы и освежаются на выплате; в уведомлении друг
-  называется через `invitedLabel` (`@ник` / имя / `id N`).
-- **Идемпотентность/durability**: `rewardedAt` ставится в том же шаге актора, что
-  и кредит балансов, поэтому повторные сообщения/рестарт не платят дважды; при
-  потере флаша теряются обе записи разом (баланс и отметка) — пара просто снова
-  становится pending и оплатится на следующем сообщении. Отдельный `flushNow()`
-  не нужен (в отличие от платежей).
-- **Хранение**: `ReferralLedger` = привязки + агрегаты по пригласившим +
-  накопленный расход + счётчики отказов, одна строка `bot_config`
-  (`Config.referralLedger`); прунятся только **разрешённые** записи
-  (pending не трогаются), агрегаты живут дольше записей, поэтому ни лимит наград,
-  ни счётчик приведённых клиентов нельзя обнулить переполнением журнала.
-  У `ReferralRecord` и `ReferralTally` **рукописные `init(from:)`**: поля,
-  добавленные позже, читаются как опциональные — иначе одна старая запись роняет
-  декод всей строки и разом забываются все привязки.
-- **Отказы считаются** (`refusedSelf` / `refusedRepeat` / `refusedNotNew` /
-  `refusedUnknown`): без них «ссылку никто не открывает» неотличимо от «открывают,
-  но правила всех отсеивают» — а это разные проблемы с разными решениями. Видно на
-  странице «🎁 Приглашения» и в `/ref stats`.
-- **Где показывается**: кнопка «🎁 Пригласить друга» в главном меню (только личка),
-  блок на странице покупки, третья кнопка в оффере при исчерпании дневного лимита
-  (бесплатный способ снять лимит), команда `/ref`, страница меню `ref` (ссылка,
-  «📤 Поделиться» — текст шаринга называет сумму бонуса друга, личная статистика:
-  приглашено / с наградой / ждут / заработано / остаток лимита).
-- **Контроль и мониторинг у суперадмина**: страница «🎁 Приглашения»
-  (`superref`) — вкл/выкл, награды каждой стороне, лимит, счётчики
-  (привязки / выплачено пар / ждут / отклонено лимитом / выплачено $ / пригласивших
-  / **друзья, которые оплатили** + разбивка незасчитанных переходов), топ
-  пригласивших, очистка журнала (с подтверждением); те же ручки командой
-  `/ref on|off|reward|friend|bonus|cap|stats`. Воронка:
-  `referralJoined → referralRewarded → referralPaidBonus` в «📊 Воронка» и
-  `/metrics` (+ `referral_pending`, `referral_rewarded`, `referral_paid_cents`,
-  `referral_conversions`).
-
-**Источники трафика** (`Domain/Chat/TrafficSource.swift`): ссылка
-`t.me/<bot>?start=src_<метка>` в рекламном объявлении помечает, из какого канала
-пришёл человек. Без этого CAC (потрачено ÷ платящих) считается только «в целом»,
-и бюджет уходит в канал, который *кажется* рабочим — самая дорогая ошибка из
-`LAUNCH_ECONOMICS.md`.
-
-- **Три числа на кампанию**: `joined` (привязок) → `activated` (дошли до первого
-  реального ответа) → `payers` (оплатили хоть раз, знаменатель CAC) + `payments`
-  (все оплаты, включая повторные). Активация считается в
-  `GenerationCoordinator.processContent` рядом с реферальной выплатой, а не на
-  `/start`: клик, не давший ни одного ответа, — не активация.
-- **First touch wins**: повторный переход по чужой метке не переписывает
-  привязку (`repeatOpens`), иначе канал присваивал бы клиента, за которого
-  заплатил другой. Тот, кто уже пользовался ботом (`hasPriorBotActivity`), в
-  `joined` не попадает вообще (`knownUserOpens`) — иначе CAC выглядел бы лучше,
-  чем есть. Оба счётчика видны на странице: «рекламу никто не открывает» и
-  «открывают, но это уже наши люди» — разные проблемы.
-- **Молчит по определению**: `src_` ничего не выдаёт и ни о чём не сообщает,
-  приветствие выглядит как обычное. В отличие от `inv_` (лицензия) и `ref_`
-  (бонус), метка только помечает происхождение.
-- **Оплата засчитывается на всех путях**: `handleSuccessfulPayment` (обе ветки —
-  подписка и пакет) и `CryptoPaymentService.applyMatch`, до `flushNow` — рядом с
-  реферальным бонусом за конверсию, чтобы атрибуция была durable вместе с
-  платежом.
-- **Хранение**: привязки — строки `bot_traffic_attribution`, агрегаты кампаний
-  и два скалярных счётчика — один документ `bot_config` (`Config.trafficTotals`
-  → `TrafficSourceTotals`). Метка санитайзится до `[a-z0-9_-]` (до 32 символов)
-  — она уходит и в ключ JSON, и в HTML; число кампаний ограничено (`maxTags`
-  200, сверх — бакет `other`), поэтому агрегаты и остаются документом.
-  **Агрегаты живут дольше привязок буквально**: привязки прунятся по возрасту и
-  чистятся кнопкой, `tallies` при этом не трогаются, и restore берёт их из
-  документа, а не пересчитывает из уцелевших строк (пересчёт —
-  `rebuildTalliesFromAttributions` — остался фолбэком для базы без документа).
-  Иначе первый же прунинг обнулял бы знаменатель CAC.
-- **Мониторинг**: страница супер-меню «📈 Источники» (`supersrc`) — кампании,
-  отсортированные по платящим, конверсия, готовый шаблон ссылки, очистка с
-  подтверждением; строка-сводка на странице «🛡 Супер-админ» и кнопка со
-  страницы «📊 Воронка».
+### 5.6 Удержание и рост
+- `SubscriptionReminderService` (§12): волны до истечения (`expiryReminderDays`,
+  до 3, ключ дедупа `expiring<N>`, берётся ближайшая наступившая) и winback после
+  (`winbackDays`) со срочной скидкой (`SubscriptionDiscount`, дефолт −30%/48 ч).
+  Дедуп: `noticeCycleUntil` + `sentNotices`, отметка **после** доставки;
+  продление сбрасывает набор. `grantWinbackDiscount` возвращает уже живую скидку,
+  не выдаёт новую. Каналы: личка спонсора + опционально его группы
+  (`ownedGroupChatIDs`, ≤10). 403/«chat not found» → `setBotPresence(isMember:
+  false)`; 429/5xx — ретрай. Суперадмины исключены.
+- **Возврат по балансу** (`walletWinbackDays`, дефолт 7): только `toppedUpUsd >
+  0`, баланс ≈ 0, нет подписки, тишина ≥ N дней. `lapsedNoticeAt` — раз на цикл,
+  сбрасывается пополнением.
+- **Онбординг** (`OnboardingConfig`/`OnboardingExample`): кнопки-примеры в
+  приветствии, `callback_data` `ex:<id>` → тап = обычный запрос через per-chat
+  очередь (`runReadyPrompt`, синтетический `GenerationOrigin`), эхо запроса в
+  чат `<blockquote>`. `OnboardingPlacement`: `everywhere/privateOnly/groupsOnly`
+  (неизвестное → `everywhere`). Максимум 6 примеров, счётчик тапов персистится,
+  правка текста сохраняет id.
+- **Реферал** (`Domain/Chat/Referral.swift`): ссылка `?start=ref_<userID>`.
+  Фазы: `bindReferral` (только привязка) → первый реальный ответ →
+  `redeemReferralIfDue` (кредит обоим, уведомления в личку) → первая оплата друга
+  → `redeemReferralPaymentBonus` (бонус пригласившему, идемпотентность
+  `paidBonusAt`, антифрод-лимит не действует). Антифрод: самоприглашение, одна
+  привязка навсегда, только «новый» (`hasPriorBotActivity`), лимит
+  `maxRewardsPerInviter` (дефолт 20) — при исчерпании `.boundWithoutReward`.
+  Хранение: `bot_referral` + `bot_referral_tally` + `Config.referralTotals`;
+  агрегаты живут дольше записей; у `ReferralRecord`/`ReferralTally` рукописные
+  `init(from:)` (новые поля опциональны).
+- **Источники трафика** (`?start=src_<метка>`): `joined → activated → payers`
+  (+`payments`). First touch wins, известный пользователь в `joined` не попадает.
+  Метка санитайзится до `[a-z0-9_-]`, ≤32 симв., ≤200 кампаний (сверх — `other`).
+  Привязки — `bot_traffic_attribution`, агрегаты — `Config.trafficTotals`
+  (restore берёт документ; `rebuildTalliesFromAttributions` — фолбэк).
+- **Реклама** (`AdCampaign`): только во free-tier чатах, два дросселя (частота +
+  пейсинг), `nextAdToShow` атомарно считает показ и ротирует (least-shown first).
+  Нет кампании → синтетический само-оффер из `SelfPromoConfig` (`Config
+  .selfPromo`) с кнопкой «⚡ Открыть премиум» (источник `promo`).
+- **Спонсор-герой**: строка под ответом в спонсируемой группе (не чаще 1 ч на
+  чат), благодарность в меню и на странице покупки, поздравление при оплате.
 
 ---
 
-## 8. LLM-провайдеры
+## 6. LLM-провайдеры
 
-Абстракция через `ProviderGatewayPort`: `capabilities`, `makeRequest(plan)`,
-`stream(request) -> AsyncThrowingStream<ProviderStreamEvent>`,
-`fallbackModel(for:)`. Реестр `ProviderGatewayRegistry` мапит `ServiceProvider`
-на адаптер.
+`ProviderGatewayPort`: `capabilities`, `makeRequest(plan)`, `stream(request) ->
+AsyncThrowingStream<ProviderStreamEvent>`, `fallbackModel(for:)`.
 
-- **OpenRouter** (`.openrouter`, а также `.yandex` мапится на него) — основной.
-  Поддерживает **image/audio/video/reasoning**. Reasoning через
-  `OpenRouterReasoning(effort, enabled)`. **Provider routing**: `providerRouting`
-  пинит апстрим-провайдера (`order`/`only`, `allow_fallbacks:false`) — для
-  моделей, где нужен конкретный бэкенд. Стоимость берётся из usage (`cost` или
-  `cost_details.upstream_inference_cost`). Endpoint SSE:
+- **OpenRouter** (`.openrouter`, `.yandex` мапится сюда) — image/audio/video/
+  reasoning, `OpenRouterReasoning(effort, enabled)`, provider routing
+  (`order`/`only`, `allow_fallbacks:false`), стоимость из usage (`cost` или
+  `cost_details.upstream_inference_cost`). SSE
   `openrouter.ai/api/v1/chat/completions`.
-- **DeepSeek** (`.deepseek`) — только текст, без reasoning. Модель фиксирована
-  `deepseek-chat`. Endpoint `api.deepseek.com/v1/chat/completions`. Стоимость не
-  отдаёт (cache hit/miss токены отдаёт).
+- **DeepSeek** (`.deepseek`) — только текст, модель `deepseek-chat`, стоимость не
+  отдаёт.
 
-Оба адаптера парсят SSE через `NetworkClient.ssePayloads`, эмитят
-`.text(chunk)` и в конце `.meta(StreamMeta)` (модель + usage), корректно
-обрабатывают отмену (`producer.cancel()` на termination) и `[DONE]`.
+Оба парсят SSE через `NetworkClient.ssePayloads`, эмитят `.text(chunk)` и в конце
+`.meta(StreamMeta)`, обрабатывают отмену и `[DONE]`. **Ошибка внутри потока —
+ошибка**: OpenAI-совместимые провайдеры отдают отказ в SSE с HTTP 200
+(`{"error":{...}}`) → декод `ProviderStreamErrorPayload` (код читается числом и
+строкой) → `ProviderAdapterError.upstream(provider:code:message:)`. Наружу —
+`UserFacingError.httpStatusReason`, оригинал в логах, ход не списывается.
 
-**Ошибка внутри потока — это ошибка, а не пустой ответ.** OpenAI-совместимые
-провайдеры отдают отказ прямо в SSE с HTTP 200
-(`{"error":{"code":429,"message":"rate limited"}}` — лимит, кончившийся баланс
-у провайдера, модерация, «no endpoints found»). Такой payload не парсится ни как
-usage, ни как delta, поэтому раньше молча игнорировался: поток заканчивался,
-аккумулятор пустой, пользователь видел «Пустой ответ.» с футером, а причина не
-доходила даже до логов. Теперь оба адаптера декодят поле `error`
-(`ProviderStreamErrorPayload`, код читается и числом, и строкой) и завершают
-поток `ProviderAdapterError.upstream(provider:code:message:)`. Наружу идёт
-русский текст по коду (`UserFacingError` → `httpStatusReason`), английский
-оригинал остаётся в логах (`stream failed: …`). Ход при этом не списывается:
-`cancelPendingTurn` + `refundDailyPremium` отрабатывают как на любой ошибке.
-
-Дефолтные модели-пресеты (сеются в `main`): Gemini 3 Flash, Gemini Flash latest,
-Gemini 3.1 Flash Lite, DeepSeek V4 Pro/Flash, Grok 4.3. Дефолтная модель:
-`google/gemini-3-flash-preview`.
-
-`ProviderCapabilities` проверяются **до** генерации: если чат прислал медиа,
-которое провайдер не поддерживает, пользователю показывается подсказка сменить
-провайдера/отправить только текст.
+`ProviderCapabilities` проверяются **до** генерации (медиа не поддержано →
+подсказка). Дефолтная модель `google/gemini-3-flash-preview`.
 
 ---
 
-## 9. Генерация и стриминг
+## 7. Генерация (`GenerationCoordinator.processContent`)
 
-`GenerationCoordinator.processContent`:
-1. **Воронка + free-model gate с дневным премиум-вкусом**: сначала
-   `markFirstMessageIfNeeded` (первое сообщение чата → аналитика, §7). Затем: если у
-   отправителя нет полного доступа и текущая модель платная — `consumeDailyPremium`
-   (группа: общий счётчик на чат; личка: на `userID`; сброс по UTC-суткам; лимит
-   `dailyPremiumLimitValue`, дефолт 5, настраивается суперадмином в супер-меню
-   «🎁 Премиум-лимит/день», персист в `bot_config`; сам счётчик расхода —
-   **in-memory**). Остаток есть → платная модель отвечает
-   (бесплатный «вкус премиума»); исчерпан → переключение на первую бесплатную +
-   оффер с кнопками покупки/баланса (`sendDailyLimitOffer`) + `funnel(.capHit)`.
-   Free-модели безлимитны; спонсируемые чаты сюда не доходят (`hasFullModelAccess`).
-   **Порция возвращается**, если ход не дал ответа (ошибка провайдера, «Стоп»,
-   пустой ответ): `refundDailyPremium` зовётся везде, где зовётся
-   `cancelPendingTurn` — у бесплатного юзера этих ответов 5, потерять один на
-   ошибке нельзя. **Последняя порция** проговаривается вслух
-   (`sendLastPremiumCallNotice`, событие `capWarned`, максимум раз в сутки):
-   дефицит виден до стены, а не после. При `limit = 0` оффер не говорит «0 из 0» —
-   там другой текст («умные модели доступны с премиумом»).
-   **Откат модели обратим**: переключение идёт через `downgradeModelToFree`, которая
-   запоминает платную модель в `ChatContext.downgradedFromModel` (персистится). Как
-   только у спрашивающего появился полный доступ (подписка, спонсор, реферал или
-   пополнение), `restoreDowngradedModel` возвращает её и сообщает об этом в чат —
-   иначе оплата выглядела бы как «ничего не изменилось»: чат так и отвечал бы на
-   бесплатной модели, пока кто-нибудь не залезет в меню. Явный выбор модели
-   (`setModelAndResetHistory`/`setModelOnly`) отметку снимает.
-   **Новые сутки тоже возвращают модель** — молча, до входа в гейт: если у
-   спрашивающего есть остаток дневной порции (`remainingDailyPremium > 0`), а
-   модель чата припаркована, `restoreDowngradedModel` зовётся без сообщения в
-   чат. Без этого механика умирает после первого же исчерпания: гейт срабатывает
-   только пока модель чата платная, а после отката она бесплатная — и
-   `consumeDailyPremium` не вызывается больше никогда.
-   **Платную модель можно выбрать и вручную**, пока порция есть:
-   `paidModelAccess(username:userID:chatID:)` (`.full` / `.dailyTaste` / `.none`)
-   — единый гейт пикеров (`/model`, меню `select`/`gsel`/`csel`). Иначе вкус
-   премиума доступен только тем чатам, у кого платная модель была выставлена до
-   отката, и записаться в него невозможно. При выборе на дневную порцию
-   пользователю сразу называется остаток (`dailyTasteToastSuffix` в меню,
-   строка «🚦 Умных ответов сегодня» в `/model`) — иначе откат в середине дня
-   читается как поломка.
-   **Что вообще считается бесплатным — `allowedFreeModelIDs()`**, а не
-   `effectiveFreeModelIDs()`: это ноль-стоимостный каталог (пины суперадмина ∪
-   бесплатные OpenRouter) **плюс модели 🆓-режимов** (§7 «Режимы»). Единственный
-   ответ на вопрос «можно ли без оплаты» — его обязаны спрашивать все гейты:
-   генерация, `/model`, кнопки пикера и ручной ввод ID. Фолбэк —
-   `fallbackFreeModel()`: модель рабочего 🆓-режима → первая закреплённая →
-   `sorted().first`.
-2. **Режим биллинга**: `covered` (подписка/лицензия) → бесплатно для отправителя;
-   иначе `billedTo` (положительный баланс) → списание per-message; иначе free-tier
-   → `adEligible`. Списание, **обнулившее** кошелёк, возвращает `true` из
-   `appendAssistant` → в чат уходит один оффер «💸 Баланс закончился» с кнопками
-   пополнения (событие `balanceEmpty`). Повторов не будет: без положительного
-   баланса `billingKey` больше не адресует кошелёк.
-3. Регистрирует `GenerationID` в `SessionRegistry`, запускает **typing**-индикатор.
-   Typing живёт ровно до старта стрима (ожидание слота лимитера и первого
-   плейсхолдера) — дальше прогресс видно по draft-анимации или по правкам
-   плейсхолдера, поэтому `defer` его гасит.
-4. `generationLimiter.acquire()` — глобальный кап одновременных стримов.
-5. Оборачивает текст: `"Тебе пишет @username: <text>"`. Вложения не пишутся в
-   историю (только текст) — экономия хранилища; в запрос идут с медиа.
-6. `snapshotAndAppend` — атомарный снапшот истории + добавление pending turn.
-7. `stream` через шлюз; режим:
-   - **draft** (`runDraftStreaming`, только личка, Bot API 9.3+): анимированный
-     `sendMessageDraft`; финальный текст/оверфлоу/ошибки **всегда** persist'ятся
-     через `sendMessage` (draft эфемерен). Контрол-сообщение «💭 Думаю…» несёт
-     только кнопку Стоп и удаляется после записи ответа.
-   - **edit** (`runEditStreaming`, группы / серверы без draft): placeholder
-     редактируется по мере генерации (тротлинг: раз в 3с или +300 символов).
-8. **Разбивка длинных ответов** (`MessageSplitter`): при переполнении —
-   «↑ продолжение» / «↓ продолжение ниже», новое сообщение. Бюджет считается **в
-   экранированных символах** (`renderedLength` / `splitRendered`, `charLimit`
-   3896 из 4096): Telegram меряет то, что получил, а `&` → `&amp;` и `<` → `&lt;`
-   растят текст — кусок кода, нарезанный по сырой длине, отдавал 400 «message is
-   too long», и часть ответа пропадала. Оценка пессимистична (настоящий тег
-   считается как экранированный), поэтому ошибается только в сторону «разрезали
-   раньше». Финальную проверку делает шлюз настоящим форматтером
-   (`TelegramHTTPGateway.chunkFittingHTML`), в том числе для `editMessage`,
-   которую разбить на два сообщения нельзя.
-   **Оформление переживает разрез**: `splitRendered` не режет внутри `<…>` и
-   `&…;` (граница сдвигается перед висящей разметкой) и **переоткрывает** в
-   начале продолжения всё, что осталось открытым (`openTagMarkup`, теги
-   копируются сырыми — санитайзер всё равно перечистит их в следующем куске).
-   Симметрично `closingTagMarkup` **закрывает** их перед «↓ продолжение ниже»,
-   перед стоп-нотисом и перед футером — иначе служебная строка оказывается
-   внутри блока (в `<pre>` она читается как часть кода). Модель стека зеркалит
-   `TelegramHTMLFormatter` (закрывающий тег снимает верхний независимо от
-   имени); `script`/`style` не переоткрываются никогда — форматтер съел бы всё
-   продолжение как их содержимое.
-9. **Футер** (`makeFooter` → `ResponseFooterFormatter`): токены, стоимость ×markup,
-   модель, прогнозируемый остаток баланса (для billed-юзеров).
-10. Итог: `appendAssistant` (запись в историю + учёт usage + списание баланса) →
-    оффер при обнулённом балансе → нотис о последней дневной порции → при
-    `adEligible` показ рекламы; либо `cancelPendingTurn` + `refundDailyPremium`
-    при пустом/отменённом.
+1. `markFirstMessageIfNeeded` (воронка) → free-model гейт: нет полного доступа и
+   модель платная → `consumeDailyPremium`; остаток есть → отвечаем платной;
+   исчерпан → `downgradeModelToFree` (помнит модель в `downgradedFromModel`) +
+   оффер (`sendDailyLimitOffer`) + `funnel(.capHit)`. Последняя порция
+   проговаривается (`sendLastPremiumCallNotice`, ≤1/сутки). Появился полный
+   доступ → `restoreDowngradedModel` с сообщением; новые сутки с остатком →
+   молча, до входа в гейт (иначе механика умирает после первого исчерпания).
+   **«Бесплатна ли модель» спрашивают только у `allowedFreeModelIDs()`**
+   (пины суперадмина ∪ бесплатные OpenRouter ∪ модели 🆓-режимов); **nil = всё
+   платное**. Фолбэк — `fallbackFreeModel()` (модель рабочего режима → первая
+   закреплённая → `sorted().first`; `Set.first` недетерминирован).
+2. Режим биллинга: `covered` → бесплатно; `billedTo` (положительный баланс) →
+   списание per-message; иначе free-tier → `adEligible`. Списание, обнулившее
+   кошелёк, возвращает `true` из `appendAssistant` → один оффер `balanceEmpty`.
+3. `SessionRegistry` + typing (живёт до старта стрима, гасится `defer`).
+4. `generationLimiter.acquire()` (`MAX_CONCURRENT_GENERATIONS`, дефолт 64).
+5. Текст оборачивается `"Тебе пишет @username: <text>"`; вложения в историю не
+   пишутся, в запрос идут.
+6. `snapshotAndAppend` — атомарный снапшот + pending turn.
+7. Стрим: **draft** (`runDraftStreaming`, только личка, Bot API 9.3+;
+   финальный текст всегда `sendMessage`, draft эфемерен) или **edit**
+   (`runEditStreaming`, группы; правка раз в 3 с или +300 симв.).
+8. Разбивка: `MessageSplitter.splitRendered` — бюджет в **экранированных**
+   символах (`charLimit` 3896), не режет внутри `<…>`/`&…;`, переоткрывает
+   открытые теги (`openTagMarkup`; `script`/`style` никогда) и закрывает их
+   (`closingTagMarkup`) перед маркером продолжения, стоп-нотисом и футером.
+   Финальную проверку делает `TelegramHTTPGateway.chunkFittingHTML`.
+9. Футер `makeFooter` → `ResponseFooterFormatter`.
+10. `appendAssistant` (история + usage + списание) → офферы → реклама; либо
+    `cancelPendingTurn` + `refundDailyPremium`.
 
-**Отмена**: кнопка Стоп → callback → `SessionRegistry.cancel` → отмена task →
-пометка `cancelled` → «⏹ Остановлено».
-
-**Слот генерации** освобождается ровно один раз через `finishGeneration`
-(release limiter + finish session), какой бы путь ни был.
+Отмена: кнопка Стоп → callback → `SessionRegistry.cancel` → `cancelled` →
+«⏹ Остановлено». Слот освобождается ровно один раз через `finishGeneration`.
 
 ---
 
-## 10. Персистентность: Postgres напрямую, две скорости записи
+## 8. Персистентность: Postgres напрямую
 
-**Транспорт — PostgresNIO** (`postgres-nio`, драйвер на NIO; ни Vapor, ни его
-рантайма он не тянет). PostgREST убран вместе с `SupabaseStatePersistence`.
-Что это дало и почему без этого нельзя было выходить в прод:
+Транспорт — PostgresNIO. Даёт транзакции, БД-ограничения (`check (balance_nanos
+>= 0)`, PK ключа идемпотентности, unique платёжного id), `pg_try_advisory_lock`
+и параметризацию по построению (`PostgresQuery` —
+`ExpressibleByStringInterpolation`, интерполяция → bind-параметр; SQL нельзя
+собрать конкатенацией). Подключение — `DATABASE_URL`, **session-режим пула
+(порт 5432)**: на 6543 (transaction) advisory lock молча не держится — бот пишет
+об этом ошибкой на старте.
 
-- **транзакции** — деньги двигаются одним куском (§10.2);
-- **ограничения на стороне базы** — `check (balance_nanos >= 0)`,
-  `primary key` на ключе идемпотентности, `unique` на платёжном id вендора.
-  Ограничение, которое проверяет Postgres, нельзя обойти ошибкой в Swift;
-- **`pg_try_advisory_lock`** — честный единственный писатель (§10.4);
-- **параметризация по построению**: `PostgresQuery` —
-  `ExpressibleByStringInterpolation`, интерполируемое значение становится
-  bind-параметром, а не текстом. Собрать SQL конкатенацией просто **не
-  получится**; ручное percent-кодирование фильтров `DELETE` исчезло вместе с
-  комментарием «DELETE, потерявший фильтр, чистит таблицу».
+### 8.1 Write-behind — всё, кроме денег
+`PersistenceCoordinator` (актор) каждые **2 с** дренирует и апсертит только
+изменившиеся строки, весь батч одной транзакцией (O(changed)).
+- Провал → весь дренаж в `retryCarry` и сливается со следующим
+  (`PendingFlush.merged` / `PersistenceBatch.merged`, newer wins; delete
+  отменяет upsert и наоборот).
+- Дренаж = две неразделимые половины: строки (`drainDirtyBatch`) и кошельки,
+  изменившиеся вне транзакции (`drainDirtyWallets`). `PendingFlush` носит обе.
+- `flushOnce` сериализован цепочкой тасков (не флагом с опросом); начатый флаш
+  доводится до конца даже при отмене вызвавшего таска.
+- `flushNow()` — для платежей. `stop()` — финальный flush + один ретрай.
+  `abandon()` — остановка **без** флаша (потеря блокировки писателя).
 
-Подключение — одна переменная `DATABASE_URL` (§15). **Нужен session-режим пула
-(порт 5432), не transaction (6543)**: в transaction-режиме pgbouncer возвращает
-соединение в пул после каждого запроса, и advisory lock снимается молча —
-`pg_try_advisory_lock` вернёт true, а гарантии не будет. При порте 6543 бот
-пишет об этом ошибкой в лог на старте.
+### 8.2 Write-through — деньги (`LedgerPort`)
+Кошельки, журнал, ключи идемпотентности и срок подписки пишутся **в транзакции**
+и durable до того, как кому-то сказали «оплачено». Метода «двинуть баланс» вне
+транзакции не существует.
+- `claimPayment` — `insert … on conflict do nothing returning` (проверка+захват
+  одним запросом).
+- `debit` — блокировка строки, затем `greatest(balance - x, 0)`. (`select … for
+  update` внутри того же statement, что и `UPDATE`, возвращает ноль строк.)
+- `extendSubscription` — `greatest(now(), paid_until) + N days` считает база.
+- Начисление вне платежа — `WalletWriter` (`grant` = `credit(kind:.grant)`,
+  `set` = `setBalance`); подписка/winback вне платежа — `SubscriptionWriter`
+  (`paid_until` и `winback_*` write-behind не пишет **никогда**).
+- Память — кэш: стор мутируется **после** коммита (`applyCommitted*`).
+- Идемпотентность не-платежей — `claim(_:)` (`bot_claim`), ключи
+  `refsignup:<id>` / `refbonus:<id>`, в той же транзакции, что и кредит.
+- Удаление кошелька пишет закрывающую строку `correction` (`reconcile()`
+  суммирует журнал с начала).
+- `bot_ledger` — журнал каждого движения; инвариант `sum(amount_nanos) =
+  balance_nanos` проверяет `reconcile()`, расхождение → `OwnerAlert
+  .ledgerMismatch`.
+- `InMemoryLedger` — тот же контракт без durability (разработка, тесты,
+  деградированный режим).
 
-### 10.1. Write-behind: всё, кроме денег
-
-`PersistenceCoordinator` (актор) каждые **2с** дренирует `drainDirtyBatch()` и
-апсертит **только изменившиеся** строки; весь батч идёт одной транзакцией.
-Flush = O(changed), не O(all chats).
-
-- Провал flush → **весь дренаж** кладётся в `retryCarry` и **сливается**
-  (`PendingFlush.merged` поверх `PersistenceBatch.merged`, newer wins) со
-  следующим; delete в новом батче отменяет upsert из старого и наоборот, поэтому
-  ретрай не воскрешает удалённое.
-- **Дренаж — это две половины, и они неразделимы**: строки
-  (`drainDirtyBatch`) и кошельки, изменившиеся вне транзакции
-  (`drainDirtyWallets`, §10.2). Дренаж опустошает dirty-наборы, поэтому
-  половина, выброшенная при неудаче, потеряна навсегда: слияние кошельков при
-  опознании ника оставило бы в базе **обе** строки, а память считала бы их
-  слитыми — и следующий рестарт сложил бы их второй раз. `PendingFlush` носит
-  обе.
-- `flushOnce` сериализован **цепочкой тасков**, а не флагом с опросом:
-  реентрантность актора (каждый `await` пускает следующего) требует явной
-  очереди, а спин-ожидание у отменённого таска не спит вообще — `Task.sleep`
-  возвращается мгновенно, и SIGTERM-окно превращалось в busy-wait. Начатый флаш
-  доводится до конца даже если вызвавший его таск отменён.
-- `stop()` (в SIGTERM-окне): отменяет цикл, финальный flush + один ретрай.
-- `abandon()` — остановка **без** финального флаша: так завершается копия,
-  потерявшая блокировку писателя (§10.4).
-
-### 10.2. Write-through: деньги (`LedgerPort`)
-
-Кошельки, журнал движений, ключи идемпотентности платежей и срок подписки
-пишутся **в транзакции** и durable до того, как кому-нибудь сказали «оплачено».
-Метода «двинуть баланс» вне транзакции не существует **ни в одну сторону** —
-поэтому платёжный путь не может «забыть» durability, как мог, пока правило было
-фразой в документации. У кошелька один владелец (строка `bot_wallet`) и один
-писатель (транзакция): второй писатель через кэш — это не сокращение, а
-потерянное обновление (см. `WalletWriter` ниже).
-
-- `claimPayment` — `insert … on conflict do nothing returning`: проверка и
-  захват одним запросом, окна между «не видели» и «записали» нет ни между
-  корутинами, ни между процессами. Кэп в 500 записей в памяти (и повторная
-  активация подписки на 501-м платеже) больше не существует.
-- `debit` — блокировка строки, затем `greatest(balance - x, 0)`: два хода
-  одного человека не могут списать один и тот же остаток.
-- **Начисление суперадмина — тоже транзакция, через `WalletWriter`**
-  (`Application/Payments/WalletWriter.swift`; `grant` = `credit(kind: .grant)`,
-  `set` = `setBalance`). Раньше `/balance add|set` и кнопка «💰 Пополнить»
-  меняли **кэш** и ждали флаша: любой ответ, списанный в эти 2 секунды, читал
-  строку без начисления и зеркалил догрантовый остаток обратно (`debit` →
-  `applyCommittedCharge` обязан писать то, что закоммитила база) — начисление
-  исчезало, ответ был бесплатным. У стора поэтому **нет** метода «начислить
-  баланс»: путь через кэш больше не выражается в типе, а тестам заготовку даёт
-  расширение в тест-таргете. Кэш двигают только `applyCommitted*`.
-- **Удаление кошелька закрывает его журнал.** `syncWallets(removed:)` пишет
-  строку `correction` на остаток: журнал переживает кошелёк намеренно (это
-  доказательство), но `reconcile()` суммирует его с начала — без закрывающей
-  строки кошелёк, заведённый под тем же ключом заново, навсегда попадал в
-  расхождение, то есть в неснимаемый алерт владельцу.
-- `extendSubscription` — `greatest(now(), paid_until) + N days` считает база;
-  бессрочный тенант остаётся бессрочным.
-- **Память — кэш.** Стор мутируется *после* коммита
-  (`ChatContextStore+Ledger.swift`: `applyCommittedPayment`,
-  `applyCommittedCharge`, …). Чтения остаются синхронными: единственный писатель
-  (§10.4) гарантирует, что кэш не устареет за спиной.
-- **Идемпотентность не-платежей — `claim(_:)`** (`bot_claim`): реферальные
-  выплаты берут ключ `refsignup:<id>` / `refbonus:<id>` **в той же транзакции**,
-  что и кредит. Отметка `rewardedAt` — write-behind состояние; «проверить
-  отметку, потом начислить» это два шага, и падение между ними платит дважды.
-- **Подписка и winback вне платежа — только через `SubscriptionWriter`**
-  (`Application/Payments/SubscriptionWriter.swift`). Колонки `paid_until` и
-  `winback_*` write-behind не пишет **никогда** (иначе устаревшая копия из
-  памяти отменила бы оплаченное продление), поэтому продление суперадмином и
-  выдача скидки свипом обязаны идти этим путём — иначе они верны до первого
-  рестарта и потом молча исчезают.
-- **`bot_ledger` — журнал** каждого движения. Без него «почему у меня было $2, а
-  стало $1.30» не имеет ответа нигде. Инвариант
-  `sum(amount_nanos) = balance_nanos` проверяет `reconcile()`; расхождение —
-  алерт владельцу (§14), а не жалоба клиента.
-- В памяти (`InMemoryLedger`) — тот же контракт для локальной разработки, тестов
-  и деградированного режима. Что он не даёт — durability, поэтому в этом режиме
-  бот ничего не продаёт (§10.6).
-
-### 10.3. Схема
-
-Принцип: **jsonb — для документов, колонки — для данных**. Документ это то, что
-всегда читается и пишется целиком и по чему никогда не ищут.
-
+### 8.3 Схема
+Принцип: **jsonb — для документов, колонки — для данных**.
 ```
 bot_user(user_key PK, user_id unique, username, first_name, first_seen_at, seen_at)
 bot_wallet(user_key PK, balance_nanos check >= 0, topped_up_nanos, spent_*_nanos, …)
@@ -1291,899 +534,352 @@ bot_traffic_attribution(user_id PK, tag, joined_at, activated_at, paid_at, payme
 bot_funnel_daily(day, event, count)  PK (day, event)
 bot_crypto_invoice(id PK, owner_key, status, expires_at, data jsonb)
 bot_external_order(id PK, payer_key, status, vendor_payment_id unique, data jsonb)
-bot_claim(key PK)                  -- идемпотентность не-платежей (реферал)
-bot_config(key PK, data jsonb)     -- только настоящие документы
+bot_claim(key PK)
+bot_config(key PK, data jsonb)
 bot_schema_meta(id PK, version)
 ```
+`bot_config` (21 ключ `ConfigName`, значения обёрнуты в `{"value": …}`):
+stars_price, stars_per_usd, free_models, crypto, card, super_admins, root_owner,
+polling_offset, ads, markup, funnel, funnel_daily, daily_premium_limit,
+self_promo, modes, reminders, onboarding, referrals, referral_totals,
+traffic_totals, external_payments, spend_policy. Ничто из них не растёт с числом
+пользователей. `root_owner` восстанавливается **до** `ensureDefaultOwnerTenant`
+и сборки `superAdminKeys`.
 
-Всё, что **растёт с числом пользователей**, стало таблицей: директория,
-кошельки, метаданные чатов, обработанные платежи, привязки реферала, атрибуции
-`src_`. Раньше это были одиночные JSON-строки, переписываемые целиком на каждое
-изменение (и ограниченные сверху — 10 000 личностей, 5 000 привязок, 500
-платежей).
+**Миграции в бинаре** (`PostgresSchema`), на старте: версия базы > бинаря → **не
+стартуем** (единственная ошибка хранилища, роняющая процесс; `bootstrapState`
+её пробрасывает); версия меньше → встроенные шаги по порядку, все
+`create … if not exists`.
 
-В `bot_config` осталось то, что действительно документ (`ConfigName`, 21
-ключ): stars_price, stars_per_usd, free_models, crypto (адреса/режим, не
-инвойсы), card, super_admins, **root_owner** (пин владельца, §6), polling_offset,
-ads, markup, funnel, daily_premium_limit, self_promo, modes, reminders,
-onboarding, referrals, referral_totals, traffic_totals,
-external_payments (реквизиты, не счета),
-**spend_policy** (§4.1). Ни один из них больше не растёт от числа
-пользователей. Значения оборачиваются в `{"value": …}`.
+**Одна битая строка не роняет restore только там, где потеря самолечится**:
+`bot_chat_context` читается через `mapSkippingUnreadable`; тенанты, кошельки,
+счета, реферал — строго. Legacy-путь (`bot_state`, `BotStateSnapshot`) удалён.
 
-`root_owner` — единственное поле директории, которое не «на человека»: сами
-личности стали таблицей `bot_user`, и пину владельца не осталось колонки. Без
-своей строки он жил только в памяти, а после рестарта root заново выводился из
-@ника из конфигурации — то есть ровно та подмена, ради которой пин и заведён
-(§6). Восстанавливается **до** `ensureDefaultOwnerTenant` и до сборки
-`superAdminKeys`: оба резолвят `rootSuperAdminKey`.
+### 8.4 Единственный писатель
+`WriterLock` берёт `pg_try_advisory_lock` на выделенном соединении на всё время
+жизни процесса. Порядок в `bootstrapState`: **миграция → блокировка → чтение**.
+- Не взяли → процесс сразу `ready` (иначе healthcheck-gated деплой встаёт в
+  дедлок), но **не принимает апдейты** (`StateDurability.acceptsUpdates` →
+  webhook 503) и раз в 2 с пробует блокировку → `claimWriterAndRestore`.
+  Ожидание >10 мин = `OwnerAlert.notWriter`.
+- Потеряли на ходу → `stepDownAsWriter`: `abandon()` + выключение. `onLost`
+  значит «отняли то, что держали», и только это (неудачная попытка молчит).
+- `shutdown()` освобождает блокировку **последним действием**, после флаша.
 
-**Миграции — в бинаре** (`PostgresSchema`), применяются на старте:
+### 8.5 Ретеншн и `/forget`
+`RetentionService` — суточный свип: `pruneChatContexts` удаляет переписки старше
+180 дней, кроме чатов, за которые кто-то платит; запускает только писатель.
+`/forget` стирает переписку своего чата (в группе — только у оператора);
+кошелёк, подписка и `bot_ledger` не трогаются.
 
-- версия базы больше, чем знает бинарь → **не стартуем** с внятным текстом:
-  старый билд, пишущий в новую схему, теряет то, что лежит в новых колонках.
-  Это **единственная** ошибка хранилища, которую нельзя пережить деградацией,
-  поэтому `bootstrapState` её пробрасывает (`throws`), а `main` не ловит:
-  никакая другая (сеть, пул, битый restore) процесс не роняет — они уводят бота
-  в memory-only с закрытой кассой. Откат деплоя не должен выглядеть успешным;
-- версия меньше → применяем встроенные шаги по порядку. Все они
-  `create … if not exists`, поэтому падение на середине чинится следующим стартом.
-
-**Одна нечитаемая строка не роняет restore целиком** — но только там, где
-потеря строки переживается и самолечится: `bot_chat_context` читается через
-`mapSkippingUnreadable` (пропуск + громкая ошибка в лог, переписка соберётся
-заново со следующего сообщения). Всё остальное (тенанты, кошельки, счета,
-реферал) читается строго: молча потерять оплаченную подписку хуже, чем отказаться
-писать. До этого один битый jsonb-документ уносил весь restore, а с ним и кассу
-(§10.6) — из-за истории одного чата.
-
-Legacy-путь (`bot_state`, `BotStateSnapshot`, `restoreFromSnapshot`,
-`loadLegacySnapshot`, `ChatKey(snapshotKey:)`) **удалён**: прода на нём никогда
-не было, а миграция, которая никогда не выполнится, — это место, где ждёт своего
-часа «устаревший блоб перезаписал живые данные».
-
-### 10.4. Единственный писатель
-
-Railway при деплое держит старый и новый инстанс одновременно — это дизайн, а не
-авария; плюс никто не мешает выставить `replicas = 2`. Две копии, читающие
-состояние в память и пишущие обратно, — это исчезнувшее продление, удвоенные
-напоминания и дважды зачисленный перевод.
-
-`WriterLock` берёт `pg_try_advisory_lock` на выделенном соединении и держит его
-всё время жизни процесса. Это строго сильнее аренды с TTL: нет окна «оба считают
-себя писателями», нечего подбирать в таймаутах, ничего не зависит от часов.
-Порядок в `bootstrapState`: **миграция → блокировка → чтение** (сначала
-блокировка, потом чтение — иначе гонка просто сдвигается).
-
-- **Не взяли → ждём передачи, а не отказываемся стартовать.** Healthcheck-gated
-  деплой держит старый инстанс, пока новый не отчитается `ready`, а старый
-  держит блокировку, пока его не остановят: копия, которая отказывается быть
-  ready без блокировки, ждёт того, кто ждёт её. Поэтому новый процесс сразу
-  отвечает `ready`, но **не принимает апдейты** (`StateDurability.acceptsUpdates`
-  → webhook 503, Telegram придержит и передоставит) и раз в 2 секунды пробует
-  блокировку. Как только старый выключился — `claimWriterAndRestore`, загрузка
-  состояния, `durable`, persistence и свипы. Дольше 10 минут ожидания = алерт.
-- Потеряли на ходу → `stepDownAsWriter`: `abandon()` (без финального флаша) и
-  выключение. Писать поверх нового хозяина хуже, чем упасть.
-- **`onLost` значит «блокировку, которую мы держали, отняли» — и только это.**
-  Неудачная попытка обязана молчать: ожидающий инстанс дёргает `acquire` раз в
-  2 секунды, и запоздавший колбэк проигравшей попытки выключил бы процесс через
-  секунды после того, как он стал писателем.
-- `shutdown()` освобождает блокировку **последним действием**, после финального
-  флаша: это и есть сигнал следующему инстансу.
-
-### 10.5. Ретеншн и «забудь меня» (§7.2)
-
-Продукт берёт деньги и хранит переписку, значит у вопроса «сколько вы её
-держите» должен быть ответ, и «вечно, стереть нельзя» — не он.
-
-- **`RetentionService`** — суточный свип: `pruneChatContexts` удаляет переписки,
-  которых не касались дольше 180 дней, **кроме** чатов, за которыми кто-то
-  платит (лицензия тенанта, активная подписка, положительный баланс,
-  суперадмин). Запрос дешёвый: `bot_chat_context` проиндексирован по
-  `updated_at`. Свип запускает только писатель.
-- **`/forget`** — стирает переписку того чата, где вызвана. В группе доступна
-  только тому, кто ей управляет: история общая. Кошелёк, подписка и `bot_ledger`
-  **не трогаются** — это финансовые документы и доказательство самого человека в
-  споре о списании; удалить их по просьбе значит стереть доказательство, а не
-  данные.
-
-### 10.6. Durability как условие продажи
-
-`StateDurability` (`durable` / `readOnly` / `volatile`) живёт в `RuntimeFlags` и
-проверяется на **каждом** входе в кассу. Не durable → не продаём:
-`answerPreCheckoutQuery(ok: false)` показывает покупателю текст и **не списывает
-деньги**. Это единственное место в продукте, где «не продать» строго лучше, чем
-«продать».
-
-Входов пять, и три из них — не Telegram:
-
-- `/buy` (`BotCommandHandler+Buy`) и рендер страницы `pay` (`renderPay`) —
-  оффер вместо кнопок;
-- `pre_checkout_query` — последний гейт перед списанием;
-- **`handleBuyAction`** — все `menu:buy:*` одним местом. Страница прячет кнопки,
-  но кнопка в **старом** сообщении живёт, а volatile наступает именно на старте:
-  каждая страница покупки, нарисованная прошлым процессом, иначе остаётся
-  рабочей кассой (крипто-инвойс в RAM = перевод в никуда, повторной доставки у
-  блокчейна нет);
-- **`PaymentFulfillmentService.fulfil`** — точка, где сходятся все рельсы, в том
-  числе крипта (поллер блокчейна) и касса (HTTP-эндпоинт), не проходящие ни
-  через `pre_checkout_query`, ни через меню. Отказ = `.failed`, на который
-  каждый транспорт уже умеет оставлять дверь открытой (§17);
-- **`ExternalPaymentService.handleCallback`** — **до** поиска счёта. Без базы
-  restore не поднял ни одного счёта, поэтому уведомление кассы выглядит как
-  уведомление о *неизвестном* счёте, а такое подтверждается по построению
-  (иначе агрегатор долбит эндпоинт вечно) — и покупка исчезает вместе с
-  процессом. Не durable → кассе не отвечаем, она доставит снова.
-
-Флаг стартует закрытым (`volatile("starting")`) — процесс, не дошедший до
-`bootstrapState`, продать ничего не может. `/ready` при этом остаётся 200 (бот
-отвечает и без базы), а `/metrics` отдаёт `durability` и `degraded`.
-
-**Важно при добавлении новых мутаций стора**: любая новая изменяемая сущность
-обязана помечать свой dirty-set и дренироваться в `drainDirtyBatch()`, иначе она
-молча не сохранится. Экспорт/импорт — в `ChatContextStore+Persistence.swift`.
+### 8.6 Durability как условие продажи
+`StateDurability` (`durable/readOnly/volatile`) в `RuntimeFlags`, стартует
+закрытым (`volatile("starting")`). Не durable → не продаём. Пять входов:
+`/buy`, рендер страницы `pay`, `pre_checkout_query` (`answerPreCheckoutQuery(ok:
+false)`, деньги не списываются), `handleBuyAction` (все `menu:buy:*` — кнопка в
+старом сообщении переживает рестарт), `PaymentFulfillmentService.fulfil` (крипта
+и касса не проходят через первые четыре) и `ExternalPaymentService
+.handleCallback` **до** поиска счёта. `/ready` при этом 200, `/metrics` отдаёт
+`durability` и `degraded`.
 
 ---
 
-## 11. Надёжность и масштабирование
+## 9. Надёжность и масштабирование
 
-- **Интейк** (`UpdateIntake`): единая точка для webhook и polling. Дедуп по
-  `update_id` (кольцевой буфер), склейка альбомов с holdback-таймером (holdback
-  750 мс, таймер тикает раз в 300 мс — при webhook флашить больше некому, поэтому
-  альбом реально уезжает через ~0.75–1 с). На выключении `shutdown()` не гасит
-  буфер, а **сливает** его (`flushAll`): за эти апдейты Telegram уже получил 200 и
-  повторно их не пришлёт.
-  - **Буфер альбомов ограничен со всех сторон** (`TelegramPhotoAlbumBuffer`):
-    частей на альбом (16), время жизни альбома (10 с), апдейтов в очереди за
-    чатом (64), альбомов всего (256). Это память, которую держит отправитель:
-    каждая новая часть двигала `lastSeenAt` вперёд, поэтому непрерывный поток
-    частей с одним `media_group_id` держал альбом открытым бесконечно, а за ним
-    копились **все** остальные сообщения чата — OOM с телефона. По превышению
-    лимитов альбом отдаётся как есть, а лишние апдейты уходят вне очереди:
-    порядок — приятная мелочь, неограниченная память — нет.
-- **Per-chat сериализация** (`ChatUpdateDispatcher`): порядок в чате гарантирован,
-  чаты параллельны, очередь ограничена (16) → защита от флуда.
-- **Глобальный кап стримов** (`GenerationLimiter`): FIFO-семафор
-  (`MAX_CONCURRENT_GENERATIONS`, дефолт 64). Лишние ждут (typing уже идёт),
-  не выедая сокеты/память.
-- **Rate limiter Telegram** (`TelegramRateLimiter`): token-bucket. Глобально
-  ~18 msg/s (реальные сообщения) + отдельные бюджеты для draft'ов (8/s,
-  droppable) и косметики/typing (3/s) → суммарно <30/s. Per-chat: личка ~1/s,
-  группа 20/min. Авто-retry по `retry_after` (429). Прунинг «прогретых» бакетов.
-  **Правки (`editMessage`) идут мимо per-chat ведра** — только через глобальное
-  (`waitForEditSlot`). Лимит «20 сообщений/мин на группу» относится к отправке,
-  а не к `editMessageText`; edit-стриминг (правка раз в 3с) выедал ровно весь
-  бюджет чата, и каждый следующий вызов спал ~3с **внутри** `for try await` по
-  SSE — ответ в группе залипал, а непрочитанный поток провайдера копился в
-  памяти.
-- **Дедупликация платежей**: charge_id (Stars/карта), tx-хеши (крипта).
-- **Graceful shutdown** (SIGTERM/SIGINT): `draining=true`, webhook отдаёт 503 →
-  Telegram передержит и передоставит апдейты; сливаем интейк; ждём (до 8с), пока
-  опустеют **и** per-chat очереди (`totalQueuedOperations`), **и** активные стримы
-  (`activeCount`); отменяем фоновые таски; финальный flush состояния. Ждать только
-  стримы было мало: принятый апдейт, ещё стоящий в очереди чата, — это вопрос
-  пользователя, на который никто не ответит и следов не останется.
-  Отмена генерации («Стоп») **не** обнуляет `activeCount` заранее: сессия живёт до
-  `finish`, поэтому выключение дожидается записи ответа в историю. **Редеплой без
-  потерь.**
-- **Эндпоинт кассы** (`/payments/<vendor>`, §7 «Внешняя касса»): принимает
-  уведомление агрегатора (POST или GET, форма — не JSON), аутентификация —
-  подпись вендора внутри адаптера, ответ — ровно то слово, которого касса ждёт
-  (`YES`), иначе доставка повторяется. Всё, что мы приняли, но не смогли
-  использовать (неизвестный счёт, недоплата), **подтверждается и логируется**:
-  иначе агрегатор долбит эндпоинт вечно. 400 — только неподписанному запросу.
-- **Health-эндпоинты** (`AppHTTPServer`): `/health` (liveness), `/ready` (503 пока
-  restore не завершён и при draining — Railway healthcheck), `/metrics`
-  (**закрыт токеном**: `Authorization: Bearer <METRICS_TOKEN>`, при незаданном —
-  вебхук-секрет; с `Accept: text/plain` отдаёт то же самое в формате Prometheus,
-  включая `bot_state_degraded` и `bot_alert_firing` — единственные два, на
-  которые стоит вешать правило; эндпоинт висит на публичном домене и отдаёт воронку и выручку,
-  открытым он быть не может). Оба секрета сверяются
-  `SecretGuard.constantTimeEquals`. JSON:
-  uptime, активные генерации, глубина очередей, dirty-сущности, статус
-  персистентности, счётчики, `funnel`).
-- **Метрики** (`RuntimeMetrics`/`MetricName`): updates received/deduplicated/dropped,
+- `UpdateIntake` — единая точка для webhook и polling: дедуп по `update_id`
+  (кольцевой буфер 2048), склейка альбомов (holdback 750 мс, тик 300 мс).
+  `shutdown()` **сливает** буфер (за эти апдейты Telegram уже получил 200).
+- `TelegramPhotoAlbumBuffer` ограничен со всех сторон: частей на альбом 16,
+  жизнь альбома 10 с, апдейтов в очереди за чатом 64, альбомов 256; по
+  превышению альбом отдаётся как есть, лишнее уходит вне очереди.
+- `ChatUpdateDispatcher` — порядок в чате, параллельность чатов, очередь 16.
+- `GenerationLimiter` — FIFO-семафор, `MAX_CONCURRENT_GENERATIONS` (64).
+- `TelegramRateLimiter` — token-bucket: глобально ~18 msg/s + draft 8/s
+  (droppable) + косметика/typing 3/s; per-chat личка ~1/s, группа 20/min;
+  авто-retry по `retry_after`. **`editMessage` идёт мимо per-chat ведра**
+  (`waitForEditSlot`, только глобальное): иначе edit-стриминг съедает бюджет
+  группы и блокирует чтение SSE.
+- Graceful shutdown (SIGTERM/SIGINT): `draining=true` (webhook 503) → слив
+  интейка → ждём до 8 с опустошения **и** per-chat очередей
+  (`totalQueuedOperations`), **и** активных стримов (`activeCount`) → отмена
+  фоновых тасков → финальный flush. «Стоп» не обнуляет `activeCount` заранее.
+- `/payments/<vendor>` — POST/GET, форма (не JSON), аутентификация подписью
+  вендора; принятое-но-непригодное (неизвестный счёт, недоплата) подтверждается
+  и логируется; 400 — только неподписанному.
+- Health: `/health`, `/ready`, `/metrics` (**закрыт токеном**: `Authorization:
+  Bearer <METRICS_TOKEN>`, при незаданном — вебхук-секрет, сверка
+  `SecretGuard.constantTimeEquals`; `Accept: text/plain` → Prometheus, включая
+  `bot_state_degraded` и `bot_alert_firing`).
+- `RuntimeMetrics`/`MetricName`: updates received/deduplicated/dropped,
   generations, telegram_429, send errors, persistence flushes/errors, payments
-  processed/deduplicated, reminder sweeps/sent/winbacks/send errors. Легко мапится
-  на Prometheus.
-- **Воронка-аналитика** (`FunnelEvent`/`funnelCounters`, персистится в `bot_config`):
-  события start → addedToGroup (вирусный рост, §шаг4) → onboardingShown →
-  exampleTapped (онбординг, §шаг9) → firstMessage → capHit/capWarned →
-  promoShown/balanceEmpty (точки боли, §шаг5) →
-  openPurchase → invoiceSent → paid/renewed + creditTopup, плюс удержание:
-  expiryReminder → winbackSent → winbackRedeemed → walletWinbackSent и рост:
-  referralJoined → referralRewarded → referralPaidBonus (§7). Счётчики —
-  событийные (не уникальные юзеры), переживают рестарт.
-  - **Периоды.** Каждое событие пишется дважды: в общий счётчик и в подневный
-    бакет (`FunnelDailyLog`, `bot_config` → `funnel_daily`, окно 35 суток,
-    прунится относительно **реальных** текущих суток). Страница супер-меню
-    «📊 Воронка» переключается кнопками сегодня / 7 дней / 30 дней / всё время
-    (`funnel:p:<period>`), рядом с числом периода показан общий итог. Итог
-    отвечает «сколько всего», окно — «стало ли лучше»; без второго измерять
-    бессмысленно.
-  - **Источник покупки.** `openPurchase` считается вместе с поверхностью, откуда
-    пришли: кнопка несёт `menu:nav:pay:<source>` (`PurchaseSource`: menu, cap,
-    promo, welcome, command, reminder, balance, referral), счётчик кладётся под
-    ключ `openPurchase.<source>` (namespace не пересекается с именами событий).
-    Так апселлы в точке боли сравнимы с обычной кнопкой меню.
-  - **Возвращаемость** — прокси вместо когортного D1/D7: `UserIdentity.firstSeenAt`
-    + `seenAt` дают «видели ли человека спустя сутки / спустя неделю после первой
-    встречи» (`UserDirectory.retention`). Поле опциональное, старые записи
-    backfill'ятся последним известным визитом и до тех пор в когорту не входят.
-  - Отдаётся в `/metrics`: `funnel` (всё время: счётчики + живой подсчёт спонсоров
-    active/expired/unlimited/expiring_soon, активных winback-скидок, реферала
-    `referral_pending`/`referral_rewarded`/`referral_paid_cents` и
-    `retention_*`), плюс `funnelToday` и `funnelWeek`.
-- **Режим апдейтов** (`UpdateMode`): `auto` (webhook если есть публичный URL —
-  Railway; иначе polling), `webhook`, `polling`. Webhook защищён secret-заголовком.
-  **Подписка на типы апдейтов — одна на оба транспорта**:
-  `TelegramUpdateSubscription.allowedUpdates` (`message`, `callback_query`,
-  `pre_checkout_query`, `my_chat_member`) уходит и в `setWebhook`, и в
-  `getUpdates` (percent-encoded JSON). Без явного списка `getUpdates` **молча
-  выкидывает** `my_chat_member`, и в polling-режиме пропадают приветствие группы,
-  событие `addedToGroup`, детект блокировки и флаг `botRemoved`. Если `setWebhook`
-  упал и мы уходим в polling — сначала `deleteWebhook()`, иначе каждый
-  `getUpdates` отвечает «webhook is active».
+  processed/deduplicated, reminder sweeps/sent/winbacks/errors.
+- **Воронка** (`FunnelEvent`): start → addedToGroup → onboardingShown →
+  exampleTapped → firstMessage → capHit/capWarned → promoShown/balanceEmpty →
+  openPurchase → invoiceSent → paid/renewed + creditTopup; удержание
+  expiryReminder → winbackSent → winbackRedeemed → walletWinbackSent; рост
+  referralJoined → referralRewarded → referralPaidBonus. Каждое событие пишется
+  дважды: общий счётчик + подневный бакет (`FunnelDailyLog`, окно 35 суток).
+  `openPurchase` считается с поверхностью: ключ `openPurchase.<PurchaseSource>`.
+  Возвращаемость — `UserDirectory.retention` (firstSeenAt + seenAt, D1/D7).
+- **Режим апдейтов** (`UpdateMode`): `auto` (webhook при публичном URL, иначе
+  polling), `webhook`, `polling`. Подписка на типы — одна на оба транспорта
+  (`TelegramUpdateSubscription.allowedUpdates`: message, callback_query,
+  pre_checkout_query, my_chat_member): без явного списка `getUpdates` молча
+  выкидывает `my_chat_member`. `setWebhook` упал → сначала `deleteWebhook()`.
 
 ---
 
-## 12. Команды (`BotCommandName` / `BotCommandHandler`)
+## 10. Команды (`BotCommandName` / `BotCommandHandler`)
 
-Парсинг: `/cmd`, `/cmd@botusername`, суффикс тест-режима (`/model3` при
-`suffix=3`). До access-gate разрешены только `/start` и `/buy` — распознаются тем
-же `CommandParser`, а не по префиксу строки (иначе `/buying` и `/startsomething`
-проходили бы гейт).
+Парсинг `CommandParser`: `/cmd`, `/cmd@botusername`, суффикс тест-режима
+(`/model3` при `suffix=3`). До access-gate разрешены только `/start` и `/buy` —
+через парсер, не по префиксу строки.
 
-**Пользовательские / настройки чата**: `/setrole`, `/clear_history`, `/settemp`,
-`/model`, `/historylength`, `/show_model`, `/show_cost`, `/show_tokens`,
-`/provider`, `/testmode`, `/reasoning`, `/help`, `/menu`, `/reset`, `/history`,
-`/reset_stats`, `/backup_notify`, `/chatid`, `/forget` (стереть переписку этого
-чата; в группе — только у того, кто ей управляет), `/start`, `/buy`, `/balance`,
-`/examples` (кнопки-примеры онбординга), `/ref` (личная реферальная ссылка).
-Тонкая настройка закрыта теми же гейтами, что и её страницы меню (§13):
-`/settemp` и `/reasoning` — полный доступ, `/historylength` и `/provider` —
-оператор чата.
+- **Чат/настройки**: `/setrole`, `/clear_history`, `/settemp`, `/model`,
+  `/historylength`, `/show_model`, `/show_cost`, `/show_tokens`, `/provider`,
+  `/testmode`, `/reasoning`, `/help`, `/menu`, `/reset`, `/history`,
+  `/reset_stats`, `/backup_notify`, `/chatid`, `/forget`, `/start`, `/buy`,
+  `/balance`, `/examples`, `/ref`.
+  Гейты те же, что у страниц меню: `/settemp` и `/reasoning` — полный доступ
+  (`requireFullAccessForTuning`), `/historylength` и `/provider` — оператор
+  (`requireOperatorForTuning`).
+- **Админ/тенант**: `/default_role`, `/defaults`, `/whitelist`, `/chats`,
+  `/users`, `/presets`, `/tenant` (assign/release/adduser/register/remove/
+  freemodels/crypto/…), `/inspect`, `/ads` (+`/ads promo`), `/invite`.
+- **Суперадмин**: `/superadmin`, `/simulate`, `/reminders`, `/examples`, `/ref`,
+  free-модели, цены, наценка, балансы (в основном через супер-меню).
 
-**Админские / тенант**: `/default_role`, `/defaults`, `/whitelist`, `/chats`,
-`/users`, `/presets`, `/tenant` (assign/release/adduser/register/remove/freemodels/
-crypto/…), `/inspect`, `/ads` (+ `/ads promo` — само-реклама, §7), `/invite` (через меню).
-
-**Суперадминские**: `/superadmin` (add/remove), `/simulate`, `/reminders`
-(on/off/days `3,1`/winback/discount/hours/interval/chats/wallet/run/test/clear —
-§7/§14), `/examples` (stats/on/off/groups/reset/clearstats — §7 «Онбординг»;
-размещение примера — кнопкой «📍» в меню),
-`/ref` (on/off/reward/friend/bonus/cap/stats — §7 «Реферал»; очистка журнала —
-только кнопкой в меню),
-глобальные free-модели, цены, наценка, балансы (в основном через супер-меню).
-
-Неизвестная команда/упоминание → `.mention`/`.unknown` (игнор или обычная генерация).
+Неизвестная команда → `.mention`/`.unknown` (игнор или обычная генерация).
 
 ---
 
-## 13. Inline-меню (`BotMenuHandler`)
+## 11. Inline-меню (`BotMenuHandler`)
 
-Страницы (`MenuPage`, callback_data `menu:<action>`): главная (`main` — режимы,
-роль, сброс, тонкая настройка), `tuning` («⚙️ Тонкая настройка» — модель, стиль,
-обдумывание, что показывать под ответом, память и сервис ИИ оператору), страница
-покупки (`pay` — подписка + пакеты кредитов), реферальная страница (`ref` — личная
-ссылка, «Поделиться», личная статистика; только в личке), admin-панель (`admin`, `adminhelp`,
-`adminchats`, `adminusers`, `adminwl`, `admindef`, `admininvite`), супер-панель
-(`superadmin`, `superadminhelp`, `superstars`, `supercrypto`, `supercard`,
-`superextpay` — внешняя касса: реквизиты, валюта, цены, способы оплаты, URL
-оповещения для кабинета,
-`superfreemodels`, `supertenants`, `superadmins`, `supersim`, `superchats`,
-`superads` — кампании + само-реклама (текст/частота/пауза/показы),
-`superbal`, `superfunnel` — воронка-аналитика с переключателем периода,
-источниками открытий покупки и возвращаемостью, `superreminders` —
-напоминания/winback: волны расписания, возврат по балансу, ручная проверка,
-предпросмотр, список подписок под наблюдением, `superonboarding` —
-примеры-запросы: тексты, порядок, размещение (личка/группы), вкл/выкл,
-предпросмотр, тапы по каждому примеру, `supermodes` — режимы бота: тексты,
-модель, стиль, память, обдумывание, роль, тариф 🆓/⭐, рабочий режим, порядок,
-цены моделей и тапы, `superspend` — лимиты расходов: общий и на тенанта, что делать при достижении,
-кто тратит сегодня, `superref` — приглашения: награды обеим
-сторонам, бонус за оплату друга, антифрод-лимит, счётчики выплат и приведённых
-клиентов, топ пригласивших, очистка журнала, `supersrc` — источники трафика:
-кампании `src_` по платящим, конверсия, шаблон ссылки, очистка).
+Страницы (`MenuPage`, `callback_data` `menu:<action>`): `main` (режимы, роль,
+сброс, тонкая настройка), `tuning`, `pay`, `ref`, админ-панель (`admin`,
+`adminhelp`, `adminchats`, `adminusers`, `adminwl`, `admindef`, `admininvite`),
+супер-панель (`superadmin`, `superadminhelp`, `superstars`, `supercrypto`,
+`supercard`, `superextpay`, `superfreemodels`, `supertenants`, `superadmins`,
+`supersim`, `superchats`, `superads`, `superbal`, `superfunnel`,
+`superreminders`, `superonboarding`, `supermodes`, `superspend`, `superref`,
+`supersrc`).
 
-**Гейт `super*`-страниц перечисляет их поимённо** (`case .superAdmin, … :` в
-обработчике `nav:`), а не через `default` — забытая в списке страница
-проваливается в `default: break` и открывается кому угодно (кнопки внутри
-по-прежнему проверяют роль, но конфиг и числа владельца утекают). Новая
-`super*`-страница обязана быть дописана в этот список. Забыть больше нельзя
-молча: `EndToEndTests` тапает `nav:<page>` **за каждую** страницу с префиксом
-`super` от лица обычного юзера и требует отказа (§19).
-
-**Гейты тонкой настройки живут на самой странице** (`MenuPage`), а не в
-обработчиках: `requiresFullAccess` (`temp`, `reasoning`) — нужен премиум, баланс
-или спонсор, отказ **ведёт на страницу покупки** (`PurchaseSource.tuning`), а не
-в тупик; `requiresOperator` (`provider`) — только суперадмин или админ этого
-чата. Оба проверяются **дважды**, как `isPersonal`: в `showPage` (тап) и в
-`renderPage` (перерисовка меню после текстового ввода, где callback'а нет).
-Страница-хаб `tuning` намеренно **не** закрыта: закрытая дверь, в которую видно
-(⭐ на кнопках), продаёт, а наглухо запертая — раздражает. То же у команд:
-`/settemp` и `/reasoning` требуют полного доступа, `/historylength` и `/provider`
-— оператора (`requireFullAccessForTuning` / `requireOperatorForTuning`), иначе
-команда была бы обходным путём мимо гейта и мимо контроля расходов.
-
-- `sendMenu` / `showPage` / `renderPage` — рендер клавиатур под роль/контекст.
-- **Страница — это `MenuScreen`** (`Menu/MenuScreen.swift`), не безымянный
-  кортеж: текст + клавиатура + инвариант `fitsInOneMessage`. Рендеры возвращают
-  его, `editOrAnswer(callback:message:screen:)` его шлёт, `refreshMenu` —
-  перерисовывает меню-сообщение после текстового ввода. Страница, переросшая
-  одно сообщение, теперь пишет warning с именем страницы (`warnIfOversized`), а
-  не молча теряет хвост. Ряды кнопок копит `Keyboard` (`row(...)`,
-  `row(if:...)`, `insertBeforeLast(...)`, `extendLastRow(with:)`).
-- **Гейт роли — один вызов** (`BotMenuHandler+Guards.swift`):
-  `requireSuperAdmin(callback)` / `requireRootSuperAdmin(callback)` /
-  `requireAdmin(callback, chatKey:)`. Они сами отвечают тостом при отказе, так
-  что вызывающему остаётся `guard await requireX(...) else { return }`. Раньше
-  это были 26 копий по четыре строки — 26 шансов вставить не тот гейт или
-  забыть `answerCallback` (кнопка, которая молчит, читается как сломанный бот).
-- **Подпись кнопки «назад» живёт у страницы-назначения** (`MenuPage.backLabel`,
-  кнопка — `backButton(to:)`; отмена ввода — `cancelButton(to:)`). Кнопка не
-  может обещать «← К супер-админу» и вести в другое место, а у одной страницы не
-  может быть двух разных названий; закреплено тестом (§19).
-- **Личные страницы — только в личке** (`MenuPage.isPersonal`: `ref`,
-  `admininvite`, `superbal`). В группе меню — одно сообщение на всех: страницу
-  перерисовывает тот, кто тапнул, а читают её все. `showPage` отвечает тостом
-  `privateOnlyNotice` и ничего не рендерит; `renderPage` дублирует гейт для пути
-  «меню обновилось после текстового ввода». Раньше `admininvite` публиковал
-  пригласительный токен админа прямо в чат (любой участник получал платный доступ
-  за его счёт, отозвать — только регенерацией), а `superbal` — кошельки всех
-  людей.
-- **Страница покупки в группе — прайс-лист.** `renderPay` в общем чате
-  (`chatID < 0`) берёт цены через `subscriptionPricing(username: nil)` и не
-  печатает ничего личного: ни баланс, ни срок своей подписки, ни персональную
-  winback-скидку. Публично остаётся только факт про сам чат («премиум открыл @X»,
-  `chatSponsor`) и общий оффер. Тапнуть «купить» там может любой, и платить он
-  будет по прайс-листу (§17).
-- **Главная страница в группе — тоже без личных чисел.** `renderMain` при
-  `chatID < 0` не читает кошелёк и берёт `chatAccessStatus(username: nil)`:
-  иначе строка «💰 Баланс · $0.1234» и «⚡ Премиум · ваш, до …» тапнувшего
-  публиковались всем участникам (меню — одно сообщение на чат). По той же
-  причине там не появляется метка «🔄 Продлить премиум»: она выдаёт, что
-  тапнувший платит.
-- **Справка супер-админа разбита на разделы** (`SuperHelpSection`,
-  `nav:superadminhelp` → `sahelp:<раздел>`). Целиком она ~8 000 символов, а
-  `editMessage` молча обрезает всё после ~3 900 (разбить правку на два
-  сообщения нельзя) — половина справки была невидима. Любая страница меню
-  обязана помещаться в одно сообщение: списки на `super*`-страницах
-  (тенанты, кошельки, кампании-источники, открытые счета) поэтому режутся с
-  явной строкой «показаны первые N».
-- **Необратимое действие спрашивает подтверждение.** Удаление тенанта
-  (`stenant:rm` → `rmyes`) и кошелька (`sbal:rm` → `rmyes`) — это чужая
-  подписка и чужие деньги, а кнопка стоит в строке списка, где легко
-  промахнуться. Очистка журналов реферала и источников устроена так же.
-- **Callback кнопки — типизированный маршрут** (`Menu/MenuRoute.swift`).
-  `callback_data` разбирается **один раз** в `MenuRoute`: `command`
-  (`MenuCommand`, enum — неизвестная команда не доходит до обработчика, тап
-  получает тост), `arg(i)`/`int(i)`/`page(i)`/`sub`. Индексы те же, что были у
-  `parts`, только без `guard parts.count >= N` (их было 77) и без
-  `parts[i]` (98). Пустой аргумент считается отсутствующим: `stenant:rmyes:`
-  — это кнопка, потерявшая payload, а не просьба удалить тенанта с пустым ником.
-  - **Кнопка строится тем же типом.** Наружу payload собирают только
-    `MenuRoute.link(_:_:)` / `navigation(to:)` / `purchase(from:)` и обёртки
-    `menuButton(_:page:)`, `menuButton(_:command:)`, `menuButton(_:_:_:)`,
-    `buyButton(_:source:)`. Строковый `menuButton(_:action:)` — `private`.
-    Переход на страницу принимает `MenuPage`, кнопка покупки **обязана** назвать
-    `PurchaseSource` (§17 — иначе поверхность сольётся с меню в воронке).
-    Склеивать `"cmd:sub:arg"` руками больше негде.
-  - **Тесты вместо грепа** (§19): `MenuPageRenderTests` рендерит **каждую**
-    страницу (личка/группа × владелец/обычный юзер) и проверяет, что каждая
-    кнопка парсится в `MenuRoute`, каждая `nav:` ведёт на существующую страницу,
-    страница не пустая и влезает в одно сообщение. `MenuRouteTests` — round-trip
-    ссылок. Раньше связь «кнопка → обработчик» держалась на двух строковых
-    литералах, и опечатка давала кнопку, которая молча ничего не делает.
-- **Pending-input flow**: кнопка вроде «✏️ Изменить цену» кладёт «ожидание ввода»
-  (`state.setPending(kind, menuMessageID:chatKey:)`) с ID меню-сообщения;
-  следующий текст юзера ловит `processTextInput` (шаг 6 роутинга), применяет и
-  обновляет меню. Так реализованы все «введите значение» сценарии (цена, адреса,
-  пресеты, наценка, топ-ап баланса, симуляция и т.д.).
-  - **Ожидание одно на чат** — `PendingRequest` (`{owner, menuMessageID, kind}`),
-    `kind` — `PendingKind` со всеми вариантами (в т.ч. `.preset(PresetInput)` и
-    `.admin(AdminPendingInput)`). Было восемь параллельных словарей со своими
-    `set/consume/has/clear` и восемь `if has*` подряд на разборе; их нельзя было
-    держать в согласии — чат мог висеть сразу в двух ожиданиях, а «есть ли
-    ожидание» приходилось перечислять поимённо. Новый вид ввода = новый `case` в
-    `PendingKind` плюс ветка в `switch` — ни поля, ни аксессоров, ни правок в
-    «очистить всё».
-  - **У ожидания есть владелец.** Само ожидание ключуется по `ChatKey` (там живёт
-    меню-сообщение), но после каждого действия меню `handle(action:)` зовёт
-    `notePendingInputOwner(invokerKey(callback))`, а `processTextInput` первым
-    делом сверяет `pending.owner` с отправителем и **возвращает `false` для
-    чужого сообщения** (оно идёт дальше, в обычный ответ LLM). Иначе настройка из
-    группы съедает следующее сообщение любого участника: ответа нет, в чат
-    прилетает «🔒 Только суперадмин…», а ожидание потрачено. Владелец живёт
-    внутри `PendingRequest`, поэтому исчезает вместе с ожиданием — застрять он не
-    может. Значение, не прошедшее валидацию, **перевзводит** то же ожидание, и
-    `processTextInput` заново проставляет владельца: перевзведённое без хозяина
-    ожидание начало бы глотать сообщения группы (закреплено тестом, §19).
-  - **И срок жизни** — `PendingRequest.armedAt` + `lifetime` (30 мин). Ожидание,
-    на которое не ответили, обязано перестать слушать: иначе следующее сообщение
-    его владельца в этом чате — через час, через неделю, настоящий вопрос —
-    тратится как значение, и вместо ответа человек получает «⚠️ Нужно число от 1
-    до 50» про меню, о котором забыл. Все чтения идут через единственный
-    `livePending`, он же протухшее и удаляет, поэтому «проверить часы» негде
-    забыть; `setPending` подметает карту выше 256 записей и **не** наследует
-    владельца у мёртвого ожидания.
-- Всё управление ценами/оплатой/рекламой/наценкой — из меню, без передеплоя.
+- **Гейт `super*`-страниц перечисляет их поимённо** в обработчике `nav:` (не
+  через `default`): новая `super*`-страница обязана быть дописана в список,
+  иначе провалится в `default: break` и откроется всем. Закреплено тестом.
+- **Гейты тонкой настройки живут на `MenuPage`**: `requiresFullAccess` (`temp`,
+  `reasoning`) → отказ ведёт на страницу покупки (`PurchaseSource.tuning`);
+  `requiresOperator` (`provider`, ручки памяти) → суперадмин/админ чата. Оба
+  проверяются **дважды**: в `showPage` и в `renderPage`. Хаб `tuning` не закрыт.
+- **`MenuScreen`** — текст + клавиатура + `fitsInOneMessage`; `warnIfOversized`
+  логирует переросшую страницу. Ряды копит `Keyboard` (`row`, `row(if:)`,
+  `insertBeforeLast`, `extendLastRow`). Списки на `super*`-страницах режутся с
+  явной строкой «показаны первые N» (editMessage обрезает после ~3900).
+- **`backLabel`** живёт у страницы-назначения (`backButton(to:)`,
+  `cancelButton(to:)`).
+- **`isPersonal`** (`ref`, `admininvite`, `superbal`) — в группе не рендерятся
+  вообще (`showPage` отвечает тостом, `renderPage` дублирует гейт). `renderPay`
+  и `renderMain` в группе не печатают личных чисел (баланс, срок, персональная
+  скидка, метка «Продлить»).
+- **`MenuRoute`** — `callback_data` разбирается один раз: `command`
+  (`MenuCommand`, enum), `arg(i)`/`int(i)`/`page(i)`/`sub`; пустой аргумент =
+  отсутствующий. Наружу payload собирают только `MenuRoute.link(_:_:)`/
+  `navigation(to:)`/`purchase(from:)` и `menuButton(_:page:)`/
+  `menuButton(_:command:)`/`menuButton(_:_:_:)`/`buyButton(_:source:)`;
+  строковый `menuButton(_:action:)` — `private`.
+- **Лимит `callback_data` — 64 байта** (`MenuRoute.maxCallbackDataBytes`);
+  превышение отклоняет **всё сообщение**. Пресеты моделей ездят позицией в
+  списке (`presetTarget` принимает и позицию, и значение — ради старых кнопок).
+  `menuButton` при превышении рисует мёртвую кнопку с записью в лог.
+- **Pending-input**: кнопка кладёт `setPending(kind, menuMessageID:chatKey:)`,
+  следующий текст ловит `processTextInput` (шаг 6 роутинга). Ожидание **одно на
+  чат** (`PendingRequest {owner, menuMessageID, kind, armedAt}`, `PendingKind` —
+  все виды). У ожидания есть **владелец** (`notePendingInputOwner(invokerKey)`);
+  чужое сообщение → `processTextInput` возвращает `false` и оно идёт в LLM.
+  Невалидное значение перевзводит то же ожидание, владелец проставляется заново.
+  TTL `PendingRequest.lifetime` = 30 мин; все чтения через `livePending` (он же
+  удаляет протухшее); `setPending` подметает карту выше 256 записей.
+- Необратимое действие (удаление тенанта `stenant:rm→rmyes`, кошелька
+  `sbal:rm→rmyes`, очистка журналов) спрашивает подтверждение.
+- Справка суперадмина разбита на `SuperHelpSection` (`sahelp:<раздел>`).
 
 ---
 
-## 14. Фоновые процессы (запускаются в `run`)
+## 12. Фоновые процессы (в `run`)
 
-- **`ModelPriceMonitor`** (каждые 5 мин + initial): тянет `openrouter.ai/api/v1/models`,
-  кэширует цены (`openRouterModelPrices`) и множество бесплатных моделей
-  (`openRouterFreeModelIDs`). Если модель, используемая в системе, стала платной —
-  уведомляет затронутые чаты (или суперадминов, если модель «закреплена» в free).
-  Адреса суперадминов — `superAdminPrivateChats()`, то есть личка **каждого**
-  суперадмина через `privateChatID` (а не чаты, привязанные к root-тенанту:
-  личка попадает в `chatOwnership` только через `autoAssignIfNeeded`, поэтому
-  часть владельцев не получала ничего). Текст для чатов не обещает автоматической
-  подмены модели: она случится, только когда у чата кончится дневная порция
-  премиума (§9).
-- **`CryptoPaymentMonitor`** (каждые 30с): поллит эксплореры, матчит входящие
-  переводы к открытым инвойсам, засчитывает частичные оплаты, экспайрит
-  просроченные. Позицию сканирования держит **стор**, а не актор монитора (§7,
-  «Курсоры сканирования персистятся»).
-- **`runPersistenceNotifyLoop`** (каждые 60с): чатам с `backupNotify=true` шлёт
-  строку статуса хранилища (замена старого 60-секундного бэкап-отчёта).
-- **`SubscriptionReminderService.run`** (первый проход через 60с после старта,
-  дальше — каждые `sweepIntervalMinutes`, дефолт 60): свип подписок → напоминания
-  перед истечением и winback-офферы со скидкой (§7). Свип сериализован (флаг
-  `sweeping`), поэтому кнопка «🔄 Проверить сейчас» / `/reminders run` не пересекается
-  с циклом. Пауза между свипами спится **минутными кусками** с перечитыванием
-  конфига: интервал — живая настройка, и её укорачивание должно срабатывать
-  сразу, а не после старого (возможно, суточного) сна.
-  Результат последнего свипа (`SweepResult`) — на странице супер-меню.
-  Работает и в memory-only режиме: подписка не должна тихо истечь.
+- `ModelPriceMonitor` — каждые 5 мин + initial: `openrouter.ai/api/v1/models` →
+  `openRouterModelPrices` + `openRouterFreeModelIDs`; модель стала платной →
+  уведомление затронутым чатам либо суперадминам (`superAdminPrivateChats()`,
+  личка каждого, не чаты root-тенанта).
+- `CryptoPaymentMonitor` — каждые 30 с: эксплореры, матчинг, частичные оплаты,
+  экспирация. Позицию сканирования держит стор.
+- `runPersistenceNotifyLoop` — каждые 60 с: статус хранилища чатам с
+  `backupNotify=true`.
+- `SubscriptionReminderService.run` — первый проход через 60 с, дальше каждые
+  `sweepIntervalMinutes` (дефолт 60), сон минутными кусками с перечитыванием
+  конфига; свип сериализован флагом `sweeping` (кнопка «Проверить сейчас» не
+  пересекается). Работает и в memory-only.
+- `RetentionService` — суточный прунинг переписок (только писатель).
+- `OwnerAlerter` — алерты владельцу.
 
-Бесплатные модели: ноль-стоимостное множество = закреплённые суперадмином
-(`_freeModelIDs`) ∪ бесплатные с OpenRouter (`effectiveFreeModelIDs()`).
-**Разрешённое без оплаты** = оно же ∪ модели 🆓-режимов
-(`allowedFreeModelIDs()`, §7 «Режимы») — именно его спрашивают гейты.
-
-**Неизвестное множество — это «всё платное», а не «всё бесплатное».** Каталог
-OpenRouter кэшируется в памяти и на старте может не подняться (сервис лежит,
-ключ протух), а закреплённых моделей и 🆓-режимов с явной моделью может не быть —
-тогда `allowedFreeModelIDs()` возвращает nil. Раньше гейт в `processContent` в этом
-случае **пропускался целиком**: дневная порция не тратилась, откат не делался, и
-любой пользователь получал платные модели без ограничений за счёт владельца —
-молча, всё время недоступности каталога. Теперь nil означает «модель считаем
-платной»: дневной лимит применяется как обычно, а когда он исчерпан и запасной
-бесплатной модели нет, ход честно отклоняется. **Запасная модель берётся
-только через `fallbackFreeModel()`**: модель рабочего 🆓-режима, иначе первая
-закреплённая суперадмином, иначе
-`sorted().first` эффективного множества. `Set.first` недетерминирован — чат,
-упавший на free-tier, получал бы разную модель на каждом откате, и качество
-ответов скакало бы без причины.
+Бесплатные модели: `effectiveFreeModelIDs()` = пины суперадмина ∪ бесплатные
+OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режимов — **гейты
+спрашивают только его**, nil = «всё платное».
 
 ---
 
-## 15. Переменные окружения (`AppConfig` / `EnvironmentKey`)
+## 13. Переменные окружения (`AppConfig` / `EnvironmentKey`)
 
-**Обязательные**: `TG_BOT_TOKEN`, `DEEPSEEK_API_KEY`, `ROUTER_API_KEY`
-(OpenRouter). `COMPANY_CHAT_ID` стал опциональным: обязательная переменная,
-которая ни на что не влияет, — это лишний способ не запуститься.
+**Обязательные**: `TG_BOT_TOKEN`, `DEEPSEEK_API_KEY`, `ROUTER_API_KEY`.
 
 **Опциональные**:
-- **`STATE_ENCRYPTION_KEY`** — 32 байта base64 (`openssl rand -base64 32`).
-  Шифрует платёжные секреты в базе (§5.6): токен провайдера карты и оба
-  секретных слова кассы. Не задан — они лежат открытым текстом (бот пишет
-  warning). Кривой ключ = **отказ стартовать**: молча хранить секреты в
-  открытом виде хуже, чем не запуститься.
-  - **Чужой шифротекст не перезаписывается.** Секрет, запечатанный ключом,
-    которого у процесса нет, читается как «не задан» (касса не подпишет ничего,
-    карта не выставит счёт), но **остаётся в строке как есть** (`SealedSecret`
-    хранит форму хранения, а не расшифровку). Вернули ключ — вернулись и
-    реквизиты. Иначе один деплой без переменной (откат, новое окружение,
-    ротация) стирал бы их навсегда при первой же правке настроек, причём молча:
-    нечитаемый секрет и так выглядит как «не настроено». На странице настроек у
-    этого состояния свой текст (`Texts.secretUnreadable`) — «не задано» отправило
-    бы владельца в кабинет вендора за значением, которое никуда не девалось.
-- **`TELEGRAM_WEBHOOK_SECRET`** — 1–256 символов `A-Z a-z 0-9 _ -` (правило
-  Telegram). Что-то другое = **отказ стартовать** (`AppConfig.isValidWebhookSecret`):
-  `setWebhook` с таким секретом падает, бот молча уходит в long polling и
-  продолжает работать — то есть вебхука, ради которого собран деплой, просто нет,
-  и единственный след — одна строка в логе здорового с виду бота.
-- Хранилище: **`DATABASE_URL`** —
-  `postgres://user:password@host:5432/db?sslmode=require`. Без неё бот работает
-  memory-only **и ничего не продаёт** (§10.6). Обязательно **session**-режим
-  пула (порт 5432): на 6543 (transaction) молча ломается блокировка писателя.
-- **`OWNER_USERNAME`** — @ник владельца (дефолт `maythe4th`). Composition root
-  не должен знать имя человека.
-- Сеть/режим: `PORT` (дефолт 8000), `UPDATE_MODE` (auto/webhook/polling),
-  `WEBHOOK_PUBLIC_URL` или `RAILWAY_PUBLIC_DOMAIN`, `TELEGRAM_WEBHOOK_SECRET`,
-  `METRICS_TOKEN` (доступ к `/metrics`; не задан → берётся вебхук-секрет).
-- Крипто-эксплореры: `TONAPI_KEY`, `ETHERSCAN_API_KEY` (V2 multichain: покрывает
-  ETH и BSC), `BSCSCAN_API_KEY` (legacy fallback для BSC), `TRONGRID_API_KEY`.
-- **`OWNER_USER_ID`** — числовой userID владельца. Формально опционален, но без
-  него root опознаётся только по @нику из конфигурации: ник арендуемый, и тот,
-  кто займёт его после владельца, получит root первым же сообщением
-  (`identifyUser` → `adoptRecords` перенесёт запись суперадмина на его userID).
-  С ним `rootSuperAdminKey` возвращает `#<id>` и **перебивает** и директорию, и
-  восстановленное состояние. На старте без него пишется warning.
-- **`TELEGRAM_API_BASE`** — адрес Bot API. Задаётся **только** в сквозных тестах
-  (локальный дублёр, §19); в проде не выставлять, дефолт `https://api.telegram.org`.
-- Прочее: `LOG_LEVEL`, `LOG_FORMAT` (`json` → структурные логи),
-  `MAX_CONCURRENT_GENERATIONS` (дефолт 64).
+- `DATABASE_URL` — `postgres://user:pass@host:5432/db?sslmode=require`,
+  **session-режим (5432)**. Без неё — memory-only и касса закрыта.
+- `STATE_ENCRYPTION_KEY` — 32 байта base64. Шифрует платёжные секреты (токен
+  карты, оба слова кассы). Кривой ключ = отказ стартовать. Чужой шифротекст
+  читается как «не задан», но **не перезаписывается** (`SealedSecret` хранит
+  форму хранения); в UI у этого состояния свой текст `Texts.secretUnreadable`.
+- `TELEGRAM_WEBHOOK_SECRET` — 1–256 симв. `A-Za-z0-9_-`
+  (`AppConfig.isValidWebhookSecret`), иначе отказ стартовать.
+- `OWNER_USERNAME` (дефолт `maythe4th`), `OWNER_USER_ID` (без него root
+  опознаётся только по арендуемому нику — warning на старте).
+- `PORT` (8000), `UPDATE_MODE` (auto/webhook/polling), `WEBHOOK_PUBLIC_URL` или
+  `RAILWAY_PUBLIC_DOMAIN`, `METRICS_TOKEN`, `MAX_CONCURRENT_GENERATIONS` (64),
+  `LOG_LEVEL`, `LOG_FORMAT` (`json`), `COMPANY_CHAT_ID`.
+- Эксплореры: `TONAPI_KEY`, `ETHERSCAN_API_KEY` (V2 multichain: ETH+BSC),
+  `BSCSCAN_API_KEY` (legacy), `TRONGRID_API_KEY`.
+- `TELEGRAM_API_BASE` — **только для сквозных тестов** (локальный дублёр Bot
+  API); в проде не задавать.
 
-**Секреты не попадают в логи**: `SecretRedactor` (регистрируется в `main` до
-первой строки лога) вычищает токен бота и все ключи из любого сообщения
-`ConsoleLogger` и из `UserFacingError.message`. Ошибки транспорта цитируют
-запрос, а в каждом URL Telegram лежит токен — утечка токена это полный угон бота.
-
-Цены/токены оплаты (Stars, карта, крипто-адреса, наценка) в env **не хранятся** —
-настраиваются из супер-меню и лежат в `bot_config`.
+Цены/токены оплаты в env не хранятся — только в `bot_config`.
+`SecretRedactor` (регистрируется в `main` до первой строки лога) вычищает токен
+бота и ключи из `ConsoleLogger` и `UserFacingError.message`.
 
 ---
 
-## 16. Деплой
+## 14. Конвенции и инварианты
 
-- **Dockerfile**: multi-stage (`swift:6.2-bookworm` build → `-slim` runtime),
-  бинарь `/usr/local/bin/app`.
-- **Railway** (`railway.toml`): builder Dockerfile, healthcheck `/ready`
-  (timeout 300с), restart ON_FAILURE. `/ready`=503 до окончания restore → новый
-  деплой берёт трафик (а старый отдаёт) только когда реально готов → zero-loss
-  редеплой в связке с очередью webhook.
-- **База**: схему бот создаёт и мигрирует сам на старте (§10.3) — руками
-  ничего выполнять не нужно. Подробности оплаты —
-  `PAYMENTS_SETUP.md`.
+**Структура кода**
+- Крупный тип разбит на `Тип+Тема.swift`; головной файл — зависимости,
+  хранилище, диспетчеры. Файл >~700 строк пора делить. Члены, видные соседнему
+  `+файлу`, — `internal` без `private`.
+- Switch — диспетчер: функция >~120 строк режется, внешний switch по строке на
+  ветку, тело в метод со своим switch (+`default: break`).
 
----
+**Состояние**
+- Всё изменяемое — через актор `ChatContextStore`. Новая сущность обязана:
+  (а) метить dirty-set, (б) экспортироваться/импортироваться в
+  `ChatContextStore+Persistence.swift`, (в) при надобности получить `ConfigKey`.
+- Новая настройка `bot_config` = строка в `ConfigRegistry` + поле в сторе +
+  ветка в `currentConfig(for:)` (реестр читается рефлексией, экспорт —
+  исчерпывающий switch по `ConfigName`).
+- Новая сущность «на пользователя» ключуется `UserKey` и переносится в
+  `adoptRecords`.
+- Границы настроек чата — только в домене (`ChatContext.historyRange`,
+  `tempRange`, `ClosedRange.clamping`), стор клампит сам.
+- `resetChat` возвращает **настройки**, но переносит накопленное (usage,
+  пресеты, `funnelFirstMessageCounted`, счётчики рекламы). Новое поле
+  `ChatContext` обязано ответить, настройка оно или накопленное.
+- jsonb-колонка с дефолтом `'{}'` требует **рукописного `init(from:)`**:
+  синтезированный декодер игнорирует значения по умолчанию и бросает на
+  отсутствующем ключе — одна строка кладёт весь restore.
 
-## 17. Конвенции и подводные камни
+**Деньги**
+- Все видимые цены и списания — через `priceMultiplier()`; цена подписки — через
+  `subscriptionPricing(username:)`.
+- Деньги пишутся только через `LedgerPort.inTransaction`; кошелёк вне платежа —
+  `WalletWriter`, подписка/winback вне платежа — `SubscriptionWriter`; кэш
+  двигают только `applyCommitted*`.
+- Начисление и отметка «выплачено» — разные места: однократность держит
+  `claim(_:)`, а не отметка.
+- Платежи — `flushNow()`. Исключение: реферальные выплаты (кредит и `rewardedAt`
+  в одном шаге актора, теряются вместе).
+- Пакет кредитов — `credit(purchased: true)`; бонусы и гранты — `false`.
+- Новый платёжный путь не пишет свой post-payment код — только
+  `PaymentFulfillmentService.fulfil` (§5.3), и обязан обработать
+  `.keptSponsor`.
+- `.failed` из `fulfil` обязан оставить дверь открытой: Telegram передоставит,
+  крипта держит инвойс `open` и курсор (`.deferred`), касса возвращает счёт в
+  `pending` и не отвечает `YES`.
+- Курсор блокчейна двигается последним и только вперёд; дефолт — «сейчас минус
+  45 минут».
+- Подпись уведомления кассы проверяется первой, в постоянном времени; нет
+  подписи = неверная; имена полей сверяются регистронезависимо.
+- Адрес токена сравнивается точно: TON — `TonAddress.equal` (обе записи), Tron —
+  побайтово (base58 регистрозависим), EVM — lowercase hex. Тем же сверяется
+  получатель.
+- В `amountDelta` усыновление непривязанного инвойса требует ≥
+  `minimumAdoptableShare` остатка и берёт ближайший по сумме; точное совпадение
+  сверяется с `remainingAtomic`.
+- Новый вход в кассу проверяет `StateDurability`.
+- Идемпотентность обязательна на каждом пути (charge_id / tx-хеш / `ext:…`).
 
-- **Код живёт в файле своей темы.** Четыре крупных типа (`ChatContextStore`,
-  `BotMenuHandler`, `BotCommandHandler`, `GenerationCoordinator`) разбиты на
-  расширения `Тип+Тема.swift` (§3): в «головном» файле только зависимости,
-  хранилище и диспетчеры, тело — в тематическом файле. Новый обработчик
-  дописывается в существующий `+файл` своей темы, а не в головной; новая тема —
-  новый `+файл` с шапкой-комментарием, что в нём. Файл, переваливший ~700 строк,
-  пора делить: чтобы прочитать одну ветку логики, не должен грузиться весь тип.
-  Члены, к которым обращается соседний `+файл`, — `internal` без `private`;
-  за пределами файлов одного типа их всё равно никто не трогает.
-- **Switch — это диспетчер, а не место для тел.** Функция длиннее ~120 строк
-  режется тем же приёмом, которым разобраны `processAction`,
-  `processSuperAdminAction`, `handleTenant`, `handleBuyAction` и
-  `processAdminPendingInput`: внешний `switch` оставляет по одной строке на
-  ветку, тело уезжает в метод **со своим** `switch` (+ `default: break`) —
-  тогда голый `break`/`return` внутри тела значит ровно то же, что значил.
-  Новая ветка дописывается в метод своей темы, а не в диспетчер. Если у ветки
-  есть своя страница меню, её обработчик живёт в файле этой страницы
-  (`sbal:*` — в `+Tenants.swift`, `stars:*` — в `+PaymentSettings.swift`).
-- **Всё состояние — через актор `ChatContextStore`**. Новая изменяемая сущность
-  обязана: (а) помечать dirty-set при мутации, (б) экспортироваться/импортироваться
-  в `ChatContextStore+Persistence.swift`, (в) при необходимости получить
-  `ConfigKey`/DTO.
-- **Цены пользователю — всегда через `priceMultiplier()`** (`billedCost`,
-  футер, списания). Не показывай сырой `totalCost`.
-- **Рекламная ссылка несёт метку**: `?start=src_<метка>` (§7 «Источники»).
-  Атрибуция — first touch и только для нового человека; засчитанная оплата идёт
-  через `recordTrafficSourcePayment` рядом с реферальным бонусом, то есть **до**
-  `flushNow` на каждом платёжном пути. Новый платёжный путь, забывший её,
-  обнуляет CAC того канала, который этого клиента привёл.
-- **Callback_data не пишется строкой.** Кнопка строится через
-  `menuButton(_:page:)` / `menuButton(_:command:)` / `menuButton(_:_:_:)` /
-  `buyButton(_:source:)`, а вне меню — через `MenuRoute.link(...)`; разбирается
-  через `MenuRoute` (§13). Новая команда — новый `case MenuCommand` (иначе
-  `MenuRoute(action:)` вернёт nil и тап честно ответит «Неизвестное действие»,
-  а не промолчит). Ручная склейка `"cmd:sub:\(arg)"` возвращает ровно ту
-  ошибку, ради которой всё это делалось: кнопку, которая рендерится и ничего
-  не делает.
-- **В `callback_data` едут id и индексы, а не чужой текст.** Лимит Telegram —
-  **64 байта** (`MenuRoute.maxCallbackDataBytes`), и превышение отклоняет не
-  кнопку, а **всё сообщение**: страница просто не открывается. Поэтому пресеты
-  моделей ездят позицией в списке (`BotMenuHandler.presetTarget` принимает и
-  позицию, и — ради кнопок в старых сообщениях — само значение): id моделей
-  OpenRouter бывают длиннее 48 символов, и `menu:model:gsel:<id>` уносил
-  страницу «🤖 Модель» целиком. `menuButton` дополнительно проверяет длину и
-  при превышении рисует мёртвую кнопку с записью в лог — видимый отказ лучше
-  невидимого. Закреплено тестом (§19).
-- **Повторяющийся текст — в `Texts`** (`Application/Texts.swift`), гейт роли —
-  в `require*` (§13). Отказ, скопированный в 43 места, — это 43 шанса разойтись
-  в формулировке (уже разошлись: «🔒 Только админ» рядом с «🔒 Только
-  администратор»). В каталог кладутся **только литералы**: строка, называющая
-  человека, чат или модель, собирается на месте — иначе каталог станет вторым
-  путём чужого текста в HTML в обход `displayLabel`/`sanitizeName`.
-- **Кнопка «купить» несёт источник**: `menu:nav:pay:<PurchaseSource>`
-  (`menu`, `cap`, `promo`, `welcome`, `command`, `reminder`, `balance`,
-  `referral`, `model` — пикер моделей, где платная модель недоступна,
-  `mode` — тап по ⭐-режиму, `tuning` — попытка открыть тонкую настройку). Новая
-  поверхность, ведущая на страницу покупки, обязана добавить свой источник —
-  иначе она сольётся с меню и её вклад будет не виден в «📊 Воронка» (§11).
-  Неизвестный/отсутствующий суффикс безопасно читается как `menu`.
-- **«Можно ли эту модель без оплаты» спрашивают только у `allowedFreeModelIDs()`**
-  (§9), и **nil значит «платная»**. Пикеры раньше читали nil наоборот
-  (`?? false`), и пока каталог OpenRouter лежал, они раздавали ровно то, что гейт
-  генерации потом отклонял, — за счёт владельца. Фолбэк — `fallbackFreeModel()`.
-- **Настройка, которая множит стоимость ответа, — не пользовательская.** Память
-  (`maxHistory`) переотправляется на каждом ходу, обдумывание и стиль тоже стоят
-  денег: они закрыты `MenuPage.requiresFullAccess`/`requiresOperator` **и теми же
-  гейтами в командах** (§13). Новая настройка такого рода обязана закрыть оба
-  входа — иначе команда становится обходным путём.
-- **Границы настроек чата живут в домене, а не у вызывающих.**
-  `ChatContext.historyRange` / `ChatContext.tempRange` (+ `ClosedRange.clamping`)
-  — единственный источник: стор клампит сам (`setMaxHistory`, `setTemperature`,
-  `setDefaultHistoryLength`, создание контекста), `trimHistory` клампит
-  эффективный лимит, `ModePresetConfig` ссылается на них, UI сверяется с той же
-  константой. Раньше это были литералы `(1...50)` в четырёх местах и
-  `(0.0...2.0)` в трёх, и новый вход, забывший кламп, домен не ловил.
-- **Накопленное чатом переживает «↺ Сбросить».** `resetChat` возвращает
-  *настройки*, а usage, пресеты, флаг воронки (`funnelFirstMessageCounted`) и
-  счётчики рекламы — переносит: первое иначе даёт накрутку активаций кнопкой,
-  доступной всем, второе — показ рекламы раньше своей паузы. Новое поле
-  `ChatContext` обязано ответить на вопрос «это настройка или то, что чат
-  накопил», и накопленное дописывается в перенос.
-- **Режим применяется одной мутацией** (`applyMode`): модель, стиль, память,
-  обдумывание и роль пишутся вместе или не пишутся вовсе (нерезолвимая модель →
-  `nil`, ничего не тронуто). Полуприменённый режим — это ни то, что выбрали, ни
-  то, что было. Счётчик тапов ставит **обработчик кнопки**, не `applyMode`:
-  сброс настроек тоже применяет режим, и считать его тапом нельзя.
-- **Дневная порция премиума — ресурс пользователя.** Взял (`consumeDailyPremium`)
-  — верни, если ход не дал ответа (`refundDailyPremium` рядом с
-  `cancelPendingTurn`). Счётчик персистится: не превращай его обратно в
-  in-memory «упрощение», иначе каждый редеплой обнуляет главный гейт конверсии.
-- **Цена подписки — всегда через `subscriptionPricing(username:)`** (меню, `/buy`,
-  крипто-инвойс, `pre_checkout_query`). Прямое чтение `starsPrice()`/`cardConfig()`
-  для выставления счёта разъедет показанную и списанную цену, когда у юзера есть
-  winback-скидка.
-- **Деньги пишутся только через `LedgerPort.inTransaction`** (§10.2). Метода
-  «списать баланс» вне транзакции нет — и не заводи его: правило, которое
-  проверяет тип, нельзя забыть, а правило в документации забывали.
-- **Начисление и отметка «выплачено» — не одно и то же место.** Отметка
-  (`rewardedAt`, `paidBonusAt`) write-behind, начисление транзакционное, поэтому
-  однократность держит `claim(_:)`, а не отметка. Новая выплата обязана взять
-  свой ключ.
-- **Платёжный секрет в базе — поле типа `SealedSecret`** (§5.6, §15), не
-  `String` с ручным `SecretBox.seal/open` по краям. Тип хранит **форму
-  хранения**: шифротекст уезжает в строку как есть, `value` отдаёт открытый
-  текст только тому, кто спросил, `description` печатает `‹secret›`, а
-  присвоить туда `String`-переменную нельзя — именно это делает ненаписуемым
-  круг «расшифровал → записал обратно», который стирал чужой шифротекст.
-  Регистрация в `SecretRedactor` живёт в инициализаторах типа, поэтому и
-  набранный в чате секрет, и поднятый из базы при restore редактируются в логах
-  без второго места, где об этом надо помнить. Новое поле такого рода обязано
-  пройти тем же путём — иначе дамп базы это выданные платёжные реквизиты.
-- **jsonb-колонка с дефолтом `'{}'` требует рукописного `init(from:)`.**
-  Синтезированный декодер Swift **игнорирует значения по умолчанию** и бросает
-  на отсутствующем ключе: одна такая строка кладёт весь restore и роняет бота в
-  memory-only, где он перестаёт продавать.
-- **Новый вход в кассу проверяет `StateDurability`** (§10.6). Продажа из
-  состояния, которое умрёт вместе с процессом, — это реальные деньги за ничто.
-- **Новая изменяемая сущность получает свой dirty-set** и строку в
-  `drainDirtyBatch()`. Забытый набор = значение, которое молча не сохраняется.
-- **Платежи — `flushNow()`**, не полагайся на 2-секундный debounce. Исключение —
-  реферальные выплаты (§7): кредит балансов и отметка `rewardedAt` меняются в
-  одном шаге актора, поэтому потеря флаша откатывает их **вместе** и пара просто
-  оплатится позже. Любая новая начисляющая механика обязана держать это свойство
-  (деньги и отметка «выплачено» — в одной мутации).
-- **Курсор сканирования блокчейна двигается последним.** Сначала зачисление всей
-  пачки переводов (с его `flushNow`), только потом `advanceExplorerCursor` — и
-  только вперёд. Обратный порядок помечает диапазон просканированным, а падение
-  между этим и кредитом уносит платёж навсегда: у блокчейна нет ретрая доставки.
-  Курсор по умолчанию — не «сейчас», а «сейчас минус 45 минут» (§7).
-- **Пакет кредитов зачисляется `credit(purchased: true)`**: только этот флаг
-  отмечает, что человек заплатил **реальные деньги** (`UserBalance.toppedUpUsd`)
-  и открывает новый цикл возврата по балансу (§7). Бонусы и начисления
-  суперадмина обязаны идти с `purchased: false` — иначе бесплатный кредит
-  превратит кого угодно в «доказанного плательщика».
-- **Кошелёк двигает только транзакция** (§10.2). Начисление вне платежа — это
-  `WalletWriter`, кэш обновляют исключительно `applyCommitted*`. Метода
-  «начислить баланс» у стора нет, и заводить его обратно нельзя: одно и то же
-  число с двумя писателями теряет то одно изменение, то другое, и оба раза
-  молча.
-- **Новый платёжный путь не пишет свой post-payment код.** Всё, что следует за
-  приходом денег, живёт в `PaymentFulfillmentService.fulfil(_:)`: дедуп,
-  активация или зачисление, `claimChatForPayment`, съедание winback-скидки,
-  счётчики воронки, реферальный бонус за конверсию, `recordTrafficSourcePayment`
-  и `flushNow` — в этом порядке. Список длинный, каждый пункт невидим, если о
-  нём забыть, и каждый — чьи-то деньги. Путь строит `PaymentReceipt`, получает
-  `PaymentFulfillmentOutcome` и рисует **только текст** для своего канала.
-- **Идемпотентность**: любой платёжный путь дедуплицируется (charge_id / tx-хеш /
-  `ext:<vendor>:<paymentID>`) — Telegram, блокчейн-поллинг и касса доставляют
-  события повторно.
-- **`.failed` из `fulfil` обязан оставить дверь для повтора открытой.** Ничего
-  не закоммичено, значит путь не имеет права ни объявлять покупку, ни закрывать
-  свою «заявку»: Telegram просто передоставит `successful_payment`; крипта
-  оставляет инвойс `open` и **держит курсор** (`.deferred`); касса возвращает
-  счёт в `pending` и **не отвечает** `YES`. Закрыть заявку и подтвердить приём —
-  значит превратить сбой записи в потерянные деньги, потому что второго повода
-  доставить событие уже не будет.
-- **Подпись уведомления кассы проверяется до всего остального** и в постоянном
-  времени; отсутствующая подпись — это неверная подпись, а не «поля нет».
-  Адаптер, который отвечает вендору `YES` без проверки, дарит подписку любому,
-  кто знает URL. Тексты полей сверяются регистронезависимо: платёж, отклонённый
-  из-за строчной буквы в имени поля, неотличим от неверного секрета.
-- **Какой токен пришёл — решается точным сравнением адреса контракта.** Свой
-  жетон может выпустить кто угодно за стоимость газа, поэтому приблизительное
-  сравнение здесь = бесплатная подписка. У TON две записи одного адреса (сырая
-  `0:hex` и дружественная `EQ…`), и сравнивать их можно только через
-  `TonAddress.equal` (декодирует base64url в `<workchain>:<hex>`); прежняя
-  эвристика «в одной есть `:`, вторая начинается на `eq` → совпало» пропускала
-  **любой** жетон как USDT. Tron сравнивается побайтово (base58 регистрозависим),
-  EVM — по lowercase hex. Тем же `TonAddress.equal` сверяется и получатель:
-  адрес в конфиге вводит человек, а индексатор отвечает в другой записи.
-- **Чужой перевод не должен уметь занять чужой счёт.** В режиме `amountDelta`
-  «усыновление» непривязанного инвойса (`applyIncomingTransfer`, шаг 3) требует
-  не меньше половины остатка (`minimumAdoptableShare`) и берёт **ближайший** по
-  сумме, а не самый старый. Без порога один пылевой перевод переводил чужой
-  инвойс в `.partial`, и последующая **точная** оплата владельца уже ни с чем не
-  matchилась. Точное совпадение (шаг 1) сверяется с `remainingAtomic` и включает
-  `.partial` — счёт говорит «осталось доплатить X», значит X и должен матчиться.
-- **Ключ пользователя не может содержать ничего, кроме `[a-z0-9_]`**
-  (`UserKey.pending`, `userKeyOrRaw` → `sanitizedPendingFallback`). Ключ не
-  безобиден: он уходит в фильтр PostgREST и печатается в HTML. Раньше
-  `userKeyOrRaw` возвращал сырую строку, и текст из `/tenant adduser` мог стать
-  ключом с `#` (подделка идентифицированного ключа) или с `&` (лишний
-  query-параметр в URL удаления). Сам класс проблем закрыт транспортом:
-  значения уходят bind-параметрами, и **DELETE не может потерять фильтр** — его
-  нельзя собрать из текста (§10).
-- **Роли**: `isSuperAdmin` учитывает симуляцию, `isActuallySuperAdmin` — нет.
-  Для гейтов, которые должны работать при симуляции, используй второй.
-- **Сохранённого владельца не с чем сравнивать, кроме ключа** — теперь это
-  проверяет компилятор: `UserKey` не `String`, и `owner == username` не
-  собирается. Текст превращается в ключ ровно в двух местах
-  (`userKey(forHandle:)` / `userKeyOrRaw(_:)`), ключ в ключ — через
-  `resolved(_:)`.
-- **Кто спрашивает — тоже ключ, и он берётся из userID.** У обработчиков есть
-  готовые хелперы: `BotMenuHandler.invokerKey(callback)` (userID у callback есть
-  всегда) и `BotCommandHandler.actorKey(fromUser)` / `ownerKey(for:)`. Через них
-  идут **все** гейты ролей (`isSuperAdmin`/`isAdmin`/`isRootSuperAdmin`/
-  `isActuallySuperAdmin`), фильтры «мои чаты/юзеры» (`groupChats(ownedBy:)`,
-  `privateChats(ownedBy:)`), симуляция и владение крипто-инвойсом. Сырой
-  `callback.from.username` / `fromUser?.username` в гейте = человек без ника
-  теряет доступ, а `nil` не совпадает ни с чем. Свою же принадлежность
-  («это моя ссылка?») проверяй через `userKeys(key:userID:).contains(owner)`.
-- **Ключ наружу не показывать.** Любая строка, называющая сохранённого
-  пользователя, идёт через `displayLabel(forKey:)` или через готовое поле
-  `label`. Метки уже содержат `@`, второй раз его дописывать не надо.
-  `UserKey.description` печатает `UserKey(#42)` — интерполяция ключа в
-  сообщение видна в выводе, а не притворяется подписью.
-- **Чат и человек — разные типы.** `ChatID` / `UserID`, и «id лички = userID»
-  выражается только через `ChatID.privateChat(with:)` / `UserID.privateChat`.
-  `chatID < 0` не пишем — есть `isGroup` / `isPrivate`. Целочисленные литералы
-  для id включены **только в тест-таргете**: продакшен-код обязан сказать, какой
-  id он имеет в виду.
-- **Новая настройка `bot_config` — одна строка в `ConfigRegistry`** (§5.4), плюс
-  поле в сторе и ветка в `currentConfig(for:)`. Реестр читается рефлексией,
-  поэтому «объявил, но не загрузил» невозможно; экспорт — исчерпывающий `switch`
-  по `ConfigName`, поэтому «добавил ключ, но не экспортировал» не собирается.
-- **Новая сущность «на пользователя» ключуется `UserKey`** и переносится в
-  `adoptRecords` (§6). Иначе она потеряется при смене ника — ровно то, ради чего
-  вводился ключ.
-- **Callback'и вне per-chat очереди** — не ломай это (Стоп должен прерывать).
-  Исключение: кнопка, которая **запускает** генерацию (`ex:` — пример онбординга),
-  обязана идти через `ChatUpdateDispatcher`, иначе порядок сообщений в чате
-  разъедется.
-- **Приветствие группы — только через `claimGroupGreeting`.** Telegram доставляет
-  вход дважды (`my_chat_member` + `/start <payload>` от `?startgroup=`), пути
-  разные и порядок не гарантирован. Новый повод поздороваться с группой обязан
-  проходить через тот же claim и тот же `GroupWelcomePresenter`.
-- **Каналы доставки в группы** (напоминания, поздравления, любые рассылки) берут
-  чаты через `ownedGroupChatIDs` — он отсекает чаты, из которых бота удалили.
-  Не обходи его прямым фильтром по `chatOwnership`. Личка адресуется через
-  `privateChatID(forKey:)` — он так же отсекает заблокировавших бота.
-- **Мёртвый адрес отмечается, а не ретраится.** 403 (заблокировали/выгнали) и
-  «chat not found» — это навсегда: любая фоновая рассылка обязана позвать
-  `setBotPresence(chatID:isMember:false)`, иначе она будет биться в ту же стену
-  на каждом проходе и раздувать счётчик ошибок. 429/5xx/сеть — наоборот, ретрай.
-- **Персональная цена не уходит в общий чат.** Winback-скидка живёт на аккаунте;
-  в групповом сообщении цену берём из `subscriptionPricing(username: nil)` —
-  тапнуть «Продлить» может любой участник, и платить он будет по прайс-листу.
-  То же самое в меню: страница покупки в группе рендерится без личных чисел
-  (§13), а страница, которая **вся** про одного человека (`MenuPage.isPersonal`),
-  в группе не рендерится вообще.
-- **Оплата не переписывает владельца живого чата.** Платёжные пути зовут
-  `claimChatForPayment`, а не `assignChat`: группу, за которую платит активная
-  чужая подписка, оплата не забирает (§7 «Спонсор-герой»). Новый платёжный путь
-  обязан использовать её же и обработать `.keptSponsor` в тексте подтверждения —
-  иначе бот поздравит покупателя с доступом, который открыл не он.
-- **Ошибка провайдера внутри SSE обязана ронять поток.** Новый адаптер
-  OpenAI-совместимого API декодит `error` (`ProviderStreamErrorPayload`) и
-  завершает стрим `ProviderAdapterError.upstream`. Тихий `continue` превращает
-  отказ (лимит, кончившийся баланс, модерация) в «Пустой ответ.» — и делает целый
-  класс проблем невидимым в логах (§8).
-- **`editMessage` не занимает per-chat бюджет.** Правки идут через
-  `waitForEditSlot()` (глобальное ведро). Не возвращай их в `waitForMessageSlot`:
-  групповое ведро 20/мин рассчитано на отправку, и edit-стриминг съест его
-  целиком, заблокировав чтение SSE (§11).
-- **Draft — только личка**; в группах и на старых Bot API — edit-стриминг.
-  Draft эфемерен → финальный текст обязательно `sendMessage`, не только draft.
-- **Имя пользователя — это чужой текст, а не подпись.** `first_name`, ник и
-  название группы человек задаёт себе сам, а бот вставляет их в HTML-сообщение,
-  подписанное собой. Поэтому экранирование живёт **в источнике меток** —
-  `UserIdentity.displayLabel` / `sanitizeName` и `ChatMetaInfo.displayLabel` —
-  а не на каждом из десятков мест склейки. Санитайзер отправки пропускает
-  готовые сущности (`&lt;`) как есть, так что двойного экранирования нет.
-  Новая метка обязана идти через них: `first_name` вида
-  `<a href="…">Поддержка</a>` иначе станет живой ссылкой внутри сообщения бота —
-  без всякой модели и prompt-инъекции.
-- **Значения атрибутов в HTML экранируются целиком, включая кавычки**
-  (`TelegramHTMLFormatter.escapeAttributeValue`). Без `"` строка вида
-  `x" onclick="y` закрывает атрибут и дописывает свой; Telegram отвечает
-  «can't parse entities», и ответ не приходит вообще.
-- **`href` — только по белому списку схем** (`allowedURLSchemes`: http, https,
-  tg, mailto, tel). Ссылка в сообщении бота наследует доверие к боту, а текст
-  ссылки произволен, поэтому `javascript:`/`data:`/протокол-относительный `//`
-  отбрасываются вместе с самим тегом `<a>` (текст остаётся).
-- **Telegram-вывод — HTML** (`TelegramHTMLFormatter`), не Markdown. В system prompt
-  боту сказано не тегать участников (`@` перед именами).
-- **Резать длинный текст — только `MessageSplitter.splitRendered`** (не `split`
-  и не по `.count`): он один считает бюджет в экранированных символах, держит
-  границу вне разметки и переоткрывает теги в продолжении (§9). Любая служебная
-  строка, которую дописывают **после** текста ответа (маркер продолжения,
-  «⏹ Остановлено», футер), обязана идти после `closingTagMarkup(in:)` — иначе
-  она попадёт внутрь незакрытого блока. Список переоткрываемых тегов
-  (`MessageSplitter.renderedTags`) держать в согласии с allow-list форматтера.
-- **`ChatKey` = chatID + threadID** (топики форумов — отдельные контексты;
-  threadID=0 = основной).
-- Русский — основной язык пользовательских сообщений и документации.
-- **Язык текстов для пользователя** (ревизия после роадмап-шагов 1–10). Обращение —
-  только на «вы». Внутренние термины наружу не выходят: в коде остаются
-  `tenant`/`whitelist`/`preset`/`provider`/`reasoning`, а пользователь видит
-  «премиум-доступ · спонсор», «гости чата», «заготовки», «сервис ИИ»,
-  «обдумывание» (`ReasoningEffort.displayName`, ввод — через
-  `ReasoningEffort(userInput:)`, понимает и `high`, и «глубоко»),
-  «стиль ответа» вместо температуры, «память» вместо длины истории,
-  «под ответом» вместо футера. Любую цифру или механику объясняем через пользу:
-  про баланс всегда говорим **за что** (стоимость каждого ответа), **когда**
-  (сразу после ответа) и **сколько примерно** (доли цента). Жаргон допустим
-  только на `super*`-страницах меню и в супер-админских ветках команд.
-  `UserFacingError` не должен выпускать наружу английский текст провайдера —
-  нераспознанные ошибки оборачиваются в «Что-то пошло не так…». HTTP-ошибка
-  апстрима отдаёт **только** `httpStatusReason(code)`: тело ответа раньше
-  вставлялось в чат дословно, а туда сервис кладёт что хочет — фрагменты
-  запроса, идентификаторы аккаунта, префиксы ключей. Полное тело остаётся в
-  логах. Итоговая строка дополнительно проходит `SecretRedactor` (§15).
-- **`/help` (`BotCallbackHandler.faqText`) держать под ~3800 символов**:
-  `MessageSplitter.charLimit` = 3896, иначе справка приедет двумя сообщениями.
-  Супер-админские команды в общий `/help` не добавлять — для них есть
-  `superAdminHelpText`.
+**Доступ и роли**
+- «Можно ли модель без оплаты» — только `allowedFreeModelIDs()`, **nil =
+  платная**; фолбэк — `fallbackFreeModel()`.
+- Дневная порция премиума — ресурс: взял `consumeDailyPremium` — верни
+  `refundDailyPremium`. Счётчик персистится.
+- Настройка, множащая стоимость ответа, закрывается **и** в меню, **и** в
+  команде.
+- Гейты ролей идут через `invokerKey(callback)` / `actorKey(fromUser)` /
+  `ownerKey(for:)`, не через сырой `username`. Своя принадлежность —
+  `userKeys(key:userID:).contains(owner)`. Для гейтов, работающих при симуляции,
+  — `isActuallySuperAdmin`.
+- Ключ наружу не показывать: `displayLabel(forKey:)` или поле `label` (метки уже
+  содержат `@`).
+
+**Telegram**
+- `callback_data` не пишется строкой (§11); новая команда = новый `case
+  MenuCommand`. В payload едут id и индексы, не чужой текст.
+- Кнопка «купить» несёт `PurchaseSource` (`menu`, `cap`, `promo`, `welcome`,
+  `command`, `reminder`, `balance`, `referral`, `model`, `mode`, `tuning`);
+  неизвестный суффикс читается как `menu`.
+- Callback'и — вне per-chat очереди (Стоп обязан прерывать); исключение —
+  кнопка, **запускающая** генерацию (`ex:`), идёт через очередь.
+- Приветствие группы — только через `claimGroupGreeting` и
+  `GroupWelcomePresenter`.
+- Рассылки в группы — через `ownedGroupChatIDs` (отсекает `botRemoved`), в личку
+  — через `privateChatID(forKey:)` (отсекает заблокировавших). 403 и «chat not
+  found» → `setBotPresence(isMember:false)`, не ретрай; 429/5xx — ретрай.
+- Персональная цена не уходит в общий чат; `isPersonal`-страницы в группе не
+  рендерятся.
+- Draft — только личка; финальный текст обязательно `sendMessage`.
+- `editMessage` — через `waitForEditSlot()`, не `waitForMessageSlot`.
+- Имя пользователя — чужой текст: экранирование живёт в источнике меток
+  (`UserIdentity.displayLabel`, `sanitizeName`, `ChatMetaInfo.displayLabel`).
+- Значения атрибутов экранируются целиком, включая кавычки
+  (`escapeAttributeValue`); `href` — только `allowedURLSchemes` (http, https, tg,
+  mailto, tel), иначе тег `<a>` отбрасывается вместе со схемой.
+- Резать длинный текст — только `MessageSplitter.splitRendered`; служебная
+  строка после ответа — после `closingTagMarkup(in:)`. `renderedTags` держать в
+  согласии с allow-list форматтера.
+- Вывод — HTML, не Markdown. `/help` (`BotCallbackHandler.faqText`) держать под
+  ~3800 символов; супер-админские команды — в `superAdminHelpText`.
+
+**Провайдеры**
+- Ошибка внутри SSE обязана ронять поток (`ProviderStreamErrorPayload` →
+  `ProviderAdapterError.upstream`), тихий `continue` запрещён.
+- `UserFacingError` не выпускает наружу английский текст провайдера и тело
+  ответа апстрима — только `httpStatusReason(code)`; итог проходит
+  `SecretRedactor`.
+
+**Тексты**
+- Русский, обращение на «вы». Внутренние термины наружу не выходят: `tenant` →
+  «премиум-доступ · спонсор», `whitelist` → «гости чата», `preset` →
+  «заготовки», `provider` → «сервис ИИ», `reasoning` → «обдумывание»
+  (`ReasoningEffort.displayName`, ввод `ReasoningEffort(userInput:)`),
+  температура → «стиль ответа», длина истории → «память», футер → «под ответом».
+  Жаргон допустим на `super*`-страницах и в супер-админских ветках.
+- Повторяющийся литерал — в `Texts`; строка, называющая человека/чат, собирается
+  на месте.
 
 ---
 
-## 18. Продуктовая спецификация (исходное ТЗ)
+## 15. Тесты
 
-Ниже — исходная бизнес-логика, на которой строился бот (для контекста намерений).
-
-### Базовое
-Telegram-чат-бот на Swift-сервере в Docker. Принимает апдейты, отвечает через LLM
-по API. Память на каждый чат (история, настройки модели, reasoning, длина истории).
-Параметры меняются командами или через UI-меню. Состояние хранится в Postgres.
-
-### Тенант-система
-Free-план даёт только бесплатные модели. Платные — за подписку (Stars/крипта/карта).
-- **Суперадмины** (`@maythe4th`) — реальные владельцы, могут всё.
-- **Обычные пользователи** — только free-модели, если владелец лицензии не открыл
-  платный доступ их чату/личке. Могут заводить per-chat пресеты.
-- **Админы** (владельцы лицензий) — оплатившие; своя виртуальная копия бота,
-  управляют доступом своих чатов/юзеров к платным моделям, редактируют глобальные
-  и per-chat пресеты. Не могут суперадминских вещей (цена, дефолтные on-start
-  пресеты). Суперадмин ⊇ админ. Только `@maythe4th` добавляет/снимает суперадминов.
-- Админ может в чате открыть свою панель и одной кнопкой добавить/убрать чат из
-  своей лицензии.
-
-### Лицензирование
-Оплатившие становятся **админами** (не суперадминами). Добавление бота в группу
-авто-привязывает чат к лицензии → доступ к платным моделям. Либо ручная привязка
-по chatID (группа) / `@username` (личка). Админ управляет списком своих чатов.
-Суперадмины видят всех админов и их чаты + статистику (токены, стоимость в $).
-
-### Прайсинг
-Подписка на платные модели. Суперадмин задаёт цену и методы оплаты.
-
----
-
-## 19. Тесты
-
-`swift test` — цель `LLM_chat_botTests` (`Tests/LLM_chat_botTests/`), 398 тестов.
-378 из них — чистая логика без сети: стор поднимается в памяти
-(`Fixtures.makeStore()`), база, Telegram и провайдеры не участвуют. Оставшиеся
-20 (`PostgresIntegrationTests`) требуют настоящий Postgres и **сами себя
-пропускают** без `TEST_DATABASE_URL`:
+`swift test` — цель `LLM_chat_botTests`, ~409 тестов; 389 без сети
+(`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
+`TEST_DATABASE_URL`:
 
 ```
 docker run -d --rm --name pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=botdb \
@@ -2191,179 +887,29 @@ docker run -d --rm --name pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=botdb \
 TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disable' swift test
 ```
 
-- `DurabilityTests` — разбор `DATABASE_URL` (включая распознавание
-  transaction-пула на 6543 и то, что пароль не попадает в лог), гейты
-  `StateDurability`, и `Money`: тысяча списаний приходит ровно в ноль, сумма не
-  зависит от порядка, наценка округляется в пользу клиента, `NaN` от провайдера
-  стоит ноль, переполнение насыщает вместо ловушки. Плюс `PublicOriginTests`:
-  публичный адрес нормализуется без хвостового `/` — иначе `setWebhook`
-  регистрирует `https://host//telegram/webhook`, роутер такой путь не отдаёт, и
-  бот молча перестаёт получать апдейты при живом `/ready`; и вебхук-секрет вне
-  алфавита Telegram отвергается на старте, а не превращается в тихий откат в
-  polling. Плюс `SecretBoxTests`: секрет, запечатанный другим ключом, читается
-  как «не задан», **переживает перезапись строки** (вернули ключ — вернулись
-  реквизиты, обе ветки: касса и карта) и попадает в `SecretRedactor` уже при
-  декоде, а не только когда его набирают в чате.
-- `LedgerTests` — правила про деньги, не зависящие от реализации (§10.2): ключ
-  платежа берётся один раз (в т.ч. при 16 конкурентных доставках), ключ выплаты
-  берётся один раз и не пересекается с платёжным, списание
-  останавливается на нуле, продление не сокращает срок, бессрочный остаётся
-  бессрочным, журнал сходится с остатком после 200 случайных движений, реальную
-  оплату отмечает только покупка пакета. Плюс кошелёк как одно число с одним
-  писателем: начисление суперадмина durable **до** того, как о нём сообщили
-  (списание сразу после видит эти деньги), и оно **не** уезжает ещё и
-  write-behind; выставленный баланс объясняется журналом; кошелёк, удалённый и
-  заведённый заново, не наследует старый журнал; синхронизация кошелька вне
-  транзакции тоже пишет свою строку — иначе правило «журнал сходится» не
-  покрывает единственный путь без транзакции.
-- `ConfigRoundTripTests` — **каждая** строка `bot_config` экспортируется,
-  кодируется **и читается обратно**, а изменённое значение возвращается
-  изменённым, а не дефолтом. Единственный класс ошибок, который иначе не ловит
-  ничто: ключ, который пишется, но не читается, молча откатывается на дефолт при
-  каждом рестарте. Тест самообновляемый: `Config.all` выводится рефлексией,
-  `ConfigName.allCases` — компилятором.
-- `PostgresIntegrationTests` — то, что существует **потому что** база
-  настоящая: миграция идемпотентна и пишет версию; бинарь старше схемы не
-  стартует; `check (balance_nanos >= 0)` не даёт вставить минус; ключ платежа
-  берётся ровно один раз при конкурентных доставках; упавшая транзакция не
-  оставляет ни кошелька, ни занятого ключа; продление считает база; удаление
-  тенанта не задевает соседних; блокировку писателя получает только один
-  процесс, и она освобождается вместе с соединением. Плюс: тенант, созданный
-  платежом, читается обратно (колонки с дефолтом `'{}'`), флаш не отменяет
-  оплаченное продление, бессрочный тенант остаётся бессрочным, правки подписки
-  суперадмином и winback-скидка переживают рестарт, полный round-trip
-  состояния store → батч → база → restore, нечитаемая переписка не роняет
-  restore (остальные строки приезжают), проигравшая попытка взять блокировку
-  **не** сообщает о потере (`onLost` — только про отнятую блокировку), и два
-  запроса, которые есть только у настоящей базы: выставление точного баланса
-  пишет в журнал дельту, а удаление кошелька — закрывающую строку, поэтому
-  кошелёк под тем же ключом заново сходится, а история никуда не девается.
-- `PersistenceCoordinatorTests` — write-behind без базы: неудачный флаш
-  сохраняет **обе** половины дренажа (строки и кошельки) для следующего,
-  удаление кошелька в новом дренаже отменяет более раннюю запись того же
-  кошелька, а `abandon()` закрывает запись навсегда.
-- `MessageSplitterTests` — бюджет в экранированных символах, границы вне
-  разметки, переоткрытие тегов в продолжении (§9).
-- `TelegramHTMLFormatterTests` — allow-list тегов, экранирование атрибутов,
-  схемы `href`, `<script>` (§17).
-- `TelegramHTMLFormatterGoldenTests` + `HTMLCorpus` — 69 входов (все ветки
-  чтения тега, атрибутов и сущностей + то, что реально выдаёт модель) и их
-  точный вывод, снятый **до** разбиения санитайзера на три стадии. Файл не
-  утверждает, что этот вывод идеален, — только что разбиение его не изменило.
-  Он же держит регрессию найденного при разбиении падения: текст,
-  заканчивающийся на `<` (оборванный блок кода), ронял процесс — проверка
-  границы смотрела на текущий индекс вместо следующего.
-- `CommandParserTests`, `MessageRoutingPolicyTests` — `/cmd@bot`+суффикс,
-  «`/buying` — не `/buy`», реакция в группе только на reply/@-упоминание.
-- `UserIdentityTests` — `UserKey` (в т.ч. что типизированный текст не может
-  подделать `#<id>`), директория, adoption, retention (§6); плюс перехват ника:
-  сместившийся владелец назван в `Sighting.displacedUserID`, иначе его строку
-  никто не перезапишет.
-- `StoreRootOwnerTests` — пин владельца переживает рестарт (§6/§10.3): строка
-  `root_owner` пишется и **читается обратно**, а после restore перехвативший
-  @ник не становится ни root, ни суперадмином. Тест закрывает регрессию, при
-  которой пин жил только в памяти.
-- `SubscriptionScheduleTests` — `dueNotice`: волны, дедуп, legacy-ключ,
-  catch-up окно winback; нормализация и декод конфига (§7/§14).
-- `Store*Tests` — доступ и роли, подписки и цены со скидкой, кошельки и дневная
-  порция премиума, реферал и антифрод, источники трафика, реклама, free-модели,
-  онбординг, память чата, воронка, dirty-tracking и restore. В том числе
-  `StorePersistenceTests`: агрегаты кампаний `src_` переживают потерю своих
-  привязок (§7 «Источники») — иначе прунинг обнуляет знаменатель CAC.
-- `StoreModePresetTests` — режимы (§7 «Режимы»): модель 🆓-режима разрешена без
-  подписки, ⭐ не даёт ничего, фолбэк детерминирован и предпочитает рабочий
-  режим, применение пишет весь бандл или ничего, ручная правка снимает
-  `activeModeID`, повторный выбор того же режима не чистит переписку, правка
-  сохраняет тапы, неизвестный тариф декодится как `premium`, конфиг переживает
-  flush → restore.
-- `StorePendingInputTests` — слот ожидания ввода (§13): одно ожидание на чат,
-  взведение вытесняет прежнее, потраченное не оставляет ни следа, ни владельца,
-  перевзведение живого ожидания владельца сохраняет, а забытое (старше
-  `PendingRequest.lifetime`) перестаёт слушать, не остаётся в карте и не
-  передаёт владельца новому.
-- `StoreChatContextTests` — память одного чата (§5): пары user+assistant
-  дописываются по порядку при параллельных ходах, завершившийся ход отдаёт в
-  запрос **и** свой ответ, снятый «Стопом» не отдаёт ничего, system переживает
-  любую обрезку, переписка держится в байтовом бюджете, а вопрос — всегда, каким
-  бы он ни был; лимит памяти клампит домен; расход считается и когда ход сняли
-  на середине; «↺ Сбросить» не трогает накопленное; начало хода помечает чат
-  грязным.
-- `MenuRouteTests` — разбор `callback_data`, отказ неизвестной команде, пустой
-  аргумент = отсутствующий, round-trip ссылок всех страниц и всех
-  `PurchaseSource` (§13).
-- `MenuPageRenderTests` — рендер **каждой** страницы меню в личке и в группе, за
-  владельца и за обычного юзера: у каждой кнопки маршрут существует, `nav:`
-  ведёт на реальную страницу, тело не пустое и влезает в одно сообщение; личные
-  страницы и страница покупки в группе не печатают личных чисел; кнопка «←»
-  называет ту страницу, на которую ведёт (`MenuPage.backLabel`). Плюс гейты
-  тонкой настройки: **каждая** `requiresFullAccess`-страница отказывает
-  бесплатному чату и открывается, как только у него появился баланс; ручки
-  памяти видны только оператору; главная предлагает режимы и помечает ⭐ те, что
-  закрыты. Плюс лимит `callback_data` (§17): со списком, куда добавлен пресет с
-  длинным id модели, **ни одна** кнопка **ни одной** страницы не превышает 64
-  байта, и payload кнопки модели резолвится обратно в свой пресет (и позицией,
-  и — для кнопок в старых сообщениях — значением).
-- `PaymentTypeTests` — сравнение TON-адресов (обе записи одного счёта),
-  форматирование атомарных сумм, пакеты кредитов, минимумы валют карты.
-- `ExternalPaymentTests` — внешняя касса (§7): подпись ссылки и уведомления
-  сверены с примером из документации вендора (хеш посчитан вне кода), подделка
-  подписи/суммы/чужого секрета отклоняется, суммы парсятся целочисленно
-  (`0.29` не превращается в 28.99…), реквизиты работают только тройкой,
-  пополнения переживают выключенную подписку, скидка не опускает цену ниже
-  минимума валюты, счёт переиспользуется и оплачивается один раз, конфиг и
-  открытые счета переживают рестарт.
-- `ExternalCallbackEndToEndTests` — деньги от кассы до доступа: подписанное
-  уведомление включает премиум и пишет плательщику, повторное — не продлевает
-  второй раз, пакет ложится на баланс по курсу суперадмина и помечается как
-  реальная оплата, неподписанное и недоплаченное не дают ничего; уведомление,
-  которое база не приняла, **не** подтверждается, счёт открывается заново, и
-  повтор от кассы включает премиум ровно один раз. Плюс гейт durability (§10.6):
-  уведомление, пришедшее в недюрабельном состоянии, остаётся неподтверждённым и
-  ничего не выдаёт, а ретрай кассы после восстановления включает премиум один
-  раз; и то же правило уровнем ниже — `fulfil` отказывается применять платёж, но
-  **не** занимает ключ идемпотентности, поэтому повторная доставка его
-  дозачисляет.
-- `CryptoSettlementTests` — перевод от прихода до доступа (§7): точная сумма
-  закрывает инвойс и включает премиум; отказ базы оставляет инвойс `open`, не
-  пишет txHash, ничего не выдаёт и оплачивается со второй попытки один раз
-  (`.deferred`); недоплата копится на счёте; пылевой перевод не может занять
-  чужой инвойс.
-- `EndToEndTests` + `FakeTelegram.swift` — **сквозные**: апдейт входит в
-  `BotOrchestrator.dispatch`, проходит настоящие команды/меню/генерацию и
-  настоящий `TelegramHTTPGateway`, а приземляется в локальный дублёр Bot API —
-  тест читает **то, что увидел бы пользователь** (текст, кнопки, `parse_mode`).
-  Подделаны только модель (`FakeProviderGateway`) и загрузчик медиа. Покрыто:
-  приветствие с примерами, ответ в личке и молчание в группе без обращения,
-  рендер меню и переход на страницу покупки, отказ **каждой** `super*`-страницы
-  обычному юзеру (цикл по `MenuPage.allCases` — новая страница попадает в
-  проверку сама), реферальный диплинк с выплатой после первого ответа, `src_`-метка,
-  оффер при исчерпании дневного лимита, тап по примеру, тап по ⭐-режиму без
-  доступа (приходит страница покупки, настройки чата не изменились, источник
-  учтён в воронке) и по 🆓-режиму (применяются модель, стиль и память сразу),
-  разбивка длинного
-  ответа, ожидание ввода в группе (чужое сообщение не съедается и получает
-  обычный ответ; неверное значение перевзводит ожидание с тем же владельцем),
-  проверка, что ни одна отправленная боту кнопка не ведёт в никуда.
+Наборы: `DurabilityTests` (разбор `DATABASE_URL`, гейты durability, `Money`,
+`PublicOriginTests`, `SecretBoxTests`), `LedgerTests`, `ConfigRoundTripTests`
+(каждая строка `bot_config` пишется **и читается обратно** — иначе молчаливый
+откат на дефолт при рестарте), `PostgresIntegrationTests` (миграции, БД-
+ограничения, конкурентный `claimPayment`, writer lock, round-trip состояния),
+`PersistenceCoordinatorTests`, `MessageSplitterTests`,
+`TelegramHTMLFormatterTests` + `…GoldenTests`/`HTMLCorpus` (69 входов),
+`CommandParserTests`, `MessageRoutingPolicyTests`, `UserIdentityTests`,
+`StoreRootOwnerTests`, `SubscriptionScheduleTests`, `Store*Tests`
+(доступ/подписки/кошельки/реферал/источники/реклама/free-модели/онбординг/
+воронка/dirty+restore), `StoreModePresetTests`, `StorePendingInputTests`,
+`StoreChatContextTests`, `MenuRouteTests`, `MenuPageRenderTests` (рендер
+**каждой** страницы личка/группа × владелец/юзер: маршруты существуют, `nav:`
+ведёт на реальную страницу, влезает в одно сообщение, гейты, лимит 64 байта),
+`PaymentTypeTests`, `ExternalPaymentTests`, `ExternalCallbackEndToEndTests`,
+`CryptoSettlementTests`, `EndToEndTests` + `FakeTelegram.swift` (апдейт входит в
+`dispatch`, проходит настоящие команды/меню/генерацию и настоящий
+`TelegramHTTPGateway`, приземляется в локальный дублёр Bot API; подделаны только
+модель и загрузчик медиа; цикл по `MenuPage.allCases` требует отказа обычному
+юзеру на каждой `super*`).
 
-**Правила.**
-- Тест формулирует **правило продукта**, а не текущий вывод функции: «оплата
-  никогда не сокращает срок», «порция возвращается, если ответа не было»,
-  «оплата не отбирает чужой чат».
-- Новая денежная или доступная механика приезжает с тестом — это единственная
-  проверка, которая ловит регрессию до продакшена (тесты уже поймали две:
-  §6, `userKey(username:)` перестал принимать `#<userID>` — все ролевые гейты
-  молча отвечали «нет»; и §10 — `select … for update` внутри того же statement,
-  что и `UPDATE`, возвращает **ноль строк**, из-за чего списание считалось
-  нулевым. Второе видно только на настоящем Postgres, поэтому
-  `PostgresIntegrationTests` и существуют).
-- **SQL проверяется на настоящем Postgres.** Хитрый одиночный запрос,
-  проверенный только глазами, — это способ узнать о поведении базы из
-  продакшена.
-- `Tests/` копируется в Docker-образ: SwiftPM проверяет **все** цели манифеста,
-  и без каталога сборка падает («overlapping sources»).
-- **`TELEGRAM_API_BASE`** (§15) существует ради сквозных тестов: он переключает
-  `TelegramHTTPGateway` на локальный дублёр. В проде его не задают никогда —
-  дефолт `https://api.telegram.org`.
-- Ждать результат — только по условию (`waitUntil`, `waitForCall`), не
-  `sleep`: бот отвечает на своих тасках, и фиксированная пауза даёт либо
-  флаки, либо медленный прогон.
+**Правила**: тест формулирует правило продукта, а не текущий вывод функции;
+новая денежная или доступная механика приезжает с тестом; хитрый SQL проверяется
+на настоящем Postgres; `Tests/` копируется в Docker-образ (SwiftPM проверяет все
+цели манифеста); ждать результат — только по условию (`waitUntil`,
+`waitForCall`), не `sleep`.
