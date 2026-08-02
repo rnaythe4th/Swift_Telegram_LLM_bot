@@ -33,8 +33,28 @@ actor InMemoryLedger: LedgerPort {
     }
 
     func syncWallets(changed: [UserKey: UserBalance], removed: [UserKey]) async throws {
-        for key in removed { wallets.removeValue(forKey: key) }
-        for (key, wallet) in changed { wallets[key] = wallet }
+        // Journalled exactly like the Postgres side: a wallet that moved outside
+        // a transaction still gets its line, and a deleted one gets a closing
+        // line that brings its journal back to zero. Without this the two
+        // implementations disagree about `reconcile()`, and a rule proved
+        // against the in-memory ledger would say nothing about the real one.
+        for key in removed {
+            guard let wallet = wallets.removeValue(forKey: key), !wallet.balance.isZero else { continue }
+            entries.append(LedgerEntry(
+                userKey: key, kind: .correction, amount: -wallet.balance,
+                balanceAfter: .zero, ref: "wallet deleted", createdAt: Date()
+            ))
+        }
+        for (key, wallet) in changed {
+            let before = wallets[key]?.balance ?? .zero
+            wallets[key] = wallet
+            let delta = wallet.balance - before
+            guard !delta.isZero else { continue }
+            entries.append(LedgerEntry(
+                userKey: key, kind: .correction, amount: delta,
+                balanceAfter: wallet.balance, ref: "sync", createdAt: Date()
+            ))
+        }
     }
 
     func recentEntries(userKey: UserKey, limit: Int) async throws -> [LedgerEntry] {
@@ -102,6 +122,22 @@ actor InMemoryLedger: LedgerPort {
         )
     }
 
+    fileprivate func applySetBalance(_ key: UserKey, to amount: Money, ref: String?) -> UserBalance {
+        var wallet = wallets[key] ?? .empty
+        let before = wallet.balance
+        wallet.balance = amount.clampedToZero
+        wallet.updatedAt = Date()
+        wallets[key] = wallet
+        let delta = wallet.balance - before
+        if !delta.isZero {
+            entries.append(LedgerEntry(
+                userKey: key, kind: .correction, amount: delta,
+                balanceAfter: wallet.balance, ref: ref, createdAt: Date()
+            ))
+        }
+        return wallet
+    }
+
     fileprivate func applyExtension(_ key: UserKey, days: Int) -> SubscriptionExtension {
         let existing = subscriptions[key]
         guard let current = existing else {
@@ -145,6 +181,11 @@ actor InMemoryLedger: LedgerPort {
 
         func debit(_ userKey: UserKey, upTo amount: Money, real: Money, ref: String?) async throws -> WalletDebit {
             await ledger.applyDebit(userKey, upTo: amount, real: real, ref: ref)
+        }
+
+        @discardableResult
+        func setBalance(_ userKey: UserKey, to amount: Money, ref: String?) async throws -> UserBalance {
+            await ledger.applySetBalance(userKey, to: amount, ref: ref)
         }
 
         func extendSubscription(

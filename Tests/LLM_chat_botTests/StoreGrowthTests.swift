@@ -80,7 +80,7 @@ final class StoreReferralTests: XCTestCase {
     func testExistingUserCannotBeInvited() async {
         let store = await makePair()
         // The "friend" already has a wallet — they are not a new user.
-        _ = await store.creditPurchasedBalance(key: UserKey.identified(200), amount: .usd(1))
+        _ = await store.seedPurchasedBalance(key: UserKey.identified(200), amount: .usd(1))
         let outcome = await store.bindReferral(invitedUserID: 200, invitedUsername: nil, inviterUserID: 100)
         XCTAssertEqual(outcome, .notNewUser)
         let overview = await store.referralOverview()
@@ -228,7 +228,7 @@ final class StoreTrafficSourceTests: XCTestCase {
     /// it is.
     func testExistingUserIsNotAnAcquisition() async {
         let store = Fixtures.makeStore()
-        _ = await store.creditPurchasedBalance(key: UserKey.identified(302), amount: .usd(1))
+        _ = await store.seedPurchasedBalance(key: UserKey.identified(302), amount: .usd(1))
         let outcome = await store.bindTrafficSource(userID: 302, tag: "vk", username: nil)
         XCTAssertEqual(outcome, .knownUser)
     }

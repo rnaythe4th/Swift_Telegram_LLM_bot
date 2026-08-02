@@ -33,7 +33,30 @@ final class PostgresLedger: LedgerPort, Sendable {
         let log = queryLogger
         try await client.withTransaction(logger: log) { db in
             for key in removed {
-                try await db.query("delete from bot_wallet where user_key = \(key)", logger: log)
+                // The journal outlives the wallet on purpose — it is the
+                // evidence behind every движение — but `reconcile()` sums it
+                // from the beginning, so rows left behind under a deleted key
+                // would never balance again once somebody topped up under that
+                // same key a second time: a permanent mismatch alert nobody can
+                // clear. A closing line brings the sum back to zero and keeps
+                // the history.
+                let rows = try await db.query(
+                    "delete from bot_wallet where user_key = \(key) returning balance_nanos",
+                    logger: log
+                )
+                var closing = Money.zero
+                for try await row in rows {
+                    closing = .nanos(try PostgresRandomAccessRow(row)["balance_nanos"].decode(Int64.self))
+                }
+                guard !closing.isZero else { continue }
+                try await db.query(
+                    """
+                    insert into bot_ledger (user_key, kind, amount_nanos, balance_after_nanos, ref)
+                    values (\(key), \(LedgerEntryKind.correction.rawValue), \((-closing).nanoValue),
+                            \(Int64(0)), 'wallet deleted')
+                    """,
+                    logger: log
+                )
             }
             for (key, wallet) in changed {
                 // The journal is why a balance can be explained, so a wallet
@@ -261,6 +284,38 @@ final class PostgresLedger: LedgerPort, Sendable {
                 remaining: remaining,
                 depleted: charged.isPositive && !remaining.isPositive
             )
+        }
+
+        @discardableResult
+        func setBalance(_ userKey: UserKey, to amount: Money, ref: String?) async throws -> UserBalance {
+            // Same shape as `credit`: lock, then write. The floor lives here as
+            // well as in the column's `check` — a super-admin typing a negative
+            // amount is a correction to zero, not a debt.
+            let before = try await lockedBalance(userKey)
+            let target = amount.clampedToZero
+            let rows = try await connection.query(
+                """
+                insert into bot_wallet (user_key, balance_nanos, updated_at)
+                values (\(userKey), \(target.nanoValue), now())
+                on conflict (user_key) do update set
+                    balance_nanos = excluded.balance_nanos,
+                    updated_at = now()
+                returning balance_nanos, topped_up_nanos, spent_billed_nanos, spent_real_nanos,
+                          lapsed_notice_at, updated_at
+                """,
+                logger: logger
+            )
+            var wallet = UserBalance.empty
+            for try await row in rows {
+                wallet = try Self.wallet(from: PostgresRandomAccessRow(row))
+            }
+            let delta = wallet.balance - (before ?? .zero)
+            if !delta.isZero {
+                try await writeEntry(
+                    userKey, kind: .correction, amount: delta, balanceAfter: wallet.balance, ref: ref
+                )
+            }
+            return wallet
         }
 
         /// Locks one wallet row and returns its balance, or nil when there is

@@ -427,8 +427,13 @@ extension BotMenuHandler {
                 if target.isEmpty {
                     toast = Texts.usernameRequired
                 } else {
-                    let wallet = await state.creditBalance(key: state.userKeyOrRaw(target), amount: .usd(amount))
-                    toast = "✓ Баланс @\(target.lowercased()) · <b>\(wallet.balance.formatted())</b>"
+                    // Money, so it goes through a transaction and not through
+                    // the write-behind cache (see `WalletWriter`).
+                    let wallet = await wallets.grant(
+                        key: state.userKeyOrRaw(target), amount: .usd(amount), ref: "balance top-up"
+                    )
+                    toast = wallet.map { "✓ Баланс @\(target.lowercased()) · <b>\($0.balance.formatted())</b>" }
+                        ?? "⚠️ Баланс не изменён — хранилище не приняло запись"
                 }
             } else {
                 toast = "⚠️ Формат: <code>@username сумма</code>, например <code>@user 5</code>"

@@ -74,6 +74,13 @@ final class PaymentFulfillmentService: Sendable {
     private let persistence: PersistenceCoordinator?
     private let metrics: RuntimeMetrics
     private let logger: LoggerPort
+    /// The last gate before money is applied (§4.3). `pre_checkout_query` and
+    /// the purchase page ask the same question earlier, but they only cover the
+    /// rails that go through Telegram: crypto arrives from a blockchain poller
+    /// and the hosted checkout from an HTTP endpoint, neither of which passes
+    /// through either. Asking here covers every rail there is and every one
+    /// added later.
+    private let durability: LockedValue<StateDurability>
 
     init(
         state: ChatContextStore,
@@ -81,7 +88,8 @@ final class PaymentFulfillmentService: Sendable {
         ledger: LedgerPort,
         persistence: PersistenceCoordinator?,
         metrics: RuntimeMetrics,
-        logger: LoggerPort
+        logger: LoggerPort,
+        durability: LockedValue<StateDurability> = LockedValue(.durable)
     ) {
         self.state = state
         self.telegram = telegram
@@ -89,6 +97,7 @@ final class PaymentFulfillmentService: Sendable {
         self.persistence = persistence
         self.metrics = metrics
         self.logger = logger
+        self.durability = durability
     }
 
     /// Applies a payment and returns what it bought. Everything is committed
@@ -112,6 +121,23 @@ final class PaymentFulfillmentService: Sendable {
     ///    leaving anyone's pocket, and the claim already guarantees they run at
     ///    most once per payment.
     func fulfil(_ receipt: PaymentReceipt) async -> PaymentFulfillmentOutcome {
+        // Applying a payment into a memory that dies with the process is the
+        // one thing worse than not applying it: the money is gone and there is
+        // nothing left that says it arrived. `.failed` is exactly the right
+        // answer here — every transport already knows to keep its door open on
+        // it (Telegram redelivers for 24 hours, crypto leaves the invoice open
+        // and holds its cursor, the aggregator is not acknowledged), so the
+        // payment lands intact once storage is back.
+        let durability = durability.value
+        guard durability.acceptsPayments else {
+            await metrics.increment(MetricName.paymentsRefusedVolatile)
+            logger.error(
+                "not applying payment \(receipt.idempotencyKey): state is \(durability.statusLine)"
+                + " — awaiting redelivery"
+            )
+            return .failed
+        }
+
         let defaults = await state.tenantDefaults(forKey: receipt.payerKey)
         let referralBonusDue = await state.pendingReferralPaymentBonus(payerUserID: receipt.payerUserID)
 

@@ -3,7 +3,9 @@ import Foundation
 /// Pay-as-you-go credit packs a user can top up their balance with.
 ///
 /// A pack is defined by its **USD face value** (in cents): that exact amount
-/// lands on the wallet (`creditBalance`). The provider markup (`priceMultiplier`)
+/// lands on the wallet (`LedgerTransaction.credit(purchased: true)`, which is
+/// also what marks the payer as one who paid real money). The provider markup
+/// (`priceMultiplier`)
 /// is charged later, per answer, at spend time — so margin comes from spending,
 /// not from the deposit. The price charged to buy a pack is derived per method:
 /// Stars via `starsForCents`, crypto via the pack cents fed to the invoice.

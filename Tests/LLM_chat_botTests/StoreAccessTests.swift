@@ -106,7 +106,7 @@ final class StoreAccessTests: XCTestCase {
     func testPositiveBalanceGivesFullAccessButNotSubscriptionCoverage() async {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 12, username: "payer", firstName: nil)
-        _ = await store.creditPurchasedBalance(key: UserKey.identified(12), amount: .usd(5))
+        _ = await store.seedPurchasedBalance(key: UserKey.identified(12), amount: .usd(5))
 
         let subscription = await store.hasSubscriptionCoverage(key: UserKey.pending("payer")!, userID: 12, chatID: 12)
         XCTAssertFalse(subscription)
@@ -120,7 +120,7 @@ final class StoreAccessTests: XCTestCase {
     func testBalanceIsFoundByUserIDAlone() async {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: 13, username: nil, firstName: "Без ника")
-        _ = await store.creditBalance(key: UserKey.identified(13), amount: .usd(1))
+        _ = await store.seedBalance(key: UserKey.identified(13), amount: .usd(1))
         let key = await store.billingKey(key: nil, userID: 13)
         XCTAssertEqual(key, UserKey.identified(13))
     }

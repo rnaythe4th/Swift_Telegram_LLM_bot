@@ -282,6 +282,18 @@ extension BotMenuHandler {
         message: MaybeInaccessibleMessage
     ) async throws {
         guard !route.sub.isEmpty else { return }
+        // `renderPay` hides these buttons while state is not durable, but a
+        // button already sitting in an older message still works — and that is
+        // the likely case, not an unlikely one: the state goes volatile at boot
+        // (no database, failed restore), so every purchase page drawn by the
+        // previous process is now a live checkout. Opening a crypto invoice or
+        // an aggregator order from here would take a payment into a memory that
+        // dies with the process, and neither rail has a second delivery.
+        let durability = durability.value
+        guard durability.acceptsPayments else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: durability.purchaseRefusalMessage)
+            return
+        }
         switch route.sub {
         case "credits":
             try await showCreditPackMethods(route: route, chatKey: chatKey, callback: callback, message: message)

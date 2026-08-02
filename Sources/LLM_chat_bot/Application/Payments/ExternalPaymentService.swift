@@ -34,6 +34,10 @@ actor ExternalPaymentService {
     /// cabinet needs. nil in local polling mode — the settings page then says
     /// so instead of printing a URL that resolves to nothing.
     private let publicBaseURL: String?
+    /// Whether anything written now survives the process (§4.3). The vendor's
+    /// retry loop is the only second chance this rail has, so a notification
+    /// arriving while state is not durable must go unacknowledged.
+    private let durability: LockedValue<StateDurability>
 
     init(
         state: ChatContextStore,
@@ -42,7 +46,8 @@ actor ExternalPaymentService {
         telegram: TelegramGatewayPort,
         logger: LoggerPort,
         metrics: RuntimeMetrics,
-        publicBaseURL: String?
+        publicBaseURL: String?,
+        durability: LockedValue<StateDurability> = LockedValue(.durable)
     ) {
         self.state = state
         self.resolver = resolver
@@ -51,6 +56,7 @@ actor ExternalPaymentService {
         self.logger = logger
         self.metrics = metrics
         self.publicBaseURL = publicBaseURL
+        self.durability = durability
     }
 
     // MARK: - Configuration surface (for the menu)
@@ -154,6 +160,20 @@ actor ExternalPaymentService {
         vendor: ExternalPaymentVendor,
         parameters: [String: String]
     ) async -> ExternalCallbackVerdict {
+        // Before anything is looked up: a process that cannot keep what it
+        // writes must not end the vendor's retry loop. Without this the worst
+        // case is silent and total — the database is down, the restore left us
+        // with no orders at all, so the notification looks like one for an
+        // *unknown* order, which is acknowledged by design. The vendor stops
+        // retrying and the purchase is gone with nothing anywhere that says it
+        // happened.
+        let durability = durability.value
+        guard durability.acceptsPayments else {
+            await metrics.increment(MetricName.paymentsRefusedVolatile)
+            logger.error("external callback (\(vendor.rawValue)) left unacknowledged: state is \(durability.statusLine)")
+            return .rejected(reason: "state is not durable")
+        }
+
         let config = await state.externalPaymentConfig()
         // A callback for a vendor we are not configured for cannot be checked
         // at all — there is no secret to check it against.

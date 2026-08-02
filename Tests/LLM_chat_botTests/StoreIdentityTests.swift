@@ -9,7 +9,7 @@ final class StoreIdentityTests: XCTestCase {
     func testPendingWalletIsAdoptedAndSummed() async {
         let store = Fixtures.makeStore()
         // Somebody was told about, but never seen: a pending record.
-        _ = await store.creditPurchasedBalance(key: UserKey.pending("@newbie")!, amount: .usd(3))
+        _ = await store.seedPurchasedBalance(key: UserKey.pending("@newbie")!, amount: .usd(3))
         let pending = await store.balance(UserKey.pending("newbie")!)
         XCTAssertEqual(pending?.balance, .usd(3))
 
@@ -24,8 +24,8 @@ final class StoreIdentityTests: XCTestCase {
     /// money" marker and the lapse timestamps.
     func testWalletsUnderBothKeysAreMerged() async {
         let store = Fixtures.makeStore()
-        _ = await store.creditPurchasedBalance(key: UserKey.pending("@dual")!, amount: .usd(2))
-        _ = await store.creditBalance(key: UserKey.identified(701), amount: .usd(5))
+        _ = await store.seedPurchasedBalance(key: UserKey.pending("@dual")!, amount: .usd(2))
+        _ = await store.seedBalance(key: UserKey.identified(701), amount: .usd(5))
 
         await store.identifyUser(userID: 701, username: "dual", firstName: nil)
 

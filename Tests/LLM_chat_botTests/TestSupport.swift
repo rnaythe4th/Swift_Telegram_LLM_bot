@@ -4,6 +4,51 @@ import Foundation
 // Shared builders. Everything here is in-memory: no network, no Supabase, no
 // Telegram — the state actor and the domain types are pure by construction.
 
+// Funding a wallet straight into the store's cache.
+//
+// Production has no such path and must not grow one: a balance is written by a
+// ledger transaction and mirrored back (`WalletWriter`, `applyCommittedCharge`),
+// because a second writer through the cache loses whichever of the two lands
+// first. These live in the test target so that a test can arrange a funded
+// wallet in one line without that shortcut existing in the shipped type — they
+// stand in for the one thing that really does change a wallet outside a
+// transaction, a rename merging two of them.
+extension ChatContextStore {
+    @discardableResult
+    func seedBalance(key: UserKey, amount: Money) -> UserBalance {
+        let target = resolved(key)
+        var wallet = userBalances[target] ?? .empty
+        wallet.balance = (wallet.balance + amount).clampedToZero
+        wallet.updatedAt = Date()
+        userBalances[target] = wallet
+        markWalletDirty(target)
+        return wallet
+    }
+
+    /// As above, but marks the wallet as one somebody paid real money into —
+    /// what `LedgerTransaction.credit(purchased: true)` does in production.
+    @discardableResult
+    func seedPurchasedBalance(key: UserKey, amount: Money) -> UserBalance {
+        var wallet = seedBalance(key: key, amount: amount)
+        wallet.toppedUp = wallet.toppedUp + amount
+        wallet.lapsedNoticeAt = nil
+        userBalances[resolved(key)] = wallet
+        markWalletDirty(resolved(key))
+        return wallet
+    }
+
+    @discardableResult
+    func seedBalanceAmount(key: UserKey, amount: Money) -> UserBalance {
+        let target = resolved(key)
+        var wallet = userBalances[target] ?? .empty
+        wallet.balance = amount.clampedToZero
+        wallet.updatedAt = Date()
+        userBalances[target] = wallet
+        markWalletDirty(target)
+        return wallet
+    }
+}
+
 enum Fixtures {
     /// The @username the bot is configured with, and the key that handle
     /// resolves to once the owner has been seen.

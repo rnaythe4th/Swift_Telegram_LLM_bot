@@ -28,7 +28,7 @@ final class StorePersistenceTests: XCTestCase {
         await store.identifyUser(userID: 960, username: "payer", firstName: nil)
         _ = await store.drainDirtyBatch()
 
-        _ = await store.creditPurchasedBalance(key: UserKey.identified(960), amount: .usd(1))
+        _ = await store.seedPurchasedBalance(key: UserKey.identified(960), amount: .usd(1))
         _ = await store.activatePaidSubscription(UserKey.identified(960))
         _ = await store.assignChat(chatID: -960, to: UserKey.identified(960))
         await store.setDailyPremiumLimit(3)

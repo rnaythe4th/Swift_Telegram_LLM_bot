@@ -169,6 +169,99 @@ final class LedgerTests: XCTestCase {
         XCTAssertEqual(purchase.toppedUp, .cents(500))
         XCTAssertEqual(purchase.balance, .cents(600))
     }
+
+    /// Setting a balance is still a movement, and the journal has to be able to
+    /// explain it — otherwise `/balance set` is money appearing from nowhere and
+    /// `reconcile()` calls the wallet corrupt.
+    func testSettingABalanceRecordsTheDelta() async throws {
+        let ledger = InMemoryLedger()
+        let key = UserKey.identified(70)
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(200), kind: .topup, purchased: true, ref: nil)
+        }
+        let set = try await ledger.inTransaction { try await $0.setBalance(key, to: .cents(50), ref: "set") }
+        XCTAssertEqual(set.balance, .cents(50))
+        XCTAssertEqual(set.toppedUp, .cents(200), "a correction is not a refund of the top-up")
+
+        let negative = try await ledger.inTransaction { try await $0.setBalance(key, to: .usd(-1), ref: "set") }
+        XCTAssertEqual(negative.balance, .zero, "a wallet has a floor wherever it is written")
+
+        let mismatched = try await ledger.reconcile()
+        XCTAssertTrue(mismatched.isEmpty, "unbalanced wallets: \(mismatched)")
+    }
+
+    /// A super-admin grant is money, so it is written by a transaction and only
+    /// then mirrored — it must never travel write-behind.
+    ///
+    /// The bug this pins down: the grant used to change the store's cache and
+    /// wait up to two seconds for a flush. Any answer charged in that window
+    /// opened its own transaction, read a row that did not have the grant yet,
+    /// and mirrored that pre-grant balance back over the cache. The grant was
+    /// gone, the answer was free, and nothing anywhere recorded either.
+    func testASuperAdminGrantIsWrittenThroughTheLedger() async throws {
+        let store = Fixtures.makeStore()
+        let ledger = InMemoryLedger()
+        let writer = WalletWriter(state: store, ledger: ledger, logger: SilentLogger())
+        let key = Fixtures.key(71)
+
+        let granted = await writer.grant(key: key, amount: .usd(5), ref: "balance add")
+        XCTAssertEqual(granted?.balance, .usd(5))
+
+        // Durable before it was reported: a charge landing immediately after
+        // starts from the granted balance, not from what the cache alone knew.
+        let debit = try await ledger.inTransaction {
+            try await $0.debit(key, upTo: .cents(50), real: .cents(40), ref: "gen")
+        }
+        XCTAssertEqual(debit.charged, .cents(50), "the charge must see money the grant already committed")
+
+        // And it must not be queued for the write-behind wallet sync as well —
+        // that would write the pre-charge balance back over the row and log a
+        // second journal line for a movement that never happened.
+        let drained = await store.drainDirtyWallets()
+        XCTAssertTrue(drained.changed.isEmpty, "a committed grant must not also be flushed as a cache change")
+        let cached = await store.balance(key)?.balance
+        XCTAssertEqual(cached, .usd(5), "the cache mirrors what committed")
+    }
+
+    /// A wallet somebody deleted and then funded again still reconciles.
+    ///
+    /// The journal outlives the wallet on purpose — it is the evidence behind
+    /// every movement — but `reconcile()` sums it from the beginning. Rows left
+    /// under a deleted key made the next wallet under that key permanently
+    /// unbalanced: an alert about corrupted money that no one could ever clear.
+    func testAWalletDeletedAndFundedAgainStillReconciles() async throws {
+        let ledger = InMemoryLedger()
+        let key = UserKey.identified(72)
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(300), kind: .topup, purchased: true, ref: nil)
+        }
+
+        try await ledger.syncWallets(changed: [:], removed: [key])
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(100), kind: .topup, purchased: true, ref: nil)
+        }
+
+        let mismatched = try await ledger.reconcile()
+        XCTAssertTrue(mismatched.isEmpty, "a recreated wallet must not inherit the old journal: \(mismatched)")
+    }
+
+    /// The wallet changes that really do happen outside a transaction — a
+    /// rename folding two wallets into one — are journalled too, or the
+    /// "journal always adds up" rule stops covering the only path that can
+    /// move a balance without a transaction.
+    func testSyncingAWalletOutsideATransactionIsJournalled() async throws {
+        let ledger = InMemoryLedger()
+        let key = UserKey.identified(73)
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(100), kind: .topup, purchased: true, ref: nil)
+        }
+        try await ledger.syncWallets(
+            changed: [key: UserBalance(balance: .cents(400), toppedUp: .cents(400))],
+            removed: []
+        )
+        let mismatched = try await ledger.reconcile()
+        XCTAssertTrue(mismatched.isEmpty, "a synced wallet must carry its own journal line: \(mismatched)")
+    }
 }
 
 /// Every `bot_config` key must survive the round trip store → batch → restore.

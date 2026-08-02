@@ -35,9 +35,18 @@ extension BotCommandHandler {
                     return
                 }
                 let targetKey = await state.userKeyOrRaw(target)
-                let wallet = subcommand == "add"
-                    ? await state.creditBalance(key: targetKey, amount: .usd(amount))
-                    : await state.setBalanceAmount(key: targetKey, amount: .usd(amount))
+                // Through the ledger, not the cache: a grant that only reached
+                // memory is erased by the next charge (see `WalletWriter`).
+                let written = subcommand == "add"
+                    ? await wallets.grant(key: targetKey, amount: .usd(amount), ref: "balance add")
+                    : await wallets.set(key: targetKey, amount: .usd(amount), ref: "balance set")
+                guard let wallet = written else {
+                    try await sendUserFeedback(
+                        chatKey: chatKey,
+                        text: "⚠️ Баланс не изменён — хранилище не приняло запись. Попробуйте ещё раз."
+                    )
+                    return
+                }
                 try await sendUserFeedback(chatKey: chatKey, text: """
                     ✓ Баланс @\(target.lowercased()) · <b>\(formatUsd(wallet.balance))</b>
                     Потрачено: клиентская цена \(formatUsd(wallet.spentBilled)) · реально \(formatUsd(wallet.spentReal))

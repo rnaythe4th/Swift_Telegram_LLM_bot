@@ -158,6 +158,39 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertTrue(mismatched.isEmpty, "journal and balance disagree for: \(mismatched)")
     }
 
+    /// Two statements the ledger runs only against a real database: setting a
+    /// balance to an exact amount, and closing a wallet's journal when the
+    /// wallet is deleted.
+    ///
+    /// The second is what keeps `reconcile()` usable. The journal outlives the
+    /// wallet on purpose, but it is summed from the beginning — so a key funded
+    /// again after a deletion inherited the old rows and was reported corrupt
+    /// forever, an alert about somebody's money that no one could clear.
+    func testASetBalanceAndADeletedWalletBothKeepTheJournalHonest() async throws {
+        let key = UserKey.identified(47)
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(300), kind: .topup, purchased: true, ref: "top")
+        }
+        let set = try await ledger.inTransaction { try await $0.setBalance(key, to: .cents(75), ref: "set") }
+        XCTAssertEqual(set.balance, .cents(75))
+        XCTAssertEqual(set.toppedUp, .cents(300), "a correction is not a refund of the top-up")
+        var mismatched = try await ledger.reconcile()
+        XCTAssertTrue(mismatched.isEmpty, "a balance that was set must still be explainable: \(mismatched)")
+
+        // Super-admin deletes the wallet; the person comes back and tops up.
+        try await ledger.syncWallets(changed: [:], removed: [key])
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(100), kind: .topup, purchased: true, ref: "top-again")
+        }
+        mismatched = try await ledger.reconcile()
+        XCTAssertTrue(mismatched.isEmpty, "a recreated wallet must not inherit the old journal: \(mismatched)")
+
+        // And the history is still there — the closing line explains where the
+        // deleted balance went instead of erasing the evidence.
+        let entries = try await ledger.recentEntries(userKey: key, limit: 10)
+        XCTAssertEqual(entries.count, 4, "top-up, correction, closing line, top-up")
+    }
+
     /// Paying never shortens access, and the end date is computed by the
     /// database so two renewals cannot read the same one.
     func testRenewalExtendsFromTheCurrentEnd() async throws {

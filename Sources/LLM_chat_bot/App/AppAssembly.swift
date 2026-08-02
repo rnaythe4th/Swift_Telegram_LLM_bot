@@ -259,7 +259,8 @@ struct AppAssembly {
             ledger: storage.ledger,
             persistence: persistence,
             metrics: metrics,
-            logger: logger
+            logger: logger,
+            durability: flags.durability
         )
 
         let cryptoService = CryptoPaymentService(
@@ -281,7 +282,8 @@ struct AppAssembly {
             // The vendor answers over the public internet, so without a public
             // address there is nothing to configure — the settings page says so
             // rather than printing a URL that resolves to a laptop.
-            publicBaseURL: config.webhookPublicURL
+            publicBaseURL: config.webhookPublicURL,
+            durability: flags.durability
         )
 
         return BotOrchestrator(

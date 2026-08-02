@@ -125,6 +125,15 @@ protocol LedgerTransaction: Sendable {
         ref: String?
     ) async throws -> WalletDebit
 
+    /// Sets a wallet to an exact amount — the super-admin correction behind
+    /// `/balance set`. Here rather than in the store because a balance has one
+    /// owner and one writer: a change that only reached the cache would be
+    /// overwritten by the next charge, which reads the row and mirrors it back.
+    /// The journal records the delta, so a balance that was *set* is still
+    /// explainable.
+    @discardableResult
+    func setBalance(_ userKey: UserKey, to amount: Money, ref: String?) async throws -> UserBalance
+
     /// Extends a subscription by `days` from `max(now, paid_until)`, creating
     /// the tenant if this is their first payment. Computed by the database, so
     /// two concurrent renewals cannot both read the same end date.

@@ -50,6 +50,12 @@ final class BotCommandHandler: Sendable {
         self.subscriptions = subscriptions
     }
 
+    /// See `BotMenuHandler.wallets`: `/balance add|set` is a money write, so it
+    /// goes through a ledger transaction rather than the store's cache.
+    var wallets: WalletWriter {
+        WalletWriter(state: state, ledger: ledger, logger: menuHandler.logger)
+    }
+
     func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?, isPrivate: Bool) async throws -> Bool {
         guard let text else {
             return false

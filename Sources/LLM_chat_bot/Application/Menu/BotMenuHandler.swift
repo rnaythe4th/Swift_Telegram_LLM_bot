@@ -24,6 +24,9 @@ final class BotMenuHandler: Sendable {
     /// Subscription dates are not write-behind state (§10.2); the menu changes
     /// them through here so they survive a restart.
     let subscriptions: SubscriptionWriter?
+    /// Where money is written. Balances are not write-behind state either: the
+    /// menu's top-up goes through `wallets`, never through the store's cache.
+    let ledger: LedgerPort
 
     init(
         telegram: TelegramGatewayPort,
@@ -37,7 +40,8 @@ final class BotMenuHandler: Sendable {
         reminderService: SubscriptionReminderService? = nil,
         externalPayments: ExternalPaymentService? = nil,
         durability: LockedValue<StateDurability> = LockedValue(.durable),
-        subscriptions: SubscriptionWriter? = nil
+        subscriptions: SubscriptionWriter? = nil,
+        ledger: LedgerPort = InMemoryLedger()
     ) {
         self.telegram = telegram
         self.state = state
@@ -51,6 +55,13 @@ final class BotMenuHandler: Sendable {
         self.externalPayments = externalPayments
         self.durability = durability
         self.subscriptions = subscriptions
+        self.ledger = ledger
+    }
+
+    /// Wallet changes that are not a payment (a super-admin grant) go through a
+    /// transaction, not through the write-behind cache — see `WalletWriter`.
+    var wallets: WalletWriter {
+        WalletWriter(state: state, ledger: ledger, logger: logger)
     }
 
     /// Plain chat message, no keyboard — used for the short confirmations and

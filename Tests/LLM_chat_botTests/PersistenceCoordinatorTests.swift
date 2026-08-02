@@ -19,7 +19,7 @@ final class PersistenceCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator(store: store, persistence: persistence, ledger: ledger)
 
         await store.identifyUser(userID: 991, username: "payer", firstName: nil)
-        _ = await store.creditPurchasedBalance(key: Fixtures.key(991), amount: .usd(2))
+        _ = await store.seedPurchasedBalance(key: Fixtures.key(991), amount: .usd(2))
         await store.setMarkupPercent(37)
 
         await coordinator.flushNow()
@@ -50,7 +50,7 @@ final class PersistenceCoordinatorTests: XCTestCase {
         let ledger = RecordingLedger()
         let coordinator = makeCoordinator(store: store, persistence: persistence, ledger: ledger)
 
-        _ = await store.creditBalance(key: Fixtures.key(992), amount: .usd(1))
+        _ = await store.seedBalance(key: Fixtures.key(992), amount: .usd(1))
         await coordinator.flushNow()          // fails, wallet sits in the carry
 
         _ = await store.removeBalance(Fixtures.key(992))

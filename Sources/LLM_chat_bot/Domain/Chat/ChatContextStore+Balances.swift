@@ -57,34 +57,21 @@ extension ChatContextStore {
             .first { (userBalances[$0]?.balance ?? .zero) >= Self.minimumBillableBalance }
     }
 
-    /// Adds (or subtracts, for corrections) to the user's balance. Creates the
-    /// wallet on first credit.
-    @discardableResult
-    func creditBalance(key: UserKey, amount: Money) -> UserBalance {
-        var wallet = userBalances[key] ?? .empty
-        // A correction may be negative; a wallet may not. The same floor is a
-        // `check` constraint on the column (§2.1).
-        wallet.balance = (wallet.balance + amount).clampedToZero
-        wallet.updatedAt = Date()
-        userBalances[key] = wallet
-        markWalletDirty(key)
-        return wallet
-    }
-
-    /// A credit pack the person actually paid for, as opposed to a referral
-    /// bonus or a super-admin grant. Tracked separately because "has paid real
-    /// money at least once" is what makes a lapsed wallet worth an offer, and
-    /// what tells the super-admin who is a customer (§7 «Возврат по балансу»).
-    /// Topping up also reopens the lapse cycle: coming back earns a new notice.
-    @discardableResult
-    func creditPurchasedBalance(key: UserKey, amount: Money) -> UserBalance {
-        var wallet = creditBalance(key: key, amount: amount)
-        wallet.toppedUp = wallet.toppedUp + amount
-        wallet.lapsedNoticeAt = nil
-        userBalances[key] = wallet
-        markWalletDirty(key)
-        return wallet
-    }
+    // There is deliberately no "credit this wallet" method here.
+    //
+    // A balance has one owner, the `bot_wallet` row, and one writer, a ledger
+    // transaction (`WalletWriter` for a super-admin grant, `LedgerTransaction`
+    // for everything a payment or an answer moves). A second writer through the
+    // cache is not a shortcut, it is a lost update: the grant lives in memory
+    // until the next flush, any charge in that window reads the row without it
+    // and mirrors the pre-grant balance back over the cache, and the money is
+    // gone. Removing the method is what keeps that from being rediscovered —
+    // the store simply cannot express it any more.
+    //
+    // What still changes a wallet here is what no transaction can know about:
+    // a rename folding two wallets into one (`adoptRecords`), the winback
+    // stamp, and deletion. Those are what `dirtyWallets` and `syncWallets` are
+    // for, and all three are metadata or a merge rather than money arriving.
 
     // MARK: - Lapsed wallets (roadmap step 8, applied to pay-as-you-go)
 
@@ -159,17 +146,6 @@ extension ChatContextStore {
             if wallet.lapsedNoticeAt != nil { notified += 1 }
         }
         return (dueWalletWinbacks(now: now).count, notified, payers)
-    }
-
-    @discardableResult
-    func setBalanceAmount(key: UserKey, amount: Money) -> UserBalance {
-        let u = resolved(key)
-        var wallet = userBalances[u] ?? .empty
-        wallet.balance = amount.clampedToZero
-        wallet.updatedAt = Date()
-        userBalances[u] = wallet
-        markWalletDirty(u)
-        return wallet
     }
 
     @discardableResult

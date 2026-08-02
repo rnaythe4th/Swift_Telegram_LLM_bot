@@ -90,7 +90,8 @@ final class BotOrchestrator: Sendable {
             ledger: ledger,
             persistence: persistence,
             metrics: metrics,
-            logger: logger
+            logger: logger,
+            durability: flags.durability
         )
         self.externalPayments = externalPayments
         self.botUsername = botUsername
@@ -126,7 +127,8 @@ final class BotOrchestrator: Sendable {
             reminderService: reminderService,
             externalPayments: externalPayments,
             durability: flags.durability,
-            subscriptions: subscriptions
+            subscriptions: subscriptions,
+            ledger: ledger
         )
 
         self.menuHandler = menuHandler

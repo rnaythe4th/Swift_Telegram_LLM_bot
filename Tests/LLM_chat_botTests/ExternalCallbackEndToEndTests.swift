@@ -14,6 +14,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
     private var store: ChatContextStore!
     private var service: ExternalPaymentService!
     private var gateway: TelegramHTTPGateway!
+    private var durability: LockedValue<StateDurability>!
 
     private let payerID: UserID = 5_555
     private let merchantID = "7012"
@@ -42,13 +43,15 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
             usdRateMinorUnits: 9_500,
             methods: [ExternalPaymentMethod(code: "44", title: "СБП")]
         ))
+        durability = LockedValue(.durable)
         let fulfillment = PaymentFulfillmentService(
             state: store,
             telegram: gateway,
             ledger: InMemoryLedger(),
             persistence: nil,
             metrics: RuntimeMetrics(),
-            logger: SilentLogger()
+            logger: SilentLogger(),
+            durability: durability
         )
         service = ExternalPaymentService(
             state: store,
@@ -57,7 +60,8 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
             telegram: gateway,
             logger: SilentLogger(),
             metrics: RuntimeMetrics(),
-            publicBaseURL: "https://bot.example.com"
+            publicBaseURL: "https://bot.example.com",
+            durability: durability
         )
     }
 
@@ -67,6 +71,7 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         store = nil
         service = nil
         gateway = nil
+        durability = nil
     }
 
     private func notification(orderID: String, amount: String, paymentID: String) -> [String: String] {
@@ -130,6 +135,85 @@ final class ExternalCallbackEndToEndTests: XCTestCase {
         XCTAssertEqual(first, second, "a redelivered notification must not extend the subscription")
         let report = await store.funnelReport()
         XCTAssertEqual(report.counters[FunnelEvent.paid.rawValue], 1)
+    }
+
+    /// The database dies between opening the checkout and the vendor's
+    /// notification. The vendor's retry loop is the only second chance this
+    /// rail has, so it must not be ended by a process that cannot keep what it
+    /// writes — and the worst case is silent: with no state restored the
+    /// notification looks like one for an *unknown* order, which is
+    /// acknowledged by design. The payment would be gone with nothing anywhere
+    /// saying it happened.
+    func testANotificationArrivingWhileStateIsNotDurableIsNotAcknowledged() async throws {
+        let checkout = try await service.createCheckout(
+            payerKey: store.userKey(userID: payerID),
+            payerUserID: payerID,
+            chatID: payerID.privateChat,
+            threadID: nil,
+            purpose: .subscription,
+            methodCode: nil
+        )
+        let params = notification(orderID: checkout.order.id, amount: "499.00", paymentID: "555")
+
+        durability.value = .volatile(reason: "restore failed")
+        let verdict = await service.handleCallback(vendor: .freekassa, parameters: params)
+        guard case .rejected = verdict else {
+            return XCTFail("a notification we cannot durably apply must stay unacknowledged, got \(verdict)")
+        }
+        let granted = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertFalse(granted.exists, "nothing may be granted from a state that dies with the process")
+
+        // Storage is back. The order was never closed, so the retry the vendor
+        // was still making applies the payment — exactly once.
+        durability.value = .durable
+        let retry = await service.handleCallback(vendor: .freekassa, parameters: params)
+        guard case .acknowledged = retry else {
+            return XCTFail("the retry must be applied once storage is back, got \(retry)")
+        }
+        let subscription = await store.tenantSubscription(ownerKey: store.userKey(userID: payerID))
+        XCTAssertTrue(subscription.isActive, "the retry has to buy what the first delivery could not")
+        let report = await store.funnelReport()
+        XCTAssertEqual(report.counters[FunnelEvent.paid.rawValue], 1, "one payment, one activation")
+    }
+
+    /// Same rule one level down, for every rail at once: `fulfil` is the single
+    /// place all of them meet, and `.failed` is what each of them already knows
+    /// to leave its door open on.
+    func testFulfilmentRefusesToApplyAPaymentWhileStateIsNotDurable() async throws {
+        let ledger = InMemoryLedger()
+        let fulfillment = PaymentFulfillmentService(
+            state: store,
+            telegram: gateway,
+            ledger: ledger,
+            persistence: nil,
+            metrics: RuntimeMetrics(),
+            logger: SilentLogger(),
+            durability: durability
+        )
+        let receipt = PaymentReceipt(
+            payerKey: store.userKey(userID: payerID),
+            payerUserID: payerID,
+            chatID: payerID.privateChat,
+            purpose: .credit(cents: 500),
+            idempotencyKey: "charge-volatile",
+            method: .stars
+        )
+
+        durability.value = .volatile(reason: "no DATABASE_URL")
+        guard case .failed = await fulfillment.fulfil(receipt) else {
+            return XCTFail("a payment must not be applied while state is not durable")
+        }
+        let empty = await store.balance(store.userKey(userID: payerID))
+        XCTAssertNil(empty, "nothing may be credited")
+
+        // The idempotency key must still be free, or the redelivery that is
+        // supposed to save the payment would be dismissed as a duplicate.
+        durability.value = .durable
+        guard case .credit(let cents, let wallet) = await fulfillment.fulfil(receipt) else {
+            return XCTFail("the redelivery must apply the payment")
+        }
+        XCTAssertEqual(cents, 500)
+        XCTAssertEqual(wallet.balance, .usd(5))
     }
 
     func testTopUpNotificationCreditsTheWalletAtFaceValue() async throws {

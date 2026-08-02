@@ -105,6 +105,15 @@ extension ChatContextStore {
         userBalances[key] = wallet
     }
 
+    /// Mirrors a wallet the ledger just wrote outside a payment — a super-admin
+    /// grant or correction (`WalletWriter`). The row is already there, so this
+    /// must **not** mark the wallet dirty: the write-behind sync would push the
+    /// same number back and write a second journal line for a movement that
+    /// never happened.
+    func applyCommittedWallet(key: UserKey, wallet: UserBalance) {
+        userBalances[resolved(key)] = wallet
+    }
+
     /// Mirrors a committed charge for one answer.
     func applyCommittedCharge(key: UserKey, debit: WalletDebit, real: Money) {
         guard var wallet = userBalances[key] else { return }
