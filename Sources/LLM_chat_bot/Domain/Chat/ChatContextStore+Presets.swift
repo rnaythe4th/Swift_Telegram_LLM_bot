@@ -3,6 +3,29 @@ import Foundation
 // Defaults and presets: tenant-scoped defaults, the four preset
 // categories and their per-chat counterparts.
 
+/// Where each category's presets live. One switch instead of one per operation:
+/// a fifth category then fails to compile until it has been given a home, and
+/// no operation can quietly address the wrong list.
+extension PresetCategory {
+    var tenantPresets: WritableKeyPath<TenantState, PresetList> {
+        switch self {
+        case .model: return \.modelPresets
+        case .temp: return \.tempPresets
+        case .history: return \.historyLengthPresets
+        case .role: return \.rolePresets
+        }
+    }
+
+    var chatPresets: WritableKeyPath<ChatContext, PresetList> {
+        switch self {
+        case .model: return \.chatModelPresets
+        case .temp: return \.chatTempPresets
+        case .history: return \.chatHistoryLengthPresets
+        case .role: return \.chatRolePresets
+        }
+    }
+}
+
 extension ChatContextStore {
     // MARK: - Defaults
 
@@ -40,231 +63,120 @@ extension ChatContextStore {
 
     // MARK: - Presets (tenant-scoped)
 
-    func modelPresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).modelPresets }
-    func tempPresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).tempPresets }
-    func historyLengthPresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).historyLengthPresets }
-    func rolePresets(chatID: ChatID) -> [Preset] { tenantState(for: chatID).rolePresets }
+    func modelPresets(chatID: ChatID) -> [Preset] { presets(for: .model, chatID: chatID) }
+    func tempPresets(chatID: ChatID) -> [Preset] { presets(for: .temp, chatID: chatID) }
+    func historyLengthPresets(chatID: ChatID) -> [Preset] { presets(for: .history, chatID: chatID) }
+    func rolePresets(chatID: ChatID) -> [Preset] { presets(for: .role, chatID: chatID) }
 
     func presets(for category: PresetCategory, chatID: ChatID) -> [Preset] {
-        switch category {
-        case .model: return modelPresets(chatID: chatID)
-        case .temp: return tempPresets(chatID: chatID)
-        case .history: return historyLengthPresets(chatID: chatID)
-        case .role: return rolePresets(chatID: chatID)
-        }
+        tenantState(for: chatID)[keyPath: category.tenantPresets].asArray
     }
 
-    func addPreset(category: PresetCategory, display: String, value: String, provider: String? = nil, chatID: ChatID) -> Preset {
-        let preset = Preset(display: display, value: value, provider: provider)
+    func addPreset(
+        category: PresetCategory,
+        display: String,
+        value: String,
+        provider: String? = nil,
+        chatID: ChatID
+    ) -> PresetList.AddOutcome {
+        var outcome: PresetList.AddOutcome = .full
         mutateTenant(for: chatID) { tenant in
-            switch category {
-            case .model: tenant.modelPresets.append(preset)
-            case .temp: tenant.tempPresets.append(preset)
-            case .history: tenant.historyLengthPresets.append(preset)
-            case .role: tenant.rolePresets.append(preset)
-            }
+            outcome = tenant[keyPath: category.tenantPresets].add(display: display, value: value, provider: provider)
         }
-        return preset
+        return outcome
     }
 
-    func removePresetByIndex(category: PresetCategory, index: Int, chatID: ChatID) -> Bool {
-        var success = false
-        mutateTenant(for: chatID) { tenant in
-            switch category {
-            case .model:
-                guard index >= 0, index < tenant.modelPresets.count else { return }
-                tenant.modelPresets.remove(at: index)
-                success = true
-            case .temp:
-                guard index >= 0, index < tenant.tempPresets.count else { return }
-                tenant.tempPresets.remove(at: index)
-                success = true
-            case .history:
-                guard index >= 0, index < tenant.historyLengthPresets.count else { return }
-                tenant.historyLengthPresets.remove(at: index)
-                success = true
-            case .role:
-                guard index >= 0, index < tenant.rolePresets.count else { return }
-                tenant.rolePresets.remove(at: index)
-                success = true
-            }
-        }
-        return success
-    }
-
-    func editPreset(category: PresetCategory, index: Int, display: String, value: String, provider: String? = nil, chatID: ChatID) -> Bool {
-        let preset = Preset(display: display, value: value, provider: provider)
-        var success = false
-        mutateTenant(for: chatID) { tenant in
-            switch category {
-            case .model:
-                guard index >= 0, index < tenant.modelPresets.count else { return }
-                tenant.modelPresets[index] = preset
-                success = true
-            case .temp:
-                guard index >= 0, index < tenant.tempPresets.count else { return }
-                tenant.tempPresets[index] = preset
-                success = true
-            case .history:
-                guard index >= 0, index < tenant.historyLengthPresets.count else { return }
-                tenant.historyLengthPresets[index] = preset
-                success = true
-            case .role:
-                guard index >= 0, index < tenant.rolePresets.count else { return }
-                tenant.rolePresets[index] = preset
-                success = true
-            }
-        }
-        return success
-    }
-
-    func addModelPreset(display: String, value: String, provider: String? = nil, chatID: ChatID) -> Preset {
-        addPreset(category: .model, display: display, value: value, provider: provider, chatID: chatID)
-    }
-
-    func removeModelPreset(value: String, chatID: ChatID) -> Bool {
+    /// False means the button named a preset that is no longer in the list —
+    /// somebody edited it from another message while this page was open.
+    func removePreset(category: PresetCategory, id: String, chatID: ChatID) -> Bool {
         var removed = false
         mutateTenant(for: chatID) { tenant in
-            let before = tenant.modelPresets.count
-            tenant.modelPresets.removeAll { $0.value == value }
-            removed = tenant.modelPresets.count < before
+            removed = tenant[keyPath: category.tenantPresets].remove(id: id)
         }
         return removed
     }
 
-    func addTempPreset(display: String, value: String, chatID: ChatID) -> Preset {
-        addPreset(category: .temp, display: display, value: value, chatID: chatID)
-    }
-
-    func removeTempPreset(value: String, chatID: ChatID) -> Bool {
-        var removed = false
+    func editPreset(
+        category: PresetCategory,
+        id: String,
+        display: String,
+        value: String,
+        provider: String? = nil,
+        chatID: ChatID
+    ) -> Bool {
+        var edited = false
         mutateTenant(for: chatID) { tenant in
-            let before = tenant.tempPresets.count
-            tenant.tempPresets.removeAll { $0.value == value }
-            removed = tenant.tempPresets.count < before
+            edited = tenant[keyPath: category.tenantPresets].replace(
+                id: id,
+                display: display,
+                value: value,
+                provider: provider
+            )
         }
-        return removed
+        return edited
     }
 
-    func addHistoryLengthPreset(display: String, value: String, chatID: ChatID) -> Preset {
-        addPreset(category: .history, display: display, value: value, chatID: chatID)
-    }
-
-    func removeHistoryLengthPreset(value: String, chatID: ChatID) -> Bool {
+    /// `/presets <category> remove <value>`: addresses a preset by what it does,
+    /// which is what someone typing a command has in front of them.
+    func removePreset(category: PresetCategory, value: String, chatID: ChatID) -> Bool {
         var removed = false
         mutateTenant(for: chatID) { tenant in
-            let before = tenant.historyLengthPresets.count
-            tenant.historyLengthPresets.removeAll { $0.value == value }
-            removed = tenant.historyLengthPresets.count < before
-        }
-        return removed
-    }
-
-    func addRolePreset(display: String, value: String, chatID: ChatID) -> Preset {
-        addPreset(category: .role, display: display, value: value, chatID: chatID)
-    }
-
-    func removeRolePreset(value: String, chatID: ChatID) -> Bool {
-        var removed = false
-        mutateTenant(for: chatID) { tenant in
-            let before = tenant.rolePresets.count
-            tenant.rolePresets.removeAll { $0.value == value }
-            removed = tenant.rolePresets.count < before
+            removed = tenant[keyPath: category.tenantPresets].removeAll(value: value)
         }
         return removed
     }
 
     // MARK: - Initial preset seeding (called at boot)
 
-    func setModelPresets(_ presets: [Preset]) {
-        mutateTenantByOwner(configuredOwnerKey) { $0.modelPresets = presets }
-    }
-
-    func setTempPresets(_ presets: [Preset]) {
-        mutateTenantByOwner(configuredOwnerKey) { $0.tempPresets = presets }
-    }
-
-    func setHistoryLengthPresets(_ presets: [Preset]) {
-        mutateTenantByOwner(configuredOwnerKey) { $0.historyLengthPresets = presets }
-    }
-
-    func setRolePresets(_ presets: [Preset]) {
-        mutateTenantByOwner(configuredOwnerKey) { $0.rolePresets = presets }
+    func setPresets(_ category: PresetCategory, _ presets: [Preset]) {
+        mutateTenantByOwner(configuredOwnerKey) { $0[keyPath: category.tenantPresets] = PresetList(presets) }
     }
 
     // MARK: - Per-chat preset management
 
     func chatPresets(category: PresetCategory, chatKey: ChatKey) -> [Preset] {
-        let ctx = ensure(chatKey: chatKey)
-        switch category {
-        case .model: return ctx.chatModelPresets
-        case .temp: return ctx.chatTempPresets
-        case .history: return ctx.chatHistoryLengthPresets
-        case .role: return ctx.chatRolePresets
-        }
+        ensure(chatKey: chatKey)[keyPath: category.chatPresets].asArray
     }
 
-    func addChatPreset(category: PresetCategory, chatKey: ChatKey, display: String, value: String, provider: String? = nil) -> Preset {
-        let preset = Preset(display: display, value: value, provider: provider)
+    func addChatPreset(
+        category: PresetCategory,
+        chatKey: ChatKey,
+        display: String,
+        value: String,
+        provider: String? = nil
+    ) -> PresetList.AddOutcome {
+        var outcome: PresetList.AddOutcome = .full
         mutate(chatKey: chatKey) { ctx in
-            switch category {
-            case .model: ctx.chatModelPresets.append(preset)
-            case .temp: ctx.chatTempPresets.append(preset)
-            case .history: ctx.chatHistoryLengthPresets.append(preset)
-            case .role: ctx.chatRolePresets.append(preset)
-            }
+            outcome = ctx[keyPath: category.chatPresets].add(display: display, value: value, provider: provider)
         }
-        return preset
+        return outcome
     }
 
-    func removeChatPresetByIndex(category: PresetCategory, chatKey: ChatKey, index: Int) -> Bool {
-        var success = false
+    func removeChatPreset(category: PresetCategory, chatKey: ChatKey, id: String) -> Bool {
+        var removed = false
         mutate(chatKey: chatKey) { ctx in
-            switch category {
-            case .model:
-                guard index >= 0, index < ctx.chatModelPresets.count else { return }
-                ctx.chatModelPresets.remove(at: index)
-                success = true
-            case .temp:
-                guard index >= 0, index < ctx.chatTempPresets.count else { return }
-                ctx.chatTempPresets.remove(at: index)
-                success = true
-            case .history:
-                guard index >= 0, index < ctx.chatHistoryLengthPresets.count else { return }
-                ctx.chatHistoryLengthPresets.remove(at: index)
-                success = true
-            case .role:
-                guard index >= 0, index < ctx.chatRolePresets.count else { return }
-                ctx.chatRolePresets.remove(at: index)
-                success = true
-            }
+            removed = ctx[keyPath: category.chatPresets].remove(id: id)
         }
-        return success
+        return removed
     }
 
-    func editChatPreset(category: PresetCategory, chatKey: ChatKey, index: Int, display: String, value: String, provider: String? = nil) -> Bool {
-        let preset = Preset(display: display, value: value, provider: provider)
-        var success = false
+    func editChatPreset(
+        category: PresetCategory,
+        chatKey: ChatKey,
+        id: String,
+        display: String,
+        value: String,
+        provider: String? = nil
+    ) -> Bool {
+        var edited = false
         mutate(chatKey: chatKey) { ctx in
-            switch category {
-            case .model:
-                guard index >= 0, index < ctx.chatModelPresets.count else { return }
-                ctx.chatModelPresets[index] = preset
-                success = true
-            case .temp:
-                guard index >= 0, index < ctx.chatTempPresets.count else { return }
-                ctx.chatTempPresets[index] = preset
-                success = true
-            case .history:
-                guard index >= 0, index < ctx.chatHistoryLengthPresets.count else { return }
-                ctx.chatHistoryLengthPresets[index] = preset
-                success = true
-            case .role:
-                guard index >= 0, index < ctx.chatRolePresets.count else { return }
-                ctx.chatRolePresets[index] = preset
-                success = true
-            }
+            edited = ctx[keyPath: category.chatPresets].replace(
+                id: id,
+                display: display,
+                value: value,
+                provider: provider
+            )
         }
-        return success
+        return edited
     }
 }

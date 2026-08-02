@@ -60,6 +60,9 @@ final class TelegramAPIMessage: Decodable, Sendable {
     let reply_to_message: TelegramAPIMessage?
     let photo: [TelegramAPIPhotoSize]?
     let successful_payment: TelegramAPISuccessfulPayment?
+    /// Set on the service message a group posts when Telegram turns it into a
+    /// supergroup — the chat's new id.
+    let migrate_to_chat_id: Int64?
 }
 
 struct TelegramAPIVoice: Decodable, Sendable {

@@ -280,6 +280,20 @@ extension BotOrchestrator {
             await state.identifyUser(userID: from.id, username: from.username, firstName: from.first_name)
         }
 
+        // The group was just upgraded to a supergroup. Move its state to the id
+        // Telegram gave it and stop: this service message has no author, no
+        // text and nothing to answer — everything after this point is about a
+        // chat id that no longer receives anything.
+        if let newChatID = message.migrate_to_chat_id {
+            let moved = await state.migrateChat(from: chatKey.chatID, to: newChatID)
+            logger.info(
+                "group migrated to supergroup \(newChatID)\(moved ? "" : " (nothing stored)")",
+                context: LogContext(chat: chatKey)
+            )
+            await persistence?.flushNow()
+            return
+        }
+
         // Keep the human-readable chat identity fresh so admin tooling can
         // show titles/usernames instead of bare IDs.
         await state.recordChatMeta(

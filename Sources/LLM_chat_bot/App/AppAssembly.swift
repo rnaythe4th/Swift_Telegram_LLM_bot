@@ -138,7 +138,7 @@ struct AppAssembly {
             defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil
         )
 
-        await state.setModelPresets([
+        await state.setPresets(.model, [
             Preset(display: "Gemini 3 Flash preview", value: "google/gemini-3-flash-preview"),
             Preset(display: "Gemini Flash latest", value: "google/gemini-flash-latest"),
             Preset(display: "Gemini 3.1 Flash Lite", value: "google/gemini-3.1-flash-lite-preview"),
@@ -146,9 +146,9 @@ struct AppAssembly {
             Preset(display: "DeepSeek V4 Flash", value: "deepseek/deepseek-v4-flash"),
             Preset(display: "Grok 4.3", value: "x-ai/grok-4.3"),
         ])
-        await state.setTempPresets(presets(from: [0.0, 0.5, 1.0, 1.5, 2.0]))
-        await state.setHistoryLengthPresets(presets(from: [10, 15, 20, 30, 50]))
-        await state.setRolePresets([
+        await state.setPresets(.temp, presets(from: [0.0, 0.5, 1.0, 1.5, 2.0]))
+        await state.setPresets(.history, presets(from: [10, 15, 20, 30, 50]))
+        await state.setPresets(.role, [
             Preset(display: "Физик Анатолий", value: "Ты физик, тебя зовут Анатолий."),
         ])
         return state

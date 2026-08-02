@@ -27,18 +27,18 @@ extension BotMenuHandler {
             await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
             try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil))
         case "edit":
-            guard let index = route.int(3) else { return }
+            guard let id = route.arg(3) else { return }
             let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
-            guard index >= 0, index < chatPresets.count else {
+            guard let preset = chatPresets.first(where: { $0.id == id }) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
-            let pending = PresetInput(category: category, scope: .chat, kind: .edit(index: index))
+            let pending = PresetInput(category: category, scope: .chat, kind: .edit(id: id))
             await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
-            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .edit(index: index), preset: chatPresets[index]))
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .edit(id: id), preset: preset))
         case "del":
-            guard let index = route.int(3) else { return }
-            let removed = await state.removeChatPresetByIndex(category: category, chatKey: chatKey, index: index)
+            guard let id = route.arg(3) else { return }
+            let removed = await state.removeChatPreset(category: category, chatKey: chatKey, id: id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : Texts.presetNotFound)
             try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
 
@@ -73,22 +73,22 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
                 return
             }
-            guard let index = route.int(3) else { return }
+            guard let id = route.arg(3) else { return }
             let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
-            guard index >= 0, index < globalPresets.count else {
+            guard let preset = globalPresets.first(where: { $0.id == id }) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
-            let pending = PresetInput(category: category, scope: .global, kind: .edit(index: index))
+            let pending = PresetInput(category: category, scope: .global, kind: .edit(id: id))
             await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
-            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .global, kind: .edit(index: index), preset: globalPresets[index]))
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .global, kind: .edit(id: id), preset: preset))
         case "gdel":
             guard canManageGlobal else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
                 return
             }
-            guard let index = route.int(3) else { return }
-            let removed = await state.removePresetByIndex(category: category, index: index, chatID: chatKey.chatID)
+            guard let id = route.arg(3) else { return }
+            let removed = await state.removePreset(category: category, id: id, chatID: chatKey.chatID)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : Texts.presetNotFound)
             try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
 
@@ -105,26 +105,35 @@ extension BotMenuHandler {
         let modelPrices = category == .model ? await state.openRouterModelPrices() : [:]
         let priceMultiplier = await state.priceMultiplier()
 
+        // Preset text is somebody's arbitrary input on its way into an HTML
+        // message, so it goes in escaped (`Preset.escapedDisplay`); the buttons
+        // below take the caption raw, because a caption is not markup.
+        func lines(_ presets: [Preset]) -> String {
+            var text = ""
+            for (i, preset) in presets.enumerated() {
+                if category == .role {
+                    text += "\(i + 1). <b>\(preset.escapedDisplay)</b>\n<blockquote expandable>\(preset.escapedValue)</blockquote>\n"
+                    continue
+                }
+                var line = "\(i + 1). <b>\(preset.escapedDisplay)</b> · <code>\(preset.escapedValue)</code>"
+                if let provider = preset.escapedProvider {
+                    line += " · 📡 <code>\(provider)</code>"
+                }
+                if let price = modelPrices[preset.value] {
+                    line += " — ⬇️$\(Self.formatPriceM(price.inputPerToken * priceMultiplier))/M | ⬆️$\(Self.formatPriceM(price.outputPerToken * priceMultiplier))/M"
+                }
+                text += line + "\n"
+            }
+            return text
+        }
+
         var text = "<b>📋 Мои заготовки · \(category.displayName)</b>\n\n"
 
         if globalPresets.isEmpty {
             text += "🌐 <b>Общие — во всех чатах</b> — <i>нет</i>\n"
         } else {
             text += "🌐 <b>Общие — во всех чатах</b> (меняет администратор)\n"
-            for (i, preset) in globalPresets.enumerated() {
-                if category == .role {
-                    text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
-                } else {
-                    var line = "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>"
-                    if let provider = preset.provider {
-                        line += " · 📡 <code>\(provider)</code>"
-                    }
-                    if let price = modelPrices[preset.value] {
-                        line += " — ⬇️$\(Self.formatPriceM(price.inputPerToken * priceMultiplier))/M | ⬆️$\(Self.formatPriceM(price.outputPerToken * priceMultiplier))/M"
-                    }
-                    text += line + "\n"
-                }
-            }
+            text += lines(globalPresets)
         }
 
         text += "\n"
@@ -133,44 +142,40 @@ extension BotMenuHandler {
             text += "💬 <b>Заготовки этого чата</b> — <i>нет</i>"
         } else {
             text += "💬 <b>Заготовки этого чата</b>\n"
-            for (i, preset) in chatPresets.enumerated() {
-                if category == .role {
-                    text += "\(i + 1). <b>\(preset.display)</b>\n<blockquote expandable>\(preset.value)</blockquote>\n"
-                } else {
-                    var line = "\(i + 1). <b>\(preset.display)</b> · <code>\(preset.value)</code>"
-                    if let provider = preset.provider {
-                        line += " · 📡 <code>\(provider)</code>"
-                    }
-                    if let price = modelPrices[preset.value] {
-                        line += " — ⬇️$\(Self.formatPriceM(price.inputPerToken * priceMultiplier))/M | ⬆️$\(Self.formatPriceM(price.outputPerToken * priceMultiplier))/M"
-                    }
-                    text += line + "\n"
-                }
-            }
+            text += lines(chatPresets)
         }
 
         var rows: Keyboard = []
 
+        // Buttons carry the preset's id, not its position: this keyboard
+        // describes the list as it was when the page was drawn, and a delete
+        // addressed by position removes whatever has slid into that slot since.
         if canManageGlobal {
-            for (i, preset) in globalPresets.enumerated() {
+            for preset in globalPresets {
                 rows.row([
-                    menuButton("🌐 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "gedit", "\(i)"),
-                    menuButton("❌", .pm, "\(category.rawValue)", "gdel", "\(i)"),
+                    menuButton("🌐 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "gedit", preset.id),
+                    menuButton("❌", .pm, "\(category.rawValue)", "gdel", preset.id),
                 ])
             }
         }
 
-        for (i, preset) in chatPresets.enumerated() {
+        for preset in chatPresets {
             rows.row([
-                menuButton("💬 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "edit", "\(i)"),
-                menuButton("❌", .pm, "\(category.rawValue)", "del", "\(i)"),
+                menuButton("💬 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "edit", preset.id),
+                menuButton("❌", .pm, "\(category.rawValue)", "del", preset.id),
             ])
         }
 
-        rows.row([menuButton(
-            "➕ Добавить заготовку",
-            .pm, category.rawValue, canManageGlobal ? "scopesel" : "add"
-        )])
+        // Both lists full means every "add" would be refused; saying so beats a
+        // button that answers with a complaint.
+        let scope = canManageGlobal ? "scopesel" : "add"
+        let canAddMore = chatPresets.count < PresetList.maxCount
+            || (canManageGlobal && globalPresets.count < PresetList.maxCount)
+        if canAddMore {
+            rows.row([menuButton("➕ Добавить заготовку", .pm, category.rawValue, scope)])
+        } else {
+            text += "\n\n<i>Список заполнен: \(PresetList.maxCount) заготовок. Удалите ненужную, чтобы добавить новую.</i>"
+        }
 
         rows.row([
             backButton(to: MenuPage(category: category)),
@@ -197,9 +202,9 @@ extension BotMenuHandler {
             Пример: <code>\(category.addExample)</code>
             """
         case .edit:
-            let currentValue = (preset?.value ?? "") + (preset?.provider.map { " | \($0)" } ?? "")
+            let currentValue = (preset?.escapedValue ?? "") + (preset?.escapedProvider.map { " | \($0)" } ?? "")
             text = """
-            <b>✏️ Редактирование · \(scopeLabel) · \(preset?.display ?? "")</b>
+            <b>✏️ Редактирование · \(scopeLabel) · \(preset?.escapedDisplay ?? "")</b>
 
             Текущее значение:
             <code>\(currentValue)</code>

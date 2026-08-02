@@ -41,7 +41,9 @@ enum Texts {
 
     // MARK: - "Not found" toasts
 
-    static let presetNotFound = "Заготовка не найдена"
+    static let presetNotFound = "Заготовка не найдена — список изменился"
+    /// The list is at `PresetList.maxCount`; the value typed was not saved.
+    static let presetListFull = "⚠️ Больше \(PresetList.maxCount) заготовок в одном списке не помещается — удалите ненужную и попробуйте снова."
     static let tenantNotFound = "Тенант не найден"
     static let modelNotFound = "Модель не найдена"
     static let modeNotFound = "Режим не найден"

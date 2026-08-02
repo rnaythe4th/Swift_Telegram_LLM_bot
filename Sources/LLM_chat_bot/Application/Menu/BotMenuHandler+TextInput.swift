@@ -340,17 +340,17 @@ extension BotMenuHandler {
 
         switch (pending.scope, pending.kind) {
         case (.global, .add):
-            _ = await state.addPreset(category: pending.category, display: display, value: value, provider: provider, chatID: chatKey.chatID)
-            toastText = "✓ Общая заготовка добавлена: \(display)\(providerSuffix)"
-        case (.global, .edit(let index)):
-            let ok = await state.editPreset(category: pending.category, index: index, display: display, value: value, provider: provider, chatID: chatKey.chatID)
-            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Заготовка не найдена"
+            let outcome = await state.addPreset(category: pending.category, display: display, value: value, provider: provider, chatID: chatKey.chatID)
+            toastText = Self.addToast(outcome, prefix: "✓ Общая заготовка добавлена", suffix: providerSuffix)
+        case (.global, .edit(let id)):
+            let ok = await state.editPreset(category: pending.category, id: id, display: display, value: value, provider: provider, chatID: chatKey.chatID)
+            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : Texts.presetNotFound
         case (.chat, .add):
-            _ = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value, provider: provider)
-            toastText = "✓ Заготовка чата добавлена: \(display)\(providerSuffix)"
-        case (.chat, .edit(let index)):
-            let ok = await state.editChatPreset(category: pending.category, chatKey: chatKey, index: index, display: display, value: value, provider: provider)
-            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : "⚠️ Заготовка не найдена"
+            let outcome = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value, provider: provider)
+            toastText = Self.addToast(outcome, prefix: "✓ Заготовка чата добавлена", suffix: providerSuffix)
+        case (.chat, .edit(let id)):
+            let ok = await state.editChatPreset(category: pending.category, chatKey: chatKey, id: id, display: display, value: value, provider: provider)
+            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : Texts.presetNotFound
         }
 
         await refreshMenu(
@@ -370,5 +370,16 @@ extension BotMenuHandler {
         )
 
         return true
+    }
+
+    /// A full list is not an error the person made — it is a limit they have to
+    /// be told about, or the preset they just typed vanishes without a word.
+    private static func addToast(_ outcome: PresetList.AddOutcome, prefix: String, suffix: String) -> String {
+        switch outcome {
+        case .added(let preset):
+            return "\(prefix): \(preset.display)\(suffix)"
+        case .full:
+            return Texts.presetListFull
+        }
     }
 }

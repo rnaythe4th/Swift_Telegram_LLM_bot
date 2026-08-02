@@ -19,6 +19,14 @@ actor SessionRegistry {
         return generationID
     }
     
+    /// Hands the registry the task that does the streaming.
+    ///
+    /// A generation is registered before it has a task: the slot on the global
+    /// limiter, the placeholder message and the draft handshake all happen
+    /// first, and the stop button lives on that placeholder. So «Стоп» can
+    /// arrive while `task` is still nil — `cancel` then records the reason and
+    /// has nothing to cancel. Without the check below the answer would be
+    /// generated, billed and posted after the user was told «Остановлено».
     func attach(generationID: GenerationID, task: Task<Void, Never>) {
         guard var existing = sessions[generationID] else {
             task.cancel()
@@ -26,6 +34,7 @@ actor SessionRegistry {
         }
         existing.task = task
         sessions[generationID] = existing
+        if cancellationReasons[generationID] != nil { task.cancel() }
     }
     
     func finish(generationID: GenerationID) {

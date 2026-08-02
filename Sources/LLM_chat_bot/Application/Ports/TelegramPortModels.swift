@@ -37,6 +37,11 @@ final class TelegramMessage: Codable, Sendable {
     // Internal marker for a synthetic merged album: one primary photo per album item.
     let album_photos: [PhotoSize]?
     let successful_payment: TelegramSuccessfulPayment?
+    /// Service message posted in a group the moment Telegram upgrades it to a
+    /// supergroup: the id every later update for this room will carry. The
+    /// announcement comes once, so the chat's state has to follow it here or
+    /// not at all (`ChatContextStore.migrateChat`).
+    let migrate_to_chat_id: ChatID?
 
     init(
         message_id: Int,
@@ -52,7 +57,8 @@ final class TelegramMessage: Codable, Sendable {
         reply_to_message: TelegramMessage?,
         photo: [PhotoSize]?,
         album_photos: [PhotoSize]? = nil,
-        successful_payment: TelegramSuccessfulPayment? = nil
+        successful_payment: TelegramSuccessfulPayment? = nil,
+        migrate_to_chat_id: ChatID? = nil
     ) {
         self.message_id = message_id
         self.from = from
@@ -68,6 +74,7 @@ final class TelegramMessage: Codable, Sendable {
         self.photo = photo
         self.album_photos = album_photos
         self.successful_payment = successful_payment
+        self.migrate_to_chat_id = migrate_to_chat_id
     }
 }
 

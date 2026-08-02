@@ -581,7 +581,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
             media_group_id: message.media_group_id,
             reply_to_message: message.reply_to_message.map(map),
             photo: message.photo?.map(map),
-            successful_payment: message.successful_payment.map(map)
+            successful_payment: message.successful_payment.map(map),
+            migrate_to_chat_id: message.migrate_to_chat_id.map { ChatID(Int($0)) }
         )
     }
 

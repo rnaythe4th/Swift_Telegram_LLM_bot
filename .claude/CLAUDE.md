@@ -112,7 +112,8 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   `ChatSessionTypes` (`ChatKey` = chatID+threadID, `GenerationID`),
   `Identifiers` (`ChatID`/`UserID`), `UserDirectory` (`UserKey`, `UserIdentity`),
   `UserBalance` (+`ChatAccessStatus`), `ChatMetaInfo` (+`InviteRecord`),
-  `PresetTypes`, `PendingRequest` (`PendingKind` + владелец + TTL),
+  `PresetTypes` (`Preset` + `id`, `PresetList` — кап 12, `PresetCategory`),
+  `PendingRequest` (`PendingKind` + владелец + TTL),
   `ModePreset`, `Onboarding`, `Referral`, `TrafficSource`, `AdCampaign`,
   `SubscriptionLifecycle`, `SpendPolicy`, `CreditPack`, `FunnelMetrics`,
   `MediaTypes`, `UserInputContent`, `PersistedSnapshots` (DTO строк/конфигов).
@@ -168,15 +169,22 @@ Telegram → webhook POST /telegram/webhook | long polling getUpdates
      ├─ my_chat_member      → вход в группу (присутствие, autoAssign, funnel, приветствие)
      │                        / выход (botRemoved) / личка (блок-разблок)
      └─ message             → ChatUpdateDispatcher.submit(chatKey) { route(message) }
-            route: 1 recordChatMeta → 2 successful_payment → 3 /start|/buy до гейта
-                   → 4 autoAssignIfNeeded → 5 BotCommandHandler.handleIfCommand
-                   → 6 BotMenuHandler.processTextInput → 7 GenerationCoordinator.handleIfNeeded
+            route: 1 identifyUser → 2 migrate_to_chat_id (переезд, стоп)
+                   → 3 recordChatMeta → 4 successful_payment → 5 /start|/buy до гейта
+                   → 6 autoAssignIfNeeded → 7 BotCommandHandler.handleIfCommand
+                   → 8 BotMenuHandler.processTextInput → 9 GenerationCoordinator.handleIfNeeded
 ```
 
 Вход в группу приходит **дважды** (`my_chat_member` + `/start <payload>` от
 `?startgroup=`), пути разные и порядок не гарантирован → оба зовут
 `claimGroupGreeting(chatID:)` (окно 10 мин, in-memory). `/start` в группе никогда
 не шлёт личное приветствие.
+
+Апгрейд группы в супергруппу приходит **один раз**, служебным сообщением в
+старом чате (`migrate_to_chat_id`), и меняет `chat_id`, которым ключуется всё
+состояние чата → `migrateChat(from:to:)` переносит переписки, владение, мету,
+ожидание ввода и in-memory таймеры (старая строка помечается удалённой),
+`flushNow()`. Состояние, уже лежащее под новым id, не перезаписывается.
 
 ---
 
@@ -777,6 +785,12 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   `adoptRecords`.
 - Границы настроек чата — только в домене (`ChatContext.historyRange`,
   `tempRange`, `ClosedRange.clamping`), стор клампит сам.
+- Коллекция, которую растит **пользователь**, носит кап в типе, а не в
+  вызывающем: `PresetList` (12 записей, `add` отвечает `.full`, `normalized`
+  режет длины и чинит id) — `append` в такую коллекцию не должен
+  компилироваться. Переполнение проговаривается человеку, а не глотается.
+- Состояние чата ключуется `chatID`, поэтому смена id (апгрейд в супергруппу)
+  обязана быть переездом: новая строка грязная, старая — удалённая (§3).
 - `resetChat` возвращает **настройки**, но переносит накопленное (usage,
   пресеты, `funnelFirstMessageCounted`, счётчики рекламы). Новое поле
   `ChatContext` обязано ответить, настройка оно или накопленное.
@@ -831,6 +845,11 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 **Telegram**
 - `callback_data` не пишется строкой (§11); новая команда = новый `case
   MenuCommand`. В payload едут id и индексы, не чужой текст.
+- Кнопка, которая **что-то меняет**, несёт стабильный id записи, а не её
+  позицию: клавиатура описывает список на момент отрисовки, а живёт дольше
+  (`Preset.id`, `OnboardingExample.id`, `ModePreset.id`). Промах отвечает
+  «не найдено», а не попадает в соседа. Чтение позиции остаётся только ради
+  кнопок из сообщений старого билда (`presetTarget`).
 - Кнопка «купить» несёт `PurchaseSource` (`menu`, `cap`, `promo`, `welcome`,
   `command`, `reminder`, `balance`, `referral`, `model`, `mode`, `tuning`);
   неизвестный суффикс читается как `menu`.
@@ -847,6 +866,10 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 - `editMessage` — через `waitForEditSlot()`, не `waitForMessageSlot`.
 - Имя пользователя — чужой текст: экранирование живёт в источнике меток
   (`UserIdentity.displayLabel`, `sanitizeName`, `ChatMetaInfo.displayLabel`).
+  То же для текста, который человек ввёл сам и который печатается в сообщение:
+  хранится сырым (значение уезжает в модель), экранируется в точке, где
+  становится разметкой (`Preset.escapedDisplay`/`escapedValue`). Подпись кнопки
+  — не разметка, там сырой текст.
 - Значения атрибутов экранируются целиком, включая кавычки
   (`escapeAttributeValue`); `href` — только `allowedURLSchemes` (http, https, tg,
   mailto, tel), иначе тег `<a>` отбрасывается вместе со схемой.
@@ -877,7 +900,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~409 тестов; 389 без сети
+`swift test` — цель `LLM_chat_botTests`, ~442 теста; 422 без сети
 (`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
 `TEST_DATABASE_URL`:
 
@@ -898,7 +921,11 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 `StoreRootOwnerTests`, `SubscriptionScheduleTests`, `Store*Tests`
 (доступ/подписки/кошельки/реферал/источники/реклама/free-модели/онбординг/
 воронка/dirty+restore), `StoreModePresetTests`, `StorePendingInputTests`,
-`StoreChatContextTests`, `MenuRouteTests`, `MenuPageRenderTests` (рендер
+`StoreChatContextTests`, `StorePresetTests` (границы, id вместо позиции,
+экранирование), `StoreChatMigrationTests` (переезд в супергруппу),
+`UpdateIntakeTests`/`ChatUpdateDispatcherTests`/`GenerationRuntimeTests`
+(дедуп, границы альбома, порядок в чате, FIFO слотов, отмена до старта стрима),
+`MenuRouteTests`, `MenuPageRenderTests` (рендер
 **каждой** страницы личка/группа × владелец/юзер: маршруты существуют, `nav:`
 ведёт на реальную страницу, влезает в одно сообщение, гейты, лимит 64 байта),
 `PaymentTypeTests`, `ExternalPaymentTests`, `ExternalCallbackEndToEndTests`,

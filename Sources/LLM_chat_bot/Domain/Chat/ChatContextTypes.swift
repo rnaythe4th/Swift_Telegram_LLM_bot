@@ -13,10 +13,10 @@ struct TenantState: Sendable {
     var defaultModel: String
     var defaultRole: String
     var defaultHistoryLength: Int
-    var modelPresets: [Preset]
-    var tempPresets: [Preset]
-    var historyLengthPresets: [Preset]
-    var rolePresets: [Preset]
+    var modelPresets: PresetList
+    var tempPresets: PresetList
+    var historyLengthPresets: PresetList
+    var rolePresets: PresetList
     var whitelistedUserIDs: Set<UserID>
     var adminKeys: Set<UserKey>
     var licensedKeys: Set<UserKey>
@@ -100,10 +100,10 @@ struct ChatContext: Sendable {
     var reasoningEffort: ReasoningEffort?
     var backupNotify: Bool
     var cumulativeUsage: CumulativeUsage
-    var chatModelPresets: [Preset]
-    var chatTempPresets: [Preset]
-    var chatHistoryLengthPresets: [Preset]
-    var chatRolePresets: [Preset]
+    var chatModelPresets: PresetList
+    var chatTempPresets: PresetList
+    var chatHistoryLengthPresets: PresetList
+    var chatRolePresets: PresetList
     /// Bot replies in this chat since the last ad impression.
     var adReplyCounter: Int = 0
     var adLastShownAt: Date? = nil

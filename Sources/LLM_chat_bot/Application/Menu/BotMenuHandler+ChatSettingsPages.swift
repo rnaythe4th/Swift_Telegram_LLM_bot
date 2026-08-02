@@ -15,10 +15,10 @@ extension BotMenuHandler {
 
         if !globalPresets.isEmpty {
             var currentRow: [InlineKeyboardButton] = []
-            for (i, preset) in globalPresets.enumerated() {
+            for preset in globalPresets {
                 let isActive = activeRole.hasPrefix(preset.value)
                 let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
-                currentRow.append(menuButton(label, .role, "gsel", "\(i)"))
+                currentRow.append(menuButton(label, .role, "gsel", preset.id))
                 if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
             if !currentRow.isEmpty { rows.row(currentRow) }
@@ -26,10 +26,10 @@ extension BotMenuHandler {
 
         if !chatPresets.isEmpty {
             var currentRow: [InlineKeyboardButton] = []
-            for (i, preset) in chatPresets.enumerated() {
+            for preset in chatPresets {
                 let isActive = activeRole.hasPrefix(preset.value)
                 let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
-                currentRow.append(menuButton(label, .role, "csel", "\(i)"))
+                currentRow.append(menuButton(label, .role, "csel", preset.id))
                 if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
             if !currentRow.isEmpty { rows.row(currentRow) }
@@ -85,13 +85,13 @@ extension BotMenuHandler {
 
         func appendPresets(_ presets: [Preset], action: String) {
             var currentRow: [InlineKeyboardButton] = []
-            for (index, preset) in presets.enumerated() {
+            for preset in presets {
                 let label = presetLabel(preset: preset, scope: action == "gsel" ? "🌐" : "💬")
-                // The position, not the model id: ids run past 50 characters on
-                // OpenRouter, and `menu:model:gsel:` + one of those is over
+                // The preset's id, not the model id: ids run past 50 characters
+                // on OpenRouter, and `menu:model:gsel:` + one of those is over
                 // Telegram's 64-byte `callback_data` — which fails the whole
                 // page, not the one button (`BotMenuHandler.presetTarget`).
-                currentRow.append(menuButton(label, .model, action, "\(index)"))
+                currentRow.append(menuButton(label, .model, action, preset.id))
                 if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
             if !currentRow.isEmpty { rows.row(currentRow) }

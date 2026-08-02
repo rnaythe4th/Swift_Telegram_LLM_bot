@@ -181,56 +181,7 @@ extension BotCommandHandler {
         let subcommand = parts.count > 1 ? parts[1] : ""
         let value = parts.count > 2 ? parts[2] : ""
 
-        switch presetType.lowercased() {
-        case "model":
-            try await handlePresetsSub(
-                chatKey: chatKey,
-                subcommand: subcommand,
-                value: value,
-                typeKey: "model",
-                typeName: "моделей",
-                list: { [self] in await state.modelPresets(chatID: chatKey.chatID) },
-                add: { [self] display, val, provider in await state.addModelPreset(display: display, value: val, provider: provider, chatID: chatKey.chatID) },
-                remove: { [self] val in await state.removeModelPreset(value: val, chatID: chatKey.chatID) }
-            )
-
-        case "temp":
-            try await handlePresetsSub(
-                chatKey: chatKey,
-                subcommand: subcommand,
-                value: value,
-                typeKey: "temp",
-                typeName: "стиля ответа",
-                list: { [self] in await state.tempPresets(chatID: chatKey.chatID) },
-                add: { [self] display, val, _ in await state.addTempPreset(display: display, value: val, chatID: chatKey.chatID) },
-                remove: { [self] val in await state.removeTempPreset(value: val, chatID: chatKey.chatID) }
-            )
-
-        case "history", "historylength":
-            try await handlePresetsSub(
-                chatKey: chatKey,
-                subcommand: subcommand,
-                value: value,
-                typeKey: "history",
-                typeName: "памяти",
-                list: { [self] in await state.historyLengthPresets(chatID: chatKey.chatID) },
-                add: { [self] display, val, _ in await state.addHistoryLengthPreset(display: display, value: val, chatID: chatKey.chatID) },
-                remove: { [self] val in await state.removeHistoryLengthPreset(value: val, chatID: chatKey.chatID) }
-            )
-
-        case "role":
-            try await handlePresetsSub(
-                chatKey: chatKey,
-                subcommand: subcommand,
-                value: value,
-                typeKey: "role",
-                typeName: "ролей",
-                list: { [self] in await state.rolePresets(chatID: chatKey.chatID) },
-                add: { [self] display, val, _ in await state.addRolePreset(display: display, value: val, chatID: chatKey.chatID) },
-                remove: { [self] val in await state.removeRolePreset(value: val, chatID: chatKey.chatID) }
-            )
-
-        default:
+        guard let category = PresetCategory(commandWord: presetType) else {
             try await sendUserFeedback(chatKey: chatKey, text: """
                 <b>🎛 Заготовки для меню</b>
 
@@ -243,19 +194,24 @@ extension BotCommandHandler {
                 <i>Пример:</i>
                 <code>/presets model add GPT-4o | openai/gpt-4o</code>
                 """)
+            return
         }
+        try await handlePresetsSub(
+            chatKey: chatKey,
+            category: category,
+            subcommand: subcommand,
+            value: value
+        )
     }
 
     private func handlePresetsSub(
         chatKey: ChatKey,
+        category: PresetCategory,
         subcommand: String,
-        value: String,
-        typeKey: String,
-        typeName: String,
-        list: @Sendable () async -> [Preset],
-        add: @Sendable (String, String, String?) async -> Preset,
-        remove: @Sendable (String) async -> Bool
+        value: String
     ) async throws {
+        let typeKey = category.rawValue
+        let typeName = category.listName
         switch subcommand.lowercased() {
         case "add":
             let separator = value.contains("|") ? "|" : " ~ "
@@ -279,7 +235,7 @@ extension BotCommandHandler {
             let display = addParts[0]
             let presetValue: String
             let presetProvider: String?
-            if typeKey == "model", addParts.count >= 3 {
+            if category == .model, addParts.count >= 3 {
                 // Third part pins the OpenRouter upstream provider.
                 presetValue = addParts[1]
                 presetProvider = addParts[2]
@@ -287,35 +243,46 @@ extension BotCommandHandler {
                 presetValue = addParts.dropFirst().joined(separator: " ")
                 presetProvider = nil
             }
-            let preset = await add(display, presetValue, presetProvider)
-            let providerNote = preset.provider.map { " · <code>\($0)</code>" } ?? ""
-            try await sendUserFeedback(
-                chatKey: chatKey,
-                text: "✓ Заготовка \(typeName): <b>\(preset.display)</b> → <code>\(preset.value)</code>\(providerNote)"
-            )
+            switch await state.addPreset(
+                category: category,
+                display: display,
+                value: presetValue,
+                provider: presetProvider,
+                chatID: chatKey.chatID
+            ) {
+            case .added(let preset):
+                let providerNote = preset.escapedProvider.map { " · <code>\($0)</code>" } ?? ""
+                try await sendUserFeedback(
+                    chatKey: chatKey,
+                    text: "✓ Заготовка \(typeName): <b>\(preset.escapedDisplay)</b> → <code>\(preset.escapedValue)</code>\(providerNote)"
+                )
+            case .full:
+                try await sendUserFeedback(chatKey: chatKey, text: Texts.presetListFull)
+            }
 
         case "remove":
             guard !value.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/presets \(typeKey) remove &lt;значение&gt;</code>")
                 return
             }
-            let removed = await remove(value)
+            let removed = await state.removePreset(category: category, value: value, chatID: chatKey.chatID)
+            let shownValue = Preset.escapedForMessage(value)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: removed
-                    ? "✓ Заготовка \(typeName) <code>\(value)</code> удалена."
-                    : "Заготовка \(typeName) <code>\(value)</code> не найдена."
+                    ? "✓ Заготовка \(typeName) <code>\(shownValue)</code> удалена."
+                    : "Заготовка \(typeName) <code>\(shownValue)</code> не найдена."
             )
 
         case "list":
-            let presets = await list()
+            let presets = await state.presets(for: category, chatID: chatKey.chatID)
             if presets.isEmpty {
                 try await sendUserFeedback(chatKey: chatKey, text: "Заготовки \(typeName): пусто.")
             } else {
                 var lines = ["<b>Заготовки \(typeName)</b> (\(presets.count))"]
                 for (i, p) in presets.enumerated() {
-                    let providerNote = p.provider.map { " · <code>\($0)</code>" } ?? ""
-                    lines.append("\(i). <b>\(p.display)</b> → <code>\(p.value)</code>\(providerNote)")
+                    let providerNote = p.escapedProvider.map { " · <code>\($0)</code>" } ?? ""
+                    lines.append("\(i). <b>\(p.escapedDisplay)</b> → <code>\(p.escapedValue)</code>\(providerNote)")
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             }

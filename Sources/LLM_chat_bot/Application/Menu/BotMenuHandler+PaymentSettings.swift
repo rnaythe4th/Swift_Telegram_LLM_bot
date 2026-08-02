@@ -402,15 +402,15 @@ extension BotMenuHandler {
         }
 
         if !allPresets.isEmpty {
-            for (index, preset) in allPresets.enumerated() {
+            for preset in allPresets {
                 let isPinned = pinned.contains(preset.value)
                 let mark = isPinned ? "🆓" : "☐"
-                // Position, not the model id — see `presetTarget`: a long id
-                // pushes `callback_data` past 64 bytes and Telegram then
+                // The preset's id, not the model id — see `presetTarget`: a long
+                // id pushes `callback_data` past 64 bytes and Telegram then
                 // refuses to render this page at all.
                 rows.row([menuButton(
                     "\(mark) \(preset.display)",
-                    .model, isPinned ? "unmarkfree" : "markfree", "\(index)"
+                    .model, isPinned ? "unmarkfree" : "markfree", preset.id
                 )])
             }
         }

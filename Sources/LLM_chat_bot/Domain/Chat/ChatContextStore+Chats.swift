@@ -79,6 +79,74 @@ extension ChatContextStore {
         chatMetaByID[chatID]?.botRemoved == true
     }
 
+    // MARK: - Group → supergroup migration
+
+    /// Moves everything a chat owns to the id Telegram gave it when the group
+    /// was upgraded to a supergroup.
+    ///
+    /// The upgrade is not a new chat to anyone in it — same people, same
+    /// history, same person paying — but it *is* a new `chat_id`, and every
+    /// piece of state here is keyed by that id. Without this the group loses
+    /// the licence somebody bought for it (its owner stays pinned to an id that
+    /// no longer receives messages), loses its settings and its conversation,
+    /// and is then claimed by whoever speaks first — possibly a different
+    /// tenant. Telegram announces the upgrade once, in the old chat, and never
+    /// again.
+    ///
+    /// Anything already stored under the new id wins: the supergroup may have
+    /// spoken before the announcement arrived, and that is the newer truth.
+    @discardableResult
+    func migrateChat(from oldID: ChatID, to newID: ChatID) -> Bool {
+        guard oldID != newID else { return false }
+        var moved = false
+
+        for (key, context) in contexts where key.chatID == oldID {
+            let target = ChatKey(chatID: newID, threadID: key.threadID)
+            contexts.removeValue(forKey: key)
+            dirtyContexts.remove(key)
+            deletedContexts.insert(key)
+            moved = true
+            guard contexts[target] == nil else { continue }
+            contexts[target] = context
+            dirtyContexts.insert(target)
+            deletedContexts.remove(target)
+        }
+
+        if let owner = chatOwnership.removeValue(forKey: oldID) {
+            moved = true
+            if chatOwnership[newID] == nil { chatOwnership[newID] = owner }
+        }
+
+        if let meta = chatMetaByID.removeValue(forKey: oldID) {
+            moved = true
+            if chatMetaByID[newID] == nil { chatMetaByID[newID] = meta }
+        }
+        // One row moves as a pair: the old id is deleted, the new one written.
+        // `bot_chat` carries both the identity and who pays for it.
+        if moved {
+            dirtyChats.remove(oldID)
+            deletedChats.insert(oldID)
+            dirtyChats.insert(newID)
+            deletedChats.remove(newID)
+        }
+
+        // In-memory-only companions: the greeting cooldown and the sponsor
+        // credit timer follow the chat so the upgrade does not read as a fresh
+        // join and re-greet a room that was just greeted.
+        if let greeted = _groupGreetedAt.removeValue(forKey: oldID) {
+            _groupGreetedAt[newID] = greeted
+        }
+        if let shown = _sponsorCreditShownAt.removeValue(forKey: oldID) {
+            _sponsorCreditShownAt[newID] = shown
+        }
+        for (key, request) in _pendingRequests where key.chatID == oldID {
+            _pendingRequests.removeValue(forKey: key)
+            _pendingRequests[ChatKey(chatID: newID, threadID: key.threadID)] = request
+        }
+
+        return moved
+    }
+
     // MARK: - Retention (§7.2)
 
     /// Chats whose conversation is not up for expiry: anything a tenant's

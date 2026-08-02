@@ -539,4 +539,58 @@ final class EndToEndTests: XCTestCase {
             "the ceiling must not announce that it no longer applies: \(texts)"
         )
     }
+
+    /// Telegram upgrades a group to a supergroup and gives it a new chat id,
+    /// announcing it once, in the old chat, with a service message. Everything
+    /// the group owns is keyed by that id — including the licence somebody
+    /// bought for it — so the announcement is the only chance to follow it.
+    func testAGroupUpgradedToASupergroupKeepsItsSponsorAndItsHistory() async throws {
+        let oldChatID: ChatID = -4_700
+        let newChatID: ChatID = -1_004_700_000_001
+        let sponsorID: UserID = 4_700
+        _ = await store.activatePaidSubscription(.identified(sponsorID))
+        await store.assignChat(chatID: oldChatID, to: .identified(sponsorID))
+
+        // A group answer is streamed into an edited message, so the proof it
+        // landed is the conversation, not a `sendMessage`.
+        await orchestrator.dispatch(update: message("@testbot привет", chatID: oldChatID, userID: sponsorID, isGroup: true))
+        try await waitUntil { await self.store.history(chatKey: ChatKey(chatID: oldChatID, threadID: 0)).count > 1 }
+        await telegram.reset()
+
+        await orchestrator.dispatch(update: migrationNotice(from: oldChatID, to: newChatID))
+        try await waitUntil { await self.store.chatSponsor(chatID: newChatID, asker: nil) != nil }
+
+        let history = await store.history(chatKey: ChatKey(chatID: newChatID, threadID: 0))
+        XCTAssertGreaterThan(history.count, 1, "the conversation followed the chat")
+        let orphaned = await store.hasSubscriptionCoverage(key: nil, userID: nil, chatID: oldChatID)
+        XCTAssertFalse(orphaned)
+        let answers = await telegram.calls("sendMessage")
+        XCTAssertTrue(answers.isEmpty, "a service message is not a question: \(answers.map(\.body))")
+    }
+
+    /// The service message Telegram posts in a group the moment it becomes a
+    /// supergroup: no text, no author, only the id everything moves to.
+    private func migrationNotice(from oldChatID: ChatID, to newChatID: ChatID) -> TelegramUpdate {
+        TelegramUpdate(
+            update_id: Int.random(in: 1...1_000_000),
+            message: TelegramMessage(
+                message_id: 9_100,
+                from: nil,
+                chat: TelegramChat(id: oldChatID, type: "group", title: "Тестовая группа"),
+                date: 0,
+                text: nil,
+                caption: nil,
+                voice: nil,
+                video: nil,
+                message_thread_id: nil,
+                media_group_id: nil,
+                reply_to_message: nil,
+                photo: nil,
+                migrate_to_chat_id: newChatID
+            ),
+            callback_query: nil,
+            pre_checkout_query: nil,
+            my_chat_member: nil
+        )
+    }
 }

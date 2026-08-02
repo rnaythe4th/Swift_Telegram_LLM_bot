@@ -76,38 +76,19 @@ extension BotMenuHandler {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль по умолчанию")
             try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             return
-        } else if route.sub == "gsel", let index = route.int(2) {
-            let presets = await state.rolePresets(chatID: chatKey.chatID)
-            guard index >= 0, index < presets.count else {
+        } else if route.sub == "gsel" || route.sub == "csel" || route.sub == "select" {
+            // `select` is the legacy alias of `gsel`; the only difference
+            // between the branches is which list the button is looked up in.
+            guard let token = route.arg(2) else { return }
+            let presets = route.sub == "csel"
+                ? await state.chatPresets(category: .role, chatKey: chatKey)
+                : await state.rolePresets(chatID: chatKey.chatID)
+            guard let preset = Self.presetTarget(token, in: presets) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
-            let roleValue = presets[index].value + formatOptions
-            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: roleValue)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(presets[index].display)")
-            try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
-            return
-        } else if route.sub == "csel", let index = route.int(2) {
-            let presets = await state.chatPresets(category: .role, chatKey: chatKey)
-            guard index >= 0, index < presets.count else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
-                return
-            }
-            let roleValue = presets[index].value + formatOptions
-            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: roleValue)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(presets[index].display)")
-            try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
-            return
-        } else if route.sub == "select", let index = route.int(2) {
-            // Legacy: treat as global
-            let presets = await state.rolePresets(chatID: chatKey.chatID)
-            guard index >= 0, index < presets.count else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
-                return
-            }
-            let roleValue = presets[index].value + formatOptions
-            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: roleValue)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(presets[index].display)")
+            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: preset.value + formatOptions)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(preset.display)")
             try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             return
         }
@@ -189,15 +170,18 @@ extension BotMenuHandler {
         }
     }
 
-    /// The preset a model button points at.
+    /// The preset a button points at.
     ///
-    /// Buttons carry the preset's position, because a model id does not fit:
-    /// `menu:model:gsel:` plus an OpenRouter id over 48 characters exceeds
-    /// Telegram's 64-byte `callback_data`, and the API then refuses the whole
-    /// message — the page simply never opens. Buttons in messages sent by an
-    /// older build still carry the value, so both are accepted; a numeric token
-    /// is a position first, which is why the value lookup runs second.
+    /// Buttons carry the preset's `id`, because neither of the alternatives
+    /// works: a model id does not fit (`menu:model:gsel:` plus an OpenRouter id
+    /// over 48 characters exceeds Telegram's 64-byte `callback_data`, and the
+    /// API then refuses the whole message — the page simply never opens), and a
+    /// position describes the list as it was when the page was drawn. Buttons
+    /// in messages sent by an older build still carry a position or the value,
+    /// so all three are accepted; an id always starts with a letter, so it can
+    /// never be mistaken for a position.
     static func presetTarget(_ token: String, in presets: [Preset]) -> Preset? {
+        if let preset = presets.first(where: { $0.id == token }) { return preset }
         if let index = Int(token), presets.indices.contains(index) { return presets[index] }
         return presets.first { $0.value == token }
     }
