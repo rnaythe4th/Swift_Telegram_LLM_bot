@@ -109,6 +109,35 @@ struct ChatContext: Sendable {
     var activeModeID: String? = nil
 }
 
+extension ChatContext {
+    /// What a chat's memory and answer style may be set to — whatever the value
+    /// came from: a command, a button, a mode, a row restored from an older
+    /// build. The store clamps to these itself, so a caller that forgets to
+    /// validate cannot widen them. They used to be six copies of `1...50` and
+    /// `0.0...2.0` spelled out at the call sites, and a bound kept in six
+    /// places is a bound that drifts.
+    static let historyRange = 1...50
+    static let tempRange: ClosedRange<Float> = 0.0...2.0
+
+    /// Ceiling on the conversation carried into a request, on top of the
+    /// message count. A model answer has no size limit of its own, and every
+    /// remembered message is re-sent on *every* turn — so without this one
+    /// runaway answer keeps being paid for, on every turn, and the chat's
+    /// `jsonb` row is rewritten at that size twice a second while the chat is
+    /// busy. Measured in UTF-8 bytes because that is what both the wire and the
+    /// column charge for; the system message is outside the budget (it is the
+    /// role, and dropping it changes who the bot is).
+    static let historyByteBudget = 200_000
+}
+
+extension ClosedRange {
+    /// The nearest value inside the range. Bounds belong to the domain, so the
+    /// store clamps rather than trusting the number it was handed.
+    func clamping(_ value: Bound) -> Bound {
+        Swift.min(Swift.max(value, lowerBound), upperBound)
+    }
+}
+
 struct GenerationSnapshot: Sendable {
     let provider: ServiceProvider
     let model: String

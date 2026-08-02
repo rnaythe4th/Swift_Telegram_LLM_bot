@@ -165,19 +165,6 @@ extension ChatContextStore {
         return token
     }
 
-    @discardableResult
-    func revokeInviteToken(owner: String) -> Bool {
-        let u = userKeyOrRaw(owner)
-        let stale = inviteRecords.filter { $0.value.ownerKey == u }.keys
-        guard !stale.isEmpty else { return false }
-        for token in stale {
-            inviteRecords.removeValue(forKey: token)
-            dirtyInvites.remove(token)
-            deletedInvites.insert(token)
-        }
-        return true
-    }
-
     /// Returns the issuing owner when the token is valid and their
     /// subscription is active.
     /// Owner key behind an invite token, if their subscription is still active.

@@ -284,7 +284,7 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
         }
-        guard let temp = Float(route.sub), (0.0...2.0).contains(temp) else { return }
+        guard let temp = Float(route.sub), ChatContext.tempRange.contains(temp) else { return }
         await state.setTemperature(chatKey: chatKey, value: temp)
         try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Стиль ответа: \(Self.tempBucket(temp))")
         try await showPage(.temp, chatKey: chatKey, callback: callback, message: message)
@@ -367,7 +367,7 @@ extension BotMenuHandler {
             let markup: Keyboard = [[cancelButton(to: .history)]]
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
-        } else if route.sub == "length", let length = route.int(2), (1...50).contains(length) {
+        } else if route.sub == "length", let length = route.int(2), ChatContext.historyRange.contains(length) {
             await state.setMaxHistory(chatKey: chatKey, newMax: length)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Память: \(length) сообщ.")
             try await showPage(.history, chatKey: chatKey, callback: callback, message: message)

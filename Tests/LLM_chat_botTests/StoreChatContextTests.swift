@@ -159,6 +159,140 @@ final class StoreChatContextTests: XCTestCase {
         XCTAssertEqual(topicHelp.model, "b/model")
     }
 
+    /// A turn that finished while an earlier one is still generating has an
+    /// answer — and the next question must be asked with it. Sending the
+    /// question without the answer is how the bot ends up answering it twice.
+    func testAnAnswerWaitingOnAnEarlierTurnIsStillPartOfTheConversation() async {
+        let store = Fixtures.makeStore()
+        let first = GenerationID()
+        let second = GenerationID()
+        let third = GenerationID()
+
+        _ = await store.snapshotAndAppend(chatKey: chat, generationID: first, content: input("первый"), username: nil)
+        _ = await store.snapshotAndAppend(chatKey: chat, generationID: second, content: input("второй"), username: nil)
+        // The second answer cannot be written to history yet — the first turn
+        // still holds the queue — but it happened.
+        _ = await store.appendAssistant(chatKey: chat, generationID: second, content: "ответ 2")
+
+        let snapshot = await store.snapshotAndAppend(chatKey: chat, generationID: third, content: input("третий"), username: nil)
+        XCTAssertEqual(snapshot.messages.map(\.role), ["system", "user", "user", "assistant", "user"])
+        XCTAssertEqual(plainText(snapshot.messages[3]), "ответ 2")
+        XCTAssertEqual(plainText(snapshot.messages.last), "третий")
+    }
+
+    /// The person took the question back — the model must not be asked it.
+    func testACancelledTurnIsNotSentToTheModel() async {
+        let store = Fixtures.makeStore()
+        let blocking = GenerationID()
+        let withdrawn = GenerationID()
+        let next = GenerationID()
+
+        _ = await store.snapshotAndAppend(chatKey: chat, generationID: blocking, content: input("держит очередь"), username: nil)
+        _ = await store.snapshotAndAppend(chatKey: chat, generationID: withdrawn, content: input("снятый вопрос"), username: nil)
+        await store.cancelPendingTurn(chatKey: chat, generationID: withdrawn)
+
+        let snapshot = await store.snapshotAndAppend(chatKey: chat, generationID: next, content: input("новый"), username: nil)
+        XCTAssertFalse(snapshot.messages.contains { plainText($0) == "снятый вопрос" })
+    }
+
+    /// The message count is not a size limit: one runaway answer is re-sent on
+    /// every turn and rewritten into the row on every flush.
+    func testHistoryStaysInsideItsByteBudget() async {
+        let store = Fixtures.makeStore()
+        await store.setMaxHistory(chatKey: chat, newMax: 50)
+        let huge = String(repeating: "я", count: 60_000) // 120 000 bytes each
+
+        for index in 0..<6 {
+            let generation = GenerationID()
+            _ = await store.snapshotAndAppend(chatKey: chat, generationID: generation, content: input("q\(index)"), username: nil)
+            _ = await store.appendAssistant(chatKey: chat, generationID: generation, content: huge)
+        }
+
+        let generation = GenerationID()
+        let snapshot = await store.snapshotAndAppend(chatKey: chat, generationID: generation, content: input("последний"), username: nil)
+        let carried = snapshot.messages.dropFirst().reduce(0) { $0 + $1.byteCount }
+        XCTAssertLessThanOrEqual(carried, ChatContext.historyByteBudget)
+        XCTAssertEqual(snapshot.messages.first?.role, "system", "the role is never the message dropped")
+        XCTAssertEqual(plainText(snapshot.messages.last), "последний", "the question being asked always survives")
+    }
+
+    /// The newest message survives whatever it weighs — a request without the
+    /// question is not the conversation at all.
+    func testTheQuestionSurvivesEvenWhenItAloneOverflowsTheBudget() async {
+        let store = Fixtures.makeStore()
+        let oversized = String(repeating: "x", count: ChatContext.historyByteBudget + 1_000)
+        let generation = GenerationID()
+
+        let snapshot = await store.snapshotAndAppend(chatKey: chat, generationID: generation, content: input(oversized), username: nil)
+        XCTAssertEqual(snapshot.messages.count, 2)
+        XCTAssertEqual(plainText(snapshot.messages.last), oversized)
+    }
+
+    /// Memory length multiplies the cost of every answer, so the bound is the
+    /// domain's — not something each of the four call sites re-types.
+    func testMemoryLengthIsClampedByTheDomain() async {
+        let store = Fixtures.makeStore()
+        await store.setMaxHistory(chatKey: chat, newMax: 100_000)
+        var help = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(help.maxHistory, ChatContext.historyRange.upperBound)
+
+        await store.setMaxHistory(chatKey: chat, newMax: 0)
+        help = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(help.maxHistory, ChatContext.historyRange.lowerBound)
+    }
+
+    /// The answer was generated and the money is being taken; a `/clear_history`
+    /// that landed mid-stream must not leave the chat's own totals short of what
+    /// the tenant and the daily spend already counted.
+    func testUsageIsCountedEvenWhenTheTurnWasDroppedMidStream() async {
+        let store = Fixtures.makeStore()
+        let generation = GenerationID()
+        _ = await store.snapshotAndAppend(chatKey: chat, generationID: generation, content: input("q"), username: nil)
+        await store.clearHistory(chatKey: chat)
+
+        let cost = await store.appendAssistant(
+            chatKey: chat, generationID: generation, content: "a",
+            usage: usage(cost: 1, tokens: 15)
+        )
+        XCTAssertEqual(cost.real, .usd(1), "the caller charges this — it is real spend")
+
+        let help = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(help.cumulativeUsage.generationCount, 1)
+        XCTAssertEqual(help.cumulativeUsage.totalCost, .usd(1))
+        let history = await store.history(chatKey: chat)
+        XCTAssertEqual(history.count, 1, "the answer has nowhere to go, and that part is fine")
+    }
+
+    /// "↺ Сбросить" resets settings. What the chat accumulated — its totals,
+    /// its presets, the funnel's activation flag, the ad throttle — is not a
+    /// setting, and a button anyone can tap must not move the numbers.
+    func testResetKeepsWhatTheChatAccumulated() async {
+        let store = Fixtures.makeStore()
+        let generation = GenerationID()
+        _ = await store.snapshotAndAppend(chatKey: chat, generationID: generation, content: input("q"), username: nil)
+        _ = await store.appendAssistant(chatKey: chat, generationID: generation, content: "a", usage: usage(cost: 1, tokens: 10))
+        await store.markFirstMessageIfNeeded(chatKey: chat)
+
+        await store.resetChat(chatKey: chat)
+        await store.markFirstMessageIfNeeded(chatKey: chat)
+
+        let report = await store.funnelReport()
+        XCTAssertEqual(report.counters[FunnelEvent.firstMessage.rawValue], 1, "one chat is one activation, however often it is reset")
+        let help = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(help.cumulativeUsage.generationCount, 1)
+    }
+
+    /// Every write to a chat marks it dirty; a turn is a write like any other.
+    func testStartingATurnMarksTheChatDirty() async {
+        let store = Fixtures.makeStore()
+        _ = await store.drainDirtyBatch()
+
+        _ = await store.snapshotAndAppend(chatKey: chat, generationID: GenerationID(), content: input("q"), username: nil)
+
+        let batch = await store.drainDirtyBatch()
+        XCTAssertTrue(batch.contexts.contains { $0.key == chat })
+    }
+
     /// Looking at a chat must not create one (and must not mark it dirty).
     func testPeekNeverCreatesAContext() async {
         let store = Fixtures.makeStore()

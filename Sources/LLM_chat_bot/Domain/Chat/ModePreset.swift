@@ -142,8 +142,10 @@ struct ModePresetConfig: Codable, Sendable, Equatable {
     static let maxSubtitleLength = 60
     static let maxIDLength = 12
     static let maxRoleLength = 1500
-    static let historyRange = 1...50
-    static let tempRange: ClosedRange<Float> = 0.0...2.0
+    /// A mode writes straight into a chat's settings, so it is bounded by the
+    /// same ranges the settings are (`ChatContext`) — not by a second pair.
+    static let historyRange = ChatContext.historyRange
+    static let tempRange = ChatContext.tempRange
 
     static let `default` = ModePresetConfig(
         enabled: true,
@@ -235,8 +237,8 @@ struct ModePresetConfig: Codable, Sendable, Equatable {
             item.role = item.role
                 .map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Self.maxRoleLength)) }
                 .flatMap { $0.isEmpty ? nil : $0 }
-            item.temp = min(max(item.temp, Self.tempRange.lowerBound), Self.tempRange.upperBound)
-            item.maxHistory = min(max(item.maxHistory, Self.historyRange.lowerBound), Self.historyRange.upperBound)
+            item.temp = Self.tempRange.clamping(item.temp)
+            item.maxHistory = Self.historyRange.clamping(item.maxHistory)
             item.taps = max(0, item.taps)
             guard !item.id.isEmpty, !item.title.isEmpty else { return nil }
             guard seen.insert(item.id).inserted else { return nil }

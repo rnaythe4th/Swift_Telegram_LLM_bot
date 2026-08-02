@@ -24,7 +24,7 @@ extension ChatContextStore {
             modelProviderRouting: nil,
             temp: 1.5,
             showStats: false,
-            maxHistory: tenant.defaultHistoryLength,
+            maxHistory: ChatContext.historyRange.clamping(tenant.defaultHistoryLength),
             showCost: true,
             showModel: true,
             provider: .openrouter,
@@ -49,17 +49,54 @@ extension ChatContextStore {
         dirtyContexts.insert(chatKey)
     }
 
+    /// The system message plus the newest turns that fit — by count *and* by
+    /// size. Both bounds are enforced here rather than at the setters alone:
+    /// this is the one place every path to a request and every write of the
+    /// stored conversation passes through, so a `maxHistory` that arrived out
+    /// of range (an older row, a mode from a future build) still cannot make
+    /// the bot re-send megabytes on every turn.
     private func trimHistory(_ history: [ChatMessage], limit: Int) -> [ChatMessage] {
         guard let first = history.first else { return history }
-        let safeLimit = max(1, limit)
-        let tail = Array(history.dropFirst())
-        let clipped = tail.suffix(safeLimit)
-        return [first] + clipped
+        let safeLimit = ChatContext.historyRange.clamping(limit)
+        let clipped = history.dropFirst().suffix(safeLimit)
+        return [first] + Self.fittingBudget(clipped)
     }
 
+    /// Fills the byte budget from the newest message backwards. The newest one
+    /// always survives, whatever its size: it is the question being asked, and
+    /// a request without it is not the conversation at all.
+    private static func fittingBudget(_ messages: ArraySlice<ChatMessage>) -> [ChatMessage] {
+        var remaining = ChatContext.historyByteBudget
+        var kept: [ChatMessage] = []
+        kept.reserveCapacity(messages.count)
+        for message in messages.reversed() {
+            let size = message.byteCount
+            if !kept.isEmpty, size > remaining { break }
+            remaining -= size
+            kept.append(message)
+        }
+        return kept.reversed()
+    }
+
+    /// What the model is shown: the stored conversation plus the turns still in
+    /// flight. A turn that finished while an *earlier* one is still generating
+    /// contributes both halves — showing its question without its answer is how
+    /// the bot ends up answering the same question twice. A cancelled turn
+    /// contributes nothing: the person took the question back.
     private func visibleHistory(for context: ChatContext) -> [ChatMessage] {
-        let pendingUserMessages = context.pendingTurns.map(\.userMessage)
-        return trimHistory(context.history + pendingUserMessages, limit: context.maxHistory)
+        var inFlight: [ChatMessage] = []
+        for turn in context.pendingTurns {
+            switch turn.state {
+            case .pending:
+                inFlight.append(turn.userMessage)
+            case .completed(let answer):
+                inFlight.append(turn.userMessage)
+                inFlight.append(.init(role: "assistant", content: answer))
+            case .cancelled:
+                continue
+            }
+        }
+        return trimHistory(context.history + inFlight, limit: context.maxHistory)
     }
 
     private func flushResolvedTurns(_ context: inout ChatContext) {
@@ -175,7 +212,7 @@ extension ChatContextStore {
 
     func setMaxHistory(chatKey: ChatKey, newMax: Int) {
         mutate(chatKey: chatKey) { context in
-            context.maxHistory = max(1, newMax)
+            context.maxHistory = ChatContext.historyRange.clamping(newMax)
             context.history = trimHistory(context.history, limit: context.maxHistory)
             // Hand-edited: the chat no longer matches the mode it was in.
             context.activeModeID = nil
@@ -201,7 +238,7 @@ extension ChatContextStore {
 
     func setTemperature(chatKey: ChatKey, value: Float) {
         mutate(chatKey: chatKey) {
-            $0.temp = value
+            $0.temp = ChatContext.tempRange.clamping(value)
             $0.activeModeID = nil
         }
     }
@@ -261,11 +298,17 @@ extension ChatContextStore {
         content: UserInputContent,
         username: String?
     ) -> GenerationSnapshot {
-        var context = ensure(chatKey: chatKey)
         let userMessage = ChatMessage.userContent(content, username: username)
-        context.pendingTurns.append(.init(generationID: generationID, userMessage: userMessage, state: .pending))
+        // Through `mutate`, not a bare assignment: the pending turn itself is
+        // not persisted, but "every write to `contexts` marks the chat dirty"
+        // is a rule worth having no exception to.
+        mutate(chatKey: chatKey) { context in
+            context.pendingTurns.append(
+                .init(generationID: generationID, userMessage: userMessage, state: .pending)
+            )
+        }
+        let context = ensure(chatKey: chatKey)
         let messages = visibleHistory(for: context)
-        contexts[chatKey] = context
         return .init(
             provider: context.provider,
             model: context.model,
@@ -291,18 +334,21 @@ extension ChatContextStore {
         content: String,
         usage: StreamUsageSummary? = nil
     ) -> (real: Money, billed: Money) {
+        let markup = markupPercentValue
         let real = Money.usd(usage?.cost ?? 0)
-        let billed = real.multiplied(byPercent: markupPercentValue)
+        let billed = real.multiplied(byPercent: markup)
         mutate(chatKey: chatKey) { context in
+            // Counted whatever became of the turn. The answer was generated and
+            // the money is being taken (the caller charges what this returns),
+            // so a `/clear_history` or a model switch that landed mid-stream
+            // must not leave the chat's own totals — the ones the tenant and
+            // the daily spend already got — quietly short by one answer.
+            context.cumulativeUsage.add(usage, markupPercent: markup)
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
                 return
             }
             context.pendingTurns[index].state = .completed(content)
             flushResolvedTurns(&context)
-            context.cumulativeUsage.totalTokens += usage?.totalTokens ?? 0
-            context.cumulativeUsage.totalCost += real
-            context.cumulativeUsage.totalBilledCost += billed
-            context.cumulativeUsage.generationCount += 1
         }
         accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
         recordProviderSpend(chatID: chatKey.chatID, real: real)
@@ -341,6 +387,9 @@ extension ChatContextStore {
             // Provider pin belongs to the previously chosen model.
             $0.modelProviderRouting = nil
             $0.downgradedFromModel = nil
+            // Hand-picking the model is a hand edit like any other: the chat no
+            // longer matches the mode it was switched into.
+            $0.activeModeID = nil
         }
     }
 
@@ -382,6 +431,11 @@ extension ChatContextStore {
     /// are not settings — they are things the chat accumulated, and the button
     /// says "сбросить настройки", not "стереть всё" (`/reset_stats` exists for
     /// the totals). Throwing them away silently is what this used to do.
+    ///
+    /// The same goes for the two records nobody thinks of as state: the funnel's
+    /// "this chat has been activated" flag (resetting it counts one chat as a
+    /// second activation, every time anyone taps ↺) and the ad throttle
+    /// (resetting it hands the chat another impression ahead of schedule).
     func resetChat(chatKey: ChatKey) {
         let tenant = tenantState(for: chatKey.chatID)
         let role = roleWithCompanyMembers(chatID: chatKey.chatID, role: tenant.defaultRole + formatOptions)
@@ -394,7 +448,7 @@ extension ChatContextStore {
             modelProviderRouting: nil,
             temp: 1.5,
             showStats: false,
-            maxHistory: tenant.defaultHistoryLength,
+            maxHistory: ChatContext.historyRange.clamping(tenant.defaultHistoryLength),
             showCost: true,
             showModel: true,
             provider: .openrouter,
@@ -405,7 +459,10 @@ extension ChatContextStore {
             chatModelPresets: previous?.chatModelPresets ?? [],
             chatTempPresets: previous?.chatTempPresets ?? [],
             chatHistoryLengthPresets: previous?.chatHistoryLengthPresets ?? [],
-            chatRolePresets: previous?.chatRolePresets ?? []
+            chatRolePresets: previous?.chatRolePresets ?? [],
+            adReplyCounter: previous?.adReplyCounter ?? 0,
+            adLastShownAt: previous?.adLastShownAt,
+            funnelFirstMessageCounted: previous?.funnelFirstMessageCounted ?? false
         )
         dirtyContexts.insert(chatKey)
         // "Стандартные настройки" means the working mode, when there is one:

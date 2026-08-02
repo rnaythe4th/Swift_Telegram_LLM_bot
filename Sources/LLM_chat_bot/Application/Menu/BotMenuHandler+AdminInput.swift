@@ -135,7 +135,7 @@ extension BotMenuHandler {
             resumePage = .adminDefaults
 
         case .defaultsHistory:
-            if let n = Int(trimmed), (1...50).contains(n) {
+            if let n = Int(trimmed), ChatContext.historyRange.contains(n) {
                 _ = await state.setDefaultHistoryLength(n, chatID: chatKey.chatID)
                 toast = "✓ Память в новых чатах · \(n) сообщ."
             } else {
@@ -341,7 +341,7 @@ extension BotMenuHandler {
 
         case .chatCustomTemp:
             resumePage = .temp
-            if let temp = Float(trimmed.replacingOccurrences(of: ",", with: ".")), (0.0...2.0).contains(temp) {
+            if let temp = Float(trimmed.replacingOccurrences(of: ",", with: ".")), ChatContext.tempRange.contains(temp) {
                 await state.setTemperature(chatKey: chatKey, value: temp)
                 toast = "✓ Стиль ответа: <b>\(Self.tempBucket(temp))</b> (\(Self.formatTemp(temp)))"
             } else {
@@ -350,7 +350,7 @@ extension BotMenuHandler {
 
         case .chatCustomHistory:
             resumePage = .history
-            if let n = Int(trimmed), (1...50).contains(n) {
+            if let n = Int(trimmed), ChatContext.historyRange.contains(n) {
                 await state.setMaxHistory(chatKey: chatKey, newMax: n)
                 toast = "✓ Память: <b>\(n) сообщ.</b>"
             } else {

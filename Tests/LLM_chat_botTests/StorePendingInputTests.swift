@@ -96,6 +96,47 @@ final class StorePendingInputTests: XCTestCase {
         XCTAssertEqual(owner, UserKey.identified(42))
     }
 
+    // MARK: - Lifetime
+
+    /// A wait nobody answered must stop listening. Otherwise the next thing its
+    /// owner types in that chat — a day later, a real question — is spent as
+    /// the value, and they get "⚠️ Нужно число" instead of an answer.
+    func testAForgottenWaitStopsSwallowingMessages() async {
+        let store = Fixtures.makeStore()
+        let armed = Date().addingTimeInterval(-PendingRequest.lifetime - 60)
+        await store.setPending(.starsPrice, menuMessageID: 5, chatKey: chat, now: armed)
+
+        let pending = await store.pendingRequest(chatKey: chat)
+        XCTAssertNil(pending, "an expired wait must not claim the next message")
+        let consumed = await store.consumePending(chatKey: chat)
+        XCTAssertNil(consumed)
+        let still = await store.hasAnyPendingInput(chatKey: chat)
+        XCTAssertFalse(still, "and it must not linger in the map either")
+    }
+
+    func testAWaitIsStillLiveInsideItsWindow() async {
+        let store = Fixtures.makeStore()
+        let armed = Date().addingTimeInterval(-PendingRequest.lifetime / 2)
+        await store.setPending(.starsPrice, menuMessageID: 5, chatKey: chat, now: armed)
+
+        let pending = await store.pendingRequest(chatKey: chat)
+        XCTAssertEqual(pending?.menuMessageID, 5)
+    }
+
+    /// Re-arming after an expiry starts a fresh wait: inheriting the owner of
+    /// one that died last week would hand the new prompt to the wrong person.
+    func testAnExpiredWaitDoesNotDonateItsOwner() async {
+        let store = Fixtures.makeStore()
+        let armed = Date().addingTimeInterval(-PendingRequest.lifetime - 60)
+        await store.setPending(.starsPrice, menuMessageID: 5, chatKey: chat, now: armed)
+        await store.notePendingInputOwner(UserKey.identified(42), chatKey: chat, now: armed)
+
+        await store.setPending(.starsPerUsd, menuMessageID: 6, chatKey: chat)
+
+        let owner = await store.pendingInputOwner(chatKey: chat)
+        XCTAssertNil(owner)
+    }
+
     func testOwnerIsNotRememberedWithoutAWait() async {
         let store = Fixtures.makeStore()
         await store.notePendingInputOwner(UserKey.identified(42), chatKey: chat)

@@ -28,7 +28,7 @@ extension BotCommandHandler {
             // Same line as the menu: hand-tuning is what premium unlocks, and a
             // command must not be the back door around it.
             guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
-            guard let temp = Float(parsed.argument), (0.0...2.0).contains(temp) else {
+            guard let temp = Float(parsed.argument), ChatContext.tempRange.contains(temp) else {
                 let hint = "<i>Нужно число от 0.0 (строго по фактам) до 2.0 (творчески).</i>\n<i>Пример:</i> <code>/settemp 1.0</code>"
                 try await sendUserFeedback(chatKey: chatKey, text: hint)
                 return
@@ -105,7 +105,7 @@ extension BotCommandHandler {
             // each answer.
             guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
                                                  refusal: "🔒 Длину памяти настраивает владелец бота.") else { return }
-            guard let newMax = Int(parsed.argument), (1...50).contains(newMax) else {
+            guard let newMax = Int(parsed.argument), ChatContext.historyRange.contains(newMax) else {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Нужно число от 1 до 50 — сколько прошлых сообщений бот держит в голове.</i>\n<i>Пример:</i> <code>/historylength 11</code>")
                 return
             }

@@ -74,7 +74,7 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль по умолчанию обновлена:\n<blockquote expandable>\(new)</blockquote>")
 
         case "historylength":
-            guard !value.isEmpty, let length = Int(value), (1...50).contains(length) else {
+            guard !value.isEmpty, let length = Int(value), ChatContext.historyRange.contains(length) else {
                 if value.isEmpty {
                     let defs = await state.getDefaults(chatID: chatKey.chatID)
                     try await sendUserFeedback(chatKey: chatKey, text: "Память в новых чатах · <b>\(defs.historyLength) сообщ.</b>")

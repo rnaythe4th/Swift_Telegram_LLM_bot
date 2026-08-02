@@ -28,9 +28,12 @@ extension ChatContextStore {
         return role
     }
 
+    /// The tenant default every new chat starts on, so it is bounded by the
+    /// same range as the per-chat setting — otherwise it is a way in for a
+    /// memory length no button can produce.
     @discardableResult
     func setDefaultHistoryLength(_ length: Int, chatID: ChatID) -> Int {
-        let clamped = max(1, length)
+        let clamped = ChatContext.historyRange.clamping(length)
         mutateTenant(for: chatID) { $0.defaultHistoryLength = clamped }
         return clamped
     }

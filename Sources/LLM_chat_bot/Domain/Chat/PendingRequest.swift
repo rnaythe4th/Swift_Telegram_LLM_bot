@@ -35,4 +35,19 @@ struct PendingRequest: Sendable {
     /// Menu message to redraw once the value lands.
     let menuMessageID: Int
     let kind: PendingKind
+    /// When the button was tapped. A wait nobody answers must not sit in the
+    /// chat forever: whoever armed it walks away, and the next thing they type
+    /// — an hour later, a week later — is spent as the value. Instead of an
+    /// answer they get "⚠️ Нужно число от 1 до 50" about a menu they have long
+    /// forgotten, and the question never reaches the model.
+    let armedAt: Date
+
+    /// How long a tap keeps the chat listening. Long enough to look up a
+    /// receiving address or write a role; short enough that a forgotten prompt
+    /// is gone before the next conversation.
+    static let lifetime: TimeInterval = 30 * 60
+
+    func isLive(now: Date) -> Bool {
+        now.timeIntervalSince(armedAt) < Self.lifetime
+    }
 }
