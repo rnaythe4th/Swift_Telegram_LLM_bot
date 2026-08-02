@@ -174,4 +174,81 @@ final class CryptoSettlementTests: XCTestCase {
         XCTAssertEqual(untouched?.status, .open)
         XCTAssertEqual(untouched?.accumulatedAtomic, 0)
     }
+
+    // MARK: - Keeping the invoice table bounded
+
+    private func invoice(_ id: String, status: CryptoInvoiceStatus, createdAt: Date) -> CryptoInvoice {
+        CryptoInvoice(
+            id: id,
+            ownerKey: store.userKey(userID: payerID),
+            userChatID: payerID.privateChat,
+            asset: .usdtTon,
+            receivingAddress: address,
+            exactAmountAtomic: 5_000_000,
+            accumulatedAtomic: 0,
+            quotedPriceUsdCents: 500,
+            rateAtomicPerUsdCentMicro: 10_000_000_000,
+            createdAt: createdAt,
+            expiresAt: createdAt.addingTimeInterval(1_800),
+            status: status,
+            linkedSenders: [],
+            creditedTxHashes: [],
+            slotOffset: 0,
+            purpose: .subscription
+        )
+    }
+
+    /// Every abandoned purchase leaves an invoice, and an invoice is not free
+    /// to keep: it is a `bot_crypto_invoice` row read back whole at restore and
+    /// a member of the collection the monitor scans every thirty seconds. So
+    /// settled ones are dropped once the table outgrows its budget — and open
+    /// ones never are, because those are transfers the chain will not redeliver.
+    func testSettledInvoicesArePrunedAndInflightOnesAreNot() async {
+        let base = Date().addingTimeInterval(-100_000)
+        let budget = ChatContextStore.maxStoredCryptoInvoices
+
+        await store.upsertCryptoInvoice(invoice("open-oldest", status: .open, createdAt: base))
+        await store.upsertCryptoInvoice(invoice("partial-oldest", status: .partial, createdAt: base))
+        for index in 0..<(budget + 50) {
+            await store.upsertCryptoInvoice(
+                invoice("settled-\(index)", status: .paid, createdAt: base.addingTimeInterval(Double(index)))
+            )
+        }
+
+        let held = await store.openCryptoInvoices().count
+        XCTAssertEqual(held, 2, "money in flight is never pruned")
+        let openOldest = await store.cryptoInvoice(id: "open-oldest")
+        XCTAssertNotNil(openOldest)
+        let partialOldest = await store.cryptoInvoice(id: "partial-oldest")
+        XCTAssertNotNil(partialOldest)
+
+        // The newest settled invoice survives; the oldest ones are gone.
+        let newestSettled = await store.cryptoInvoice(id: "settled-\(budget + 49)")
+        XCTAssertNotNil(newestSettled)
+        let oldestSettled = await store.cryptoInvoice(id: "settled-0")
+        XCTAssertNil(oldestSettled, "the table must not grow for ever")
+    }
+
+    /// Settling an invoice is itself a write, and a write is what triggers the
+    /// prune. The invoice being written must survive it — the caller is still
+    /// holding it, and for crypto the caller may still need to leave the door
+    /// open (`.deferred`).
+    func testSettlingAnOldInvoiceDoesNotDeleteItMidWrite() async {
+        let base = Date().addingTimeInterval(-100_000)
+        let budget = ChatContextStore.maxStoredCryptoInvoices
+
+        var oldest = invoice("oldest", status: .open, createdAt: base)
+        await store.upsertCryptoInvoice(oldest)
+        for index in 0..<(budget + 50) {
+            await store.upsertCryptoInvoice(
+                invoice("settled-\(index)", status: .paid, createdAt: base.addingTimeInterval(Double(index + 1)))
+            )
+        }
+
+        oldest.status = .paid
+        await store.upsertCryptoInvoice(oldest)
+
+        let stillThere = await store.cryptoInvoice(id: "oldest")
+        XCTAssertNotNil(stillThere)
+    }
 }

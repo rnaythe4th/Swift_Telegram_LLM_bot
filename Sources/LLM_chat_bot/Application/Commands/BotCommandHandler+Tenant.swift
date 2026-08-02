@@ -353,10 +353,13 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/tenant extend @username &lt;дней&gt;</code>")
                 return
             }
-            if let until = await extendSubscription(key: state.userKeyOrRaw(handle), days: days) {
+            switch await extendSubscription(key: state.userKeyOrRaw(handle), days: days) {
+            case .extended(let until):
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 try await sendUserFeedback(chatKey: chatKey, text: "✓ Подписка @\(handle) продлена до <b>\(f.string(from: until))</b>.")
-            } else {
+            case .alreadyUnlimited:
+                try await sendUserFeedback(chatKey: chatKey, text: "У @\(handle) бессрочный доступ — продлевать нечего. Чтобы задать срок: <code>/tenant expire @\(handle)</code>, затем продлить.")
+            case .unknownTenant:
                 try await sendUserFeedback(chatKey: chatKey, text: "Спонсор @\(handle) не найден.")
             }
 

@@ -314,24 +314,29 @@ final class PostgresIntegrationTests: XCTestCase {
         await store.registerTenant(key)
         try await persistence.apply(await store.drainDirtyBatch())
 
-        let extended = await writer.extend(key: key, days: 30)
-        let until = try XCTUnwrap(extended)
+        // `registerTenant` opens an open-ended one, and adding days to that is
+        // refused (it would swap unlimited access for an end date), so the
+        // term is put there by ending it first — which is also the order the
+        // super-admin page offers the two buttons in.
+        let expired = await writer.expire(key: key)
+        XCTAssertTrue(expired)
         var reloaded = Fixtures.makeStore()
         await reloaded.restore(from: try await persistence.loadEverything())
         var subscription = await reloaded.tenantSubscription(ownerKey: key)
+        XCTAssertFalse(subscription.isActive, "an expiry has to outlive the process that made it")
+
+        guard case .extended(let until) = await writer.extend(key: key, days: 30) else {
+            return XCTFail("a sponsor with a term must be extendable")
+        }
+        reloaded = Fixtures.makeStore()
+        await reloaded.restore(from: try await persistence.loadEverything())
+        subscription = await reloaded.tenantSubscription(ownerKey: key)
         XCTAssertEqual(
             subscription.paidUntil?.timeIntervalSince1970 ?? 0,
             until.timeIntervalSince1970,
             accuracy: 1,
-            "an extension has to outlive the process that made it"
+            "an extension has to outlive it too"
         )
-
-        let expired = await writer.expire(key: key)
-        XCTAssertTrue(expired)
-        reloaded = Fixtures.makeStore()
-        await reloaded.restore(from: try await persistence.loadEverything())
-        subscription = await reloaded.tenantSubscription(ownerKey: key)
-        XCTAssertFalse(subscription.isActive, "an expiry has to outlive it too")
 
         let unlimited = await writer.setUnlimited(key: key)
         XCTAssertTrue(unlimited)

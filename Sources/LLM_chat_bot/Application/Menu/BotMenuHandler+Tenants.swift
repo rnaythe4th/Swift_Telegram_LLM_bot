@@ -420,10 +420,13 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(invoker: target))
         case "ext":
             guard let target = route.userKey(2) else { return }
-            if let until = await extendSubscription(key: target, days: ChatContextStore.subscriptionDays) {
+            switch await extendSubscription(key: target, days: ChatContextStore.subscriptionDays) {
+            case .extended(let until):
                 let f = DateFormatter(); f.dateFormat = "dd.MM.yyyy"
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Продлена до \(f.string(from: until))")
-            } else {
+            case .alreadyUnlimited:
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.subscriptionAlreadyUnlimited)
+            case .unknownTenant:
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.tenantNotFound)
             }
             try await editOrAnswer(callback: callback, message: message, screen: await renderSuperTenantInfo(invoker: target))

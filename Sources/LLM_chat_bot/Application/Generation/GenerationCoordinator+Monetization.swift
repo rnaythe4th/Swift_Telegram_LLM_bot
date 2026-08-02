@@ -160,7 +160,8 @@ extension GenerationCoordinator {
         // price and cannot buy unbounded consumption; without this the first
         // sign of a heavy group on an expensive model is the provider's
         // invoice, weeks later.
-        if try await applySpendCap(chatKey: chatKey) == false { return nil }
+        let spendCap = try await applySpendCap(chatKey: chatKey)
+        if spendCap == .abandon { return nil }
 
         let hasAccess = await state.hasFullModelAccess(
             key: origin.userKey,
@@ -177,7 +178,13 @@ extension GenerationCoordinator {
             // back the paid model the cap had parked, otherwise the purchase
             // silently changes nothing and the chat keeps answering on the
             // fallback (roadmap steps 2 and 6).
-            if let restored = await state.restoreDowngradedModel(chatKey: chatKey) {
+            //
+            // Not while a spending ceiling is in force, though: full access is
+            // exactly the population the ceiling exists for, so restoring here
+            // handed the paid model straight back on the same turn the ceiling
+            // had just parked it — the cap answered on the expensive model
+            // anyway and said both things at once.
+            if spendCap == .clear, let restored = await state.restoreDowngradedModel(chatKey: chatKey) {
                 try? await sendUserFeedback(
                     chatKey: chatKey,
                     text: "⚡ Дневной лимит вам больше не мешает — вернул умную модель <code>\(restored)</code>. Сменить: /menu → 🤖 Модель"
@@ -201,7 +208,9 @@ extension GenerationCoordinator {
             // sitting on the cap fallback would never reach `consumeDailyPremium`
             // again and the whole daily taste would die after its first day. The
             // purchase path above announces the restore; a new day is routine.
-            if await state.remainingDailyPremium(
+            // Same exception as above: a spending ceiling outranks the daily
+            // taste, so the parked model stays parked until the ceiling lifts.
+            if spendCap == .clear, await state.remainingDailyPremium(
                 chatID: chatKey.chatID,
                 userID: origin.user?.id,
                 isGroup: !origin.isPrivate
@@ -251,15 +260,32 @@ extension GenerationCoordinator {
         return DailyPremiumVerdict(ticket: premiumTicket, lastCall: lastPremiumCall)
     }
 
-    /// Applies the daily spending ceilings. Returns false when the turn must be
-    /// abandoned; the user has been told why.
+    /// What the daily spending ceilings decided for this turn.
+    ///
+    /// Three states rather than a `Bool`, because "the turn may proceed" and
+    /// "no ceiling is in force" are not the same thing, and collapsing them is
+    /// what made the ceiling inoperative: while one holds, the paid model it
+    /// parked has to stay parked.
+    enum SpendCapOutcome: Sendable, Equatable {
+        /// No ceiling in force — the turn runs under the ordinary rules.
+        case clear
+        /// A ceiling holds; the chat answers on a free model until it lifts.
+        case capped
+        /// The turn cannot run at all — the user has been told why.
+        case abandon
+    }
+
+    /// Applies the daily spending ceilings.
     ///
     /// Free models cost nothing and are never gated: a ceiling that switches
     /// the bot off entirely would turn an accounting limit into an outage.
-    private func applySpendCap(chatKey: ChatKey) async throws -> Bool {
-        guard let verdict = await state.spendVerdict(chatID: chatKey.chatID) else { return true }
+    private func applySpendCap(chatKey: ChatKey) async throws -> SpendCapOutcome {
+        guard let verdict = await state.spendVerdict(chatID: chatKey.chatID) else { return .clear }
         let currentModel = await state.model(chatKey: chatKey)
-        guard await state.allowedFreeModelIDs()?.contains(currentModel) != true else { return true }
+        // Already on a free model: nothing to downgrade and nothing to announce
+        // a second time — but the ceiling is still in force, so this is
+        // `.capped`, not `.clear`.
+        guard await state.allowedFreeModelIDs()?.contains(currentModel) != true else { return .capped }
 
         switch verdict {
         case .global(let spent, let cap):
@@ -276,14 +302,14 @@ extension GenerationCoordinator {
                     chatKey: chatKey,
                     text: "⏸ Умные модели на сегодня недоступны — дневной лимит расходов исчерпан. Завтра всё вернётся."
                 )
-                return false
+                return .abandon
             }
             await state.downgradeModelToFree(chatKey: chatKey, freeModel: free)
             try? await sendUserFeedback(
                 chatKey: chatKey,
                 text: "⏸ Дневной лимит расходов исчерпан — отвечаю на бесплатной модели <code>\(free)</code> до завтра."
             )
-            return true
+            return .capped
 
         case .tenant(let spent, let cap, let response):
             logger.warning("tenant spend cap reached: \(spent) of \(cap)", context: LogContext(chat: chatKey))
@@ -293,15 +319,17 @@ extension GenerationCoordinator {
                     chatKey: chatKey,
                     text: "⏸ Дневной лимит расходов этой подписки исчерпан (\(cap.formatted(fractionDigits: 2))). Ответы вернутся завтра."
                 )
-                return false
+                return .abandon
             case .downgradeToFree:
-                guard let free = await state.fallbackFreeModel() else { return true }
+                // Nothing free to fall back to: the turn goes ahead on the paid
+                // model rather than being refused, but the ceiling still holds.
+                guard let free = await state.fallbackFreeModel() else { return .capped }
                 await state.downgradeModelToFree(chatKey: chatKey, freeModel: free)
                 try? await sendUserFeedback(
                     chatKey: chatKey,
                     text: "⏸ Дневной лимит расходов исчерпан (\(cap.formatted(fractionDigits: 2))) — отвечаю на бесплатной модели <code>\(free)</code> до завтра."
                 )
-                return true
+                return .capped
             }
         }
     }

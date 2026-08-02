@@ -47,6 +47,18 @@ enum SubscriptionActivation: Sendable {
     case alreadyUnlimited
 }
 
+/// Outcome of a manual "+N days" (super-admin button or `/tenant extend`).
+///
+/// Three cases rather than `Date?`, because "no such sponsor" and "this
+/// sponsor has open-ended access" call for opposite answers: the first is a
+/// typo, the second is a request that must be refused rather than granted.
+enum SubscriptionExtensionOutcome: Sendable, Equatable {
+    case extended(until: Date)
+    /// Open-ended access; adding days would replace it with an end date.
+    case alreadyUnlimited
+    case unknownTenant
+}
+
 struct TenantStatsRow: Sendable {
     /// Storage key — pass back to the store; `label` is what people read.
     let key: UserKey

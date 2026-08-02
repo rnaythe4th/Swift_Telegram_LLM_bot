@@ -95,7 +95,35 @@ extension ChatContextStore {
     func upsertCryptoInvoice(_ invoice: CryptoInvoice) {
         _cryptoInvoices[invoice.id] = invoice
         markCryptoInvoiceDirty(invoice.id)
+        pruneCryptoInvoices(keeping: invoice.id)
     }
+
+    /// A settled invoice is history. Keeping every one of them ever opened is
+    /// not free: each is a `bot_crypto_invoice` row read back in full at every
+    /// restore, and every poll of the blockchain monitor scans the whole
+    /// collection (`openInvoiceMatching`, `usedSlots`, `allocatedPoolAddresses`)
+    /// — so the cost of an abandoned purchase is paid every 30 seconds, for
+    /// ever. Same bound and same reasoning as `pruneExternalOrders`.
+    ///
+    /// Open and partial invoices are never dropped: those are payments in
+    /// flight, and the chain has no delivery retry to fall back on. `keeping`
+    /// is the invoice this write is about — settling an old one must not delete
+    /// it out from under the caller that is still holding it.
+    private func pruneCryptoInvoices(keeping id: String) {
+        guard _cryptoInvoices.count > Self.maxStoredCryptoInvoices else { return }
+        let settled = _cryptoInvoices.values
+            .filter { $0.isSettled && $0.id != id }
+            .sorted { $0.createdAt > $1.createdAt }
+        let keep = Set(settled.prefix(Self.maxStoredCryptoInvoices / 2).map(\.id))
+        for (invoiceID, invoice) in _cryptoInvoices
+        where invoice.isSettled && invoiceID != id && !keep.contains(invoiceID) {
+            _cryptoInvoices.removeValue(forKey: invoiceID)
+            dirtyCryptoInvoices.remove(invoiceID)
+            deletedCryptoInvoices.insert(invoiceID)
+        }
+    }
+
+    static let maxStoredCryptoInvoices = 200
 
     /// An invoice is a row of its own, not part of the crypto settings
     /// document: it is a payment in flight, and there is one per purchase.
@@ -109,13 +137,11 @@ extension ChatContextStore {
     }
 
     func openCryptoInvoices() -> [CryptoInvoice] {
-        _cryptoInvoices.values.filter { $0.status == .open || $0.status == .partial }
+        _cryptoInvoices.values.filter(\.isAwaitingFunds)
     }
 
     func openCryptoInvoices(asset: CryptoAsset) -> [CryptoInvoice] {
-        _cryptoInvoices.values.filter {
-            ($0.status == .open || $0.status == .partial) && $0.asset == asset
-        }
+        _cryptoInvoices.values.filter { $0.isAwaitingFunds && $0.asset == asset }
     }
 
     func openCryptoInvoiceForUser(key: UserKey, asset: CryptoAsset, purpose: CryptoInvoicePurpose) -> CryptoInvoice? {
@@ -123,13 +149,13 @@ extension ChatContextStore {
         return _cryptoInvoices.values.first { invoice in
             guard invoice.ownerKey == u, invoice.asset == asset else { return false }
             guard invoice.resolvedPurpose == purpose else { return false }
-            return invoice.status == .open || invoice.status == .partial
+            return invoice.isAwaitingFunds
         }
     }
 
     func cancelCryptoInvoice(id: String) {
         guard var inv = _cryptoInvoices[id] else { return }
-        if inv.status == .open || inv.status == .partial {
+        if inv.isAwaitingFunds {
             inv.status = .cancelled
             _cryptoInvoices[id] = inv
             markCryptoInvoiceDirty(id)
@@ -139,7 +165,7 @@ extension ChatContextStore {
     func expireDueCryptoInvoices(now: Date = Date()) -> [CryptoInvoice] {
         var expired: [CryptoInvoice] = []
         for (id, inv) in _cryptoInvoices {
-            guard inv.status == .open || inv.status == .partial else { continue }
+            guard inv.isAwaitingFunds else { continue }
             if now >= inv.expiresAt {
                 var copy = inv
                 copy.status = .expired
@@ -154,8 +180,8 @@ extension ChatContextStore {
     func usedSlots(asset: CryptoAsset) -> Set<Int> {
         Set(
             _cryptoInvoices.values
-                .filter { ($0.status == .open || $0.status == .partial) && $0.asset == asset }
-                .map { $0.slotOffset }
+                .filter { $0.isAwaitingFunds && $0.asset == asset }
+                .map(\.slotOffset)
         )
     }
 
@@ -246,7 +272,7 @@ extension ChatContextStore {
     func allocatedPoolAddresses(asset: CryptoAsset) -> Set<String> {
         Set(
             _cryptoInvoices.values
-                .filter { ($0.status == .open || $0.status == .partial) && $0.asset == asset }
+                .filter { $0.isAwaitingFunds && $0.asset == asset }
                 .map { $0.receivingAddress.lowercased() }
         )
     }
@@ -258,7 +284,7 @@ extension ChatContextStore {
         guard !pool.isEmpty else { return nil }
         let allocated = Set(
             _cryptoInvoices.values
-                .filter { ($0.status == .open || $0.status == .partial) && $0.asset.chain == chain }
+                .filter { $0.isAwaitingFunds && $0.asset.chain == chain }
                 .map { $0.receivingAddress.lowercased() }
         )
         return pool.first { !allocated.contains($0.lowercased()) }
@@ -267,7 +293,7 @@ extension ChatContextStore {
     func openInvoiceMatching(asset: CryptoAsset, address: String) -> CryptoInvoice? {
         let target = address.lowercased()
         return _cryptoInvoices.values.first {
-            ($0.status == .open || $0.status == .partial)
+            $0.isAwaitingFunds
                 && $0.asset == asset
                 && $0.receivingAddress.lowercased() == target
         }

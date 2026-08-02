@@ -45,16 +45,22 @@ extension ChatContextStore {
     }
 
     /// Super-admin: extend by N days (from max(now, current end)).
+    ///
+    /// An unlimited tenant stays unlimited — the same rule a payment follows
+    /// (`activatePaidSubscription`) and for a stronger reason here: "+30 дней"
+    /// on an open-ended sponsor reads as a gift and used to land as a
+    /// revocation. The root owner is unlimited by default, so the worst case
+    /// was the bot's owner giving themselves an expiry date with one tap.
     @discardableResult
-    func extendTenantSubscription(_ key: UserKey, days: Int) -> Date? {
+    func extendTenantSubscription(_ key: UserKey, days: Int) -> SubscriptionExtensionOutcome {
         let u = resolved(key)
-        guard var tenant = tenants[u] else { return nil }
-        let base = max(Date(), tenant.paidUntil ?? Date())
-        let until = base.addingTimeInterval(TimeInterval(days) * 86_400)
+        guard var tenant = tenants[u] else { return .unknownTenant }
+        guard let paidUntil = tenant.paidUntil else { return .alreadyUnlimited }
+        let until = max(Date(), paidUntil).addingTimeInterval(TimeInterval(days) * 86_400)
         tenant.paidUntil = until
         tenants[u] = tenant
         dirtyTenants.insert(u)
-        return until
+        return .extended(until: until)
     }
 
     /// Super-admin: make the subscription unlimited.

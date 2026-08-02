@@ -96,6 +96,19 @@ enum CryptoInvoiceStatus: String, Codable, Sendable {
     case paid
     case expired
     case cancelled
+
+    /// Money is still expected on this invoice: the monitor watches it, the
+    /// slot and the pool address it holds stay taken, and it is never pruned.
+    var isAwaitingFunds: Bool {
+        switch self {
+        case .open, .partial: return true
+        case .paid, .expired, .cancelled: return false
+        }
+    }
+
+    /// Nothing more will happen to it — history, safe to forget once the table
+    /// outgrows its budget.
+    var isSettled: Bool { !isAwaitingFunds }
 }
 
 /// What a crypto invoice buys — the same two cases every other payment method
@@ -133,6 +146,10 @@ struct CryptoInvoice: Codable, Sendable, Identifiable {
     var purpose: CryptoInvoicePurpose? = nil
 
     var remainingAtomic: Int64 { max(0, exactAmountAtomic - accumulatedAtomic) }
+
+    /// Money still in flight — see `CryptoInvoiceStatus.isAwaitingFunds`.
+    var isAwaitingFunds: Bool { status.isAwaitingFunds }
+    var isSettled: Bool { status.isSettled }
 
     /// Purpose with the legacy default applied (nil → subscription).
     var resolvedPurpose: CryptoInvoicePurpose { purpose ?? .subscription }

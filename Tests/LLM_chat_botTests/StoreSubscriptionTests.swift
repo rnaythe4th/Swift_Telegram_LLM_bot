@@ -252,4 +252,39 @@ final class StoreSubscriptionTests: XCTestCase {
         dm = await store.privateChatID(forKey: key)
         XCTAssertNil(dm, "a blocked DM is not a channel")
     }
+
+    /// "+30 дней" on an open-ended sponsor used to replace unlimited access
+    /// with an end date — a button labelled as a gift that revoked one. The
+    /// root owner is unlimited by default, so the reachable worst case was the
+    /// bot's owner giving themselves an expiry with one tap.
+    func testExtendingAnUnlimitedSponsorLeavesThemUnlimited() async {
+        let store = Fixtures.makeStore()
+        let key = await makeSponsor(store, userID: 520, username: "forever")
+        await store.registerTenant(key)
+        let seeded = await store.tenantSubscription(ownerKey: key).paidUntil
+        XCTAssertNil(seeded, "manual tenants start unlimited")
+
+        let outcome = await store.extendTenantSubscription(key, days: 30)
+
+        XCTAssertEqual(outcome, .alreadyUnlimited)
+        let after = await store.tenantSubscription(ownerKey: key).paidUntil
+        XCTAssertNil(after, "adding a term to open-ended access takes it away")
+    }
+
+    /// The other two answers of the same call, so the three are not confused:
+    /// a sponsor with a term is extended, a stranger is a typo.
+    func testExtendingReportsATermAndAnUnknownSponsorApart() async {
+        let store = Fixtures.makeStore()
+        let key = await makeSponsor(store, userID: 521, username: "paying")
+        _ = await store.activatePaidSubscription(key)
+        let before = await store.tenantSubscription(ownerKey: key).paidUntil ?? Date()
+
+        guard case .extended(let until) = await store.extendTenantSubscription(key, days: 30) else {
+            return XCTFail("a sponsor with a term must be extendable")
+        }
+        XCTAssertEqual(until.timeIntervalSince(before), 30 * 86_400, accuracy: 2)
+
+        let stranger = await store.extendTenantSubscription(UserKey.identified(522), days: 30)
+        XCTAssertEqual(stranger, .unknownTenant)
+    }
 }

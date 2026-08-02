@@ -226,4 +226,82 @@ final class StoreBillingTests: XCTestCase {
         let due = await store.dueWalletWinbacks(now: Date().addingTimeInterval(Fixtures.days(60)))
         XCTAssertTrue(due.isEmpty)
     }
+
+    // MARK: - Spending ceilings (§4.1)
+    //
+    // The only gate that applies to people who *have* paid: a subscription is
+    // a fixed price and cannot buy unbounded consumption. Everything else in
+    // this file caps the free tier.
+
+    func testNoCeilingIsConfiguredByDefault() async {
+        let store = Fixtures.makeStore()
+        let policy = await store.spendPolicy()
+        XCTAssertFalse(policy.isEnabled, "ceilings are opt-in, not a surprise")
+        await store.recordProviderSpend(chatID: -700, real: .usd(1_000))
+        let verdict = await store.spendVerdict(chatID: -700)
+        XCTAssertNil(verdict)
+    }
+
+    func testTheGlobalCeilingStopsEveryChatAtOnce() async {
+        let store = Fixtures.makeStore()
+        await store.setSpendPolicy(SpendPolicy(
+            dailyGlobalCap: .cents(50), dailyPerTenantCap: .zero, onTenantCap: .downgradeToFree
+        ))
+
+        await store.recordProviderSpend(chatID: -700, real: .cents(49))
+        let under = await store.spendVerdict(chatID: -700)
+        XCTAssertNil(under, "under the ceiling")
+
+        await store.recordProviderSpend(chatID: -700, real: .cents(1))
+        guard case .global(let spent, let cap) = await store.spendVerdict(chatID: -700) else {
+            return XCTFail("reaching the ceiling is hitting it")
+        }
+        XCTAssertEqual(spent, .cents(50))
+        XCTAssertEqual(cap, .cents(50))
+        // A chat nobody spent anything in is stopped too — the budget is the
+        // owner's, not the chat's.
+        let elsewhere = await store.spendVerdict(chatID: -701)
+        XCTAssertNotNil(elsewhere)
+    }
+
+    /// A heavy sponsor must not spend anyone else's allowance.
+    func testThePerTenantCeilingIsChargedToTheChatsOwner() async {
+        let store = Fixtures.makeStore()
+        let heavy = UserKey.identified(710)
+        await store.identifyUser(userID: 710, username: "heavy", firstName: nil)
+        _ = await store.activatePaidSubscription(heavy)
+        await store.assignChat(chatID: -710, to: heavy)
+        await store.setSpendPolicy(SpendPolicy(
+            dailyGlobalCap: .zero, dailyPerTenantCap: .cents(20), onTenantCap: .refuse
+        ))
+
+        await store.recordProviderSpend(chatID: -710, real: .cents(20))
+
+        guard case .tenant(let spent, let cap, let response) = await store.spendVerdict(chatID: -710) else {
+            return XCTFail("the sponsor of this chat is over their ceiling")
+        }
+        XCTAssertEqual(spent, .cents(20))
+        XCTAssertEqual(cap, .cents(20))
+        XCTAssertEqual(response, .refuse)
+        let other = await store.spendVerdict(chatID: -711)
+        XCTAssertNil(other, "another tenant's chat is untouched")
+    }
+
+    /// Today's spend is today's. The ledger rolls over on the first record
+    /// after UTC midnight rather than on a timer of its own.
+    func testTheDailyLedgerRollsOverAtTheDayBoundary() async {
+        var ledger = DailySpendLedger(day: FunnelDailyLog.dayNumber() - 1, total: .cents(90), byTenant: [:])
+        ledger.record(.cents(5), tenant: Fixtures.ownerKey)
+        XCTAssertEqual(ledger.total, .cents(5), "yesterday's spend is not today's")
+        XCTAssertEqual(ledger.spent(tenant: Fixtures.ownerKey), .cents(5))
+    }
+
+    /// An unknown `onTenantCap` decodes as the gentler of the two: a document
+    /// written by another build must not start refusing answers.
+    func testAnUnknownCapResponseDecodesAsTheGentleOne() throws {
+        let json = Data(#"{"dailyGlobalCap":0,"dailyPerTenantCap":0,"onTenantCap":"explode"}"#.utf8)
+        let policy = try JSONDecoder().decode(SpendPolicy.self, from: json)
+        XCTAssertEqual(policy.onTenantCap, .downgradeToFree)
+        XCTAssertFalse(policy.isEnabled)
+    }
 }

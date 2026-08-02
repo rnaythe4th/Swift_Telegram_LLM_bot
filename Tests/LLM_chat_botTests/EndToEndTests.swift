@@ -506,4 +506,37 @@ final class EndToEndTests: XCTestCase {
             )
         }
     }
+
+    /// A spending ceiling exists for the people who *have* paid — everyone else
+    /// is already held by the daily premium taste. It used to be undone on the
+    /// same turn it fired: the cap parked the paid model, and the "access is
+    /// back" branch two lines later handed it straight back, so the expensive
+    /// model answered anyway and the chat was told both things at once.
+    func testASpendingCeilingKeepsTheParkedModelParkedForASubscriber() async throws {
+        await store.setFreeModelIDs(["free/model"])
+
+        let sponsorID: UserID = 4_600
+        _ = await store.activatePaidSubscription(.identified(sponsorID))
+        await store.assignChat(chatID: sponsorID.privateChat, to: .identified(sponsorID))
+        await store.setSpendPolicy(SpendPolicy(
+            dailyGlobalCap: .cents(1), dailyPerTenantCap: .zero, onTenantCap: .downgradeToFree
+        ))
+        await store.recordProviderSpend(chatID: sponsorID.privateChat, real: .cents(5))
+
+        await orchestrator.dispatch(update: message("вопрос", userID: sponsorID, username: "sponsor"))
+        _ = await telegram.waitForCall("sendMessage", containing: "ответ модели")
+
+        let help = await store.fetchHelp(chatKey: ChatKey(chatID: sponsorID.privateChat, threadID: 0))
+        XCTAssertEqual(help.model, "free/model", "the ceiling parked the paid model; it must stay parked")
+
+        let texts = await telegram.calls("sendMessage").map(\.body)
+        XCTAssertTrue(
+            texts.contains { $0.contains("лимит расходов") },
+            "a ceiling nobody is told about is an unexplained downgrade: \(texts)"
+        )
+        XCTAssertFalse(
+            texts.contains { $0.contains("больше не мешает") },
+            "the ceiling must not announce that it no longer applies: \(texts)"
+        )
+    }
 }

@@ -18,14 +18,16 @@ struct SubscriptionWriter: Sendable {
     let logger: LoggerPort
     let alerter: OwnerAlerter?
 
-    /// Super-admin: extend by N days from max(now, current end).
+    /// Super-admin: extend by N days from max(now, current end). Nothing is
+    /// written when the store refused to move the date (unknown sponsor, or an
+    /// unlimited one that must stay unlimited).
     @discardableResult
-    func extend(key: UserKey, days: Int) async -> Date? {
-        guard let until = await state.extendTenantSubscription(key, days: days) else {
-            return nil
+    func extend(key: UserKey, days: Int) async -> SubscriptionExtensionOutcome {
+        let outcome = await state.extendTenantSubscription(key, days: days)
+        if case .extended(let until) = outcome {
+            await persist(key: key, paidUntil: until)
         }
-        await persist(key: key, paidUntil: until)
-        return until
+        return outcome
     }
 
     /// Super-admin: open-ended access.

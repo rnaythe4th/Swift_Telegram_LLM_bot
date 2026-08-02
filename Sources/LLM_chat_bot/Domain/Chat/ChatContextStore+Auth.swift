@@ -47,7 +47,15 @@ extension ChatContextStore {
     func removeSuperAdmin(_ u: UserKey) -> Bool {
         guard u != rootSuperAdminKey else { return false }
         let removed = superAdminKeys.remove(u) != nil
-        if removed { dirtyConfigs.insert(.superAdmins) }
+        if removed {
+            dirtyConfigs.insert(.superAdmins)
+            // A simulation only exists while its owner is a super-admin: every
+            // reader below gates on `superAdminKeys`. Left behind, it comes
+            // back with them — re-added, the person is a super-admin whom
+            // `isSuperAdmin` reads as somebody else, and the only way out is a
+            // `/simulate off` for a simulation nothing tells them they are in.
+            _simulatedRoles.removeValue(forKey: u)
+        }
         return removed
     }
 

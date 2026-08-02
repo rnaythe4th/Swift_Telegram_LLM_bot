@@ -183,4 +183,28 @@ final class StoreAccessTests: XCTestCase {
         let ownerIsRoot = await store.isRootSuperAdmin(UserKey.identified(Fixtures.ownerUserID))
         XCTAssertTrue(ownerIsRoot)
     }
+
+    /// A simulation only means anything while its owner is a super-admin —
+    /// every reader gates on `superAdminKeys`. Left behind on removal it came
+    /// back with them: re-added, the person was a super-admin `isSuperAdmin`
+    /// read as somebody else, with nothing on screen to say why.
+    func testRemovingASuperAdminDropsTheirSimulation() async {
+        let store = Fixtures.makeStore()
+        await store.identifyUser(userID: 560, username: "second", firstName: nil)
+        let key = UserKey.identified(560)
+        await store.addSuperAdmin(key)
+        let simulating = await store.setSimulatedRole(key, role: .regularUser)
+        XCTAssertTrue(simulating)
+        let shadowed = await store.isSuperAdmin(key)
+        XCTAssertFalse(shadowed, "a simulating super-admin is not one")
+
+        let removed = await store.removeSuperAdmin(key)
+        XCTAssertTrue(removed)
+        await store.addSuperAdmin(key)
+
+        let leftover = await store.simulatedRole(key)
+        XCTAssertNil(leftover)
+        let restored = await store.isSuperAdmin(key)
+        XCTAssertTrue(restored, "coming back must not restore a stale simulation")
+    }
 }

@@ -137,7 +137,7 @@ final class BotCommandHandler: Sendable {
 // restart; without one wired (tests, a bot with no database) they fall back to
 // the in-memory path, which is all there is to change anyway.
 extension BotCommandHandler {
-    func extendSubscription(key: UserKey, days: Int) async -> Date? {
+    func extendSubscription(key: UserKey, days: Int) async -> SubscriptionExtensionOutcome {
         if let subscriptions { return await subscriptions.extend(key: key, days: days) }
         return await state.extendTenantSubscription(key, days: days)
     }

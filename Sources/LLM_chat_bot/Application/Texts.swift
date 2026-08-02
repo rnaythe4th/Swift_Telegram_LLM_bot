@@ -50,6 +50,9 @@ enum Texts {
     static let modeUnavailable = "Режим сейчас недоступен — попробуйте позже"
     static let exampleNotFound = "Пример не найден"
     static let cannotRemove = "Нельзя удалить"
+    /// "+30 дней" on an open-ended sponsor: adding a term would replace
+    /// unlimited access with an expiry date, so nothing was changed.
+    static let subscriptionAlreadyUnlimited = "Доступ бессрочный — продлевать нечего"
     static let unknownPack = "Неизвестный пакет"
     static let cryptoUnavailable = "Крипто-оплата недоступна"
     static let externalUnavailable = "Оплата через кассу недоступна"
