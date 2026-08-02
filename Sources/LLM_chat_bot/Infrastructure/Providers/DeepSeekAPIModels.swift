@@ -38,15 +38,46 @@ struct DeepSeekStreamChunk: Decodable {
     let error: ProviderStreamErrorPayload?
 }
 
-struct DeepSeekUsage: Decodable {
-    struct CompletionTokenDetails: Decodable {
-        let reasoning_tokens: Int
+extension DeepSeekStreamChunk: OpenAICompatibleStreamChunk {
+    var streamError: ProviderStreamErrorPayload? { error }
+
+    var deltaText: String? {
+        let pieces = choices?.compactMap { $0.delta?.content }.filter { !$0.isEmpty } ?? []
+        return pieces.isEmpty ? nil : pieces.joined()
     }
 
-    let completion_tokens: Int
-    let prompt_tokens: Int
-    let prompt_cache_hit_tokens: Int
-    let prompt_cache_miss_tokens: Int
-    let total_tokens: Int
+    var finishReasonRaw: String? { choices?.compactMap(\.finish_reason).last }
+
+    var usageSummary: StreamUsageSummary? {
+        usage.map { u in
+            StreamUsageSummary(
+                promptTokens: u.prompt_tokens.map(Double.init),
+                completionTokens: u.completion_tokens.map(Double.init),
+                totalTokens: u.total_tokens.map(Double.init),
+                cacheHitTokens: u.prompt_cache_hit_tokens.map(Double.init),
+                cacheWriteTokens: nil,
+                cacheMissTokens: u.prompt_cache_miss_tokens.map(Double.init),
+                reasoningTokens: u.completion_details?.reasoning_tokens.map(Double.init),
+                // DeepSeek prices nothing in the response: the turn is
+                // genuinely unpriced, and the footer says «—» rather than
+                // inventing a zero.
+                cost: nil
+            )
+        }
+    }
+}
+
+/// Optional throughout: a required field would let one renamed or omitted
+/// counter throw away the whole chunk — text, error payload and all.
+struct DeepSeekUsage: Decodable {
+    struct CompletionTokenDetails: Decodable {
+        let reasoning_tokens: Int?
+    }
+
+    let completion_tokens: Int?
+    let prompt_tokens: Int?
+    let prompt_cache_hit_tokens: Int?
+    let prompt_cache_miss_tokens: Int?
+    let total_tokens: Int?
     let completion_details: CompletionTokenDetails?
 }

@@ -98,6 +98,9 @@ enum UserFacingError {
         case .decodeFailure:
             return "Сервис ИИ ответил непонятно. Попробуйте ещё раз."
 
+        case .streamOverflow:
+            return "Сервис ИИ прислал повреждённый ответ. Попробуйте ещё раз или выберите другую модель в /menu → 🤖 Модель."
+
         case .encodeFailure:
             return "Не удалось отправить запрос. Попробуйте ещё раз."
         }

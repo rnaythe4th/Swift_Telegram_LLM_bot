@@ -1,5 +1,16 @@
 import Foundation
 
+/// Framing shared by every OpenAI-compatible SSE stream.
+enum ProviderStreamPayload {
+    /// The sentinel that ends an OpenAI-style stream. Compared against the
+    /// trimmed payload: the SSE framing strips one space after `data:`, and a
+    /// provider that pads its sentinel would otherwise turn the end of the
+    /// stream into an undecodable chunk.
+    static func isDone(_ payload: String) -> Bool {
+        payload.trimmingCharacters(in: .whitespaces) == "[DONE]"
+    }
+}
+
 /// An error an OpenAI-compatible provider delivers *inside* a 200 OK SSE stream
 /// (`{"error":{"code":429,"message":"rate limited"}}`): rate limits, exhausted
 /// credit, moderation blocks, "no endpoints found".

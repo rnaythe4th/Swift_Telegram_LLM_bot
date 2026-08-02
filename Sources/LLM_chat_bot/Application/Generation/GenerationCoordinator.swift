@@ -13,7 +13,16 @@ private enum ReplyContentResolution {
 /// sent, so there is nowhere left to stream. Its own type because the only
 /// alternative on hand — `CancellationError` — makes the bot report «⏹
 /// Остановлено» to a user who stopped nothing.
-struct ContinuationUnavailable: Error {}
+///
+/// It carries the part that *was* delivered: the failure happens after the
+/// current message has been edited to hold that part, so whoever writes the
+/// final text has to know where the visible answer ends. Rewriting the message
+/// with the whole accumulator instead puts an over-long text in front of
+/// `editMessage`, which keeps the prefix that fits and drops the tail — the
+/// tail being the notice that explains what happened.
+struct ContinuationUnavailable: Error {
+    let delivered: String
+}
 
 /// Everything a turn needs to know about who asked and where. A real Telegram
 /// message yields one; so does a synthetic turn started from a button (an

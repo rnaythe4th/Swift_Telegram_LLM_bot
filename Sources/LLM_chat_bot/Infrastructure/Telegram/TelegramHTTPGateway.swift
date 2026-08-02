@@ -192,11 +192,23 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
     /// an over-long message is rejected outright and that piece of the answer
     /// never reaches the chat.
     static func chunkFittingHTML(_ text: String) -> (chunk: String, rest: String, html: String) {
-        var limit = MessageSplitter.charLimit
+        // The budget is the whole message. `MessageSplitter.charLimit` keeps
+        // 200 characters in reserve, but that reserve exists for the *streaming*
+        // split, which appends a footer later — spending it again here just
+        // shaved 200 characters off every finished message, and what sits in
+        // the last 200 characters of a finished message is the footer.
+        var limit = MessageSplitter.telegramMaxChars
         var (chunk, rest) = MessageSplitter.splitRendered(text, limit: limit)
         var html = TelegramHTMLFormatter.helper(text: chunk)
-        while html.count > MessageSplitter.telegramMaxChars, limit > 256 {
-            limit /= 2
+        // Telegram counts UTF-16 code units, not Characters: an answer full of
+        // emoji or CJK is twice as long to Telegram as it looks here, and the
+        // only honest measure of "does it fit" is the one Telegram uses.
+        while html.utf16.count > MessageSplitter.telegramMaxChars, limit > 256 {
+            // Shrink in proportion to the overshoot rather than halving: the
+            // formatter's own markup is a small addition, and halving throws
+            // away half an answer to make room for it.
+            let scaled = limit * MessageSplitter.telegramMaxChars / html.utf16.count
+            limit = max(256, min(limit - 1, scaled))
             (chunk, rest) = MessageSplitter.splitRendered(text, limit: limit)
             html = TelegramHTMLFormatter.helper(text: chunk)
         }

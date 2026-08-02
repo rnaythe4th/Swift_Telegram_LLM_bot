@@ -190,6 +190,11 @@ extension GenerationCoordinator {
 
                 case .meta(let meta):
                     streamMeta = meta
+
+                case .keepAlive:
+                    // Nothing to render: the point of the event is that the
+                    // watchdog upstream saw it (`withIdleTimeout`).
+                    break
                 }
             }
         } catch is CancellationError {
@@ -335,7 +340,7 @@ extension GenerationCoordinator {
             guard let next = await sendContinuationPlaceholder() else {
                 // Nowhere to put the rest of the answer. Not a cancellation:
                 // reporting it as one would tell the user they pressed Stop.
-                throw ContinuationUnavailable()
+                throw ContinuationUnavailable(delivered: done)
             }
             currentPlaceholder = next
             messageAccumulator = remaining
@@ -391,12 +396,19 @@ extension GenerationCoordinator {
 
                 case .meta(let meta):
                     streamMeta = meta
+
+                case .keepAlive:
+                    // Nothing to render: the point of the event is that the
+                    // watchdog upstream saw it (`withIdleTimeout`).
+                    break
                 }
             }
-        } catch is ContinuationUnavailable {
+        } catch let unavailable as ContinuationUnavailable {
             // Keep what has already been streamed and say what happened — the
             // alternative (an error message replacing the placeholder) throws
-            // away the part of the answer the user can already read.
+            // away the part of the answer the user can already read. Only the
+            // delivered part stays: the rest never had a message to live in.
+            messageAccumulator = unavailable.delivered
             continuationFailed = true
         } catch is CancellationError {
             isCancelled = true
@@ -421,18 +433,15 @@ extension GenerationCoordinator {
             isCancelled = true
         }
 
-        // See the draft path: the trailer must sit outside whatever block the
-        // answer stopped inside.
-        let closers = MessageSplitter.closingTagMarkup(in: messageAccumulator)
-
-        var finalText: String
+        // An edit is one message and `editMessage` keeps only the prefix that
+        // fits, so the trailer is assembled first and the answer gives way to
+        // it — see `MessageSplitter.withTrailer`. That also closes whatever
+        // block the answer stopped inside, so the trailer sits outside it.
+        var trailer: String
         if isCancelled {
-            let stopNotice = await self.cancellationNotice(for: generationID)
-            finalText = messageAccumulator.isEmpty
-                ? stopNotice
-                : (isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n") + messageAccumulator + closers + "\n\n" + stopNotice
+            trailer = "\n\n" + (await self.cancellationNotice(for: generationID))
         } else {
-            let footer = await makeFooter(
+            trailer = await makeFooter(
                 streamMeta: streamMeta,
                 fallbackModel: fallbackModel,
                 options: options,
@@ -440,14 +449,19 @@ extension GenerationCoordinator {
                 hasContent: !fullAccumulator.isEmpty,
                 sponsorLine: sponsorLine
             )
-
-            let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
-            finalText = messageAccumulator.isEmpty
-                ? "<i>Пустой ответ.</i>\(footer)"
-                : prefix + messageAccumulator + closers + footer
         }
         if continuationFailed {
-            finalText += "\n\n⚠️ <i>Ответ пришлось оборвать: не удалось отправить продолжение. Повторите запрос.</i>"
+            trailer += "\n\n⚠️ <i>Ответ пришлось оборвать: не удалось отправить продолжение. Повторите запрос.</i>"
+        }
+
+        let finalText: String
+        if messageAccumulator.isEmpty {
+            finalText = isCancelled
+                ? String(trailer.drop(while: \.isNewline))
+                : "<i>Пустой ответ.</i>" + trailer
+        } else {
+            let prefix = isFirstMessage ? "" : "<i>↑ продолжение</i>\n\n"
+            finalText = MessageSplitter.withTrailer(prefix + messageAccumulator, trailer: trailer)
         }
 
         try? await self.telegram.editMessage(

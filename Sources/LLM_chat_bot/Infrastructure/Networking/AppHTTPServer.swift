@@ -27,6 +27,11 @@ typealias AppHTTPRouteHandler = @Sendable (_ head: HTTPRequestHead, _ body: Data
 /// Small NIO HTTP/1.1 server serving liveness/readiness/metrics endpoints and
 /// the Telegram webhook. One shared handler closure routes by method + path.
 final class AppHTTPServer {
+    /// Silence on an open connection before it is dropped. Generous next to
+    /// anything a request here does (the webhook only enqueues), tight enough
+    /// that abandoned sockets do not accumulate for the life of the process.
+    static let idleTimeout: TimeAmount = .seconds(120)
+
     private let group: MultiThreadedEventLoopGroup
     private let port: Int
     private let handler: AppHTTPRouteHandler
@@ -44,8 +49,18 @@ final class AppHTTPServer {
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socket(.init(SOL_SOCKET), .init(SO_REUSEADDR)), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(HTTPRouteChannelHandler(handler: handler))
+                // Built on the event loop the handlers will run on: NIO's
+                // handlers are loop-confined, not `Sendable`, and the
+                // synchronous API is where that is expressible.
+                channel.eventLoop.makeCompletedFuture {
+                    let pipeline = channel.pipeline.syncOperations
+                    try pipeline.configureHTTPServerPipeline()
+                    // A connection nobody speaks on is a file descriptor nobody
+                    // gets back: Telegram, the platform's health prober and any
+                    // stranger who finds the port all keep sockets alive, and
+                    // this process has no other bound on how many.
+                    try pipeline.addHandler(IdleStateHandler(readTimeout: Self.idleTimeout))
+                    try pipeline.addHandler(HTTPRouteChannelHandler(handler: handler))
                 }
             }
 
@@ -72,6 +87,9 @@ private final class HTTPRouteChannelHandler: ChannelInboundHandler, @unchecked S
     private var requestHead: HTTPRequestHead?
     private var bodyData = Data()
     private var bodyTooLarge = false
+    /// Set while a handler is running. The idle timer must not close the
+    /// connection out from under a request that is about to be answered.
+    private var isResponding = false
 
     init(handler: @escaping AppHTTPRouteHandler) {
         self.handler = handler
@@ -108,6 +126,11 @@ private final class HTTPRouteChannelHandler: ChannelInboundHandler, @unchecked S
             let keepAlive = head.isKeepAlive
             let channel = context.channel
             let handler = self.handler
+            // HEAD asks for the headers of what GET would return — a body here
+            // is a protocol violation the next response on the connection pays
+            // for, because the client reads it as the head of that response.
+            let omitBody = head.method == .HEAD
+            isResponding = true
 
             Task {
                 let response: AppHTTPResponse
@@ -116,13 +139,26 @@ private final class HTTPRouteChannelHandler: ChannelInboundHandler, @unchecked S
                 } else {
                     response = await handler(head, body)
                 }
-                Self.write(response, to: channel, keepAlive: keepAlive)
+                self.write(response, to: channel, keepAlive: keepAlive, omitBody: omitBody)
             }
         }
     }
 
-    private static func write(_ response: AppHTTPResponse, to channel: Channel, keepAlive: Bool) {
+    /// Closes a connection that has gone quiet — but never one whose answer is
+    /// still being written.
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        guard event is IdleStateHandler.IdleStateEvent else {
+            context.fireUserInboundEventTriggered(event)
+            return
+        }
+        if !isResponding {
+            context.close(promise: nil)
+        }
+    }
+
+    private func write(_ response: AppHTTPResponse, to channel: Channel, keepAlive: Bool, omitBody: Bool) {
         channel.eventLoop.execute {
+            self.isResponding = false
             let bodyBytes = Array(response.body.utf8)
             var headers = HTTPHeaders()
             headers.add(name: "Content-Type", value: response.contentType)
@@ -134,9 +170,11 @@ private final class HTTPRouteChannelHandler: ChannelInboundHandler, @unchecked S
             let head = HTTPResponseHead(version: .http1_1, status: response.status, headers: headers)
             channel.write(HTTPServerResponsePart.head(head), promise: nil)
 
-            var buffer = channel.allocator.buffer(capacity: bodyBytes.count)
-            buffer.writeBytes(bodyBytes)
-            channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
+            if !omitBody {
+                var buffer = channel.allocator.buffer(capacity: bodyBytes.count)
+                buffer.writeBytes(bodyBytes)
+                channel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
+            }
 
             let endPromise = channel.eventLoop.makePromise(of: Void.self)
             channel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: endPromise)

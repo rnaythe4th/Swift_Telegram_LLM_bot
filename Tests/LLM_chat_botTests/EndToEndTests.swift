@@ -507,6 +507,50 @@ final class EndToEndTests: XCTestCase {
         }
     }
 
+    /// The answer outgrew one message and the continuation could not be sent —
+    /// the bot lost the right to post mid-answer. What the user is left with
+    /// must be the part that did land *plus* the explanation: the message used
+    /// to be rewritten with the whole answer, which `editMessage` then trimmed
+    /// back to the part that fits — trimming away the explanation with it, and
+    /// leaving «↓ продолжение ниже» pointing at a message that never came.
+    func testAnswerThatCannotBeContinuedSaysSoInsteadOfPromisingMore() async throws {
+        let long = String(repeating: "строка ответа. ", count: 700)
+        orchestrator = BotOrchestrator(
+            telegram: TelegramHTTPGateway(
+                network: NetworkClient(),
+                botToken: "test-token",
+                apiBase: baseURL,
+                rateLimiter: nil,
+                metrics: nil
+            ),
+            state: store,
+            sessionRegistry: SessionRegistry(),
+            mediaResolver: FakeMediaResolver(),
+            providers: [.openrouter: FakeProviderGateway(reply: long)],
+            persistence: nil,
+            logger: SilentLogger(),
+            metrics: RuntimeMetrics(),
+            flags: flags,
+            generationLimiter: GenerationLimiter(maxConcurrent: 4),
+            botUsername: botUsername,
+            formatOptions: ""
+        )
+        await telegram.refuse("sendMessage", containing: "Продолжаю")
+
+        await orchestrator.dispatch(update: message("@testbot дай длинный ответ", chatID: -4_900, isGroup: true))
+
+        let notice = await telegram.waitForCall("editMessageText", containing: "оборвать")
+        let final = try XCTUnwrap(notice, "the user was never told the answer had to stop")
+        let text = try XCTUnwrap(final.text)
+        XCTAssertFalse(text.contains("продолжение ниже"), "promised a continuation that cannot arrive")
+        XCTAssertLessThanOrEqual(
+            text.utf16.count,
+            MessageSplitter.telegramMaxChars,
+            "an over-long edit comes back as 400 and the notice is lost"
+        )
+        XCTAssertTrue(text.contains("строка ответа"), "threw away the part of the answer that did land")
+    }
+
     /// A spending ceiling exists for the people who *have* paid — everyone else
     /// is already held by the daily premium taste. It used to be undone on the
     /// same turn it fired: the cap parked the paid model, and the "access is

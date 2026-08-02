@@ -61,6 +61,12 @@ final class FakeTelegram: @unchecked Sendable {
         server = nil
     }
 
+    /// Makes the Bot API refuse the matching calls, the way it does when the
+    /// bot loses the right to post mid-answer.
+    func refuse(_ method: String, containing needle: String) async {
+        await recorder.refuse(method: method) { $0.contains(needle) }
+    }
+
     func calls(_ method: String) async -> [TelegramCall] { await recorder.calls(method) }
     func lastCall(_ method: String) async -> TelegramCall? { await recorder.calls(method).last }
     func allCalls() async -> [TelegramCall] { await recorder.all() }
@@ -128,10 +134,15 @@ final class FakeTelegram: @unchecked Sendable {
 private actor CallRecorder {
     private var recorded: [TelegramCall] = []
     private var nextMessageID = 1_000
+    private var refusals: [(method: String, matches: @Sendable (String) -> Bool)] = []
 
     func all() -> [TelegramCall] { recorded }
     func calls(_ method: String) -> [TelegramCall] { recorded.filter { $0.method == method } }
     func reset() { recorded.removeAll() }
+
+    func refuse(method: String, matching: @escaping @Sendable (String) -> Bool) {
+        refusals.append((method, matching))
+    }
 
     func record(head: HTTPRequestHead, body: Data) -> AppHTTPResponse {
         // The path is `/bot<token>/<method>`.
@@ -139,6 +150,13 @@ private actor CallRecorder {
             .split(separator: "?").first.map(String.init) ?? ""
         let text = String(data: body, encoding: .utf8) ?? "{}"
         recorded.append(TelegramCall(method: method, body: text))
+
+        // A Bot API that says no. Real ones do — a bot removed from the chat,
+        // a group that went read-only — and the paths that matter are the ones
+        // where the bot is mid-answer when it happens.
+        if refusals.contains(where: { $0.method == method && $0.matches(text) }) {
+            return .json(#"{"ok":false,"error_code":400,"description":"Bad Request: refused by test"}"#)
+        }
 
         switch method {
         case "getMe":

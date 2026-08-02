@@ -15,10 +15,21 @@ enum ResponseFooterFormatter {
         balanceAfter: Money? = nil,
         sponsorLine: String? = nil
     ) -> String? {
-        guard showTokens || showCost || showModel || balanceAfter != nil || sponsorLine != nil else { return nil }
+        // An answer cut off by the token ceiling is reported whatever the chat
+        // switched off: the tumblers hide *statistics*, and "this is not the
+        // whole answer" is not a statistic — without it the user reads a
+        // sentence that stops mid-word as the model's own idea of an ending.
+        let truncated = meta?.finishReason == .length
+        guard truncated || showTokens || showCost || showModel || balanceAfter != nil || sponsorLine != nil else {
+            return nil
+        }
 
         let usage = meta?.usage
         var lines: [String] = []
+
+        if truncated {
+            lines.append("✂️ <i>Ответ обрезан лимитом длины — попросите продолжить.</i>")
+        }
 
         if showTokens {
             lines.append(contentsOf: tokenLines(usage: usage))
@@ -89,14 +100,27 @@ enum ResponseFooterFormatter {
         return lines
     }
 
+    /// The single way a token count becomes text.
+    ///
+    /// `Int(_: Double)` traps on `NaN`, on an infinity and on anything past
+    /// `Int.max`, and these numbers come from a provider's JSON and from totals
+    /// accumulated out of it — a counter nobody bounds. A crash while
+    /// *formatting a footer* takes the whole bot down, and it would do it again
+    /// on every render of the chat that stored the value, so the conversion
+    /// only ever happens where it is guarded.
     static func formatTokenValue(_ value: Double) -> String {
-        if value.rounded(.towardZero) == value {
-            return String(Int(value))
+        guard value.isFinite else { return "—" }
+        let whole = value.rounded(.towardZero)
+        guard whole == value, let exact = Int(exactly: whole) else {
+            return value.isFinite && abs(value) < 1e15
+                ? String(format: "%.3f", value)
+                : String(format: "%.3e", value)
         }
-        return String(format: "%.3f", value)
+        return String(exact)
     }
 
     private static func formatCost(_ cost: Double) -> String {
+        guard cost.isFinite else { return "—" }
         if cost == 0 {
             return "0"
         }

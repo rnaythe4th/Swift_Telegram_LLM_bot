@@ -142,7 +142,7 @@ extension BotCommandHandler {
                     let mark = row.isSuperAdmin ? "🛡" : "🛠"
                     let realStr = row.usage.totalCost.formatted()
                     let billedStr = await state.billedCost(of: row.usage).formatted()
-                    let tokens = Int(row.usage.totalTokens)
+                    let tokens = ResponseFooterFormatter.formatTokenValue(row.usage.totalTokens)
                     let subscription: String
                     if let until = row.paidUntil {
                         subscription = row.isActive ? "до \(f.string(from: until))" : "⛔ истекла \(f.string(from: until))"

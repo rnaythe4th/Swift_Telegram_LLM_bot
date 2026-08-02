@@ -51,7 +51,7 @@ extension BotCommandHandler {
             lines.append("🤖 <code>\(help.model)</code> · 🌡 \(BotMenuHandler.formatTemp(help.temp)) · 📝 \(help.maxHistory)")
             let realStr = help.cumulativeUsage.totalCost.formatted()
             let billedStr = await state.billedCost(of: help.cumulativeUsage).formatted()
-            lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(Int(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
+            lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(ResponseFooterFormatter.formatTokenValue(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
             let rolePreview = help.role.count > 300 ? String(help.role.prefix(300)) + "…" : help.role
             lines.append("🎭 <blockquote expandable>\(rolePreview)</blockquote>")
         }

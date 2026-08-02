@@ -55,7 +55,9 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   `+Monetization` (`resolveDailyPremium`, `resolveBillingMode`, реклама, офферы,
   реферальная выплата, футер); `DraftStreamer` (`sendMessageDraft`);
   `StreamWatchdog` (стрим без событий 75 с → обрыв; общий потолок 600 с —
-  молчащий провайдер иначе держит слот генерации и ломает shutdown-окно).
+  молчащий провайдер иначе держит слот генерации и ломает shutdown-окно;
+  считается **тишина**, а не медленность: keep-alive и нерасшифрованный чанк
+  приходят как `ProviderStreamEvent.keepAlive` и продлевают жизнь потоку).
 - `Commands/`: `CommandParser` (`/cmd@bot`+суффикс), `BotCommandHandler`
   (обвязка, гейты, `handleIfCommand`) + `+Dispatch` (только switch) +
   `+ChatSettings/Start/Referral/Info/Onboarding/Balance/Reminders/Ads/Admin/
@@ -121,8 +123,10 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   только именованные фабрики). Целочисленность нужна для граничных сравнений
   (`> .zero`) и сходимости с журналом; насыщение вместо переполнения, `NaN` → 0.
 - `Providers/ProviderTypes.swift` — `ServiceProvider`, `ProviderCapabilities`,
-  `StreamUsageSummary`/`StreamMeta`, `ProviderStreamEvent`, `GenerationOptions`,
-  `ReasoningEffort`.
+  `StreamUsageSummary` (санирует числа провайдера на границе: не финитное →
+  nil, отрицательное → 0, потолок `maxPlausibleTokens`), `StreamMeta`
+  (+`StreamFinishReason`), `ProviderStreamEvent` (`text`/`meta`/`keepAlive`),
+  `GenerationOptions`, `ReasoningEffort`.
 - `Payments/`: `PurchasePurpose` (`subscription | credit(cents:)`),
   `CryptoPayment`, `CardPayment` (`FiatCurrency` + minor units),
   `ExternalPayment` (вендор, способы, конфиг, счета, эндпоинт, ошибки).
@@ -139,15 +143,19 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   значений атрибутов).
 - `Telegram/TelegramMediaResolver.swift` — медиа → base64/data-URL.
 - `Providers/`: `OpenRouterProviderAdapter`, `DeepSeekProviderAdapter` (+
-  `*APIModels`), `ProviderStreamErrorPayload` (§6).
+  `*APIModels`), `OpenAIStreamDecoding` (`OpenAICompatibleStreamChunk` +
+  `OpenAIStreamAccumulator` — общая машина потока), `ProviderStreamErrorPayload`
+  (§6).
 - `Persistence/`: `PostgresStatePersistence` (построчная загрузка, батч одной
   транзакцией, миграции), `PostgresLedger` (деньги в транзакциях),
   `WriterLock` (advisory lock единственного писателя), `PostgresSchema`,
   `DatabaseEndpoint` (разбор `DATABASE_URL`).
 - `Networking/`: `NetworkClient` (AsyncHTTPClient: `send`, `ssePayloads`,
-  лимиты тела), `AppHTTPServer` (NIO: `/health`, `/ready`, `/metrics`, webhook,
-  `/payments/<vendor>`), `SecretBox` (шифрование секретов в БД, `SealedSecret`),
-  `SecretGuard` (`constantTimeEquals`), `URLForm`.
+  лимиты тела), `ServerSentEventParser` (кадрирование SSE: `Event.payload` /
+  `Event.keepAlive`, потолок на незавершённые байты), `AppHTTPServer` (NIO:
+  `/health`, `/ready`, `/metrics`, webhook, `/payments/<vendor>`; тело ≤1 МиБ,
+  `HEAD` без тела, простой 120 с → закрытие), `SecretBox` (шифрование секретов
+  в БД, `SealedSecret`), `SecretGuard` (`constantTimeEquals`), `URLForm`.
 - `Payments/`: `CryptoExplorers` (`TonExplorer`, `EvmExplorer` — Etherscan V2 по
   chainID, `TronExplorer`), `FreeKassaCheckoutAdapter`,
   `ExternalCheckoutRegistry` (vendor → адаптер исчерпывающим switch),
@@ -428,8 +436,14 @@ AsyncThrowingStream<ProviderStreamEvent>`, `fallbackModel(for:)`.
 - **DeepSeek** (`.deepseek`) — только текст, модель `deepseek-chat`, стоимость не
   отдаёт.
 
-Оба парсят SSE через `NetworkClient.ssePayloads`, эмитят `.text(chunk)` и в конце
-`.meta(StreamMeta)`, обрабатывают отмену и `[DONE]`. **Ошибка внутри потока —
+Оба парсят SSE через `NetworkClient.ssePayloads` и складывают чанки одним и тем
+же `OpenAIStreamAccumulator<Chunk>` (**один декод на пейлоад**: usage, ошибка и
+дельта живут в одном объекте, и три `try?`-декода теряли два ответа из трёх;
+поля usage опциональны — отсутствующий счётчик не должен ронять чанк целиком).
+Эмитят `.text(chunk)`, `.keepAlive` (жив, но показать нечего) и в конце
+`.meta(StreamMeta)` — с `finishReason` (`length` → строка «✂️ Ответ обрезан» в
+футере, **независимо** от тумблеров статистики). Обрабатывают отмену и `[DONE]`.
+Новый провайдер = конформанс `OpenAICompatibleStreamChunk`, а не копия цикла. **Ошибка внутри потока —
 ошибка**: OpenAI-совместимые провайдеры отдают отказ в SSE с HTTP 200
 (`{"error":{...}}`) → декод `ProviderStreamErrorPayload` (код читается числом и
 строкой) → `ProviderAdapterError.upstream(provider:code:message:)`. Наружу —
@@ -464,11 +478,15 @@ AsyncThrowingStream<ProviderStreamEvent>`, `fallbackModel(for:)`.
 7. Стрим: **draft** (`runDraftStreaming`, только личка, Bot API 9.3+;
    финальный текст всегда `sendMessage`, draft эфемерен) или **edit**
    (`runEditStreaming`, группы; правка раз в 3 с или +300 симв.).
-8. Разбивка: `MessageSplitter.splitRendered` — бюджет в **экранированных**
-   символах (`charLimit` 3896), не режет внутри `<…>`/`&…;`, переоткрывает
-   открытые теги (`openTagMarkup`; `script`/`style` никогда) и закрывает их
+8. Разбивка: `MessageSplitter.splitRendered` — бюджет в **экранированных
+   UTF-16** единицах, как считает Telegram (`charLimit` 3896 = 4096 минус
+   резерв на футер), не режет внутри `<…>`/`&…;`, переоткрывает открытые теги
+   (`openTagMarkup`; `script`/`style` никогда) и закрывает их
    (`closingTagMarkup`) перед маркером продолжения, стоп-нотисом и футером.
-   Финальную проверку делает `TelegramHTTPGateway.chunkFittingHTML`.
+   Одно сообщение, в которое надо уместить и хвост, собирает
+   `MessageSplitter.withTrailer` — **тело уступает хвосту**, а не наоборот.
+   Финальную проверку делает `TelegramHTTPGateway.chunkFittingHTML` (бюджет —
+   все 4096, ужимается пропорционально).
 9. Футер `makeFooter` → `ResponseFooterFormatter`.
 10. `appendAssistant` (история + usage + списание) → офферы → реклама; либо
     `cancelPendingTurn` + `refundDailyPremium`.
@@ -874,8 +892,10 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   (`escapeAttributeValue`); `href` — только `allowedURLSchemes` (http, https, tg,
   mailto, tel), иначе тег `<a>` отбрасывается вместе со схемой.
 - Резать длинный текст — только `MessageSplitter.splitRendered`; служебная
-  строка после ответа — после `closingTagMarkup(in:)`. `renderedTags` держать в
-  согласии с allow-list форматтера.
+  строка после ответа — после `closingTagMarkup(in:)`, а если она обязана
+  выжить в одном сообщении — через `withTrailer` (правка сообщения обрезает
+  **хвост**, то есть ровно её). Длина считается в UTF-16: эмодзи — два, а не
+  один. `renderedTags` держать в согласии с allow-list форматтера.
 - Вывод — HTML, не Markdown. `/help` (`BotCallbackHandler.faqText`) держать под
   ~3800 символов; супер-админские команды — в `superAdminHelpText`.
 
@@ -900,7 +920,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~442 теста; 422 без сети
+`swift test` — цель `LLM_chat_botTests`, ~484 теста; 464 без сети
 (`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
 `TEST_DATABASE_URL`:
 
@@ -915,7 +935,11 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 (каждая строка `bot_config` пишется **и читается обратно** — иначе молчаливый
 откат на дефолт при рестарте), `PostgresIntegrationTests` (миграции, БД-
 ограничения, конкурентный `claimPayment`, writer lock, round-trip состояния),
-`PersistenceCoordinatorTests`, `MessageSplitterTests`,
+`PersistenceCoordinatorTests`, `MessageSplitterTests` (включая хвост, который
+обязан выжить, и длину в UTF-16), `ServerSentEventParserTests`/`URLFormTests`
+(кадрирование SSE и форма кассы), `ProviderStreamTests` (разбор потока
+провайдера: ошибка в 200 OK, обрыв до usage, частичный usage, `finish_reason`,
+числа-мусор, вотчдог),
 `TelegramHTMLFormatterTests` + `…GoldenTests`/`HTMLCorpus` (69 входов),
 `CommandParserTests`, `MessageRoutingPolicyTests`, `UserIdentityTests`,
 `StoreRootOwnerTests`, `SubscriptionScheduleTests`, `Store*Tests`

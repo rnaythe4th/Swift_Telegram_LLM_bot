@@ -269,6 +269,42 @@ enum MessageSplitter {
         return (done, remaining)
     }
 
+    /// Appends a trailer to a message that must stay a *single* message,
+    /// trimming the body until the trailer fits.
+    ///
+    /// The alternative is what the streaming loops used to do: hand the whole
+    /// thing to `editMessage`, which keeps the largest prefix that fits and
+    /// drops the rest — and the rest is exactly the trailer. The footer with
+    /// the price and the remaining balance, the «остановлено» notice, the
+    /// warning that the answer had to be cut: every one of them is the part
+    /// the user cannot reconstruct from what stayed on screen, so the body
+    /// gives way, not the trailer.
+    ///
+    /// Tags left open by the trimmed body are closed before the trailer, the
+    /// same way `closingTagMarkup` does it everywhere else.
+    static func withTrailer(_ body: String, trailer: String, limit: Int = telegramMaxChars) -> String {
+        guard !trailer.isEmpty else { return body + closingTagMarkup(in: body) }
+        let budget = limit - renderedLength(trailer)
+        guard budget > 0 else { return trailer }
+
+        var kept = body
+        if renderedLength(body) + closingLength(of: body) > budget {
+            // Re-split against the reduced budget, then close what the cut
+            // left open. `closingTagMarkup` grows the text, so the closers are
+            // paid for out of the same budget.
+            var attempt = budget
+            repeat {
+                kept = splitRendered(body, limit: max(1, attempt)).done
+                attempt -= max(1, closingLength(of: kept))
+            } while attempt > 0 && renderedLength(kept) + closingLength(of: kept) > budget
+        }
+        return kept + closingTagMarkup(in: kept) + trailer
+    }
+
+    private static func closingLength(of text: String) -> Int {
+        renderedLength(closingTagMarkup(in: text))
+    }
+
     /// Tags Telegram renders — mirrors the allow-list in
     /// `TelegramHTMLFormatter`. Only used to decide what is worth re-opening
     /// after a split, so drift is cheap in both directions: a missing name
@@ -401,12 +437,17 @@ enum MessageSplitter {
         return raw
     }
 
+    /// Cost of one character in the unit Telegram counts in: UTF-16 code
+    /// units. An emoji is one `Character` and two of those, a family emoji is
+    /// one `Character` and eleven — measuring in characters says a message of
+    /// emoji fits when it is twice over the limit, and the answer comes back
+    /// as 400 «message is too long» with that part lost.
     private static func renderedCost(_ ch: Character) -> Int {
         switch ch {
         case "&": return 5   // &amp;
         case "<": return 4   // &lt;
         case ">": return 4   // &gt;
-        default: return 1
+        default: return ch.utf16.count
         }
     }
 }

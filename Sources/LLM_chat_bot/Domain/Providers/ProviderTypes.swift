@@ -48,6 +48,15 @@ struct ProviderCapabilities: Sendable {
     }
 }
 
+/// Token counts and price of one answer, as reported by the provider.
+///
+/// Every number here is somebody else's JSON, and it is not decoration: the
+/// counts are added into the chat's persisted totals and the price is charged
+/// to a wallet. So they are sanitised at construction — `NaN` poisons a
+/// cumulative total for good (and `JSONEncoder` refuses to write it, taking the
+/// whole row with it), an infinity or an absurd magnitude traps the moment
+/// anything converts it to `Int` for display. Nonsense in becomes "unknown"
+/// out, which the footer already knows how to render.
 struct StreamUsageSummary: Sendable {
     let promptTokens: Double?
     let completionTokens: Double?
@@ -57,16 +66,86 @@ struct StreamUsageSummary: Sendable {
     let cacheMissTokens: Double?
     let reasoningTokens: Double?
     let cost: Double?
+
+    /// A trillion tokens for one answer is already six orders of magnitude
+    /// past any real model; past that it is a broken response, not a big one.
+    static let maxPlausibleTokens: Double = 1e12
+
+    init(
+        promptTokens: Double?,
+        completionTokens: Double?,
+        totalTokens: Double?,
+        cacheHitTokens: Double?,
+        cacheWriteTokens: Double?,
+        cacheMissTokens: Double?,
+        reasoningTokens: Double?,
+        cost: Double?
+    ) {
+        self.promptTokens = Self.plausibleTokens(promptTokens)
+        self.completionTokens = Self.plausibleTokens(completionTokens)
+        self.totalTokens = Self.plausibleTokens(totalTokens)
+        self.cacheHitTokens = Self.plausibleTokens(cacheHitTokens)
+        self.cacheWriteTokens = Self.plausibleTokens(cacheWriteTokens)
+        self.cacheMissTokens = Self.plausibleTokens(cacheMissTokens)
+        self.reasoningTokens = Self.plausibleTokens(reasoningTokens)
+        self.cost = Self.plausibleCost(cost)
+    }
+
+    private static func plausibleTokens(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return min(max(0, value), maxPlausibleTokens)
+    }
+
+    /// The price is clamped, not dropped: `Money.usd` saturates on its own, and
+    /// a refusal to name a price is what the footer shows as «—».
+    private static func plausibleCost(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return max(0, value)
+    }
+}
+
+/// Why the model stopped. Only the answers that change what the user should do
+/// get a case of their own; everything else is upstream vocabulary.
+enum StreamFinishReason: Sendable, Equatable {
+    /// The model finished on its own.
+    case stop
+    /// The answer hit the token ceiling and is cut off mid-thought.
+    case length
+    case contentFilter
+    case other(String)
+
+    init(rawValue: String) {
+        switch rawValue {
+        case "stop", "end_turn": self = .stop
+        case "length", "max_tokens": self = .length
+        case "content_filter": self = .contentFilter
+        default: self = .other(rawValue)
+        }
+    }
 }
 
 struct StreamMeta: Sendable {
     let model: String?
     let usage: StreamUsageSummary?
+    /// Absent when the provider never said — which is not the same as `.stop`,
+    /// and must not be read as "the answer is complete".
+    let finishReason: StreamFinishReason?
+
+    init(model: String?, usage: StreamUsageSummary?, finishReason: StreamFinishReason? = nil) {
+        self.model = model
+        self.usage = usage
+        self.finishReason = finishReason
+    }
 }
 
 enum ProviderStreamEvent: Sendable {
     case text(String)
     case meta(StreamMeta)
+    /// The provider is working but has nothing to show yet — a thinking model,
+    /// a keep-alive comment, a chunk this version does not decode. Nothing to
+    /// display; it exists so that "slow" is not mistaken for "dead"
+    /// (`StreamWatchdog`).
+    case keepAlive
 }
 
 enum ProviderAdapterError: Error, LocalizedError {

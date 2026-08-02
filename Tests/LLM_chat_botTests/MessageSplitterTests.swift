@@ -116,4 +116,48 @@ final class MessageSplitterTests: XCTestCase {
         XCTAssertEqual(MessageSplitter.charLimit, MessageSplitter.telegramMaxChars - MessageSplitter.footerReserve)
         XCTAssertLessThan(MessageSplitter.charLimit, 4096)
     }
+
+    /// Telegram counts UTF-16 code units. Counting `Character`s says a message
+    /// of emoji fits when it is twice over the limit — and that comes back as
+    /// 400 «message is too long», with that part of the answer lost.
+    func testRenderedLengthCountsWhatTelegramCounts() {
+        XCTAssertEqual(MessageSplitter.renderedLength("🎁"), 2)
+        XCTAssertEqual(MessageSplitter.renderedLength("привет"), 6)
+        let emoji = String(repeating: "🎁", count: 3000)
+        XCTAssertEqual(MessageSplitter.splitRendered(emoji).done.utf16.count, MessageSplitter.charLimit)
+    }
+
+    // MARK: - Trailers that must survive
+
+    /// An edit is one message, and `editMessage` keeps the prefix that fits:
+    /// hand it body+footer over the limit and the part that gets dropped is the
+    /// footer — the price, the remaining balance, the «остановлено» notice.
+    func testTrailerSurvivesAnOverlongBody() {
+        let body = String(repeating: "я", count: 4200)
+        let trailer = "\n\n──────────\n💰 Баланс · $1.23"
+        let result = MessageSplitter.withTrailer(body, trailer: trailer)
+
+        XCTAssertTrue(result.hasSuffix(trailer))
+        XCTAssertLessThanOrEqual(MessageSplitter.renderedLength(result), MessageSplitter.telegramMaxChars)
+        XCTAssertTrue(result.hasPrefix(String(repeating: "я", count: 100)))
+    }
+
+    func testShortBodyKeepsEveryCharacter() {
+        let result = MessageSplitter.withTrailer("ответ", trailer: "\n\nфутер")
+        XCTAssertEqual(result, "ответ\n\nфутер")
+    }
+
+    /// The trailer must land outside whatever block the answer stopped inside —
+    /// inside a code listing it would read as part of the code.
+    func testTrailerClosesOpenMarkupFirst() {
+        let result = MessageSplitter.withTrailer("<pre>code", trailer: "\n\nфутер")
+        XCTAssertEqual(result, "<pre>code</pre>\n\nфутер")
+    }
+
+    func testTrimmedBodyStillClosesItsMarkup() {
+        let body = "<b>" + String(repeating: "x", count: 4200)
+        let result = MessageSplitter.withTrailer(body, trailer: "\n\nхвост")
+        XCTAssertTrue(result.hasSuffix("</b>\n\nхвост"))
+        XCTAssertLessThanOrEqual(MessageSplitter.renderedLength(result), MessageSplitter.telegramMaxChars)
+    }
 }

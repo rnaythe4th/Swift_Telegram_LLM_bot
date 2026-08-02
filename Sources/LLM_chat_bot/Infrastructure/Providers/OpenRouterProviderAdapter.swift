@@ -66,64 +66,36 @@ final class OpenRouterProviderAdapter: ProviderGatewayPort, Sendable {
         
         return AsyncThrowingStream { continuation in
             let producer = Task {
-                var capturedUsage: OpenRouterResponseUsage?
-                var didYieldMeta = false
+                // OpenRouter reports rate limits, exhausted credit, moderation
+                // and "no endpoints" inside the stream with HTTP 200 — the
+                // accumulator turns those into a thrown error rather than an
+                // empty answer.
+                var accumulator = OpenAIStreamAccumulator<OpenRouterStreamChunk>()
                 let modelName = body.model ?? "unknown-model"
-                
-                let yieldMetaIfNeeded: () -> Void = {
-                    guard !didYieldMeta else { return }
-                    didYieldMeta = true
-                    
-                    let usageSummary = capturedUsage.map { u in
-                        StreamUsageSummary(
-                            promptTokens: Double(u.prompt_tokens),
-                            completionTokens: Double(u.completion_tokens),
-                            totalTokens: Double(u.total_tokens),
-                            cacheHitTokens: u.prompt_tokens_details?.cachedTokens.map(Double.init),
-                            cacheWriteTokens: u.prompt_tokens_details?.cacheWriteTokens.map(Double.init),
-                            cacheMissTokens: nil,
-                            reasoningTokens: u.completion_tokens_details?.reasoning_tokens.map(Double.init),
-                            cost: u.cost ?? u.cost_details?.upstream_inference_cost
-                        )
-                    }
-                    
-                    continuation.yield(.meta(.init(model: modelName, usage: usageSummary)))
-                }
-                
+
                 do {
-                    for try await payload in network.ssePayloads(spec) {
+                    for try await event in network.ssePayloads(spec) {
                         if Task.isCancelled { break }
-                        if payload == "[DONE]" {
-                            yieldMetaIfNeeded()
+                        guard case .payload(let payload) = event else {
+                            // The connection spoke; nothing to show for it.
+                            continuation.yield(.keepAlive)
+                            continue
+                        }
+                        switch try accumulator.accept(payload, from: .openrouter) {
+                        case .text(let text):
+                            continuation.yield(.text(text))
+                        case .finished:
+                            continuation.yield(.meta(accumulator.meta(model: modelName)))
                             continuation.finish()
                             return
-                        }
-                        
-                        guard let json = payload.data(using: .utf8) else { continue }
-                        // OpenRouter reports rate limits, exhausted credit,
-                        // moderation and "no endpoints" inside the stream with
-                        // HTTP 200. Ignoring that payload turns a real failure
-                        // into "Пустой ответ." with nothing in the logs.
-                        if let failure = parseError(jsonData: json) {
-                            continuation.finish(
-                                throwing: ProviderAdapterError.upstream(
-                                    provider: .openrouter,
-                                    code: failure.code,
-                                    message: failure.message
-                                )
-                            )
-                            return
-                        }
-                        if let usage = parseUsage(jsonData: json) {
-                            capturedUsage = usage
-                        }
-                        
-                        if let text = parseDelta(jsonData: json), !text.isEmpty {
-                            continuation.yield(.text(text))
+                        case .ignore:
+                            // A role-only chunk, a reasoning delta, a shape
+                            // this version does not decode: still a live model.
+                            continuation.yield(.keepAlive)
                         }
                     }
-                    
-                    yieldMetaIfNeeded()
+
+                    continuation.yield(.meta(accumulator.meta(model: modelName)))
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -131,28 +103,10 @@ final class OpenRouterProviderAdapter: ProviderGatewayPort, Sendable {
                     continuation.finish(throwing: error)
                 }
             }
-            
+
             continuation.onTermination = { @Sendable _ in
                 producer.cancel()
             }
         }
-    }
-    
-    private func parseUsage(jsonData: Data) -> OpenRouterResponseUsage? {
-        (try? JSONDecoder().decode(OpenRouterStreamChunk.self, from: jsonData))?.usage
-    }
-
-    private func parseError(jsonData: Data) -> ProviderStreamErrorPayload? {
-        (try? JSONDecoder().decode(OpenRouterStreamChunk.self, from: jsonData))?.error
-    }
-    
-    private func parseDelta(jsonData: Data) -> String? {
-        guard let chunk = try? JSONDecoder().decode(OpenRouterStreamChunk.self, from: jsonData),
-              let choices = chunk.choices else {
-            return nil
-        }
-        let pieces = choices.compactMap { $0.delta?.content }.filter { !$0.isEmpty }
-        guard !pieces.isEmpty else { return nil }
-        return pieces.joined()
     }
 }

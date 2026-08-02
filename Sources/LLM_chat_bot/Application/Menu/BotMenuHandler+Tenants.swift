@@ -113,7 +113,7 @@ extension BotMenuHandler {
                 let mark = row.isSuperAdmin ? "🛡" : "🛠"
                 let realStr = row.usage.totalCost.formatted()
                 let billedStr = await state.billedCost(of: row.usage).formatted()
-                let tokens = Int(row.usage.totalTokens)
+                let tokens = ResponseFooterFormatter.formatTokenValue(row.usage.totalTokens)
                 lines.append("\n\(mark) <b>\(row.label)</b>")
                 lines.append("  чатов <b>\(row.chatCount)</b> · юзеров <b>\(row.licensedUserCount)</b> · запросов <b>\(row.usage.generationCount)</b> · ток. <b>\(tokens)</b>")
                 lines.append("  💵 реально <b>\(realStr)</b> · клиентам <b>\(billedStr)</b>")
@@ -166,7 +166,7 @@ extension BotMenuHandler {
 
         \(subLine)
         Чатов · <b>\(row.chatCount)</b> · юзеров · <b>\(row.licensedUserCount)</b>
-        📈 запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(Int(row.usage.totalTokens))</b>
+        📈 запросов <b>\(row.usage.generationCount)</b> · токенов <b>\(ResponseFooterFormatter.formatTokenValue(row.usage.totalTokens))</b>
         💵 реально <b>\(realStr)</b> · клиентам <b>\(billedStr)</b>
         """
 
@@ -324,7 +324,7 @@ extension BotMenuHandler {
             lines.append("🤖 <code>\(help.model)</code> · 🌡 \(Self.formatTemp(help.temp)) · 📝 \(help.maxHistory)")
             let realStr = help.cumulativeUsage.totalCost.formatted()
             let billedStr = await state.billedCost(of: help.cumulativeUsage).formatted()
-            lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(Int(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
+            lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(ResponseFooterFormatter.formatTokenValue(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
             let rolePreview = help.role.count > 250 ? String(help.role.prefix(250)) + "…" : help.role
             lines.append("🎭 <blockquote expandable>\(rolePreview)</blockquote>")
         }
