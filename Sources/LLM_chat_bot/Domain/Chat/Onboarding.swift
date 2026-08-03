@@ -70,6 +70,12 @@ struct OnboardingExample: Codable, Sendable, Equatable {
         self.taps = taps
     }
 
+    // Both are super-admin text on their way into an HTML message (the editor
+    // page, the toasts). Escaped where they become markup — the prompt is sent
+    // to the model raw.
+    var escapedLabel: String { MessageText.escaped(label) }
+    var escapedPrompt: String { MessageText.escaped(prompt) }
+
     enum CodingKeys: String, CodingKey {
         case id, label, prompt, enabled, placement, taps
     }

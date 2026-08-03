@@ -156,7 +156,7 @@ extension BotMenuHandler {
         let text = """
         <b>⚙️ Тонкая настройка</b>
 
-        🤖 Модель · <code>\(help.model)</code>
+        🤖 Модель · <code>\(help.escapedModel)</code>
         🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
         📝 Память · <b>\(help.maxHistory) сообщ.</b>\(reasoningLine)
 
@@ -179,13 +179,19 @@ extension BotMenuHandler {
         }
         let config = await state.modeConfig()
 
-        /// The mode a positional action refers to; nil answers the callback.
-        func mode(at index: Int) async -> ModePreset? {
-            guard index >= 0, index < config.modes.count else {
+        /// The mode a button points at, by its id; nil answers the callback.
+        ///
+        /// The id, not the position: this page has an "↑ Выше" button and a
+        /// delete, so the list it describes is reordered from the page itself.
+        /// A keyboard in any other message — the settings the super-admin left
+        /// open in a second chat, anything scrolled up to — then addresses the
+        /// row that slid into that slot, and «❌» deletes the neighbour.
+        func mode() async -> ModePreset? {
+            guard let id = route.arg(2), let found = config.mode(id: id) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modeNotFound)
                 return nil
             }
-            return config.modes[index]
+            return found
         }
 
         switch route.sub {
@@ -207,7 +213,7 @@ extension BotMenuHandler {
             return
 
         case "edit":
-            guard let index = route.int(2), let item = await mode(at: index) else { return }
+            guard let item = await mode() else { return }
             await state.setPending(
                 .admin(.init(kind: .modeEdit, payload: item.id)),
                 menuMessageID: message.message_id,
@@ -217,23 +223,23 @@ extension BotMenuHandler {
                 callback: callback,
                 message: message,
                 screen: MenuScreen(
-                    Self.modeInputPrompt(title: "✏️ Режим · \(OnboardingPresenter.escape(item.title))", current: item),
+                    Self.modeInputPrompt(title: "✏️ Режим · \(item.escapedTitle)", current: item),
                     [[cancelButton(to: .superModes)]]
                 )
             )
             return
 
         case "role":
-            guard let index = route.int(2), let item = await mode(at: index) else { return }
+            guard let item = await mode() else { return }
             await state.setPending(
                 .admin(.init(kind: .modeRole, payload: item.id)),
                 menuMessageID: message.message_id,
                 chatKey: chatKey
             )
-            let currentRole = item.role.map { "<blockquote expandable>\(OnboardingPresenter.escape($0))</blockquote>" }
+            let currentRole = item.escapedRole.map { "<blockquote expandable>\($0)</blockquote>" }
                 ?? "<i>не задана — режим не трогает роль чата</i>"
             let prompt = """
-            <b>🎭 Роль режима · \(OnboardingPresenter.escape(item.title))</b>
+            <b>🎭 Роль режима · \(item.escapedTitle)</b>
 
             Сейчас:
             \(currentRole)
@@ -244,12 +250,12 @@ extension BotMenuHandler {
             return
 
         case "on":
-            guard let index = route.int(2), let item = await mode(at: index) else { return }
+            guard let item = await mode() else { return }
             await state.toggleModeEnabled(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: item.enabled ? "⚪️ Скрыт" : "🟢 Показывается")
 
         case "tier":
-            guard let index = route.int(2), let item = await mode(at: index) else { return }
+            guard let item = await mode() else { return }
             await state.cycleModeTier(id: item.id)
             let now = item.tier.next
             try? await telegram.answerCallback(
@@ -258,17 +264,17 @@ extension BotMenuHandler {
             )
 
         case "work":
-            guard let index = route.int(2), let item = await mode(at: index) else { return }
+            guard let item = await mode() else { return }
             await state.setDefaultMode(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "🎯 Рабочий режим · \(item.title)")
 
         case "up":
-            guard let index = route.int(2), let item = await mode(at: index) else { return }
-            await state.moveModeUp(id: item.id)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: index == 0 ? "Уже первый" : "↑ Выше")
+            guard let item = await mode() else { return }
+            let moved = await state.moveModeUp(id: item.id)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: moved ? "↑ Выше" : "Уже первый")
 
         case "del":
-            guard let index = route.int(2), let item = await mode(at: index) else { return }
+            guard let item = await mode() else { return }
             let removed = await state.removeMode(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "🗑 Удалён" : Texts.modeNotFound)
 
@@ -334,18 +340,21 @@ extension BotMenuHandler {
         var rows: Keyboard = [
             [menuButton(config.enabled ? "🟢 Режимы включены" : "⚪️ Режимы выключены", .smode, "toggle")],
         ]
-        for (index, mode) in config.modes.enumerated() {
+        // Every button carries the mode's id, never its row number: this page
+        // reorders and deletes its own list, so a position describes the page
+        // as it was drawn rather than the mode it was drawn for.
+        for mode in config.modes {
             let isWorking = config.defaultModeID == mode.id
             rows.row([
-                menuButton("\(mode.enabled ? "🟢" : "⚪️") \(mode.title)\(isWorking ? " · 🎯" : "")", .smode, "on", "\(index)"),
+                menuButton("\(mode.enabled ? "🟢" : "⚪️") \(mode.title)\(isWorking ? " · 🎯" : "")", .smode, "on", mode.id),
             ])
             rows.row([
-                menuButton(mode.tier.badge, .smode, "tier", "\(index)"),
-                menuButton("✏️", .smode, "edit", "\(index)"),
-                menuButton("🎭", .smode, "role", "\(index)"),
-                menuButton("🎯", .smode, "work", "\(index)"),
-                menuButton("↑", .smode, "up", "\(index)"),
-                menuButton("❌", .smode, "del", "\(index)"),
+                menuButton(mode.tier.badge, .smode, "tier", mode.id),
+                menuButton("✏️", .smode, "edit", mode.id),
+                menuButton("🎭", .smode, "role", mode.id),
+                menuButton("🎯", .smode, "work", mode.id),
+                menuButton("↑", .smode, "up", mode.id),
+                menuButton("❌", .smode, "del", mode.id),
             ])
         }
         if config.modes.count < ModePresetConfig.maxModes {
@@ -376,9 +385,9 @@ extension BotMenuHandler {
             for mode in config.modes {
                 let share = totalTaps > 0 ? " · \(pct(mode.taps, totalTaps))" : ""
                 let working = config.defaultModeID == mode.id ? " · 🎯 рабочий" : ""
-                lines.append("\(mode.enabled ? "🟢" : "⚪️") \(mode.tier.badge) <b>\(OnboardingPresenter.escape(mode.title))</b>\(working) · тапов \(mode.taps)\(share)")
+                lines.append("\(mode.enabled ? "🟢" : "⚪️") \(mode.tier.badge) <b>\(mode.escapedTitle)</b>\(working) · тапов \(mode.taps)\(share)")
                 let modelID = mode.model ?? fallback
-                var detail = "<code>\(OnboardingPresenter.escape(modelID ?? "нет бесплатной"))</code>"
+                var detail = "<code>\(MessageText.escaped(modelID ?? "нет бесплатной"))</code>"
                 if mode.model == nil { detail += " <i>(авто)</i>" }
                 detail += " · 🌡 \(Self.formatTemp(mode.temp)) · 📝 \(mode.maxHistory)"
                 if let reasoning = mode.reasoning { detail += " · 🧠 \(reasoning.displayName)" }
@@ -390,8 +399,8 @@ extension BotMenuHandler {
                     let outP = Self.formatPriceM(price.outputPerToken * multiplier)
                     lines.append("<i>⬇️$\(inP)/M · ⬆️$\(outP)/M</i>")
                 }
-                if let role = mode.role {
-                    lines.append("<blockquote expandable>🎭 \(OnboardingPresenter.escape(role))</blockquote>")
+                if let role = mode.escapedRole {
+                    lines.append("<blockquote expandable>🎭 \(role)</blockquote>")
                 }
             }
         }

@@ -58,7 +58,7 @@ extension BotCommandHandler {
         case "model":
             guard !value.isEmpty else {
                 let defs = await state.getDefaults(chatID: chatKey.chatID)
-                try await sendUserFeedback(chatKey: chatKey, text: "Модель по умолчанию · <code>\(defs.model)</code>")
+                try await sendUserFeedback(chatKey: chatKey, text: "Модель по умолчанию · <code>\(MessageText.escaped(defs.model))</code>")
                 return
             }
             let new = await state.setDefaultModel(value, chatID: chatKey.chatID)
@@ -67,7 +67,7 @@ extension BotCommandHandler {
         case "role":
             guard !value.isEmpty else {
                 let defs = await state.getDefaults(chatID: chatKey.chatID)
-                try await sendUserFeedback(chatKey: chatKey, text: "Роль по умолчанию:\n<blockquote expandable>\(defs.role)</blockquote>")
+                try await sendUserFeedback(chatKey: chatKey, text: "Роль по умолчанию:\n<blockquote expandable>\(MessageText.escaped(defs.role))</blockquote>")
                 return
             }
             let new = await state.setDefaultRole(value, chatID: chatKey.chatID)
@@ -91,10 +91,10 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: """
                 <b>⚙️ Значения по умолчанию</b>
 
-                🤖 Модель · <code>\(defs.model)</code>
+                🤖 Модель · <code>\(MessageText.escaped(defs.model))</code>
                 📝 Память · <b>\(defs.historyLength) сообщ.</b>
                 🎭 Роль:
-                <blockquote expandable>\(defs.role)</blockquote>
+                <blockquote expandable>\(MessageText.escaped(defs.role))</blockquote>
 
                 <b>Команды:</b>
                 <code>/defaults model &lt;id&gt;</code>

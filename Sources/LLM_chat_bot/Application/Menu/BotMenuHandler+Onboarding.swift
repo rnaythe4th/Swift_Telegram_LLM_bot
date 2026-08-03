@@ -15,13 +15,17 @@ extension BotMenuHandler {
         }
         var config = await state.onboardingConfig()
 
-        /// The example a positional action refers to; nil answers the callback.
-        func example(at index: Int) async -> OnboardingExample? {
-            guard index >= 0, index < config.examples.count else {
+        /// The example a button points at, by its id; nil answers the callback.
+        ///
+        /// Not by position: the page reorders ("↑ Выше") and deletes its own
+        /// list, so a row number describes the keyboard rather than the example
+        /// it was drawn for — and «❌ Удалить» would then remove the neighbour.
+        func example() async -> OnboardingExample? {
+            guard let id = route.arg(2), let found = config.examples.first(where: { $0.id == id }) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.exampleNotFound)
                 return nil
             }
-            return config.examples[index]
+            return found
         }
 
         switch route.sub {
@@ -60,17 +64,17 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
 
         case "edit":
-            guard let index = route.int(2), let item = await example(at: index) else { return }
+            guard let item = await example() else { return }
             await state.setPending(
                 .admin(.init(kind: .onboardingEdit, payload: item.id)),
                 menuMessageID: message.message_id,
                 chatKey: chatKey
             )
             let prompt = """
-            <b>✏️ Пример · \(OnboardingPresenter.escape(item.label))</b>
+            <b>✏️ Пример · \(item.escapedLabel)</b>
 
             Текущий запрос:
-            <blockquote>\(OnboardingPresenter.escape(item.prompt))</blockquote>
+            <blockquote>\(item.escapedPrompt)</blockquote>
 
             Отправьте новое значение в формате:
             <code>Кнопка | Текст запроса</code>
@@ -81,13 +85,13 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
 
         case "on":
-            guard let index = route.int(2), let item = await example(at: index) else { return }
+            guard let item = await example() else { return }
             let newValue = await state.toggleOnboardingExample(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: newValue == true ? "🟢 Показывается" : "⚪️ Скрыт")
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "place":
-            guard let index = route.int(2), let item = await example(at: index) else { return }
+            guard let item = await example() else { return }
             let placement = await state.cycleOnboardingExamplePlacement(id: item.id)
             try? await telegram.answerCallback(
                 callbackQueryID: callback.id,
@@ -96,13 +100,13 @@ extension BotMenuHandler {
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "up":
-            guard let index = route.int(2), let item = await example(at: index) else { return }
+            guard let item = await example() else { return }
             let moved = await state.moveOnboardingExampleUp(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: moved ? "↑ Выше" : "Уже первый")
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
 
         case "del":
-            guard let index = route.int(2), let item = await example(at: index) else { return }
+            guard let item = await example() else { return }
             let removed = await state.removeOnboardingExample(id: item.id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "🗑 Удалён" : Texts.exampleNotFound)
             try await showPage(.superOnboarding, chatKey: chatKey, callback: callback, message: message)
@@ -166,15 +170,17 @@ extension BotMenuHandler {
         // Two rows per example: five buttons squeezed into one row left the
         // example's own name unreadable, which is the one thing you need to
         // see to know which row you are editing.
-        for (index, example) in config.examples.enumerated() {
+        // The example's id, not its row: the list is reordered and deleted
+        // from this very page (see `example()`).
+        for example in config.examples {
             rows.row([
-                menuButton("\(example.enabled ? "🟢" : "⚪️") \(example.label)", .onb, "on", "\(index)"),
+                menuButton("\(example.enabled ? "🟢" : "⚪️") \(example.label)", .onb, "on", example.id),
             ])
             rows.row([
-                menuButton("📍 \(example.placement.shortLabel)", .onb, "place", "\(index)"),
-                menuButton("✏️ Изменить", .onb, "edit", "\(index)"),
-                menuButton("↑ Выше", .onb, "up", "\(index)"),
-                menuButton("❌ Удалить", .onb, "del", "\(index)"),
+                menuButton("📍 \(example.placement.shortLabel)", .onb, "place", example.id),
+                menuButton("✏️ Изменить", .onb, "edit", example.id),
+                menuButton("↑ Выше", .onb, "up", example.id),
+                menuButton("❌ Удалить", .onb, "del", example.id),
             ])
         }
         if config.examples.count < OnboardingConfig.maxExamples {
@@ -200,8 +206,8 @@ extension BotMenuHandler {
         } else {
             for example in config.examples {
                 let share = totalTaps > 0 ? " · \(pct(example.taps, totalTaps))" : ""
-                lines.append("\(example.enabled ? "🟢" : "⚪️") <b>\(OnboardingPresenter.escape(example.label))</b> · 📍\(example.placement.shortLabel) · тапов \(example.taps)\(share)")
-                lines.append("<blockquote>\(OnboardingPresenter.escape(example.prompt))</blockquote>")
+                lines.append("\(example.enabled ? "🟢" : "⚪️") <b>\(example.escapedLabel)</b> · 📍\(example.placement.shortLabel) · тапов \(example.taps)\(share)")
+                lines.append("<blockquote>\(example.escapedPrompt)</blockquote>")
             }
             let inPrivate = config.activeExamples(inGroup: false).count
             let inGroups = config.activeExamples(inGroup: true).count

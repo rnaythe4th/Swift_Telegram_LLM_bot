@@ -43,7 +43,7 @@ extension BotMenuHandler {
         <b>🎭 Роль ассистента</b>
 
         Текущая:
-        <blockquote expandable>\(help.role)</blockquote>
+        <blockquote expandable>\(help.escapedRole)</blockquote>
 
         <i>🌐 — общая для всех чатов · 💬 — только для этого</i>
         ✏️ — своя роль текстом (или /setrole &lt;текст&gt;)
@@ -141,18 +141,18 @@ extension BotMenuHandler {
                 guard let price = modelPrices[preset.value] else { return nil }
                 let inP = Self.formatPriceM(price.inputPerToken * multiplier)
                 let outP = Self.formatPriceM(price.outputPerToken * multiplier)
-                return "• \(preset.display) — ⬇️$\(inP)/M | ⬆️$\(outP)/M"
+                return "• \(preset.escapedDisplay) — ⬇️$\(inP)/M | ⬆️$\(outP)/M"
             }
             if !lines.isEmpty {
                 priceSection = "\n\n" + lines.joined(separator: "\n")
             }
         }
 
-        let routingLine = help.modelProviderRouting.map { "\nСервис · 📡 <code>\($0)</code>" } ?? ""
+        let routingLine = help.escapedModelProviderRouting.map { "\nСервис · 📡 <code>\($0)</code>" } ?? ""
         let text = """
         <b>🤖 Модель</b>
 
-        Сейчас · <code>\(help.model)</code>\(routingLine)\(legendLine)\(priceSection)
+        Сейчас · <code>\(help.escapedModel)</code>\(routingLine)\(legendLine)\(priceSection)
 
         <i>При смене модели переписка очищается.</i>
         Своя модель — /model &lt;id&gt;

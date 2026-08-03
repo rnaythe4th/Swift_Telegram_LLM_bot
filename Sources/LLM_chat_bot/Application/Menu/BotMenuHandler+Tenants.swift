@@ -76,13 +76,18 @@ extension BotMenuHandler {
             return
 
         case "rmuser":
-            guard let index = route.int(2) else { return }
-            let users = await state.licensedUsers(ownerKey: invoker)
-            guard index >= 0, index < users.count else {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Не найдено")
+            // Addressed by key. A button drawn a minute ago describes the list
+            // as it was then, and this list re-sorts itself whenever a guest's
+            // label changes (`licensedUsers` sorts by label) — a guest the bot
+            // meets for the first time is enough. By position the delete took
+            // paid access away from whoever had slid into that row, and said
+            // "✓ Удалён". A stale button from an older build carries a number,
+            // which as a key addresses no record: it answers «не найдено».
+            guard let target = route.userKey(2) else { return }
+            guard await state.removeLicensedUser(ownerKey: invoker, target: target) else {
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.notFound)
                 return
             }
-            _ = await state.removeLicensedUser(ownerKey: invoker, target: users[index].key)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Удалён")
             try await showPage(.adminUsers, chatKey: chatKey, callback: callback, message: message)
 
@@ -129,9 +134,9 @@ extension BotMenuHandler {
 
         var buttons: Keyboard = [[menuButton("➕ Зарегистрировать тенанта", .stenant, "add")]]
         for row in rows.prefix(pageLimit) {
-            var btnRow = [menuButton("\(row.isSuperAdmin ? "🛡" : "🛠") \(row.label)", .stenant, "info", "\(row.key.storageValue)")]
+            var btnRow = [menuButton("\(row.isSuperAdmin ? "🛡" : "🛠") \(row.label)", .stenant, "info", row.key)]
             if !row.isSuperAdmin {
-                btnRow.append(menuButton("🗑", .stenant, "rm", "\(row.key.storageValue)"))
+                btnRow.append(menuButton("🗑", .stenant, "rm", row.key))
             }
             buttons.row(btnRow)
         }
@@ -143,8 +148,10 @@ extension BotMenuHandler {
 
     func renderSuperTenantInfo(invoker target: UserKey) async -> MenuScreen {
         guard let row = await state.tenantStats().first(where: { $0.key == target }) else {
+            // The label, not the key: `"@\(target)"` printed `@UserKey(#42)`,
+            // which names nobody and shows the reader our storage format.
             return MenuScreen(
-                "Тенант @\(target) не найден.",
+                "Тенант \(await state.displayLabel(forKey: target)) не найден.",
                 [[backButton(to: .superTenants)]]
             )
         }
@@ -171,12 +178,12 @@ extension BotMenuHandler {
         """
 
         var buttons: Keyboard = [
-            [menuButton("⏳ Продлить +\(ChatContextStore.subscriptionDays) дн.", .stenant, "ext", "\(row.key.storageValue)")],
-            [menuButton("♾ Бессрочно", .stenant, "unlim", "\(row.key.storageValue)"),
-             menuButton("⛔ Истечь сейчас", .stenant, "exp", "\(row.key.storageValue)")],
+            [menuButton("⏳ Продлить +\(ChatContextStore.subscriptionDays) дн.", .stenant, "ext", row.key)],
+            [menuButton("♾ Бессрочно", .stenant, "unlim", row.key),
+             menuButton("⛔ Истечь сейчас", .stenant, "exp", row.key)],
         ]
         if !row.isSuperAdmin {
-            buttons.row([menuButton("🗑 Удалить тенанта", .stenant, "rm", "\(row.key.storageValue)")])
+            buttons.row([menuButton("🗑 Удалить тенанта", .stenant, "rm", row.key)])
         }
         buttons.row([backButton(to: .superTenants)])
         return MenuScreen(text, buttons)
@@ -215,7 +222,7 @@ extension BotMenuHandler {
         for entry in balances.prefix(30) {
             buttons.row([
                 menuButton("\(entry.label) · \(usd(entry.wallet.balance))", command: .noop),
-                menuButton("🗑", .sbal, "rm", "\(entry.key)"),
+                menuButton("🗑", .sbal, "rm", entry.key),
             ])
         }
         buttons.row([menuButton("💹 Наценка · \(markupPct)%", .markup, "set")])
@@ -233,7 +240,7 @@ extension BotMenuHandler {
             for admin in supers {
                 rows.row([
                     menuButton(admin.label, command: .noop),
-                    menuButton("🗑 Удалить", .sa, "rm", "\(admin.key)"),
+                    menuButton("🗑 Удалить", .sa, "rm", admin.key),
                 ])
             }
         }
@@ -321,12 +328,12 @@ extension BotMenuHandler {
             guard let help = await state.peekHelp(chatKey: key) else { continue }
             lines.append("")
             lines.append(key.threadID == 0 ? "<b>Основной тред</b>" : "<b>Топик \(key.threadID)</b>")
-            lines.append("🤖 <code>\(help.model)</code> · 🌡 \(Self.formatTemp(help.temp)) · 📝 \(help.maxHistory)")
+            lines.append("🤖 <code>\(help.escapedModel)</code> · 🌡 \(Self.formatTemp(help.temp)) · 📝 \(help.maxHistory)")
             let realStr = help.cumulativeUsage.totalCost.formatted()
             let billedStr = await state.billedCost(of: help.cumulativeUsage).formatted()
             lines.append("📈 запросов \(help.cumulativeUsage.generationCount) · токенов \(ResponseFooterFormatter.formatTokenValue(help.cumulativeUsage.totalTokens)) · реально \(realStr) · клиентам \(billedStr)")
             let rolePreview = help.role.count > 250 ? String(help.role.prefix(250)) + "…" : help.role
-            lines.append("🎭 <blockquote expandable>\(rolePreview)</blockquote>")
+            lines.append("🎭 <blockquote expandable>\(MessageText.escaped(rolePreview))</blockquote>")
         }
         if keys.count > 5 {
             lines.append("\n<i>…и ещё \(keys.count - 5) топиков — /inspect \(chatID)</i>")
@@ -405,7 +412,7 @@ extension BotMenuHandler {
             ⚠️ Подписка, привязанные чаты и список гостей пропадут. Их чаты вернутся на бесплатные модели. Отменить нельзя — только оформить заново.
             """
             let confirmMarkup: Keyboard = [
-                [menuButton("🗑 Да, удалить", .stenant, "rmyes", "\(target)")],
+                [menuButton("🗑 Да, удалить", .stenant, "rmyes", target)],
                 [cancelButton(to: .superTenants)],
             ]
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(confirmText, confirmMarkup))
@@ -534,7 +541,7 @@ extension BotMenuHandler {
             ⚠️ Остаток пропадёт вместе с историей списаний. Если человек пополнял баланс деньгами, это его деньги. Отменить нельзя.
             """
             let confirmMarkup: Keyboard = [
-                [menuButton("🗑 Да, удалить", .sbal, "rmyes", "\(target)")],
+                [menuButton("🗑 Да, удалить", .sbal, "rmyes", target)],
                 [cancelButton(to: .superBalances)],
             ]
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(confirmText, confirmMarkup))

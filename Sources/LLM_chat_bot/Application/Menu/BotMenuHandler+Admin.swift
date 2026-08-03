@@ -49,13 +49,13 @@ extension BotMenuHandler {
             switch route.sub {
             case "model":
                 kind = .defaultsModel
-                prompt = "<b>⚙️ Модель в новых чатах</b>\n\nСейчас: <code>\(defs.model)</code>\n\nОтправьте ID модели одним сообщением (названия — на openrouter.ai)."
+                prompt = "<b>⚙️ Модель в новых чатах</b>\n\nСейчас: <code>\(MessageText.escaped(defs.model))</code>\n\nОтправьте ID модели одним сообщением (названия — на openrouter.ai)."
             case "hist":
                 kind = .defaultsHistory
                 prompt = "<b>⚙️ Память в новых чатах</b>\n\nСейчас: <b>\(defs.historyLength) сообщ.</b>\n\nОтправьте число от 1 до 50 — сколько последних сообщений бот держит в голове."
             case "role":
                 kind = .defaultsRole
-                prompt = "<b>⚙️ Роль в новых чатах</b>\n\nСейчас:\n<blockquote expandable>\(defs.role)</blockquote>\n\nОтправьте новый текст роли одним сообщением."
+                prompt = "<b>⚙️ Роль в новых чатах</b>\n\nСейчас:\n<blockquote expandable>\(MessageText.escaped(defs.role))</blockquote>\n\nОтправьте новый текст роли одним сообщением."
             default:
                 return
             }
@@ -194,10 +194,10 @@ extension BotMenuHandler {
         \(usageLine)
 
         <b>Что включается в новых чатах</b>
-        🤖 Модель · <code>\(defaults.model)</code>
+        🤖 Модель · <code>\(MessageText.escaped(defaults.model))</code>
         📝 Память · <b>\(defaults.historyLength) сообщ.</b>
         🎭 Роль:
-        <blockquote expandable>\(defaults.role)</blockquote>
+        <blockquote expandable>\(MessageText.escaped(defaults.role))</blockquote>
 
         <b>👥 Кому открыт доступ</b>
         Гости этого чата · <b>\(whitelist.count)</b>
@@ -298,10 +298,10 @@ extension BotMenuHandler {
         let text = """
         <b>⚙️ Что включается в новых чатах</b>
 
-        🤖 Модель · <code>\(defs.model)</code>
+        🤖 Модель · <code>\(MessageText.escaped(defs.model))</code>
         📝 Память · <b>\(defs.historyLength) сообщ.</b>
         🎭 Роль:
-        <blockquote expandable>\(defs.role)</blockquote>
+        <blockquote expandable>\(MessageText.escaped(defs.role))</blockquote>
 
         <i>С этими настройками бот стартует в каждом новом чате. Они же возвращаются по команде /reset.</i>
         """
@@ -319,19 +319,30 @@ extension BotMenuHandler {
             [menuButton("🔗 Ссылка-приглашение", page: .adminInvite)],
             [menuButton("➕ Добавить по @invoker", .tenant, "adduserprompt")],
         ]
-        for (i, user) in users.prefix(40).enumerated() {
+        // The guest's key, not their position in this list: the list is sorted
+        // by display label, and a label changes on its own — a guest the bot
+        // meets for the first time stops being "@pending" and re-sorts the
+        // list under an open menu. A delete addressed by position then takes
+        // paid access away from whoever slid into that row.
+        for user in users.prefix(40) {
             rows.row([
                 menuButton(user.label, command: .noop),
-                menuButton("🗑 Удалить", .tenant, "rmuser", "\(i)"),
+                menuButton("🗑 Удалить", .tenant, "rmuser", user.key),
             ])
         }
         rows.row([backButton(to: .adminPanel)])
 
+        // Capped like every other list on these pages: past the message limit
+        // Telegram does not shorten the page, it refuses it — and the buttons
+        // were already capped at the same number, so the text promised rows the
+        // keyboard did not have.
         let listText: String
         if users.isEmpty {
             listText = "<i>пока никого</i>"
         } else {
-            listText = users.map { "• \($0.label)" }.joined(separator: "\n")
+            var shown = users.prefix(40).map { "• \($0.label)" }
+            if users.count > 40 { shown.append("<i>…и ещё \(users.count - 40)</i>") }
+            listText = shown.joined(separator: "\n")
         }
         let text = """
         <b>👥 Гости премиума \(invokerLabel)</b> (\(users.count))

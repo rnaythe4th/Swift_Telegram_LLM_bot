@@ -162,6 +162,8 @@ extension BotMenuHandler {
                 return
             }
             _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelValue, providerRouting: preset.provider)
+            // A toast is plain text, not markup — the escaped forms are for
+            // the pages; here the raw name is what the person should read.
             let toast = "Модель: \(preset.display)" + (preset.provider.map { " · \($0)" } ?? "")
                 + Self.dailyTasteToastSuffix(gate.access, isPaidModel: gate.isPaid)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: toast)

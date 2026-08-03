@@ -739,7 +739,11 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
   отсутствующий. Наружу payload собирают только `MenuRoute.link(_:_:)`/
   `navigation(to:)`/`purchase(from:)` и `menuButton(_:page:)`/
   `menuButton(_:command:)`/`menuButton(_:_:_:)`/`buyButton(_:source:)`;
-  строковый `menuButton(_:action:)` — `private`.
+  строковый `menuButton(_:action:)` — `private`. Аргументы payload — значения,
+  а не строки: `CallbackArgument` (`UserKey` → `storageValue`, `ChatID`/`UserID`
+  → число, enum → `rawValue`). Интерполяция id в payload запрещена:
+  `"\(userKey)"` — это отладочное `description` (`UserKey(#42)`), обратно оно
+  адресует никого.
 - **Лимит `callback_data` — 64 байта** (`MenuRoute.maxCallbackDataBytes`);
   превышение отклоняет **всё сообщение**. Пресеты моделей ездят позицией в
   списке (`presetTarget` принимает и позицию, и значение — ради старых кнопок).
@@ -897,9 +901,12 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   MenuCommand`. В payload едут id и индексы, не чужой текст.
 - Кнопка, которая **что-то меняет**, несёт стабильный id записи, а не её
   позицию: клавиатура описывает список на момент отрисовки, а живёт дольше
-  (`Preset.id`, `OnboardingExample.id`, `ModePreset.id`). Промах отвечает
-  «не найдено», а не попадает в соседа. Чтение позиции остаётся только ради
-  кнопок из сообщений старого билда (`presetTarget`).
+  (`Preset.id`, `OnboardingExample.id`, `ModePreset.id`, `UserKey` для гостей и
+  кошельков). Промах отвечает «не найдено», а не попадает в соседа. Особенно
+  там, где список сортируется по данным, которые меняются сами: `licensedUsers`
+  — по метке, а метка обновляется, когда бот впервые видит человека. Чтение
+  позиции остаётся только ради кнопок из сообщений старого билда
+  (`presetTarget`).
 - Кнопка «купить» несёт `PurchaseSource` (`menu`, `cap`, `promo`, `welcome`,
   `command`, `reminder`, `balance`, `referral`, `model`, `mode`, `tuning`);
   неизвестный суффикс читается как `menu`.
@@ -928,8 +935,12 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   То же для текста, который человек ввёл сам и который печатается в сообщение:
   хранится сырым (значение уезжает в модель), экранируется в точке, где
   становится разметкой (одна реализация — `MessageText.escaped`; поверх неё
-  `Preset.escapedDisplay`/`escapedValue`, `ExternalPaymentMethod
+  `Preset.escapedDisplay`/`escapedValue`, `HelpData.escapedModel`/`escapedRole`,
+  `ModePreset.escapedTitle`/`escapedSubtitle`/`escapedRole`,
+  `OnboardingExample.escapedLabel`/`escapedPrompt`, `ExternalPaymentMethod
   .escapedTitle`/`escapedCode`, `ExternalPaymentConfig.escapedMerchantID`).
+  Модель и роль чата задаёт **любой участник** — страница, печатающая их сырыми,
+  перестаёт открываться у всего чата.
   Подпись кнопки — не разметка, там сырой текст. Настройка, набранная
   суперадмином, тоже чужой текст: `<` в ней роняет **весь** `sendMessage`.
 - Значения атрибутов экранируются целиком, включая кавычки
@@ -964,7 +975,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~509 тестов; 489 без сети
+`swift test` — цель `LLM_chat_botTests`, ~517 тестов; 497 без сети
 (`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
 `TEST_DATABASE_URL`:
 
@@ -993,9 +1004,11 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 экранирование), `StoreChatMigrationTests` (переезд в супергруппу),
 `UpdateIntakeTests`/`ChatUpdateDispatcherTests`/`GenerationRuntimeTests`
 (дедуп, границы альбома, порядок в чате, FIFO слотов, отмена до старта стрима),
-`MenuRouteTests`, `MenuPageRenderTests` (рендер
+`MenuRouteTests` (в т.ч. round-trip ключа через payload),
+`MenuPageRenderTests` (рендер
 **каждой** страницы личка/группа × владелец/юзер: маршруты существуют, `nav:`
-ведёт на реальную страницу, влезает в одно сообщение, гейты, лимит 64 байта),
+ведёт на реальную страницу, влезает в одно сообщение, гейты, лимит 64 байта,
+экранирование введённой модели/роли/заготовки, кнопки редакторов носят id),
 `TelegramGatewayTests` (длина в UTF-16 на развилке «одним или резать»; какой
 отказ Bot API — успех), `MediaResolverTests` (бюджет вложений на ход),
 `PaymentTypeTests`, `ExternalPaymentTests`, `ExternalCallbackEndToEndTests`
@@ -1005,7 +1018,8 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 `dispatch`, проходит настоящие команды/меню/генерацию и настоящий
 `TelegramHTTPGateway`, приземляется в локальный дублёр Bot API; подделаны только
 модель и загрузчик медиа; цикл по `MenuPage.allCases` требует отказа обычному
-юзеру на каждой `super*`).
+юзеру на каждой `super*`; удаление кошелька проходит страница → 🗑 →
+«Да, удалить» на реальных payload'ах).
 
 **Правила**: тест формулирует правило продукта, а не текущий вывод функции;
 новая денежная или доступная механика приезжает с тестом; хитрый SQL проверяется

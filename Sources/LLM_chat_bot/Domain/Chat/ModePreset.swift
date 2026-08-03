@@ -89,6 +89,16 @@ struct ModePreset: Codable, Sendable, Equatable {
         self.taps = taps
     }
 
+    // A mode is named and described by a super-admin, and every one of those
+    // strings is printed into HTML — on the settings page every user sees, on
+    // the editor, in the toasts. Stored raw (the role is what the model is
+    // told), escaped where it becomes markup, like `Preset`: one `<` in a
+    // title otherwise makes Telegram refuse the whole page.
+    var escapedTitle: String { MessageText.escaped(title) }
+    var escapedSubtitle: String { MessageText.escaped(subtitle) }
+    var escapedRole: String? { role.map(MessageText.escaped) }
+    var escapedModel: String? { model.map(MessageText.escaped) }
+
     enum CodingKeys: String, CodingKey {
         case id, title, subtitle, model, modelProviderRouting, temp, maxHistory
         case reasoning, role, tier, enabled, taps

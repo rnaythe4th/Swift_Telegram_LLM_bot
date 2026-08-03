@@ -130,11 +130,11 @@ extension BotMenuHandler {
         case "setaddr":
             guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
             await state.setPending(.cryptoAddress(chain: chain), menuMessageID: message.message_id, chatKey: chatKey)
-            let current = await state.cryptoAddress(chain) ?? "<i>не задан</i>"
+            let current = (await state.cryptoAddress(chain)).map { "<code>\(MessageText.escaped($0))</code>" } ?? "<i>не задан</i>"
             let text = """
             <b>🪙 Адрес для приёма · \(chain.displayName)</b>
 
-            Текущий: <code>\(current)</code>
+            Текущий: \(current)
 
             Отправьте новый адрес одним сообщением. Отправьте <code>-</code> чтобы удалить.
             """
@@ -160,7 +160,9 @@ extension BotMenuHandler {
             guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
             await state.setPending(.cryptoPoolAdd(chain: chain), menuMessageID: message.message_id, chatKey: chatKey)
             let pool = await state.cryptoAddressPool(chain)
-            let listing = pool.isEmpty ? "<i>пусто</i>" : pool.enumerated().map { "\($0.offset + 1). <code>\($0.element)</code>" }.joined(separator: "\n")
+            let listing = pool.isEmpty
+                ? "<i>пусто</i>"
+                : pool.enumerated().map { "\($0.offset + 1). <code>\(MessageText.escaped($0.element))</code>" }.joined(separator: "\n")
             let text = """
             <b>🪙 Пул · \(chain.displayName)</b>
 
@@ -287,7 +289,7 @@ extension BotMenuHandler {
         case .amountDelta:
             for chain in CryptoChain.allCases {
                 if let addr = cryptoAddrs[chain] {
-                    addrLines.append("• \(chain.displayName) · <code>\(addr)</code>")
+                    addrLines.append("• \(chain.displayName) · <code>\(MessageText.escaped(addr))</code>")
                 }
             }
         case .uniqueAddress:
@@ -424,7 +426,7 @@ extension BotMenuHandler {
 
         let pinnedText = pinnedList.isEmpty
             ? "<i>не закреплены — пользователи без доступа видят все модели как бесплатные</i>"
-            : pinnedList.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+            : pinnedList.map { "• <code>\(MessageText.escaped($0))</code>" }.joined(separator: "\n")
 
         let text = """
         <b>🆓 Бесплатные модели</b>

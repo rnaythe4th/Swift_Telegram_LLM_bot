@@ -125,7 +125,7 @@ extension BotMenuHandler {
         case .defaultsModel:
             guard isAdmin, !trimmed.isEmpty else { toast = "⚠️ ID модели пуст"; resumePage = .adminDefaults; break }
             let new = await state.setDefaultModel(trimmed, chatID: chatKey.chatID)
-            toast = "✓ Модель в новых чатах · \(new)"
+            toast = "✓ Модель в новых чатах · <code>\(MessageText.escaped(new))</code>"
             resumePage = .adminDefaults
 
         case .defaultsRole:
@@ -165,7 +165,7 @@ extension BotMenuHandler {
                     toast = Texts.usernameRequired
                 } else {
                     let ok = await state.addLicensedUser(ownerKey: owner, target: state.userKeyOrRaw(target))
-                    toast = ok ? "✓ @\(target) добавлен в гости премиума" : "Уже в списке или премиум неактивен"
+                    toast = ok ? "✓ @\(MessageText.escaped(target)) добавлен в гости премиума" : "Уже в списке или премиум неактивен"
                 }
             }
             resumePage = .adminUsers
@@ -196,7 +196,7 @@ extension BotMenuHandler {
                 toast = Texts.usernameRequired
             } else {
                 await state.registerTenant(state.userKeyOrRaw(target))
-                toast = "✓ Тенант @\(target) создан"
+                toast = "✓ Тенант @\(MessageText.escaped(target)) создан"
             }
             resumePage = .superTenants
 
@@ -204,7 +204,7 @@ extension BotMenuHandler {
             guard isSuper else { toast = Texts.superAdminOnly; resumePage = .superTenants; break }
             let target = normalizeUsername(trimmed)
             let removed = await state.removeTenant(state.userKeyOrRaw(target))
-            toast = removed ? "✓ Тенант @\(target) удалён" : Texts.cannotRemove
+            toast = removed ? "✓ Тенант @\(MessageText.escaped(target)) удалён" : Texts.cannotRemove
             resumePage = .superTenants
 
         case .superAdminAdd:
@@ -214,7 +214,7 @@ extension BotMenuHandler {
                 toast = Texts.usernameRequired
             } else {
                 let ok = await state.addSuperAdmin(state.userKeyOrRaw(target))
-                toast = ok ? "✓ @\(target) — суперадмин" : "Уже суперадмин"
+                toast = ok ? "✓ @\(MessageText.escaped(target)) — суперадмин" : "Уже суперадмин"
             }
             resumePage = .superAdmins
 
@@ -222,7 +222,7 @@ extension BotMenuHandler {
             guard isRoot else { toast = Texts.rootSuperAdminOnly; resumePage = .superAdmins; break }
             let target = normalizeUsername(trimmed)
             let ok = await state.removeSuperAdmin(state.userKeyOrRaw(target))
-            toast = ok ? "✓ @\(target) больше не суперадмин" : Texts.cannotRemove
+            toast = ok ? "✓ @\(MessageText.escaped(target)) больше не суперадмин" : Texts.cannotRemove
             resumePage = .superAdmins
 
         default:
@@ -331,11 +331,13 @@ extension BotMenuHandler {
                 let allowedFree = await state.allowedFreeModelIDs()
                 let isPaidModel = allowedFree.map { !$0.contains(modelID) } ?? true
                 if isPaidModel, case .none = access {
-                    toast = "⭐ <b>\(modelID)</b> — платная модель. Открыть премиум — /buy, или пополнить баланс — /balance"
+                    toast = "⭐ <b>\(MessageText.escaped(modelID))</b> — платная модель. Открыть премиум — /buy, или пополнить баланс — /balance"
                 } else {
                     _ = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelID, providerRouting: providerRouting)
                     await modelPriceMonitor?.refreshPricesIfNeeded(for: modelID)
-                    toast = "✓ Модель: <code>\(modelID)</code>" + (providerRouting.map { " · \($0)" } ?? "") + ". Переписка очищена."
+                    toast = "✓ Модель: <code>\(MessageText.escaped(modelID))</code>"
+                        + (providerRouting.map { " · \(MessageText.escaped($0))" } ?? "")
+                        + ". Переписка очищена."
                 }
             }
 
@@ -432,7 +434,7 @@ extension BotMenuHandler {
                     let wallet = await wallets.grant(
                         key: state.userKeyOrRaw(target), amount: .usd(amount), ref: "balance top-up"
                     )
-                    toast = wallet.map { "✓ Баланс @\(target.lowercased()) · <b>\($0.balance.formatted())</b>" }
+                    toast = wallet.map { "✓ Баланс @\(MessageText.escaped(target.lowercased())) · <b>\($0.balance.formatted())</b>" }
                         ?? "⚠️ Баланс не изменён — хранилище не приняло запись"
                 }
             } else {
@@ -476,13 +478,16 @@ extension BotMenuHandler {
         case .cardUsdRate:
             resumePage = .superCard
             guard isSuper else { toast = Texts.superAdminOnly; break }
-            let rateInput = trimmed.replacingOccurrences(of: ",", with: ".")
-            if let value = Double(rateInput), value >= 0 {
-                if value == 0 {
+            // Integer parsing with an overflow check, like every other amount
+            // typed into the bot (`FiatCurrency.minorUnits`): `Int(Double)`
+            // *traps* past `Int.max`, so a slipped keyboard — a price with
+            // twenty digits — took the whole process down.
+            if let minorUnits = FiatCurrency.minorUnits(from: trimmed) {
+                if minorUnits == 0 {
                     await state.setCardUsdRateMinorUnits(nil)
                     toast = "✓ Пополнение баланса картой отключено."
                 } else {
-                    await state.setCardUsdRateMinorUnits(Int((value * 100).rounded()))
+                    await state.setCardUsdRateMinorUnits(minorUnits)
                     let card = await state.cardConfig()
                     toast = "✓ Курс: <b>\(card.usdRateLabel ?? "—")</b>"
                 }
@@ -493,13 +498,11 @@ extension BotMenuHandler {
         case .cardPrice:
             resumePage = .superCard
             guard isSuper else { toast = Texts.superAdminOnly; break }
-            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
-            if let value = Double(normalized), value >= 0 {
-                if value == 0 {
+            if let minorUnits = FiatCurrency.minorUnits(from: trimmed) {
+                if minorUnits == 0 {
                     await state.setCardPriceMinorUnits(nil)
                     toast = "✓ Продажи картой отключены."
                 } else {
-                    let minorUnits = Int((value * 100).rounded())
                     let card = await state.cardConfig()
                     if minorUnits < card.currency.minMinorUnits {
                         toast = "⚠️ Минимум для \(card.currency.rawValue): \(card.currency.format(minorUnits: card.currency.minMinorUnits))"
@@ -752,8 +755,8 @@ extension BotMenuHandler {
             await state.upsertMode(mode)
             return (
                 mode.role == nil
-                    ? "✓ Режим <b>\(OnboardingPresenter.escape(mode.title))</b> больше не меняет роль чата"
-                    : "✓ Роль режима <b>\(OnboardingPresenter.escape(mode.title))</b> обновлена",
+                    ? "✓ Режим <b>\(mode.escapedTitle)</b> больше не меняет роль чата"
+                    : "✓ Роль режима <b>\(mode.escapedTitle)</b> обновлена",
                 resumePage
             )
         }
@@ -803,7 +806,7 @@ extension BotMenuHandler {
             mode.reasoning = reasoning
             await state.upsertMode(mode)
             if let model { await modelPriceMonitor?.refreshPricesIfNeeded(for: model) }
-            return ("✓ Режим обновлён · <b>\(OnboardingPresenter.escape(mode.title))</b>", resumePage)
+            return ("✓ Режим обновлён · <b>\(mode.escapedTitle)</b>", resumePage)
         }
 
         guard config.modes.count < ModePresetConfig.maxModes else {
@@ -825,7 +828,7 @@ extension BotMenuHandler {
         )
         await state.upsertMode(mode)
         await modelPriceMonitor?.refreshPricesIfNeeded(for: model ?? "")
-        return ("✓ Режим добавлен · <b>\(OnboardingPresenter.escape(mode.title))</b> · тариф ⭐, поменяйте кнопкой", resumePage)
+        return ("✓ Режим добавлен · <b>\(mode.escapedTitle)</b> · тариф ⭐, поменяйте кнопкой", resumePage)
     }
 
     private func applyGrowthInput(
@@ -849,13 +852,13 @@ extension BotMenuHandler {
                 toast = "⚠️ Формат: <code>Кнопка | Текст запроса</code>"
             } else if pending.kind == .onboardingAdd {
                 if let added = await state.addOnboardingExample(label: label, prompt: prompt) {
-                    toast = "✓ Пример добавлен · <b>\(OnboardingPresenter.escape(added.label))</b>"
+                    toast = "✓ Пример добавлен · <b>\(added.escapedLabel)</b>"
                 } else {
                     toast = "⚠️ Не добавлен: список полон (\(OnboardingConfig.maxExamples)) или текст пуст"
                 }
             } else if let id = pending.payload,
                       await state.updateOnboardingExample(id: id, label: label, prompt: prompt) {
-                toast = "✓ Пример обновлён · <b>\(OnboardingPresenter.escape(label))</b>"
+                toast = "✓ Пример обновлён · <b>\(MessageText.escaped(label))</b>"
             } else {
                 toast = "⚠️ Пример не найден — возможно, он был удалён"
             }
@@ -863,9 +866,10 @@ extension BotMenuHandler {
         case .referralInviterReward, .referralInviteeReward, .referralPaidBonus:
             resumePage = .superReferrals
             guard isSuper else { toast = Texts.superAdminOnly; break }
-            let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
-            if let usd = Double(normalized), usd >= 0 {
-                let cents = Int((usd * 100).rounded())
+            // Same integer parsing as every other amount: `Int(Double)` traps
+            // on a number too large to express, and this field is one typo away
+            // from one.
+            if let cents = FiatCurrency.minorUnits(from: trimmed) {
                 guard ReferralConfig.rewardRange.contains(cents) else {
                     toast = "⚠️ Максимум \(ReferralConfig.formatUsd(cents: ReferralConfig.rewardRange.upperBound)) за приглашение"
                     break

@@ -44,10 +44,6 @@ enum OnboardingPresenter {
     /// Escapes text that goes into an HTML message. Example labels/prompts are
     /// free-form super-admin input — an unescaped `<` would make Telegram reject
     /// the whole message.
-    static func escape(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-    }
+    /// One implementation of this rule, not one per type (CLAUDE.md §17).
+    static func escape(_ text: String) -> String { MessageText.escaped(text) }
 }

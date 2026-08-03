@@ -434,13 +434,22 @@ final class BotMenuHandler: Sendable {
         }
     }
 
+    /// "📜 Что бот помнит" — the remembered conversation, read back.
+    ///
+    /// Two things make this a message Telegram will refuse rather than shorten,
+    /// and it refuses the whole thing: the text is the conversation, so it is
+    /// full of `<` (every answer that ever contained code), and fifty
+    /// remembered messages are several times a message's worth of characters.
+    /// So each line is escaped where it becomes markup, and the dump keeps the
+    /// **newest** messages that fit and says how many it is showing — a report
+    /// that silently sends nothing reads as a broken button.
     func sendHistoryDump(chatKey: ChatKey) async {
         let messages = await state.history(chatKey: chatKey)
         let text: String
         if messages.isEmpty {
             text = "📝 Бот пока ничего не помнит — переписки нет."
         } else {
-            var lines: [String] = ["<b>📝 Что бот помнит</b> (\(messages.count))"]
+            var lines: [String] = []
             for msg in messages {
                 let roleLabel: String
                 switch msg.role {
@@ -463,19 +472,20 @@ final class BotMenuHandler: Sendable {
                     }
                     content = (textParts.joined(separator: " ") + " " + mediaTags.joined(separator: " ")).trimmingCharacters(in: .whitespaces)
                 }
+                // Cut first, escape second: cutting escaped text lands inside
+                // `&lt;` and produces markup Telegram rejects.
                 let limit = 280
                 let displayContent: String
                 if content.isEmpty {
                     displayContent = "<i>(пусто)</i>"
                 } else if content.count > limit {
-                    let endIndex = content.index(content.startIndex, offsetBy: limit)
-                    displayContent = String(content[..<endIndex]) + "…"
+                    displayContent = MessageText.escaped(String(content.prefix(limit))) + "…"
                 } else {
-                    displayContent = content
+                    displayContent = MessageText.escaped(content)
                 }
                 lines.append("\n\(roleLabel) \(displayContent)")
             }
-            text = lines.joined(separator: "\n")
+            text = Self.historyDumpText(lines: lines, total: messages.count)
         }
         _ = try? await telegram.sendMessage(.init(
             chatID: chatKey.chatID,
@@ -484,6 +494,30 @@ final class BotMenuHandler: Sendable {
             text: text,
             replyMarkup: nil
         ))
+    }
+
+    /// The newest lines that fit in one message, with a header that says how
+    /// many of them there are. Measured the way Telegram measures (UTF-16 of
+    /// the rendered text), so the message is never the one that comes back as
+    /// "message is too long" — which is how the dump used to fail: entirely.
+    static func historyDumpText(lines: [String], total: Int) -> String {
+        var kept: [String] = []
+        var used = 0
+        for line in lines.reversed() {
+            let cost = line.utf16.count + 1
+            guard used + cost <= MessageSplitter.charLimit else { break }
+            used += cost
+            kept.insert(line, at: 0)
+        }
+        let header = kept.count == total
+            ? "<b>📝 Что бот помнит</b> (\(total))"
+            : "<b>📝 Что бот помнит</b> · последние <b>\(kept.count)</b> из \(total)"
+        // Even one message can be longer than a message: fall back to the head
+        // of it rather than to nothing at all.
+        guard !kept.isEmpty else {
+            return MessageSplitter.splitRendered(header + (lines.last ?? "")).done
+        }
+        return ([header] + kept).joined(separator: "\n")
     }
 
     /// Shown when the caller's storage key cannot be resolved. It used to read
@@ -517,9 +551,11 @@ final class BotMenuHandler: Sendable {
     /// A button carrying a command and its arguments. The payload format lives
     /// here and nowhere else: call sites pass values, not a string they glued
     /// together, so an argument cannot land in the wrong position or bring a
-    /// stray separator with it.
-    func menuButton(_ text: String, _ command: MenuCommand, _ arguments: String...) -> InlineKeyboardButton {
-        menuButton(text, action: ([command.rawValue] + arguments).joined(separator: ":"))
+    /// stray separator with it — and a typed id (`UserKey`, `ChatID`) writes
+    /// itself the way the reader on the other side parses it, instead of being
+    /// interpolated into its debug description (`CallbackArgument`).
+    func menuButton(_ text: String, _ command: MenuCommand, _ arguments: any CallbackArgument...) -> InlineKeyboardButton {
+        menuButton(text, action: MenuRoute.link(command, arguments))
     }
 
     /// A link to another page. The destination is a `MenuPage`, so a button

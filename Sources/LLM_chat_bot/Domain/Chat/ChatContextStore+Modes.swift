@@ -77,11 +77,18 @@ extension ChatContextStore {
         }
     }
 
-    func moveModeUp(id: String) {
+    /// True when the mode actually moved. The caller reports it: a button that
+    /// answers "↑ Выше" for a mode that is already first — or for one that is
+    /// no longer in the list at all — describes something that did not happen.
+    @discardableResult
+    func moveModeUp(id: String) -> Bool {
+        var moved = false
         mutateModes { config in
             guard let index = config.modes.firstIndex(where: { $0.id == id }), index > 0 else { return }
             config.modes.swapAt(index, index - 1)
+            moved = true
         }
+        return moved
     }
 
     func setDefaultMode(id: String) {

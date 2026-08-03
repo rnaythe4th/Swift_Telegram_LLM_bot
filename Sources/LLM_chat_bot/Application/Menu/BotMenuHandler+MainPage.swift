@@ -82,13 +82,16 @@ extension BotMenuHandler {
 
         var settingsSummary: String
         if modesOn {
-            let name = activeMode?.title ?? "изменён вручную"
-            let subtitle = activeMode.map { $0.subtitle.isEmpty ? "" : "\n<i>\($0.subtitle)</i>" }
-                ?? "\n<i>\(help.model)</i>"
+            // The name and the line under it are the super-admin's text on
+            // the one page every user opens: escaped, or a stray `<` in a mode
+            // title takes the settings page down for everybody.
+            let name = activeMode?.escapedTitle ?? "изменён вручную"
+            let subtitle = activeMode.map { $0.subtitle.isEmpty ? "" : "\n<i>\($0.escapedSubtitle)</i>" }
+                ?? "\n<i>\(help.escapedModel)</i>"
             settingsSummary = "Режим · <b>\(name)</b>\(subtitle)"
         } else {
             settingsSummary = """
-            🤖 Модель · <b>\(help.model)</b>
+            🤖 Модель · <b>\(help.escapedModel)</b>
             🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
             📝 Память · <b>\(help.maxHistory) сообщ.</b>\
             \(reasoningSupported ? "\n🧠 Обдумывание · <b>\(reasoningLabel)</b>" : "")

@@ -67,6 +67,42 @@ final class MenuRouteTests: XCTestCase {
         }
     }
 
+    /// A key put into a payload has to be the key that comes back out.
+    ///
+    /// `"\(key)"` produced the debug description (`UserKey(#42)`), which
+    /// `userKey(_:)` reads as a pending handle addressing nobody — so "🗑 Да,
+    /// удалить" on a tenant and on a wallet, and "🗑 Удалить" on a super-admin,
+    /// all answered «не найдено» and changed nothing. Typed arguments
+    /// (`CallbackArgument`) write the storage form; this is the round trip.
+    func testAUserKeyRoundTripsThroughAPayload() throws {
+        for key in [UserKey.identified(42), UserKey.pending("someone")!, UserKey.sanitizedPendingFallback("Alice!")] {
+            let link = MenuRoute.link(.sbal, "rmyes", key)
+            let route = try XCTUnwrap(MenuRoute(action: link))
+            XCTAssertEqual(route.userKey(2), key, "the key did not survive \(link)")
+        }
+    }
+
+    /// The debug description is exactly what must never reach a payload.
+    func testAKeysDescriptionIsNotItsPayloadForm() {
+        let key = UserKey.identified(42)
+        XCTAssertEqual(key.callbackToken, key.storageValue)
+        XCTAssertNotEqual(key.callbackToken, String(describing: key))
+        XCTAssertNotEqual(UserKey(storageValue: String(describing: key)), key, "premise: the description is not readable back")
+    }
+
+    /// Ids and indices, never a debug description: the other typed arguments
+    /// travel as the value their reader parses.
+    func testTypedArgumentsWriteWhatTheirReaderParses() throws {
+        let route = try XCTUnwrap(MenuRoute(action: MenuRoute.link(.tenant, "rmchat", ChatID(-100_500))))
+        XCTAssertEqual(route.chatID(2), ChatID(-100_500))
+
+        let whitelist = try XCTUnwrap(MenuRoute(action: MenuRoute.link(.wl, "remove", UserID(777))))
+        XCTAssertEqual(whitelist.userID(2), UserID(777))
+
+        let currency = try XCTUnwrap(MenuRoute(action: MenuRoute.link(.card, "currency", FiatCurrency.eur)))
+        XCTAssertEqual(currency.arg(2).flatMap(FiatCurrency.init(rawValue:)), .eur)
+    }
+
     /// Preset categories reuse the settings pages. The mapping is spelled out
     /// in `MenuPage(category:)` precisely so a renamed page breaks the build —
     /// this checks the mapping still lands on a real page.

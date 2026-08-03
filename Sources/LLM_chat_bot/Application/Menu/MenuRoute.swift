@@ -77,6 +77,63 @@ enum MenuCommand: String, CaseIterable {
     }
 }
 
+/// A value a button may carry in its `callback_data`.
+///
+/// The payload is a string, and that is exactly the problem: every id in this
+/// codebase is a type (`UserKey`, `ChatID`, `UserID`), and interpolating one
+/// into a payload yields its *debug* description — `UserKey(#42)` — which comes
+/// back through `MenuRoute.userKey` addressing nothing at all. That is not a
+/// broken button that looks broken: it is "🗑 Да, удалить" answering «не
+/// найдено», and it had happened to three destructive actions at once.
+///
+/// So a button takes values, not strings it glued together, and each type says
+/// once how it is written down. The round trip is symmetric by construction:
+/// what `callbackToken` writes is what the reader on the other side parses.
+protocol CallbackArgument {
+    var callbackToken: String { get }
+}
+
+extension String: CallbackArgument {
+    var callbackToken: String { self }
+}
+
+extension Int: CallbackArgument {
+    var callbackToken: String { String(self) }
+}
+
+/// The storage form, which is what `MenuRoute.userKey` reads back — never the
+/// description, and never a label a person reads.
+extension UserKey: CallbackArgument {
+    var callbackToken: String { storageValue }
+}
+
+extension ChatID: CallbackArgument {
+    var callbackToken: String { String(value) }
+}
+
+extension UserID: CallbackArgument {
+    var callbackToken: String { String(value) }
+}
+
+/// Enumerations travel as their raw value, without a `.rawValue` at each call
+/// site to forget. Conformance is declared per type rather than granted to
+/// every `RawRepresentable`: `ServiceProvider` travels as `commandValue`, not
+/// as its raw value, and a blanket rule would have silently written the wrong
+/// one.
+extension CallbackArgument where Self: RawRepresentable, Self.RawValue == String {
+    var callbackToken: String { rawValue }
+}
+
+extension MenuPage: CallbackArgument {}
+extension MenuCommand: CallbackArgument {}
+extension PurchaseSource: CallbackArgument {}
+extension PresetCategory: CallbackArgument {}
+extension CryptoChain: CallbackArgument {}
+extension CryptoAsset: CallbackArgument {}
+extension FiatCurrency: CallbackArgument {}
+extension FunnelPeriod: CallbackArgument {}
+extension SuperHelpSection: CallbackArgument {}
+
 /// `<command>[:<arg>…]`, already split and validated.
 ///
 /// Indices match the raw payload: `arg(1)` is the token right after the
@@ -142,19 +199,23 @@ struct MenuRoute {
 
     /// `<command>[:<arg>…]` — the payload a button carries. The only place the
     /// wire format is written, so a caller cannot invent a separator or leave
-    /// out the command.
-    static func link(_ command: MenuCommand, _ arguments: String...) -> String {
-        ([command.rawValue] + arguments).joined(separator: ":")
+    /// out the command, and each argument encodes itself (`CallbackArgument`).
+    static func link(_ command: MenuCommand, _ arguments: any CallbackArgument...) -> String {
+        link(command, arguments)
+    }
+
+    static func link(_ command: MenuCommand, _ arguments: [any CallbackArgument]) -> String {
+        ([command.rawValue] + arguments.map(\.callbackToken)).joined(separator: ":")
     }
 
     /// `nav:<page>` — the link a navigation button carries.
     static func navigation(to page: MenuPage) -> String {
-        link(.nav, page.rawValue)
+        link(.nav, page)
     }
 
     /// `nav:pay:<source>` — the purchase page always records which surface sent
     /// the person there (CLAUDE.md §17), so the source is part of the link.
     static func purchase(from source: PurchaseSource) -> String {
-        link(.nav, MenuPage.pay.rawValue, source.rawValue)
+        link(.nav, MenuPage.pay, source)
     }
 }

@@ -493,6 +493,53 @@ final class EndToEndTests: XCTestCase {
         XCTAssertGreaterThan(checked, 5, "no menu buttons were exercised — the check would pass vacuously")
     }
 
+    /// A destructive button, tapped the way a person taps it: open the page,
+    /// press 🗑, press "Да, удалить" — each time using the payload the previous
+    /// screen actually drew.
+    ///
+    /// Every step of that chain used to carry `"\(key)"` — the key's *debug*
+    /// description — so the confirmation addressed a record that does not
+    /// exist: the bot answered «Кошелёк не найден» and the wallet stayed. The
+    /// same three-step shape guards the tenant and the super-admin roster.
+    func testWalletDeletionGoesThroughTheButtonsItDraws() async throws {
+        let payer = UserKey.identified(userID)
+        await store.seedBalance(key: payer, amount: .usd(4.20))
+        await telegram.reset()
+
+        await orchestrator.dispatch(update: callback("menu:nav:superbal", userID: ownerID))
+        let pageCall = await telegram.waitForCall("editMessageText")
+        let page = try XCTUnwrap(pageCall)
+        let deleteAction = try XCTUnwrap(
+            page.buttonActions
+                .compactMap { BotCallbackAction(rawData: $0) }
+                .compactMap { action -> String? in
+                    guard case .menu(let value) = action else { return nil }
+                    return value
+                }
+                .first { MenuRoute(action: $0).map { $0.command == .sbal && $0.sub == "rm" } ?? false },
+            "the wallets page drew no delete button: \(page.buttonActions)"
+        )
+        await telegram.reset()
+
+        await orchestrator.dispatch(update: callback("menu:" + deleteAction, userID: ownerID))
+        let confirmCall = await telegram.waitForCall("editMessageText")
+        let confirm = try XCTUnwrap(confirmCall)
+        XCTAssertTrue(confirm.text?.contains("4.20") ?? false, "the confirmation did not name the wallet it is about")
+        let confirmAction = try XCTUnwrap(
+            confirm.buttonActions
+                .compactMap { BotCallbackAction(rawData: $0) }
+                .compactMap { action -> String? in
+                    guard case .menu(let value) = action else { return nil }
+                    return value
+                }
+                .first { MenuRoute(action: $0).map { $0.sub == "rmyes" } ?? false },
+            "the confirmation had no confirm button: \(confirm.buttonActions)"
+        )
+
+        await orchestrator.dispatch(update: callback("menu:" + confirmAction, userID: ownerID))
+        try await waitUntil { await self.store.balance(payer) == nil }
+    }
+
     /// Unknown callback data must not crash or go silent — the user gets a toast.
     func testUnknownCallbackIsAnswered() async throws {
         await orchestrator.dispatch(update: callback("menu:definitely-not-a-real-action"))

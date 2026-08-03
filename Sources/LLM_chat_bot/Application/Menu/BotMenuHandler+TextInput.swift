@@ -168,8 +168,9 @@ extension BotMenuHandler {
                 text: confirm,
                 replyMarkup: nil
             ))
-        } else if let usd = Double(trimmed), usd > 0 {
-            let cents = Int((usd * 100.0).rounded())
+        } else if let cents = FiatCurrency.minorUnits(from: trimmed), cents > 0 {
+            // Integer parsing with an overflow check: `Int(Double)` traps past
+            // `Int.max`, and this is a text field.
             await state.setCryptoPriceUsdCents(cents)
             let confirm = String(format: "✓ Цена в крипто: <b>$%.2f</b>", Double(cents) / 100.0)
             await refreshMenu(chatKey: chatKey, menuMessageID: menuMessageID, screen: await renderSuperCrypto(chatKey: chatKey))
@@ -213,8 +214,8 @@ extension BotMenuHandler {
         } else {
             let added = await state.addCryptoPoolAddress(chain, address: trimmed)
             toast = added
-                ? "✓ В пул \(chain.displayName) добавлен: \(trimmed)"
-                : "Адрес уже в пуле: \(trimmed)"
+                ? "✓ В пул \(chain.displayName) добавлен: <code>\(MessageText.escaped(trimmed))</code>"
+                : "Адрес уже в пуле: <code>\(MessageText.escaped(trimmed))</code>"
         }
         await refreshMenu(chatKey: chatKey, menuMessageID: menuMessageID, screen: await renderSuperCrypto(chatKey: chatKey))
         _ = try? await telegram.sendMessage(.init(
@@ -253,7 +254,7 @@ extension BotMenuHandler {
             replyTo: nil,
             text: trimmed == "-" || trimmed.isEmpty
                 ? "✓ Адрес для \(chain.displayName) удалён."
-                : "✓ Адрес для \(chain.displayName): <code>\(trimmed)</code>",
+                : "✓ Адрес для \(chain.displayName): <code>\(MessageText.escaped(trimmed))</code>",
             replyMarkup: nil
         ))
         return true
@@ -269,7 +270,9 @@ extension BotMenuHandler {
         let modelID = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !modelID.isEmpty {
             let added = await state.addFreeModel(modelID)
-            let toast = added ? "✓ Добавлено: \(modelID)" : "Уже в списке: \(modelID)"
+            let toast = added
+                ? "✓ Добавлено: <code>\(MessageText.escaped(modelID))</code>"
+                : "Уже в списке: <code>\(MessageText.escaped(modelID))</code>"
             await refreshMenu(chatKey: chatKey, menuMessageID: menuMessageID, screen: await renderSuperFreeModels(chatKey: chatKey))
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
@@ -332,7 +335,7 @@ extension BotMenuHandler {
         let value = components[1]
         let provider = components.count > 2 ? components[2] : nil
         let toastText: String
-        let providerSuffix = provider.map { " · \($0)" } ?? ""
+        let providerSuffix = provider.map { " · \(MessageText.escaped($0))" } ?? ""
 
         if pending.category == .model {
             await modelPriceMonitor?.refreshPricesIfNeeded(for: value)
@@ -344,13 +347,13 @@ extension BotMenuHandler {
             toastText = Self.addToast(outcome, prefix: "✓ Общая заготовка добавлена", suffix: providerSuffix)
         case (.global, .edit(let id)):
             let ok = await state.editPreset(category: pending.category, id: id, display: display, value: value, provider: provider, chatID: chatKey.chatID)
-            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : Texts.presetNotFound
+            toastText = ok ? "✓ Обновлён: \(MessageText.escaped(display))\(providerSuffix)" : Texts.presetNotFound
         case (.chat, .add):
             let outcome = await state.addChatPreset(category: pending.category, chatKey: chatKey, display: display, value: value, provider: provider)
             toastText = Self.addToast(outcome, prefix: "✓ Заготовка чата добавлена", suffix: providerSuffix)
         case (.chat, .edit(let id)):
             let ok = await state.editChatPreset(category: pending.category, chatKey: chatKey, id: id, display: display, value: value, provider: provider)
-            toastText = ok ? "✓ Обновлён: \(display)\(providerSuffix)" : Texts.presetNotFound
+            toastText = ok ? "✓ Обновлён: \(MessageText.escaped(display))\(providerSuffix)" : Texts.presetNotFound
         }
 
         await refreshMenu(
@@ -377,7 +380,7 @@ extension BotMenuHandler {
     private static func addToast(_ outcome: PresetList.AddOutcome, prefix: String, suffix: String) -> String {
         switch outcome {
         case .added(let preset):
-            return "\(prefix): \(preset.display)\(suffix)"
+            return "\(prefix): \(preset.escapedDisplay)\(suffix)"
         case .full:
             return Texts.presetListFull
         }

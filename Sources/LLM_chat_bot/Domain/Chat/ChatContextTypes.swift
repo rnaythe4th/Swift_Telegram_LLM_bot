@@ -174,4 +174,16 @@ struct HelpData: Sendable {
     let testModeSuffix: Int?
     let backupNotify: Bool
     let cumulativeUsage: CumulativeUsage
+
+    // The model id and the role are arbitrary text somebody typed — «✏️ Своя
+    // модель» and «✏️ Своя роль» are open to every member of a chat — and both
+    // are printed straight into HTML on the settings pages. Stored raw (the
+    // role is what the model is told, the id is what the provider is asked
+    // for), escaped where they turn into markup, exactly like `Preset`:
+    // an unescaped `<` does not garble a page, it makes Telegram refuse the
+    // whole message, so the menu stops opening until somebody fixes it by
+    // command.
+    var escapedModel: String { MessageText.escaped(model) }
+    var escapedRole: String { MessageText.escaped(role) }
+    var escapedModelProviderRouting: String? { modelProviderRouting.map(MessageText.escaped) }
 }

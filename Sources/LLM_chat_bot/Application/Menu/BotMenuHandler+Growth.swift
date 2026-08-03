@@ -374,6 +374,19 @@ extension BotMenuHandler {
         }
     }
 
+    /// The first `limit` characters of an ad, still valid HTML.
+    ///
+    /// Ad text is written as markup on purpose ("HTML разрешён"), so cutting it
+    /// at a character count lands inside `<a href="…` or between `<b>` and its
+    /// closer often enough — and Telegram answers "can't parse entities" for
+    /// the *whole* message, so the ads page stops opening the moment somebody
+    /// writes a normal ad longer than the preview. The splitter already knows
+    /// where a cut is safe; whatever it leaves open is closed here.
+    static func htmlPreview(_ text: String, limit: Int) -> String {
+        let (head, tail) = MessageSplitter.splitRendered(text, limit: limit)
+        return head + MessageSplitter.closingTagMarkup(in: head) + (tail.isEmpty ? "" : "…")
+    }
+
     func renderSuperAds(chatKey: ChatKey) async -> MenuScreen {
         let campaigns = await state.adCampaigns()
 
@@ -381,7 +394,9 @@ extension BotMenuHandler {
         if campaigns.isEmpty {
             lines.append("<i>Кампаний нет. Реклама показывается в чатах без активной платной лицензии — после ответа бота, с настраиваемой частотой и лимитом показов.</i>")
         } else {
-            for c in campaigns {
+            // Same cap as the buttons below: a longer page comes back with the
+            // tail missing, and the self-promo block lives at the bottom.
+            for c in campaigns.prefix(15) {
                 let status = c.enabled ? (c.isRunning() ? "🟢" : "🟡 (вне окна/лимита)") : "⚪ выкл"
                 var line = "\(status) <b>\(c.id)</b> · каждые \(c.everyNReplies) отв. · пауза \(c.minIntervalSeconds / 60) мин"
                 if let target = c.totalImpressionsTarget {
@@ -390,8 +405,10 @@ extension BotMenuHandler {
                     line += " · показов \(c.impressionsUsed)"
                 }
                 lines.append(line)
-                let preview = c.text.count > 100 ? String(c.text.prefix(100)) + "…" : c.text
-                lines.append("<blockquote expandable>\(preview)</blockquote>")
+                lines.append("<blockquote expandable>\(Self.htmlPreview(c.text, limit: 100))</blockquote>")
+            }
+            if campaigns.count > 15 {
+                lines.append("<i>…и ещё \(campaigns.count - 15) — полный список /ads</i>")
             }
         }
         // The built-in self-promo is a real ad slot occupant, so it gets the

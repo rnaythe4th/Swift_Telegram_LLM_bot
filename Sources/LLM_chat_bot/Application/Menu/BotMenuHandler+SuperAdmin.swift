@@ -201,7 +201,7 @@ extension BotMenuHandler {
         🏦 Внешняя касса · \(external.vendor.displayName) · \(external.isEnabled ? "<b>\(external.priceLabel ?? "")</b>" : "<b>откл</b>")\(external.creditsEnabled ? " · пополнения вкл" : "")
         💹 Наценка · <b>\(markupPct)%</b> · /tenant markup
         💸 Расход сегодня · <b>\(spendToday.total.formatted(fractionDigits: 2))</b>\(spendPolicy.hasGlobalCap ? " из \(spendPolicy.dailyGlobalCap.formatted(fractionDigits: 2))" : " · лимита нет")
-        🎛 Режимы · <b>\(modes.enabled ? "вкл" : "выкл")</b> · всего <b>\(modes.activeModes.count)</b> · бесплатных <b>\(freeModeCount)</b> · рабочий <b>\(modes.defaultMode?.title ?? "—")</b>
+        🎛 Режимы · <b>\(modes.enabled ? "вкл" : "выкл")</b> · всего <b>\(modes.activeModes.count)</b> · бесплатных <b>\(freeModeCount)</b> · рабочий <b>\(modes.defaultMode?.escapedTitle ?? "—")</b>
         🎁 Премиум-вкус · <b>\(dailyLimit)</b> умных ответов/день бесплатным
         💡 Примеры-запросы · <b>\(onboarding.enabled ? "вкл" : "выкл")</b> · в личке <b>\(onboarding.activeExamples(inGroup: false).count)</b> · в группах <b>\(onboarding.showInGroups ? onboarding.activeExamples(inGroup: true).count : 0)</b>
         ⏳ Напоминания · <b>\(reminders.enabled ? "вкл" : "выкл")</b> · скоро истекут <b>\(lifecycle.expiringSoon.count)</b> · winback-офферов <b>\(lifecycle.activeDiscounts.count)</b>
