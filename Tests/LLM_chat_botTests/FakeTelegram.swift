@@ -114,7 +114,15 @@ final class FakeTelegram: @unchecked Sendable {
     private static func freePort() -> Int {
         // Ask the OS for an ephemeral port: parallel test suites must not fight
         // over a hardcoded one.
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        // `SOCK_STREAM` is an `Int32` on Darwin and a `__socket_type` on Glibc,
+        // so the platform the tests actually run on in CI is the one that stops
+        // compiling if this is written once.
+        #if canImport(Glibc)
+        let streamType = Int32(SOCK_STREAM.rawValue)
+        #else
+        let streamType = SOCK_STREAM
+        #endif
+        let fd = socket(AF_INET, streamType, 0)
         defer { close(fd) }
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)

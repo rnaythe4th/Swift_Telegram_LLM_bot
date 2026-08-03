@@ -108,19 +108,27 @@ struct PersistenceBatch: Sendable {
 
     var isEmpty: Bool { entityCount == 0 }
 
+    /// Summed one statement at a time, not as one `+` chain: every new row type
+    /// makes that chain longer, and past a couple of dozen terms the type
+    /// checker gives up on it ("unable to type-check this expression in
+    /// reasonable time") — on Linux before macOS, so the build that notices is
+    /// the deploy.
     var entityCount: Int {
-        users.count + contexts.count + deletedContexts.count
-            + tenants.count + deletedTenants.count
-            + chats.count + deletedChats.count
-            + invites.count + deletedInvites.count
-            + premiumUsage.count + deletedPremiumUsage.count
-            + referrals.count + deletedReferrals.count
-            + referralTallies.count + deletedReferralTallies.count
-            + trafficAttributions.count + deletedTrafficAttributions.count
-            + funnelDays.count
-            + cryptoInvoices.count + deletedCryptoInvoices.count
-            + externalOrders.count + deletedExternalOrders.count
-            + configs.count
+        var total = 0
+        total += users.count
+        total += contexts.count + deletedContexts.count
+        total += tenants.count + deletedTenants.count
+        total += chats.count + deletedChats.count
+        total += invites.count + deletedInvites.count
+        total += premiumUsage.count + deletedPremiumUsage.count
+        total += referrals.count + deletedReferrals.count
+        total += referralTallies.count + deletedReferralTallies.count
+        total += trafficAttributions.count + deletedTrafficAttributions.count
+        total += funnelDays.count
+        total += cryptoInvoices.count + deletedCryptoInvoices.count
+        total += externalOrders.count + deletedExternalOrders.count
+        total += configs.count
+        return total
     }
 
     /// Combines a batch that failed to flush with a freshly drained one.

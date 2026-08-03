@@ -232,20 +232,26 @@ extension ChatContextStore {
         return (changed, removed)
     }
 
+    /// Summed statement by statement for the same reason as
+    /// `PersistenceBatch.entityCount`: one long `+` chain over this many dirty
+    /// sets is what the type checker refuses to finish.
     var dirtyEntityCount: Int {
-        dirtyUsers.count + dirtyContexts.count + deletedContexts.count
-            + dirtyTenants.count + deletedTenants.count
-            + dirtyChats.count + deletedChats.count
-            + dirtyInvites.count + deletedInvites.count
-            + dirtyPremiumUsage.count + deletedPremiumUsage.count
-            + dirtyReferrals.count + deletedReferrals.count
-            + dirtyReferralTallies.count + deletedReferralTallies.count
-            + dirtyTrafficAttributions.count + deletedTrafficAttributions.count
-            + dirtyFunnelDays.count
-            + dirtyCryptoInvoices.count + deletedCryptoInvoices.count
-            + dirtyExternalOrders.count + deletedExternalOrders.count
-            + dirtyWallets.count + deletedWallets.count
-            + dirtyConfigs.count
+        var total = 0
+        total += dirtyUsers.count
+        total += dirtyContexts.count + deletedContexts.count
+        total += dirtyTenants.count + deletedTenants.count
+        total += dirtyChats.count + deletedChats.count
+        total += dirtyInvites.count + deletedInvites.count
+        total += dirtyPremiumUsage.count + deletedPremiumUsage.count
+        total += dirtyReferrals.count + deletedReferrals.count
+        total += dirtyReferralTallies.count + deletedReferralTallies.count
+        total += dirtyTrafficAttributions.count + deletedTrafficAttributions.count
+        total += dirtyFunnelDays.count
+        total += dirtyCryptoInvoices.count + deletedCryptoInvoices.count
+        total += dirtyExternalOrders.count + deletedExternalOrders.count
+        total += dirtyWallets.count + deletedWallets.count
+        total += dirtyConfigs.count
+        return total
     }
 
     /// What a row holds right now. Exhaustive over `ConfigName`, and each

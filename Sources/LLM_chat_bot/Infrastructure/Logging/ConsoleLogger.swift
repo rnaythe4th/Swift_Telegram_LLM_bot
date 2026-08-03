@@ -49,7 +49,10 @@ struct ConsoleLogger: LoggerPort {
         case .json:
             print(Self.jsonLine(level: level, message: text, context: context))
         }
-        fflush(stdout)
+        // `fflush(nil)` and not `fflush(stdout)`: on Linux `stdout` is a mutable
+        // global that strict concurrency refuses to touch, and flushing every
+        // stream costs nothing when the process only writes to one.
+        fflush(nil)
     }
 
     /// `[chat=-100 user=42 gen=…]`, omitted entirely when there is nothing to
