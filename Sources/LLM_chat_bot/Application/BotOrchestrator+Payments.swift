@@ -35,8 +35,10 @@ extension BotOrchestrator {
                 // the invoice rather than charging a stale price.
                 if query.currency == "XTR" {
                     let starsEnabled = await state.starsCreditsEnabled()
-                    let expected = await state.starsForCents(cents)
-                    valid = starsEnabled && query.total_amount == expected
+                    // `nil` = this pack has no Stars price at all, and no
+                    // charged amount may match one.
+                    let expected: Int? = await state.starsForCents(cents)
+                    valid = starsEnabled && expected != nil && query.total_amount == expected
                 } else {
                     let card = await state.cardConfig()
                     valid = card.creditsEnabled

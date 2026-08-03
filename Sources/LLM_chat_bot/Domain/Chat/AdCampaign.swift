@@ -26,6 +26,20 @@ struct AdCampaign: Codable, Sendable, Equatable {
     var endAt: Date?
     var createdAt: Date
 
+    /// Bounds a campaign's throttles, in the domain rather than in whoever is
+    /// setting them (CLAUDE.md §17) — `SelfPromoConfig` already carries the same
+    /// two, and the paid campaign had none at all. That mattered beyond taste:
+    /// `/ads freq <id> 10 <minutes>` wrote `minutes * 60` straight into the row,
+    /// and `Int` multiplication **traps** on overflow, so a long enough number
+    /// in a chat message took the process down.
+    static let repliesRange = SelfPromoConfig.repliesRange
+    static let pauseMinutesRange = SelfPromoConfig.pauseMinutesRange
+
+    /// Pause in seconds for a pause given in minutes, clamped to a day.
+    static func pauseSeconds(minutes: Int) -> Int {
+        pauseMinutesRange.clamping(minutes) * 60
+    }
+
     static func makeID() -> String {
         let alphabet = Array("abcdefghjkmnpqrstuvwxyz23456789")
         return String((0..<5).map { _ in alphabet.randomElement()! })

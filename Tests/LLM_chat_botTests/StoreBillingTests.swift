@@ -19,6 +19,28 @@ final class StoreBillingTests: XCTestCase {
         XCTAssertEqual(clamped, 500)
     }
 
+    /// A credit pack's Stars price is the pack's face value at the configured
+    /// rate — and `nil` when that rate cannot price it. It used to be a
+    /// non-optional `Int` that answered "1 ⭐" for a rate of zero and **trapped**
+    /// for an absurd one, which is a crash on every render of the buy page.
+    func testStarsPriceOfAPackIsOptionalRatherThanWrongOrFatal() async {
+        let store = Fixtures.makeStore()
+
+        await store.setStarsPerUsd(77)
+        let two = await store.starsForCents(200)
+        XCTAssertEqual(two, 154)
+
+        // Off: there is no price, and "1 ⭐" is not one.
+        await store.setStarsPerUsd(0)
+        let off = await store.starsForCents(200)
+        XCTAssertNil(off)
+
+        // Absurd: refused, not fatal.
+        await store.setStarsPerUsd(.max)
+        let absurd = await store.starsForCents(1000)
+        XCTAssertNil(absurd)
+    }
+
     func testBilledCostFallsBackToTheCurrentMarkupForOldRows() async {
         let store = Fixtures.makeStore()
         await store.setMarkupPercent(50)

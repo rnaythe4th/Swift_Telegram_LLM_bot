@@ -67,7 +67,7 @@ extension BotCommandHandler {
             if isPaidModel, case .none = access {
                 let price = await state.starsPrice()
                 let buyHint = price.map { "\n\nОткрыть премиум для этого чата (\($0) ⭐) — /buy, или пополните баланс и платите за ответы — /balance" } ?? "\n\nОткрыть премиум для этого чата — /buy, или пополните баланс и платите за ответы — /balance"
-                try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(modelID)</b> — платная модель.\(buyHint)")
+                try await sendUserFeedback(chatKey: chatKey, text: "⭐ <b>\(MessageText.escaped(modelID))</b> — платная модель.\(buyHint)")
                 return
             }
             let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: modelID, providerRouting: providerRouting)
@@ -81,7 +81,12 @@ extension BotCommandHandler {
                 let outP = BotMenuHandler.formatPriceM(price.outputPerToken * multiplier)
                 priceNote = "\n⬇️$\(inP)/M · ⬆️$\(outP)/M"
             }
-            let providerNote = providerRouting.map { "\nСервис: <code>\($0)</code>" } ?? ""
+            // Model id and upstream pin are whatever the person typed; the
+            // pages that print them are escaped (audit zone 21), and this
+            // confirmation is the same value through a different door — one
+            // `<` and Telegram refuses the whole message, so the setting
+            // applies and nobody is told.
+            let providerNote = providerRouting.map { "\nСервис: <code>\(MessageText.escaped($0))</code>" } ?? ""
             // Say the daily ceiling out loud: on a free tier this model answers
             // N times today and then falls back on its own.
             var tasteNote = ""
@@ -89,8 +94,8 @@ extension BotCommandHandler {
                 tasteNote = "\n🚦 Умных ответов сегодня: <b>\(remaining) из \(limit)</b>, дальше отвечаю на бесплатной."
             }
             try await sendUserFeedback(chatKey: chatKey, text: """
-                ✓ Модель: <code>\(changed.new)</code>\(providerNote)
-                <i>Была:</i> <code>\(changed.old)</code>
+                ✓ Модель: <code>\(MessageText.escaped(changed.new))</code>\(providerNote)
+                <i>Была:</i> <code>\(MessageText.escaped(changed.old))</code>
                 Переписка очищена.\(priceNote)\(tasteNote)
                 """)
 

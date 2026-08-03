@@ -27,11 +27,14 @@ enum FiatCurrency: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    /// `%ld`, not `%d`: `Int` is 64-bit and `%d` reads 32 of those bits, so a
+    /// price above ~21 million in a two-decimal currency printed a different
+    /// number than the one that would be charged.
     func format(minorUnits: Int) -> String {
         let whole = minorUnits / 100
-        let frac = minorUnits % 100
+        let frac = abs(minorUnits % 100)
         if frac == 0 { return "\(whole) \(symbol)" }
-        return String(format: "%d.%02d %@", whole, frac, symbol)
+        return String(format: "%ld.%02ld %@", whole, frac, symbol)
     }
 
     /// `499`, `499.00`, `499,5`, `1 499.90` → minor units. nil for anything that
@@ -76,7 +79,7 @@ enum FiatCurrency: String, Codable, Sendable, CaseIterable {
     /// The decimal string a gateway is given and signs: always two decimals, so
     /// what we sign and what we later compare are produced by one function.
     static func decimalString(minorUnits: Int) -> String {
-        String(format: "%d.%02d", minorUnits / 100, abs(minorUnits % 100))
+        String(format: "%ld.%02ld", minorUnits / 100, abs(minorUnits % 100))
     }
 }
 
@@ -156,10 +159,11 @@ struct CardPaymentConfig: Codable, Sendable {
 
     /// Price of a credit pack in this currency's minor units, never below the
     /// provider's minimum for the currency (Telegram rejects smaller invoices).
+    /// nil when the configured rate cannot price this pack at all — see
+    /// `CreditPack.price(cents:perUsd:)`.
     func creditMinorUnits(cents: Int) -> Int? {
-        guard let rate = usdRateMinorUnits, rate > 0 else { return nil }
-        let raw = Int((Double(cents) / 100.0 * Double(rate)).rounded())
-        return max(raw, currency.minMinorUnits)
+        guard let rate = usdRateMinorUnits else { return nil }
+        return CreditPack.price(cents: cents, perUsd: rate).map { max($0, currency.minMinorUnits) }
     }
 
     var usdRateLabel: String? {

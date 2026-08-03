@@ -114,6 +114,45 @@ final class CreditPackTests: XCTestCase {
         XCTAssertEqual(CreditPack.label(cents: 200), "$2")
         XCTAssertEqual(CreditPack.label(cents: 250), "$2.50")
     }
+
+    func testAPackIsPricedAtItsFaceValueTimesTheRate() {
+        // 77 ⭐ per $1: a $2 pack is 154 ⭐, a $10 pack is 770 ⭐.
+        XCTAssertEqual(CreditPack.price(cents: 200, perUsd: 77), 154)
+        XCTAssertEqual(CreditPack.price(cents: 1000, perUsd: 77), 770)
+        // Half a unit rounds up, and the arithmetic stays in integers: the
+        // `Double` version answered 149.99999999999997 → 149 for this one.
+        XCTAssertEqual(CreditPack.price(cents: 500, perUsd: 95), 475)
+        XCTAssertEqual(CreditPack.price(cents: 150, perUsd: 1), 2)
+    }
+
+    /// A rate is a number a super-admin types into a chat, and the old
+    /// `Int(Double(cents) / 100 * Double(rate))` **trapped** outside `Int`'s
+    /// range rather than returning something wrong. The value is persisted, so
+    /// the process died on every render of the buy page and then died again
+    /// after the restart. "Cannot be priced" must be a value, not a crash.
+    func testARateTooLargeToPriceAPackIsRefusedRatherThanTrapping() {
+        XCTAssertNil(CreditPack.price(cents: 1000, perUsd: .max))
+        XCTAssertNil(CreditPack.price(cents: 200, perUsd: Int.max / 100))
+        // Off, or nonsense, is not a price either.
+        XCTAssertNil(CreditPack.price(cents: 200, perUsd: 0))
+        XCTAssertNil(CreditPack.price(cents: 200, perUsd: -5))
+        XCTAssertNil(CreditPack.price(cents: 0, perUsd: 77))
+    }
+
+    /// Both card rails price a pack the same way, so both inherit the refusal —
+    /// and both keep the currency floor when they do have a price.
+    func testCardRailsRefuseAPackTheRateCannotPrice() {
+        var card = CardPaymentConfig.empty
+        card.providerToken = SealedSecret("123:LIVE:token")
+        card.currency = .rub
+        card.usdRateMinorUnits = .max
+        XCTAssertNil(card.creditMinorUnits(cents: 1000))
+
+        card.usdRateMinorUnits = 9500          // 95 ₽ за $1
+        XCTAssertEqual(card.creditMinorUnits(cents: 200), 19000)
+        // $0.01 at this rate is under the RUB floor, so the floor wins.
+        XCTAssertEqual(card.creditMinorUnits(cents: 1), FiatCurrency.rub.minMinorUnits)
+    }
 }
 
 final class FiatCurrencyTests: XCTestCase {

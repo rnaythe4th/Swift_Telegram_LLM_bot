@@ -62,7 +62,7 @@ extension BotCommandHandler {
                 return
             }
             let new = await state.setDefaultModel(value, chatID: chatKey.chatID)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Модель по умолчанию · <code>\(new)</code>")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Модель по умолчанию · <code>\(MessageText.escaped(new))</code>")
 
         case "role":
             guard !value.isEmpty else {
@@ -71,7 +71,7 @@ extension BotCommandHandler {
                 return
             }
             let new = await state.setDefaultRole(value, chatID: chatKey.chatID)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль по умолчанию обновлена:\n<blockquote expandable>\(new)</blockquote>")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль по умолчанию обновлена:\n<blockquote expandable>\(MessageText.escaped(new))</blockquote>")
 
         case "historylength":
             guard !value.isEmpty, let length = Int(value), ChatContext.historyRange.contains(length) else {
@@ -121,10 +121,13 @@ extension BotCommandHandler {
         if groups.isEmpty {
             lines.append("<i>нет</i>")
         } else {
-            for (chatID, threadID) in groups.sorted(by: { $0.chatID < $1.chatID }) {
+            for (chatID, threadID) in groups.sorted(by: { $0.chatID < $1.chatID }).prefix(Self.listCap) {
                 let threadInfo = threadID != 0 ? " · thread \(threadID)" : ""
                 let label = await state.chatMeta(chatID: chatID).map { " · \($0.displayLabel)" } ?? ""
                 lines.append("• <code>\(chatID)</code>\(threadInfo)\(label)")
+            }
+            if groups.count > Self.listCap {
+                lines.append("<i>…и ещё \(groups.count - Self.listCap)</i>")
             }
         }
 
@@ -133,10 +136,13 @@ extension BotCommandHandler {
         if privates.isEmpty {
             lines.append("<i>нет</i>")
         } else {
-            for (chatID, threadID) in privates.sorted(by: { $0.chatID < $1.chatID }) {
+            for (chatID, threadID) in privates.sorted(by: { $0.chatID < $1.chatID }).prefix(Self.listCap) {
                 let threadInfo = threadID != 0 ? " · thread \(threadID)" : ""
                 let label = await state.chatMeta(chatID: chatID).map { " · \($0.displayLabel)" } ?? ""
                 lines.append("• <code>\(chatID)</code>\(threadInfo)\(label)")
+            }
+            if privates.count > Self.listCap {
+                lines.append("<i>…и ещё \(privates.count - Self.listCap)</i>")
             }
         }
 
@@ -163,9 +169,12 @@ extension BotCommandHandler {
 
         let sorted = privates.sorted(by: { $0.chatID < $1.chatID })
         var list: [String] = []
-        for entry in sorted {
+        for entry in sorted.prefix(Self.listCap) {
             let label = await state.chatMeta(chatID: entry.chatID).map { " · \($0.displayLabel)" } ?? ""
             list.append("• <code>\(entry.chatID)</code>\(label)")
+        }
+        if sorted.count > Self.listCap {
+            list.append("<i>…и ещё \(sorted.count - Self.listCap)</i>")
         }
         try await sendUserFeedback(chatKey: chatKey, text: """
             <b>👤 Пользователи в личке</b> (\(sorted.count))

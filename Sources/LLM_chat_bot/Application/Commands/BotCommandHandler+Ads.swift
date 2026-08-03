@@ -24,13 +24,23 @@ extension BotCommandHandler {
             limits += " · до \(Self.adsDateFormatter.string(from: endAt))"
         }
         lines.append("\(status) <b>\(c.id)</b> · \(limits)")
-        let preview = c.text.count > 120 ? String(c.text.prefix(120)) + "…" : c.text
-        lines.append("<blockquote expandable>\(preview)</blockquote>")
+        // Ad text is markup on purpose ("HTML разрешён"), so a cut by character
+        // count lands inside `<a href="…` often enough — and Telegram then
+        // refuses the whole message, i.e. `/ads` stops answering entirely. The
+        // ads page already cuts through the splitter; this is the same report.
+        lines.append("<blockquote expandable>\(BotMenuHandler.htmlPreview(c.text, limit: 120))</blockquote>")
         if let bt = c.buttonText, let url = c.buttonURL {
-            lines.append("🔗 [\(bt)] → \(url)")
+            // Both are typed by the super-admin, so they are escaped where they
+            // become markup — an `&` in a tracking URL is enough on its own.
+            lines.append("🔗 [\(MessageText.escaped(bt))] → \(MessageText.escaped(url))")
         }
         return lines
     }
+
+    /// Campaigns listed in one message before the tail is cut off. Same cap as
+    /// the ads page draws, and for the same reason: an overgrown message is
+    /// rejected, not shortened.
+    private static let adsListCap = 15
 
     func handleAds(chatKey: ChatKey, argument: String) async throws {
         let parts = argument.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).map(String.init)
@@ -81,14 +91,16 @@ extension BotCommandHandler {
         case "remove", "rm":
             let id = rest.trimmingCharacters(in: .whitespaces)
             let removed = await state.removeAdCampaign(id: id)
-            try await sendUserFeedback(chatKey: chatKey, text: removed ? "✓ Кампания \(id) удалена." : "Кампания \(id) не найдена.")
+            let shown = MessageText.escaped(id)
+            try await sendUserFeedback(chatKey: chatKey, text: removed ? "✓ Кампания \(shown) удалена." : "Кампания \(shown) не найдена.")
 
         case "on", "off":
             let id = rest.trimmingCharacters(in: .whitespaces)
             let ok = await state.setAdCampaignEnabled(id: id, enabled: subcommand == "on")
+            let shown = MessageText.escaped(id)
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ Кампания \(id) · \(subcommand == "on" ? "включена" : "выключена")."
-                : "Кампания \(id) не найдена.")
+                ? "✓ Кампания \(shown) · \(subcommand == "on" ? "включена" : "выключена")."
+                : "Кампания \(shown) не найдена.")
 
         default:
             break
@@ -105,9 +117,11 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ads freq &lt;id&gt; &lt;каждые_N_ответов&gt; [пауза_минут]</code>")
                 return
             }
-            campaign.everyNReplies = everyN
+            // Both throttles are clamped by the domain: an unbounded pause was
+            // `minutes * 60` on a number typed into a chat, and that traps.
+            campaign.everyNReplies = AdCampaign.repliesRange.clamping(everyN)
             if args.count >= 3, let minutes = Int(args[2]), minutes >= 0 {
-                campaign.minIntervalSeconds = minutes * 60
+                campaign.minIntervalSeconds = AdCampaign.pauseSeconds(minutes: minutes)
             }
             await state.upsertAdCampaign(campaign)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): каждые <b>\(campaign.everyNReplies)</b> ответов · пауза <b>\(campaign.minIntervalSeconds / 60) мин</b>.")
@@ -167,7 +181,7 @@ extension BotCommandHandler {
             campaign.buttonText = buttonParts[0]
             campaign.buttonURL = buttonParts[1]
             await state.upsertAdCampaign(campaign)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): кнопка «\(buttonParts[0])» → \(buttonParts[1])")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ \(campaign.id): кнопка «\(MessageText.escaped(buttonParts[0]))» → \(MessageText.escaped(buttonParts[1]))")
 
         case "text":
             let args = rest.split(separator: " ", maxSplits: 1).map(String.init)
@@ -241,9 +255,13 @@ extension BotCommandHandler {
         if campaigns.isEmpty {
             lines.append("<i>нет</i>")
         } else {
-            for c in campaigns {
+            for c in campaigns.prefix(Self.adsListCap) {
                 lines.append("")
                 lines.append(contentsOf: adSummaryLines(c))
+            }
+            if campaigns.count > Self.adsListCap {
+                lines.append("")
+                lines.append("<i>…и ещё \(campaigns.count - Self.adsListCap) — управление кнопками: /menu → 🛡 Супер-админ → 📣 Реклама</i>")
             }
         }
         let promo = await state.selfPromoConfig()

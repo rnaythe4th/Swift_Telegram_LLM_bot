@@ -84,6 +84,19 @@ extension BotMenuHandler {
         )
     }
 
+    /// A tap whose payload no longer addresses anything: an argument the current
+    /// build cannot parse, a sub-action that has since been renamed. Telegram
+    /// keeps the button's clock spinning until *something* answers, so
+    /// "unroutable" has to be said out loud rather than returned from silently —
+    /// a button that appears to hang reads as a broken bot, not as a stale one.
+    ///
+    /// Written to be used as the whole `else` of a guard (`return try await
+    /// staleTap(callback)`), which is what keeps the two halves — refusing and
+    /// answering — impossible to separate.
+    func staleTap(_ callback: CallbackQuery) async throws {
+        try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.staleButton)
+    }
+
     private func require(_ allowed: Bool, callback: CallbackQuery, refusal: String) async -> Bool {
         guard allowed else {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: refusal)

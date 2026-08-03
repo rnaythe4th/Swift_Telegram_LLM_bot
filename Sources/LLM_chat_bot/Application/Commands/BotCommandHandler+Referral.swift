@@ -22,12 +22,12 @@ extension BotCommandHandler {
                 return
 
             case "reward", "friend", "bonus":
-                guard parts.count >= 2,
-                      let usd = Double(parts[1].replacingOccurrences(of: ",", with: ".")), usd >= 0 else {
+                // Integer parsing with an overflow check: `Int(Double)` traps
+                // past `Int.max`, and this is a number typed into a chat.
+                guard parts.count >= 2, let cents = FiatCurrency.minorUnits(from: parts[1]) else {
                     try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/ref \(subcommand) 1</code> — сумма в долларах, <code>0</code> — не платить.")
                     return
                 }
-                let cents = Int((usd * 100).rounded())
                 guard ReferralConfig.rewardRange.contains(cents) else {
                     try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Максимум \(ReferralConfig.formatUsd(cents: ReferralConfig.rewardRange.upperBound)) за приглашение.")
                     return

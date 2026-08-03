@@ -35,6 +35,10 @@ extension BotCommandHandler {
                     return
                 }
                 let targetKey = await state.userKeyOrRaw(target)
+                // The handle was typed into a chat: name the person the key
+                // actually reached, escaped at the source, rather than echoing
+                // the characters back into HTML.
+                let targetName = await state.displayLabel(forKey: targetKey)
                 // Through the ledger, not the cache: a grant that only reached
                 // memory is erased by the next charge (see `WalletWriter`).
                 let written = subcommand == "add"
@@ -48,7 +52,7 @@ extension BotCommandHandler {
                     return
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: """
-                    ✓ Баланс @\(target.lowercased()) · <b>\(formatUsd(wallet.balance))</b>
+                    ✓ Баланс \(targetName) · <b>\(formatUsd(wallet.balance))</b>
                     Потрачено: клиентская цена \(formatUsd(wallet.spentBilled)) · реально \(formatUsd(wallet.spentReal))
                     """)
                 return
@@ -58,11 +62,12 @@ extension BotCommandHandler {
                     try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/balance remove @username</code>")
                     return
                 }
-                let target = normalizeUsername(parts[1])
-                let removed = await state.removeBalance(state.userKeyOrRaw(target))
+                let targetKey = await state.userKeyOrRaw(normalizeUsername(parts[1]))
+                let targetName = await state.displayLabel(forKey: targetKey)
+                let removed = await state.removeBalance(targetKey)
                 try await sendUserFeedback(chatKey: chatKey, text: removed
-                    ? "✓ Кошелёк @\(target.lowercased()) удалён."
-                    : "У @\(target.lowercased()) нет кошелька.")
+                    ? "✓ Кошелёк \(targetName) удалён."
+                    : "У \(targetName) нет кошелька.")
                 return
 
             case "list", "stats":
@@ -72,15 +77,24 @@ extension BotCommandHandler {
                 if balances.isEmpty {
                     lines.append("<i>кошельков нет</i>")
                 } else {
+                    var shown = 0
                     var totalBalance = Money.zero, totalBilled = Money.zero, totalReal = Money.zero
+                    // Totals cover every wallet; only the per-wallet lines are
+                    // capped, so a long list still adds up honestly.
                     for entry in balances {
                         let w = entry.wallet
                         totalBalance += w.balance
                         totalBilled += w.spentBilled
                         totalReal += w.spentReal
+                        guard shown < Self.listCap else { continue }
+                        shown += 1
                         lines.append("")
                         lines.append("• <b>\(entry.label)</b> · остаток <b>\(formatUsd(w.balance))</b>")
                         lines.append("  списано \(formatUsd(w.spentBilled)) · реально \(formatUsd(w.spentReal)) · маржа <b>\(formatUsd(w.margin))</b>")
+                    }
+                    if balances.count > shown {
+                        lines.append("")
+                        lines.append("<i>…и ещё \(balances.count - shown) кошельков</i>")
                     }
                     lines.append("")
                     lines.append("<b>Итого</b> · остатки \(formatUsd(totalBalance)) · списано \(formatUsd(totalBilled)) · реально \(formatUsd(totalReal)) · маржа <b>\(formatUsd(totalBilled - totalReal))</b>")
@@ -100,7 +114,10 @@ extension BotCommandHandler {
 
         // Personal view (everyone, incl. superadmin without subcommand). The
         // wallet belongs to the account, so no @invoker is required.
-        guard let userID = fromUser?.id else { return }
+        guard let userID = fromUser?.id else {
+            try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
+            return
+        }
         let invoker = state.userKey(userID: userID)
         guard let wallet = await state.balance(invoker) else {
             var lines = [

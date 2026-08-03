@@ -27,9 +27,13 @@ extension ChatContextStore {
     /// not silently kill the cheapest entry point (roadmap step 2). 0 = off.
     func starsCreditsEnabled() -> Bool { _starsPerUsd > 0 }
 
-    /// Stars to charge for a credit pack worth `cents` USD.
-    func starsForCents(_ cents: Int) -> Int {
-        max(1, Int((Double(cents) / 100.0 * Double(_starsPerUsd)).rounded()))
+    /// Stars to charge for a credit pack worth `cents` USD — nil when the
+    /// configured rate cannot price it (off, or absurd enough that the
+    /// arithmetic does not fit). Optional on purpose: the caller has to say
+    /// what it does when a pack is unsellable, and the old non-optional form
+    /// answered "1 ⭐" for a rate of zero.
+    func starsForCents(_ cents: Int) -> Int? {
+        CreditPack.price(cents: cents, perUsd: _starsPerUsd).map { max(1, $0) }
     }
 
     // MARK: - Card payment config

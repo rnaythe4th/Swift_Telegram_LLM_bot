@@ -57,6 +57,26 @@ final class CommandParserTests: XCTestCase {
         XCTAssertEqual(parse("   /help").name, .help)
     }
 
+    /// A newline separates a command from its argument as naturally as a space:
+    /// a long role is written on the lines below `/setrole`, and reading that as
+    /// one unknown token sent the whole thing to the model as a question.
+    func testANewlineSeparatesTheCommandFromItsArgument() {
+        let parsed = parse("/setrole\nТы — эксперт.\nОтвечай кратко.")
+        XCTAssertEqual(parsed.name, .setRole)
+        XCTAssertEqual(parsed.argument, "Ты — эксперт.\nОтвечай кратко.")
+
+        // The suffix and the @-form survive the same treatment.
+        XCTAssertEqual(parse("/model3\nopenai/gpt-4o", suffix: 3).name, .model)
+        XCTAssertEqual(parse("/setrole@testbot\nкот").argument, "кот")
+    }
+
+    /// Addressing the bot by name waives the test-mode suffix, and Telegram does
+    /// not promise the case the owner registered the name in.
+    func testAddressingTheBotWaivesTheSuffixWhateverTheCase() {
+        XCTAssertEqual(parse("/model@TestBot", suffix: 3).name, .model)
+        XCTAssertEqual(parse("/model@TESTBOT", suffix: 3).name, .model)
+    }
+
     func testEveryCommandNameResolvesFromItsOwnSpelling() {
         // Guards against two commands claiming the same token after an edit.
         var seen = Set<String>()

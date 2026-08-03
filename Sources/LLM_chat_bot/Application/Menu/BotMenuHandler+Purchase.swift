@@ -6,7 +6,13 @@ import Foundation
 extension BotMenuHandler {
     /// `invoker` is needed to quote the same price the invoice will charge —
     /// a winback discount (roadmap step 8) is per user.
+    ///
+    /// In a group it is dropped here rather than at each call site: this message
+    /// is read by the whole room, and a personal discount quoted in it is
+    /// somebody's private business made public (CLAUDE.md §17). The invoice
+    /// itself is still issued to whoever taps an asset, at their own price.
     func sendCryptoAssetChoice(chatKey: ChatKey, invoker: UserKey? = nil) async {
+        let invoker = chatKey.chatID.isGroup ? nil : invoker
         guard let service = cryptoService else {
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
@@ -334,8 +340,7 @@ extension BotMenuHandler {
             return
         }
         var rows: Keyboard = []
-        if await state.starsCreditsEnabled() {
-            let stars = await state.starsForCents(cents)
+        if await state.starsCreditsEnabled(), let stars = await state.starsForCents(cents) {
             rows.row([menuButton("💫 Stars · \(stars) ⭐", .buy, "cstars", "\(cents)")])
         }
         let cryptoAssets: [CryptoAsset]
@@ -405,11 +410,10 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.unknownPack)
                 return
             }
-            guard await state.starsCreditsEnabled() else {
+            guard await state.starsCreditsEnabled(), let stars = await state.starsForCents(cents) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Stars-оплата отключена")
                 return
             }
-            let stars = await state.starsForCents(cents)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
             try await telegram.sendInvoice(.init(
                 chatID: chatKey.chatID,

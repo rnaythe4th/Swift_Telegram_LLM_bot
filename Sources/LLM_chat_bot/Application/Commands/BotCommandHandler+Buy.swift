@@ -37,16 +37,26 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: "ℹ️ Продажа доступа сейчас недоступна.")
             return
         }
-        guard let buyerID = fromUser?.id else { return }
+        guard let buyerID = fromUser?.id else {
+            try await sendUserFeedback(chatKey: chatKey, text: Self.unknownAccountNotice)
+            return
+        }
         // Purchases identify the buyer by userID, so a @invoker is optional.
         let invoker = state.userKey(userID: buyerID)
         await state.bumpPurchaseOpen(source: .command)
+        // The same line the purchase page draws (`renderPay`): in a group this
+        // message is read by everyone in the room, so it quotes the price list
+        // and keeps every personal number — subscription dates, a winback
+        // discount only this person has — for the DM. Otherwise `/buy` is the
+        // back door around a rule the menu already keeps.
+        let isGroup = chatKey.chatID.isGroup
+        let personalKey: UserKey? = isGroup ? nil : invoker
         // Prices for this user: a live winback discount (roadmap step 8) is
         // already applied, so quotes here match what checkout will charge.
-        let pricing = await state.subscriptionPricing(key: invoker)
+        let pricing = await state.subscriptionPricing(key: personalKey)
         // Existing tenant: unlimited → nothing to buy; with an expiry →
         // the same purchase flow extends the subscription.
-        if await state.isTenant(invoker) {
+        if let invoker = personalKey, await state.isTenant(invoker) {
             let sub = await state.tenantSubscription(ownerKey: invoker)
             if sub.paidUntil == nil {
                 try await sendUserFeedback(chatKey: chatKey, text: "✅ У вас бессрочный доступ к боту.")

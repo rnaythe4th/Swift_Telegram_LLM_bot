@@ -730,6 +730,143 @@ final class EndToEndTests: XCTestCase {
         XCTAssertTrue(answer.contains("\"ok\":true"), "a renewal must go through: \(answer.body)")
     }
 
+    /// `/buy` in a group is read by everyone in the room, so it quotes the price
+    /// list — never this person's subscription dates or their winback discount.
+    /// The purchase *page* has kept that line since it was written; the command
+    /// was the second door into the same numbers, and it printed all of them.
+    func testBuyInAGroupQuotesThePriceListAndNoPersonalNumbers() async throws {
+        await store.setStarsPrice(100)
+        let groupID: ChatID = -4_800
+        let buyerID: UserID = 4_801
+        // A lapsed subscriber carrying a live winback offer: everything the
+        // group must not learn about them.
+        _ = await store.activatePaidSubscription(.identified(buyerID))
+        _ = await store.expireTenantSubscription(.identified(buyerID))
+        _ = await store.grantWinbackDiscount(key: .identified(buyerID), percent: 30, hours: 48)
+
+        await orchestrator.dispatch(update: message("/buy", chatID: groupID, userID: buyerID, isGroup: true))
+
+        let call = await telegram.waitForCall("sendMessage")
+        let sent = try XCTUnwrap(call)
+        XCTAssertFalse(sent.contains("Ваша подписка"), "subscription status is personal: \(sent.body)")
+        XCTAssertFalse(sent.contains("Ваша скидка"), "so is a winback offer: \(sent.body)")
+        XCTAssertFalse(sent.contains("скидка −30%"), "and so is the price it produces: \(sent.body)")
+        XCTAssertTrue(sent.contains("100 ⭐"), "the list price is public: \(sent.body)")
+    }
+
+    /// The same person in their own DM is told everything — otherwise the fix
+    /// above would have simply deleted the feature.
+    func testBuyInPrivateStillShowsTheirOwnDiscount() async throws {
+        await store.setStarsPrice(100)
+        let buyerID: UserID = 4_802
+        _ = await store.activatePaidSubscription(.identified(buyerID))
+        _ = await store.expireTenantSubscription(.identified(buyerID))
+        _ = await store.grantWinbackDiscount(key: .identified(buyerID), percent: 30, hours: 48)
+
+        await orchestrator.dispatch(update: message("/buy", userID: buyerID))
+
+        let call = await telegram.waitForCall("sendMessage", containing: "Ваша скидка")
+        let sent = try XCTUnwrap(call, "the offer belongs in their own DM")
+        XCTAssertTrue(sent.contains("−30%"), "quoted as an offer: \(sent.body)")
+        let choice = await telegram.waitForCall("sendMessage", containing: "⭐")
+        XCTAssertTrue(try XCTUnwrap(choice).contains("70 ⭐"), "and charged at the discounted price")
+    }
+
+    /// `/tenant` mixes an admin's own licence controls with the bot owner's
+    /// knobs, and the audience used to be a hand-written list of subcommand
+    /// names beside the dispatch switch — a gate that fails open. A chat admin
+    /// must not reach another person's subscription term or the price list.
+    func testTenantSuperOnlySubcommandsRefuseAChatAdmin() async throws {
+        // Named here, not read off `audience`: the loop below proves the gate
+        // honours whatever the type declares, which is worth nothing if the
+        // declaration itself can quietly change. These reach past the caller's
+        // own licence — somebody else's subscription, the price list, the rails
+        // that take money, and the roster of every paying customer.
+        let mustBeSuperOnly: Set<TenantSubcommand> = [
+            .add, .remove, .list, .stats,
+            .extend, .unlimited, .expire,
+            .markup, .price, .cryptoprice,
+            .freemodels, .cryptoaddr, .cryptomode, .cryptopool, .cryptoinvoices,
+        ]
+        for sub in mustBeSuperOnly {
+            XCTAssertEqual(sub.audience, .superAdmin, "/tenant \(sub.rawValue) is not an admin's to run")
+        }
+
+        let adminID: UserID = 4_810
+        let groupID: ChatID = -4_811
+        // A real licence owner: they administer this chat, and nothing beyond it.
+        _ = await store.activatePaidSubscription(.identified(adminID))
+        _ = await store.assignChat(chatID: groupID, to: .identified(adminID))
+        let isAdmin = await store.isAdmin(.identified(adminID), chatID: groupID)
+        XCTAssertTrue(isAdmin)
+
+        for sub in TenantSubcommand.allCases where sub.audience == .superAdmin {
+            await telegram.reset()
+            await orchestrator.dispatch(update: message(
+                "/tenant \(sub.rawValue) @victim 30",
+                chatID: groupID, userID: adminID, isGroup: true
+            ))
+            let call = await telegram.waitForCall("sendMessage")
+            let sent = try XCTUnwrap(call, "/tenant \(sub.rawValue) answered nothing")
+            XCTAssertTrue(
+                sent.contains(Texts.superAdminOnlyCommand),
+                "/tenant \(sub.rawValue) must be refused for a chat admin: \(sent.body)"
+            )
+        }
+    }
+
+    /// Prices are typed into a chat, and `Int(Double)` **traps** outside `Int`'s
+    /// range — a twenty-digit typo took the process down rather than answering
+    /// "введите число". A trap here fails this test by killing the whole run,
+    /// which is exactly the signal wanted.
+    func testAnAbsurdPriceIsRefusedRatherThanCrashingTheBot() async throws {
+        let superID = ownerID
+        for command in ["/tenant cryptoprice 99999999999999999999",
+                        "/ref reward 1e30",
+                        "/ref bonus 99999999999999999999"] {
+            await telegram.reset()
+            await orchestrator.dispatch(update: message(command, userID: superID, username: "owner"))
+            let call = await telegram.waitForCall("sendMessage")
+            XCTAssertNotNil(call, "\(command) answered nothing")
+        }
+        // Nothing absurd was stored either.
+        let cents = await store.cryptoPriceUsdCents()
+        XCTAssertNil(cents, "an unparseable price must not be saved")
+
+        // The same shape one level down: `/ads freq` wrote `minutes * 60` into
+        // the row, and `Int` multiplication traps on overflow.
+        await store.upsertAdCampaign(AdCampaign.new(text: "объявление"))
+        let campaigns = await store.adCampaigns()
+        let campaignID = try XCTUnwrap(campaigns.first?.id)
+        await orchestrator.dispatch(update: message(
+            "/ads freq \(campaignID) 999999999999999999 999999999999999999",
+            userID: superID, username: "owner"
+        ))
+        try await waitUntil {
+            await self.store.adCampaign(id: campaignID)?.everyNReplies != 10
+        }
+        let stored = await store.adCampaign(id: campaignID)
+        let tuned = try XCTUnwrap(stored)
+        XCTAssertTrue(AdCampaign.repliesRange.contains(tuned.everyNReplies), "\(tuned.everyNReplies)")
+        XCTAssertLessThanOrEqual(tuned.minIntervalSeconds, AdCampaign.pauseMinutesRange.upperBound * 60)
+    }
+
+    /// And the operator half still works for that same admin, so the gate is
+    /// not simply closed on everything.
+    func testTenantOperatorSubcommandsWorkForAChatAdmin() async throws {
+        let adminID: UserID = 4_812
+        let groupID: ChatID = -4_813
+        _ = await store.activatePaidSubscription(.identified(adminID))
+
+        await orchestrator.dispatch(update: message("/tenant claim", chatID: groupID, userID: adminID, isGroup: true))
+
+        let call = await telegram.waitForCall("sendMessage")
+        let sent = try XCTUnwrap(call)
+        XCTAssertFalse(sent.contains(Texts.superAdminOnlyCommand), "own licence, own chat: \(sent.body)")
+        let owner = await store.chatOwner(chatID: groupID)
+        XCTAssertEqual(owner, .identified(adminID))
+    }
+
     private func preCheckout(payload: String, stars: Int, userID: UserID) -> TelegramUpdate {
         TelegramUpdate(
             update_id: Int.random(in: 1...1_000_000),

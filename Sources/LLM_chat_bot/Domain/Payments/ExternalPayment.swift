@@ -298,9 +298,8 @@ struct ExternalPaymentConfig: Codable, Sendable, Equatable {
     /// Price of a credit pack in this currency, never below the currency's
     /// floor — aggregators reject a 30 ₽ order outright.
     func creditMinorUnits(cents: Int) -> Int? {
-        guard let rate = usdRateMinorUnits, rate > 0 else { return nil }
-        let raw = Int((Double(cents) / 100.0 * Double(rate)).rounded())
-        return max(raw, currency.minMinorUnits)
+        guard let rate = usdRateMinorUnits else { return nil }
+        return CreditPack.price(cents: cents, perUsd: rate).map { max($0, currency.minMinorUnits) }
     }
 
     /// Merchant id as it goes into the settings message — typed by hand, so it

@@ -12,7 +12,10 @@ extension BotMenuHandler {
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard !route.sub.isEmpty else { return }
+        // Every branch below either redraws a page or answers; a bare `return`
+        // would leave Telegram spinning its clock on a button that is simply
+        // from an older build.
+        guard !route.sub.isEmpty else { return try await staleTap(callback) }
         switch route.sub {
         case "settoken":
             await state.setPending(.admin(.init(kind: .cardProviderToken)), menuMessageID: message.message_id, chatKey: chatKey)
@@ -81,7 +84,9 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(rateText, rateMarkup))
 
         case "currency":
-            guard let currency = route.arg(2).flatMap(FiatCurrency.init(rawValue:)) else { return }
+            guard let currency = route.arg(2).flatMap(FiatCurrency.init(rawValue:)) else {
+                return try await staleTap(callback)
+            }
             await state.setCardCurrency(currency)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Валюта: \(currency.rawValue)")
             try await showPage(.superCard, chatKey: chatKey, callback: callback, message: message)
@@ -104,7 +109,7 @@ extension BotMenuHandler {
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard !route.sub.isEmpty else { return }
+        guard !route.sub.isEmpty else { return try await staleTap(callback) }
         switch route.sub {
         case "setprice":
             await state.setPending(.cryptoPrice, menuMessageID: message.message_id, chatKey: chatKey)
@@ -128,7 +133,9 @@ extension BotMenuHandler {
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "setaddr":
-            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else {
+                return try await staleTap(callback)
+            }
             await state.setPending(.cryptoAddress(chain: chain), menuMessageID: message.message_id, chatKey: chatKey)
             let current = (await state.cryptoAddress(chain)).map { "<code>\(MessageText.escaped($0))</code>" } ?? "<i>не задан</i>"
             let text = """
@@ -144,7 +151,9 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "deladdr":
-            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else {
+                return try await staleTap(callback)
+            }
             await state.setCryptoAddress(chain, address: nil)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ Адрес удалён")
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
@@ -157,7 +166,9 @@ extension BotMenuHandler {
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
 
         case "pooladd":
-            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else { return }
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)) else {
+                return try await staleTap(callback)
+            }
             await state.setPending(.cryptoPoolAdd(chain: chain), menuMessageID: message.message_id, chatKey: chatKey)
             let pool = await state.cryptoAddressPool(chain)
             let listing = pool.isEmpty
@@ -177,7 +188,9 @@ extension BotMenuHandler {
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(text, markup))
 
         case "poolrm":
-            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)), let index = route.int(3) else { return }
+            guard let chain = route.arg(2).flatMap(CryptoChain.init(rawValue:)), let index = route.int(3) else {
+                return try await staleTap(callback)
+            }
             let removed = await state.removeCryptoPoolAddress(chain, at: index)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "✓ Удалено" : "Не найдено")
             try await showPage(.superCrypto, chatKey: chatKey, callback: callback, message: message)
@@ -215,9 +228,12 @@ extension BotMenuHandler {
         let rate = await state.starsPerUsd()
         var packParts: [String] = []
         for cents in CreditPack.centsOptions {
-            packParts.append("\(CreditPack.label(cents: cents)) → \(await state.starsForCents(cents))⭐")
+            guard let stars = await state.starsForCents(cents) else { continue }
+            packParts.append("\(CreditPack.label(cents: cents)) → \(stars)⭐")
         }
-        let packLine = packParts.joined(separator: " · ")
+        let packLine = packParts.isEmpty
+            ? "<i>курс не позволяет назначить цену пакетам — введите меньшее число</i>"
+            : packParts.joined(separator: " · ")
 
         var rows: Keyboard = [
             [menuButton("✏️ Изменить цену подписки", .stars, "setprice")],
@@ -518,7 +534,7 @@ extension BotMenuHandler {
                 ]
                 try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(promptText, markup))
             case "remove":
-                guard let index = route.int(2) else { return }
+                guard let index = route.int(2) else { return try await staleTap(callback) }
                 let ids = await state.freeModelIDs()
                 guard index >= 0, index < ids.count else {
                     try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modelNotFound)

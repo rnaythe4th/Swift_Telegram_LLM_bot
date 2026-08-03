@@ -408,7 +408,7 @@ extension BotMenuHandler {
                 lines.append("<blockquote expandable>\(Self.htmlPreview(c.text, limit: 100))</blockquote>")
             }
             if campaigns.count > 15 {
-                lines.append("<i>…и ещё \(campaigns.count - 15) — полный список /ads</i>")
+                lines.append("<i>…и ещё \(campaigns.count - 15)</i>")
             }
         }
         // The built-in self-promo is a real ad slot occupant, so it gets the

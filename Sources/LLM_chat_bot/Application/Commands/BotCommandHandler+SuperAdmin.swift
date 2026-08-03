@@ -20,10 +20,12 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/superadmin add @username</code>")
                 return
             }
-            let ok = await state.addSuperAdmin(state.userKeyOrRaw(handle))
+            let key = await state.userKeyOrRaw(handle)
+            let name = await state.displayLabel(forKey: key)
+            let ok = await state.addSuperAdmin(key)
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ @\(handle) теперь суперадмин."
-                : "@\(handle) уже является суперадмином.")
+                ? "✓ \(name) теперь суперадмин."
+                : "\(name) уже является суперадмином.")
 
         case "remove":
             let handle = normalizeUsername(arg.trimmingCharacters(in: .whitespaces))
@@ -31,9 +33,11 @@ extension BotCommandHandler {
                 try await sendUserFeedback(chatKey: chatKey, text: "<i>Использование:</i> <code>/superadmin remove @username</code>")
                 return
             }
-            let ok = await state.removeSuperAdmin(state.userKeyOrRaw(handle))
+            let key = await state.userKeyOrRaw(handle)
+            let name = await state.displayLabel(forKey: key)
+            let ok = await state.removeSuperAdmin(key)
             try await sendUserFeedback(chatKey: chatKey, text: ok
-                ? "✓ @\(handle) больше не суперадмин."
+                ? "✓ \(name) больше не суперадмин."
                 : "Нельзя удалить главного суперадмина или такого пользователя нет.")
 
         case "list":
@@ -195,7 +199,7 @@ extension BotCommandHandler {
                 } else {
                     lines.append("• \(chain.displayName) (\(pool.count))")
                     for (i, addr) in pool.enumerated() {
-                        lines.append("  \(i). <code>\(addr)</code>")
+                        lines.append("  \(i). <code>\(MessageText.escaped(addr))</code>")
                     }
                 }
             }
@@ -217,7 +221,7 @@ extension BotCommandHandler {
             }
             let added = await state.addCryptoPoolAddress(chain, address: addr)
             try await sendUserFeedback(chatKey: chatKey, text: added
-                ? "✓ В пул \(chain.displayName) добавлен: <code>\(addr)</code>"
+                ? "✓ В пул \(chain.displayName) добавлен: <code>\(MessageText.escaped(addr))</code>"
                 : "Адрес уже в пуле.")
         case "remove":
             guard let index = Int(arg2) else {
@@ -244,7 +248,7 @@ extension BotCommandHandler {
             var lines = ["<b>🪙 Адреса для приёма</b>"]
             for chain in CryptoChain.allCases {
                 if let addr = addrs[chain] {
-                    lines.append("• \(chain.displayName) · <code>\(addr)</code>")
+                    lines.append("• \(chain.displayName) · <code>\(MessageText.escaped(addr))</code>")
                 }
             }
             try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
@@ -260,7 +264,7 @@ extension BotCommandHandler {
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Адрес для \(chain.displayName) удалён.")
         } else {
             await state.setCryptoAddress(chain, address: trimmed)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Адрес для \(chain.displayName): <code>\(trimmed)</code>")
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Адрес для \(chain.displayName): <code>\(MessageText.escaped(trimmed))</code>")
         }
     }
 
@@ -273,9 +277,10 @@ extension BotCommandHandler {
                 return
             }
             let added = await state.addFreeModel(id)
+            let shown = MessageText.escaped(id)
             try await sendUserFeedback(chatKey: chatKey, text: added
-                ? "✓ Бесплатная модель добавлена: <code>\(id)</code>"
-                : "Модель <code>\(id)</code> уже в списке.")
+                ? "✓ Бесплатная модель добавлена: <code>\(shown)</code>"
+                : "Модель <code>\(shown)</code> уже в списке.")
 
         case "remove":
             let id = value.trimmingCharacters(in: .whitespaces)
@@ -284,16 +289,17 @@ extension BotCommandHandler {
                 return
             }
             let removed = await state.removeFreeModel(id)
+            let shown = MessageText.escaped(id)
             try await sendUserFeedback(chatKey: chatKey, text: removed
-                ? "✓ Модель <code>\(id)</code> удалена из бесплатных."
-                : "Модель <code>\(id)</code> не найдена в списке.")
+                ? "✓ Модель <code>\(shown)</code> удалена из бесплатных."
+                : "Модель <code>\(shown)</code> не найдена в списке.")
 
         case "list":
             let ids = await state.freeModelIDs()
             if ids.isEmpty {
                 try await sendUserFeedback(chatKey: chatKey, text: "💡 Список бесплатных моделей пуст — все модели доступны всем.")
             } else {
-                let list = ids.enumerated().map { "\($0.offset + 1). <code>\($0.element)</code>" }.joined(separator: "\n")
+                let list = ids.enumerated().map { "\($0.offset + 1). <code>\(MessageText.escaped($0.element))</code>" }.joined(separator: "\n")
                 try await sendUserFeedback(chatKey: chatKey, text: "<b>Бесплатные модели</b> (\(ids.count))\n\(list)")
             }
 
@@ -307,7 +313,10 @@ extension BotCommandHandler {
             if freeModels.isEmpty {
                 try await sendUserFeedback(chatKey: chatKey, text: "Бесплатных моделей на OpenRouter сейчас нет.")
             } else {
-                let list = freeModels.map { "• <code>\($0.id)</code>" }.joined(separator: "\n")
+                var list = freeModels.prefix(Self.listCap).map { "• <code>\(MessageText.escaped($0.id))</code>" }.joined(separator: "\n")
+                if freeModels.count > Self.listCap {
+                    list += "\n<i>…и ещё \(freeModels.count - Self.listCap)</i>"
+                }
                 try await sendUserFeedback(chatKey: chatKey, text: "<b>🆓 Бесплатные модели OpenRouter сейчас</b> (\(freeModels.count))\n\(list)")
             }
 
@@ -315,7 +324,7 @@ extension BotCommandHandler {
             let ids = await state.freeModelIDs()
             let status = ids.isEmpty
                 ? "<i>Список пуст — все модели доступны всем.</i>"
-                : ids.map { "• <code>\($0)</code>" }.joined(separator: "\n")
+                : ids.map { "• <code>\(MessageText.escaped($0))</code>" }.joined(separator: "\n")
             try await sendUserFeedback(chatKey: chatKey, text: """
                 <b>🆓 Бесплатные модели</b>
 

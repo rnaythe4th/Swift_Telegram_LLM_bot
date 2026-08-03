@@ -91,6 +91,15 @@ final class BotCommandHandler: Sendable {
     static let unknownAccountNotice =
         "Не удалось определить ваш аккаунт. Напишите боту любое сообщение в личке и повторите команду."
 
+    /// How many rows a listing command prints before it says how many are left.
+    ///
+    /// Telegram does not shorten an overgrown message, it refuses it — so a
+    /// listing that grows with the number of customers is a command that stops
+    /// answering at all once the bot is successful, and stops on the day it
+    /// matters most. The menu pages already carry this cap (CLAUDE.md §17); the
+    /// commands are the same reports through a different door.
+    static let listCap = 40
+
     func actorKey(_ user: TelegramUser?) async -> UserKey? {
         if let userID = user?.id { return state.userKey(userID: userID) }
         return await state.userKey(forHandle: user?.username)

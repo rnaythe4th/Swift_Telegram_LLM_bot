@@ -354,6 +354,10 @@ winback-скидки → счётчики воронки → реферальн�
 
 **Кредиты** (`CreditPack`, $2/$5/$10): payload `credits_<центы>`, зачисление
 `credit(purchased: true)` (только этот флаг = реальная оплата, `toppedUpUsd`).
+Цену пакета на любой рельсе считает **одна** `CreditPack.price(cents:perUsd:)` —
+целочисленно, с `multipliedReportingOverflow`; `nil` = «этой рельсой пакет не
+продать» (`starsForCents` и `creditMinorUnits` возвращают `Int?`, вызывающий
+обязан это проговорить). `Int(Double)` трапает, а курс персистится.
 Свои выключатели у каждого способа: Stars `starsPerUsd`, карта
 `usdRateMinorUnits`, крипта — адреса. Пакеты не зависят от продажи подписки.
 
@@ -692,6 +696,11 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
 - **Суперадмин**: `/superadmin`, `/simulate`, `/reminders`, `/examples`, `/ref`,
   free-модели, цены, наценка, балансы (в основном через супер-меню).
 
+Аудитория подкоманд `/tenant` — на типе, не в списке имён: `TenantSubcommand`
+(`String`-enum) + `audience` исчерпывающим switch без `default`, как
+`MenuCommand.access` у кнопок. Новая подкоманда не собирается, пока не назовёт
+аудиторию. Списочные команды капнуты `BotCommandHandler.listCap`.
+
 Неизвестная команда → `.mention`/`.unknown` (игнор или обычная генерация).
 
 ---
@@ -918,7 +927,12 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   — через `privateChatID(forKey:)` (отсекает заблокировавших). 403 и «chat not
   found» → `setBotPresence(isMember:false)`, не ретрай; 429/5xx — ретрай.
 - Персональная цена не уходит в общий чат; `isPersonal`-страницы в группе не
-  рендерятся.
+  рендерятся. Это же правило держат **команды**: `/buy` в группе берёт
+  `subscriptionPricing(key: nil)` и молчит про срок подписки и скидку, а
+  `sendCryptoAssetChoice` роняет `invoker` внутри себя — оба входа одной строкой.
+- Отчёт, у которого две двери (кнопка и команда), имеет **одну** реализацию:
+  `/history` зовёт `sendHistoryDump`, `/ads` режет тем же `htmlPreview`. Копия
+  расходится с оригиналом ровно на его починки.
 - Draft — только личка; финальный текст обязательно `sendMessage`.
 - `editMessage` — через `waitForEditSlot()`, не `waitForMessageSlot`. «Ошибка»
   `message is not modified` — успех (`TelegramAPIError
@@ -975,7 +989,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~517 тестов; 497 без сети
+`swift test` — цель `LLM_chat_botTests`, ~528 тестов; 508 без сети
 (`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
 `TEST_DATABASE_URL`:
 

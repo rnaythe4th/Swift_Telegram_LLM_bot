@@ -23,4 +23,26 @@ enum CreditPack {
     static func isValid(cents: Int) -> Bool {
         centsOptions.contains(cents)
     }
+
+    /// What a `cents`-worth pack costs when $1 is priced at `rate`. The unit of
+    /// `rate` belongs to the caller — Stars per dollar, kopecks per dollar — and
+    /// comes back out unchanged; this only does the arithmetic, once, for every
+    /// rail that sells a pack.
+    ///
+    /// Integer throughout, and `nil` rather than a trap. `rate` is a number a
+    /// super-admin types into a text field, and `Int(Double)` **traps** outside
+    /// `Int`'s range instead of returning something wrong: one absurd rate took
+    /// the process down on every render of the buy page — and the rate is
+    /// persisted, so the next process died the same way. A rate that cannot
+    /// price a pack means "this rail cannot sell one", which is a sentence the
+    /// caller can say out loud.
+    static func price(cents: Int, perUsd rate: Int) -> Int? {
+        guard cents > 0, rate > 0 else { return nil }
+        let (product, overflow) = cents.multipliedReportingOverflow(by: rate)
+        guard !overflow else { return nil }
+        // Round half up without `(product + 50) / 100`, which would overflow for
+        // a product within 50 of `Int.max`.
+        let (whole, remainder) = product.quotientAndRemainder(dividingBy: 100)
+        return remainder >= 50 ? whole + 1 : whole
+    }
 }
