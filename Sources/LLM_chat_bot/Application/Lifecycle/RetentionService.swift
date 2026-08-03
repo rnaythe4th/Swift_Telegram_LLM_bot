@@ -37,26 +37,57 @@ actor RetentionService {
         }
     }
 
+    /// What one pass removed. Two independent numbers rather than one total:
+    /// they answer different questions ("whose conversation aged out" and "how
+    /// much bookkeeping did we stop carrying"), and one failing must not hide
+    /// the other's result.
+    struct SweepOutcome: Sendable, Equatable {
+        var conversations = 0
+        var funnelDays = 0
+    }
+
     /// One pass. Chats that belong to somebody — a tenant's licence, a
     /// sponsor's group, a paying account's DM — are kept whatever their age:
     /// the person is still a customer, and losing their history would be a
     /// downgrade of something they pay for.
+    ///
+    /// The two halves are deliberately independent: a failure pruning
+    /// conversations must not leave the funnel table growing forever, and vice
+    /// versa. Neither is urgent enough to retry inside the pass — the sweep
+    /// comes back tomorrow.
     @discardableResult
-    func sweep() async -> Int {
-        guard let persistence else { return 0 }
+    func sweep() async -> SweepOutcome {
+        guard let persistence else { return SweepOutcome() }
+        var outcome = SweepOutcome()
+
         let protected = await state.chatsWorthKeeping()
         do {
             let removed = try await persistence.pruneChatContexts(
                 idleDays: Self.idleDays,
                 protecting: protected
             )
-            guard !removed.isEmpty else { return 0 }
-            await state.dropContexts(removed)
-            logger.info("retention: dropped \(removed.count) conversations idle for \(Self.idleDays)+ days")
-            return removed.count
+            if !removed.isEmpty {
+                await state.dropContexts(removed)
+                logger.info("retention: dropped \(removed.count) conversations idle for \(Self.idleDays)+ days")
+                outcome.conversations = removed.count
+            }
         } catch {
             logger.error("retention sweep failed: \(error)")
-            return 0
         }
+
+        // Daily funnel buckets outside the window the loader reads. They stop
+        // being read the moment they leave the window, but nothing ever stopped
+        // them accumulating — ~30 rows a day, forever.
+        do {
+            let pruned = try await persistence.pruneFunnelDays(before: FunnelDailyLog.oldestLoadedDay())
+            if pruned > 0 {
+                logger.info("retention: dropped \(pruned) funnel buckets outside the \(FunnelDailyLog.windowDays)-day window")
+                outcome.funnelDays = pruned
+            }
+        } catch {
+            logger.error("retention: funnel prune failed: \(error)")
+        }
+
+        return outcome
     }
 }

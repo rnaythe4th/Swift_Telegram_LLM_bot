@@ -171,6 +171,15 @@ struct FunnelDailyLog: Codable, Sendable, Equatable {
         Int(date.timeIntervalSince1970 / 86_400)
     }
 
+    /// The oldest day a restore still reads back. Both halves of "what we keep"
+    /// are this one number: the loader filters on it, and the retention sweep
+    /// deletes strictly below it. Two hand-written horizons would drift, and
+    /// the direction they drift decides whether the table grows forever or the
+    /// sweep quietly eats a bucket the next restore wanted.
+    static func oldestLoadedDay(_ now: Date = Date()) -> Int {
+        dayNumber(now) - windowDays
+    }
+
     mutating func bump(key: String, by amount: Int = 1, now: Date = Date()) {
         days[Self.dayNumber(now), default: [:]][key, default: 0] += amount
         // Pruning is always relative to the real current day, never to the

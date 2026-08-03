@@ -120,6 +120,8 @@ private actor FlakyPersistence: StatePersistencePort {
     func loadEverything() async throws -> PersistedBotState { PersistedBotState() }
 
     func pruneChatContexts(idleDays: Int, protecting: Set<ChatID>) async throws -> [ChatKey] { [] }
+
+    func pruneFunnelDays(before day: Int) async throws -> Int { 0 }
 }
 
 /// Records what the write-behind loop asked the ledger to sync.

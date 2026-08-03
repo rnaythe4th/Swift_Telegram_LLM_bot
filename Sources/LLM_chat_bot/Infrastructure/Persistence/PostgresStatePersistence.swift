@@ -191,7 +191,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             )
         }
 
-        let horizon = FunnelDailyLog.dayNumber() - FunnelDailyLog.windowDays
+        let horizon = FunnelDailyLog.oldestLoadedDay()
         state.funnelDays = try await map("select day, event, count from bot_funnel_daily where day >= \(horizon)") {
             FunnelDayRow(
                 day: try $0["day"].decode(Int.self),
@@ -258,6 +258,13 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
                 threadID: try $0["thread_id"].decode(Int64.self)
             )
         }
+    }
+
+    /// Drops funnel buckets the loader no longer reads (`day < horizon`). The
+    /// bound is `FunnelDailyLog.oldestLoadedDay`, the same one `loadEverything`
+    /// filters on, so the sweep can never delete a bucket a restart wanted.
+    func pruneFunnelDays(before day: Int) async throws -> Int {
+        try await map("delete from bot_funnel_daily where day < \(day) returning day") { _ in () }.count
     }
 
     /// Runs a query and maps each row by column name. Names, not tuple

@@ -20,6 +20,8 @@ actor SubscriptionReminderService {
         var walletWinbacksSent: Int = 0
         var unreachable: Int = 0
         var failed: Int = 0
+        /// Due, but past this sweep's send budget — picked up by the next one.
+        var deferred: Int = 0
         var skippedDisabled: Bool = false
 
         var sentTotal: Int { expiryRemindersSent + winbacksSent + walletWinbacksSent }
@@ -33,6 +35,7 @@ actor SubscriptionReminderService {
             if walletWinbacksSent > 0 { parts.append("по балансу \(walletWinbacksSent)") }
             if unreachable > 0 { parts.append("недоступны \(unreachable)") }
             if failed > 0 { parts.append("ошибок \(failed)") }
+            if deferred > 0 { parts.append("отложено \(deferred)") }
             return parts.joined(separator: " · ")
         }
     }
@@ -40,6 +43,17 @@ actor SubscriptionReminderService {
     /// Cap group notices per sponsor per cycle: a licence covering dozens of
     /// chats must not turn one expiry into a broadcast.
     private static let maxGroupNoticesPerSponsor = 10
+
+    /// Ceiling on the notices one sweep may send.
+    ///
+    /// A sweep is a background job spending the same Telegram budget live
+    /// answers spend (~18 messages a second, globally): an outreach wave to a
+    /// five-figure audience would hold that budget for minutes, and the sweep
+    /// is serialised, so the super-admin's "проверить сейчас" would hang behind
+    /// it too. Nothing is lost by stopping early — a notice is only marked
+    /// after delivery and both queues are ordered deterministically, so the
+    /// next sweep resumes at the same front.
+    static let maxNoticesPerSweep = 200
 
     private let telegram: TelegramGatewayPort
     private let state: ChatContextStore
@@ -136,8 +150,13 @@ actor SubscriptionReminderService {
         await metrics.increment(MetricName.reminderSweeps)
         let targets = await state.dueSubscriptionNotices(now: now)
         result.due = targets.count
+        var budget = SendBudget(remaining: Self.maxNoticesPerSweep)
 
         for target in targets {
+            guard budget.take() else {
+                result.deferred += 1
+                continue
+            }
             switch await deliver(target: target, config: config) {
             case .sent:
                 await state.markNoticeSent(
@@ -172,7 +191,7 @@ actor SubscriptionReminderService {
             }
         }
 
-        await sweepLapsedWallets(now: now, into: &result)
+        await sweepLapsedWallets(now: now, budget: &budget, into: &result)
 
         result.finishedAt = Date()
         lastResult = result
@@ -187,12 +206,16 @@ actor SubscriptionReminderService {
     /// spent it and drifted away. A subscription expires loudly and gets a
     /// winback; a wallet just runs out, and nothing has ever said "вернитесь".
     /// One message per lapse, proven payers only (see `dueWalletWinbacks`).
-    private func sweepLapsedWallets(now: Date, into result: inout SweepResult) async {
+    private func sweepLapsedWallets(now: Date, budget: inout SendBudget, into result: inout SweepResult) async {
         let targets = await state.dueWalletWinbacks(now: now)
         guard !targets.isEmpty else { return }
         result.due += targets.count
 
         for target in targets {
+            guard budget.take() else {
+                result.deferred += 1
+                continue
+            }
             switch await send(
                 chatID: target.privateChatID,
                 text: walletWinbackText(target: target),
@@ -235,6 +258,19 @@ actor SubscriptionReminderService {
             InlineKeyboardButton(text: "💰 Пополнить баланс", callback_data: payAction),
             InlineKeyboardButton(text: "⚡ Премиум на месяц", callback_data: payAction),
         ]])
+    }
+
+    /// What is left of this sweep's send budget. A value passed `inout` through
+    /// both halves rather than a counter each half keeps for itself: the cap is
+    /// on the sweep, and two independent caps are not one cap.
+    private struct SendBudget {
+        private(set) var remaining: Int
+
+        mutating func take() -> Bool {
+            guard remaining > 0 else { return false }
+            remaining -= 1
+            return true
+        }
     }
 
     private enum DeliveryOutcome {

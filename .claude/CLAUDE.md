@@ -84,16 +84,20 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   `SubscriptionWriter`/`WalletWriter` (единственные пути изменения `paid_until`
   и кошелька вне платежа), `InMemoryLedger` (тот же контракт без durability).
 - `Lifecycle/`: `SubscriptionReminderService` (свип подписок: напоминания,
-  winback, возврат по балансу), `RetentionService` (суточный прунинг переписок),
+  winback, возврат по балансу; `SendBudget` — потолок рассылки на свип),
+  `RetentionService` (суточный прунинг переписок и бакетов воронки),
   `OwnerAlerter` (`OwnerAlert`: databaseDown, volatileMode, notWriter,
   ledgerMismatch, modelCatalogueDown, spendCapReached).
 - `Persistence/PersistenceCoordinator.swift` — write-behind (§8.1).
 - `Providers/ProviderGatewayRegistry.swift` — `ServiceProvider → адаптер`.
 - `Runtime/`: `UpdateIntake` (дедуп + альбомы), `GenerationLimiter` (глобальный
   FIFO-семафор), `TelegramRateLimiter` (token-bucket), `RuntimeMetrics`,
-  `StateDurability`, `Concurrency` (`LockedValue`, `RuntimeFlags`).
+  `StateDurability`, `AnnouncementThrottle` (сказать один раз на интервал —
+  общий дроссель фоновых уведомлений), `Concurrency` (`LockedValue`,
+  `RuntimeFlags`).
 - `SessionRegistry.swift` — активные генерации (стоп, graceful shutdown).
-- `ModelPriceMonitor.swift` — цены/бесплатность моделей OpenRouter.
+- `ModelPriceMonitor.swift` — цены/бесплатность моделей OpenRouter
+  (+`ModelCatalogueReading` — чистое чтение каталога, пустой = авария).
 - `UserFacingError.swift` — ошибки → русский текст пользователю.
 - `Ports/`: `TelegramGatewayPort`, `ProviderGatewayPort`, `StatePersistencePort`,
   `LedgerPort`, `MediaResolverPort`, `LoggerPort` (+`LogContext`: чат/тема/юзер/
@@ -615,9 +619,12 @@ traffic_totals, external_payments, spend_policy. Ничто из них не р�
 
 ### 8.5 Ретеншн и `/forget`
 `RetentionService` — суточный свип: `pruneChatContexts` удаляет переписки старше
-180 дней, кроме чатов, за которые кто-то платит; запускает только писатель.
-`/forget` стирает переписку своего чата (в группе — только у оператора);
-кошелёк, подписка и `bot_ledger` не трогаются.
+180 дней, кроме чатов, за которые кто-то платит; `pruneFunnelDays` режет бакеты
+`bot_funnel_daily` вне окна. Горизонт окна один на загрузку и на чистку —
+`FunnelDailyLog.oldestLoadedDay()` (две рукописные границы разъезжаются).
+Половины свипа независимы: падение одной не отменяет другую. Запускает только
+писатель. `/forget` стирает переписку своего чата (в группе — только у
+оператора); кошелёк, подписка и `bot_ledger` не трогаются.
 
 ### 8.6 Durability как условие продажи
 `StateDurability` (`durable/readOnly/volatile`) в `RuntimeFlags`, стартует
@@ -776,7 +783,12 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
 - `ModelPriceMonitor` — каждые 5 мин + initial: `openrouter.ai/api/v1/models` →
   `openRouterModelPrices` + `openRouterFreeModelIDs`; модель стала платной →
   уведомление затронутым чатам либо суперадминам (`superAdminPrivateChats()`,
-  личка каждого, не чаты root-тенанта).
+  личка каждого, не чаты root-тенанта). Каталог судится на границе
+  (`ModelCatalogueReading`): **пустой `data` — авария апстрима, а не новость,
+  что всё стало платным**, прошлый набор переживает её; решение «кто стал
+  платным» — `modelsThatBecamePaid` (отсортировано). Рассылка про модель —
+  раз в сутки на модель (`AnnouncementThrottle`), сама смена доступа не
+  троттлится; он-деманд фетч цены — раз в минуту на модель.
 - `CryptoPaymentMonitor` — каждые 30 с: эксплореры, матчинг, частичные оплаты,
   экспирация. Позицию сканирования держит стор.
 - `runPersistenceNotifyLoop` — каждые 60 с: статус хранилища чатам с
@@ -784,9 +796,18 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
 - `SubscriptionReminderService.run` — первый проход через 60 с, дальше каждые
   `sweepIntervalMinutes` (дефолт 60), сон минутными кусками с перечитыванием
   конфига; свип сериализован флагом `sweeping` (кнопка «Проверить сейчас» не
-  пересекается). Работает и в memory-only.
-- `RetentionService` — суточный прунинг переписок (только писатель).
-- `OwnerAlerter` — алерты владельцу.
+  пересекается). Работает и в memory-only. Рассылка капнута на свип
+  (`maxNoticesPerSweep` 200, `SendBudget` — один потолок на обе половины);
+  непоместившееся видно в `SweepResult.deferred` и уезжает в следующий свип
+  (отметка ставится только после доставки, порядок детерминирован).
+- `RetentionService` — суточный прунинг переписок и бакетов воронки (§8.5,
+  только писатель).
+- `OwnerAlerter` — алерты владельцу: одно сообщение на возгорание, одно на
+  погасание, не чаще раза в час на вид (`AnnouncementThrottle`).
+  **Восстановление отправляется только для объявленного инцидента** — иначе
+  мигающее условие молчит на входе и говорит на каждом выходе. Недоставленный
+  алерт остаётся необъявленным (следующая попытка через час), `detail`
+  экранируется и обрезается (чужой текст в HTML роняет `sendMessage`).
 
 Бесплатные модели: `effectiveFreeModelIDs()` = пины суперадмина ∪ бесплатные
 OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режимов — **гейты
@@ -989,9 +1010,9 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, ~528 тестов; 508 без сети
-(`Fixtures.makeStore()`), 20 `PostgresIntegrationTests` сами себя пропускают без
-`TEST_DATABASE_URL`:
+`swift test` — цель `LLM_chat_botTests`, 541 тест в 59 классах; 520 без сети
+(`Fixtures.makeStore()`), 21 `PostgresIntegrationTests` сам себя пропускает без
+`TEST_DATABASE_URL` — и пропущенный набор **не** зелёный прогон:
 
 ```
 docker run -d --rm --name pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=botdb \
@@ -1028,7 +1049,10 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 `PaymentTypeTests`, `ExternalPaymentTests`, `ExternalCallbackEndToEndTests`
 (поздняя оплата закрытого счёта, одна живая ссылка на покупку, абсурдная сумма),
 `CryptoSettlementTests` (срок по времени перевода, хеш зачтён один раз,
-негодный курс TON), `EndToEndTests` + `FakeTelegram.swift` (апдейт входит в
+негодный курс TON), `BackgroundLoopTests` (фон: восстановление только для
+объявленного инцидента, экранирование `detail`, пустой каталог моделей — авария,
+потолок рассылки на свип, прунинг бакетов воронки),
+`EndToEndTests` + `FakeTelegram.swift` (апдейт входит в
 `dispatch`, проходит настоящие команды/меню/генерацию и настоящий
 `TelegramHTTPGateway`, приземляется в локальный дублёр Bot API; подделаны только
 модель и загрузчик медиа; цикл по `MenuPage.allCases` требует отказа обычному

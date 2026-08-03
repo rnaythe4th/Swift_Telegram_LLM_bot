@@ -191,6 +191,46 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertEqual(entries.count, 4, "top-up, correction, closing line, top-up")
     }
 
+    /// The other half of `syncWallets`: a wallet that moved **outside** a
+    /// transaction — a rename folding two people's balances into one — still
+    /// has to be explainable.
+    ///
+    /// This rule was only ever exercised against `InMemoryLedger`, and the two
+    /// implementations are not alike: the SQL one reads the stored balance
+    /// under `for update`, upserts, and writes the delta as a `correction`
+    /// row. A double that agrees with a rule its production counterpart breaks
+    /// is worse than no test, because the suite stays green.
+    func testAWalletSyncedOutsideATransactionIsJournalledInTheDatabase() async throws {
+        let key = UserKey.identified(48)
+        _ = try await ledger.inTransaction {
+            try await $0.credit(key, .cents(100), kind: .topup, purchased: true, ref: "top")
+        }
+
+        // The merge: the cache holds a bigger balance than the row does, and
+        // nothing but this call will ever write it.
+        var merged = UserBalance.empty
+        merged.balance = .cents(250)
+        merged.toppedUp = .cents(250)
+        try await ledger.syncWallets(changed: [key: merged], removed: [])
+
+        var mismatched = try await ledger.reconcile()
+        XCTAssertTrue(mismatched.isEmpty, "a wallet moved outside a transaction must still add up: \(mismatched)")
+
+        let afterMerge = try await ledger.recentEntries(userKey: key, limit: 10)
+        XCTAssertEqual(afterMerge.count, 2, "top-up plus one correction for the delta")
+        XCTAssertEqual(afterMerge.first?.kind, .correction)
+        XCTAssertEqual(afterMerge.first?.amount, .cents(150), "the delta, not the new balance")
+
+        // Writing the same wallet again is not a second movement: the delta is
+        // measured against what is stored, so a re-flush of an unchanged
+        // wallet must add nothing.
+        try await ledger.syncWallets(changed: [key: merged], removed: [])
+        let afterReflush = try await ledger.recentEntries(userKey: key, limit: 10)
+        XCTAssertEqual(afterReflush.count, 2, "an unchanged wallet writes no journal line")
+        mismatched = try await ledger.reconcile()
+        XCTAssertTrue(mismatched.isEmpty, "still explainable after a re-flush: \(mismatched)")
+    }
+
     /// Paying never shortens access, and the end date is computed by the
     /// database so two renewals cannot read the same one.
     func testRenewalExtendsFromTheCurrentEnd() async throws {

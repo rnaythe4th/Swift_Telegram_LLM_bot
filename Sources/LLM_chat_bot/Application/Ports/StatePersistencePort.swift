@@ -246,4 +246,13 @@ protocol StatePersistencePort: Sendable {
     /// erase it" is not one. The query is cheap because `bot_chat_context` is
     /// indexed on `updated_at` (§10.3).
     func pruneChatContexts(idleDays: Int, protecting: Set<ChatID>) async throws -> [ChatKey]
+
+    /// Deletes per-day funnel rows older than `day`, returning how many went.
+    ///
+    /// `FunnelDailyLog` prunes its own window in memory, but the table it is
+    /// written to has no such lifecycle: rows outside the window stopped being
+    /// read and stopped being touched, which is not the same as being gone.
+    /// The daily sweep is the only place in the process that owns "delete what
+    /// nobody will read again", so it owns this too.
+    func pruneFunnelDays(before day: Int) async throws -> Int
 }
