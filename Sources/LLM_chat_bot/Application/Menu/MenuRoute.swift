@@ -16,6 +16,8 @@ enum MenuCommand: String, CaseIterable {
     /// Reference modes: `mode` is the user-facing picker, `smode` the
     /// super-admin editor behind it.
     case mode, smode
+    /// Listen mode: the switch, the buffer size, the dump and the wipe.
+    case listen
     // Presets
     case pm
     // Purchase
@@ -62,6 +64,11 @@ enum MenuCommand: String, CaseIterable {
         case .history:
             return .everyone
         case .temp, .reasoning:
+            return .paidAccess
+        // The largest cost multiplier there is: every answer carries the recent
+        // conversation. The buffer *size* is stricter still — operator-only,
+        // checked inside the handler, exactly like the memory length.
+        case .listen:
             return .paidAccess
         case .provider:
             return .chatOperator

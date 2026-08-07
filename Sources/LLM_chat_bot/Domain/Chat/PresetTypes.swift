@@ -292,6 +292,8 @@ enum AdminPendingInputKind: Sendable {
     case chatCustomModel
     case chatCustomTemp
     case chatCustomHistory
+    /// How many overheard messages a listening chat keeps.
+    case chatListenSize
     // Super-admin monetization inputs.
     case markupPercent
     case dailyPremiumLimit

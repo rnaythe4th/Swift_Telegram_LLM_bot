@@ -337,6 +337,32 @@ extension BotOrchestrator {
             return
         }
 
+        // Listen mode: everything that reaches this line is *conversation* —
+        // commands and answers to menu prompts have already returned above. It
+        // is filed before anyone is answered, so the question being asked is in
+        // the buffer in its own place in the order, with whatever it replied
+        // to; the generation then excludes it and asks it separately.
+        await recordOverheardIfListening(message: message, chatKey: chatKey)
+
         try await generationCoordinator.handleIfNeeded(message: message, chatKey: chatKey)
+    }
+
+    /// Files one group message into the chat's transcript. Cheap for everybody
+    /// else: the first thing it asks is whether this chat listens at all, which
+    /// is one dictionary lookup and creates nothing.
+    private func recordOverheardIfListening(message: TelegramMessage, chatKey: ChatKey) async {
+        guard chatKey.chatID.isGroup else { return }
+        guard await state.isListening(chatKey: chatKey) else { return }
+        guard let author = TranscriptCapture.author(of: message),
+              let text = TranscriptCapture.overheardText(from: message) else { return }
+
+        await state.recordOverheard(
+            chatKey: chatKey,
+            messageID: message.message_id,
+            author: author,
+            text: text,
+            at: TranscriptCapture.sentAt(message),
+            replyTo: TranscriptCapture.reply(from: message, botUsername: botUsername)
+        )
     }
 }

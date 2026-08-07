@@ -104,6 +104,9 @@ struct ChatContextSnapshot: Codable, Sendable {
     // Reference mode the chat currently sits on; absent when its settings were
     // hand-edited or the chat predates modes.
     var activeMode: String?
+    // Listen mode and the overheard conversation; absent in every chat that
+    // never turned it on, which is what keeps the row the size it was.
+    var listening: ChatListening?
 }
 
 // The whole-state `BotStateSnapshot` blob and its one-time import are gone

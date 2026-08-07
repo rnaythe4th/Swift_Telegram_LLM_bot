@@ -46,7 +46,7 @@ extension BotMenuHandler {
         case .adAddText, .selfPromoText, .selfPromoEvery, .selfPromoPause:
             outcome = await applyAdsInput(pending: pending, trimmed: trimmed, isSuper: isSuper)
 
-        case .chatCustomRole, .chatCustomModel, .chatCustomTemp, .chatCustomHistory:
+        case .chatCustomRole, .chatCustomModel, .chatCustomTemp, .chatCustomHistory, .chatListenSize:
             outcome = await applyChatValueInput(
                 pending: pending,
                 trimmed: trimmed,
@@ -357,6 +357,23 @@ extension BotMenuHandler {
                 toast = "✓ Память: <b>\(n) сообщ.</b>"
             } else {
                 toast = "⚠️ Нужно число от 1 до 50"
+            }
+
+        case .chatListenSize:
+            resumePage = .listen
+            // The button that armed this wait was operator-only, but the wait
+            // outlives the page (`PendingRequest.lifetime`) and a licence can
+            // lapse in between — so the value is judged when it lands, not when
+            // it was asked for.
+            guard await state.isAdmin(invoker, chatID: chatKey.chatID) else {
+                toast = "🔒 Размер буфера настраивает владелец бота"
+                break
+            }
+            if let n = Int(trimmed), ChatTranscript.sizeRange.contains(n) {
+                let applied = await state.setListenSize(chatKey: chatKey, size: n)
+                toast = "✓ Буфер прослушки: <b>\(applied) сообщ.</b>"
+            } else {
+                toast = "⚠️ Нужно число от \(ChatTranscript.sizeRange.lowerBound) до \(ChatTranscript.sizeRange.upperBound)"
             }
 
         default:

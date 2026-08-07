@@ -80,7 +80,9 @@ final class EndToEndTests: XCTestCase {
         chatID: ChatID? = nil,
         userID: UserID? = nil,
         username: String? = "tester",
-        isGroup: Bool = false
+        isGroup: Bool = false,
+        messageID: Int = 1,
+        replyTo: TelegramMessage? = nil
     ) -> TelegramUpdate {
         let sender = userID ?? self.userID
         let chat = TelegramChat(
@@ -91,9 +93,11 @@ final class EndToEndTests: XCTestCase {
         return TelegramUpdate(
             update_id: Int.random(in: 1...1_000_000),
             message: Fixtures.message(
+                id: messageID,
                 text: text,
                 from: Fixtures.user(id: sender, username: username),
-                chat: chat
+                chat: chat,
+                replyTo: replyTo
             ),
             callback_query: nil,
             pre_checkout_query: nil,
@@ -178,6 +182,55 @@ final class EndToEndTests: XCTestCase {
         let call = await telegram.waitForCall("sendMessage")
         let answer = try XCTUnwrap(call)
         XCTAssertEqual(answer.chatID, -4_201)
+    }
+
+    /// Listen mode, through the real router: the bot keeps quiet about
+    /// everything it overhears, files all of it, and the moment it *is*
+    /// addressed the conversation is what it answers in the context of.
+    func testListeningGroupRecordsEveryMessageAndStaysQuiet() async throws {
+        let group: ChatID = -4_202
+        let chatKey = ChatKey(chatID: group, threadID: 0)
+        await store.setListenMode(chatKey: chatKey, on: true)
+
+        let asked = Fixtures.message(
+            id: 11,
+            text: "во сколько встречаемся?",
+            from: Fixtures.user(id: userID, username: "tester"),
+            chat: TelegramChat(id: group, type: "supergroup", title: "Тестовая группа")
+        )
+        await orchestrator.dispatch(update: message("во сколько встречаемся?", chatID: group, userID: userID, isGroup: true, messageID: 11))
+        // A reply, so the transcript has to keep what it answered.
+        await orchestrator.dispatch(update: message("в семь", chatID: group, userID: ownerID, username: "owner", isGroup: true, messageID: 12, replyTo: asked))
+        try await waitUntil { await self.store.listening(chatKey: chatKey).transcript.count == 2 }
+
+        let spoken = await telegram.calls("sendMessage")
+        XCTAssertTrue(spoken.isEmpty, "a listening bot must not join the conversation")
+
+        let lines = await store.transcriptLines(chatKey: chatKey).lines
+        XCTAssertTrue(lines[1].contains("(в ответ на #1)"), lines[1])
+
+        // Addressed at last. The answer arrives, and the bot's own line joins
+        // the transcript — so the next «а почему?» has something to point at.
+        await orchestrator.dispatch(update: message("@testbot а это не поздно?", chatID: group, userID: userID, isGroup: true, messageID: 13))
+        let answered = await telegram.waitForCall("editMessageText", containing: "ответ модели")
+        XCTAssertNotNil(answered)
+
+        try await waitUntil { await self.store.listening(chatKey: chatKey).transcript.entries.last?.author == .bot }
+        let texts = await store.listening(chatKey: chatKey).transcript.entries.map(\.text)
+        XCTAssertEqual(texts, ["во сколько встречаемся?", "в семь", "@testbot а это не поздно?", "ответ модели"])
+    }
+
+    /// The switch is a paid feature, and a keyboard outlives the rights it was
+    /// drawn for: a member of a free group tapping it is sold, not obeyed.
+    func testListenSwitchInAFreeGroupSellsInsteadOfRecording() async throws {
+        let group: ChatID = -4_203
+        let chatKey = ChatKey(chatID: group, threadID: 0)
+
+        await orchestrator.dispatch(update: callback("menu:listen:on", chatID: group, userID: userID, isGroup: true))
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let listening = await store.listening(chatKey: chatKey)
+        XCTAssertFalse(listening.isOn)
     }
 
     /// `/menu` renders a keyboard; every callback_data on it must route back to

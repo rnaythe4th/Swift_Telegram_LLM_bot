@@ -296,7 +296,8 @@ extension ChatContextStore {
         chatKey: ChatKey,
         generationID: GenerationID,
         content: UserInputContent,
-        username: String?
+        username: String?,
+        askedMessageID: Int? = nil
     ) -> GenerationSnapshot {
         let userMessage = ChatMessage.userContent(content, username: username)
         // Through `mutate`, not a bare assignment: the pending turn itself is
@@ -308,7 +309,13 @@ extension ChatContextStore {
             )
         }
         let context = ensure(chatKey: chatKey)
-        let messages = visibleHistory(for: context)
+        // A listening chat is shown the conversation it is part of, not the
+        // dialogue it had with the bot: in a group the second is a handful of
+        // disconnected questions, and the first is what they were about. The
+        // dialogue keeps accumulating underneath, so turning listening off
+        // hands the chat its ordinary memory back rather than a blank one.
+        let messages = listenMessages(context, excluding: askedMessageID, question: userMessage)
+            ?? visibleHistory(for: context)
         return .init(
             provider: context.provider,
             model: context.model,
@@ -332,12 +339,26 @@ extension ChatContextStore {
         chatKey: ChatKey,
         generationID: GenerationID,
         content: String,
-        usage: StreamUsageSummary? = nil
+        usage: StreamUsageSummary? = nil,
+        botMessageID: Int? = nil
     ) -> (real: Money, billed: Money) {
         let markup = markupPercentValue
         let real = Money.usd(usage?.cost ?? 0)
         let billed = real.multiplied(byPercent: markup)
         mutate(chatKey: chatKey) { context in
+            // The answer is a message in the chat like any other, and the one
+            // people reply to most. Without it in the transcript, «а почему?»
+            // ten seconds later is a question about nothing.
+            if context.listening.isOn {
+                context.listening.transcript.append(
+                    messageID: botMessageID ?? 0,
+                    author: .bot,
+                    text: content,
+                    at: Date(),
+                    replyTo: nil,
+                    size: context.listening.size
+                )
+            }
             // Counted whatever became of the turn. The answer was generated and
             // the money is being taken (the caller charges what this returns),
             // so a `/clear_history` or a model switch that landed mid-stream
@@ -462,7 +483,14 @@ extension ChatContextStore {
             chatRolePresets: previous?.chatRolePresets ?? [],
             adReplyCounter: previous?.adReplyCounter ?? 0,
             adLastShownAt: previous?.adLastShownAt,
-            funnelFirstMessageCounted: previous?.funnelFirstMessageCounted ?? false
+            funnelFirstMessageCounted: previous?.funnelFirstMessageCounted ?? false,
+            // Carried over, switch and buffer both. Listen mode is not a
+            // setting of the answer — it is a mode the whole chat was told
+            // about out loud when it was turned on, and a generic "↺
+            // Сбросить" must not silently stop (or resume) recording what
+            // everyone in the room says. It has its own page and its own
+            // switch; `/forget` is what erases what it heard.
+            listening: previous?.listening ?? .off
         )
         dirtyContexts.insert(chatKey)
         // "Стандартные настройки" means the working mode, when there is one:

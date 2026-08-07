@@ -151,6 +151,9 @@ final class BotMenuHandler: Sendable {
         case .mode, .smode:
             try await processModeAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
+        case .listen:
+            try await processListenAction(route: route, chatKey: chatKey, callback: callback, message: message)
+
         case .pm:
             try await processPresetAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
@@ -367,6 +370,8 @@ final class BotMenuHandler: Sendable {
             return await renderReasoning(chatKey: chatKey)
         case .tuning:
             return await renderTuning(chatKey: chatKey, invoker: invoker)
+        case .listen:
+            return await renderListen(chatKey: chatKey, invoker: invoker)
         case .helpPage:
             return await renderHelp(chatKey: chatKey)
         case .pay:

@@ -89,6 +89,9 @@ extension BotCommandHandler {
         case .referral:
             try await handleReferral(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
 
+        case .listen:
+            try await handleListen(chatKey: chatKey, argument: parsed.argument, fromUser: fromUser)
+
         case .setRole, .clearHistory, .setTemp, .model, .defaultRole, .historyLength:
             try await handleChatValueCommand(parsed, chatKey: chatKey, fromUser: fromUser)
 

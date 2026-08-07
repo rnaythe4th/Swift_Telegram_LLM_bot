@@ -119,6 +119,10 @@ struct ChatContext: Sendable {
     /// edit of a setting the mode owns, so the settings page can honestly say
     /// whether the chat still matches the mode or has drifted off it.
     var activeModeID: String? = nil
+    /// Listen mode: whether the bot follows the whole group conversation, how
+    /// much of it it keeps, and the buffer itself (`ChatTranscript`). Off, and
+    /// therefore free, in every chat that has not asked for it.
+    var listening: ChatListening = .off
 }
 
 extension ChatContext {

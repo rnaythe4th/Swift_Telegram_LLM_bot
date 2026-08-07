@@ -32,23 +32,43 @@ struct GenerationOrigin: Sendable {
     let isPrivate: Bool
     /// Message the reply should quote; nil = plain reply.
     let replyToMessageID: Int?
+    /// The message that asked, when a message asked at all. The same number as
+    /// `replyToMessageID` for a typed question — but they answer different
+    /// questions ("what should the answer quote" versus "which line of the
+    /// transcript is the question"), and a button-started turn has the first
+    /// and not the second.
+    let askedMessageID: Int?
+    /// What the asking message was replying to. Listen mode turns it into the
+    /// «(в ответ на #12)» that tells the model which of a hundred overheard
+    /// lines the question is about.
+    let repliedTo: TranscriptReply?
 
     /// Storage key of whoever asked. Built from the userID, which every update
     /// carries — a @username is optional, and a gate keyed off one locks out
     /// everybody who never set it (CLAUDE.md §6).
     var userKey: UserKey? { user.map { UserKey.identified($0.id) } }
 
-    init(user: TelegramUser?, isPrivate: Bool, replyToMessageID: Int?) {
+    init(
+        user: TelegramUser?,
+        isPrivate: Bool,
+        replyToMessageID: Int?,
+        askedMessageID: Int? = nil,
+        repliedTo: TranscriptReply? = nil
+    ) {
         self.user = user
         self.isPrivate = isPrivate
         self.replyToMessageID = replyToMessageID
+        self.askedMessageID = askedMessageID
+        self.repliedTo = repliedTo
     }
 
-    init(message: TelegramMessage) {
+    init(message: TelegramMessage, botUsername: String) {
         self.init(
             user: message.from,
             isPrivate: message.chat.type == "private",
-            replyToMessageID: message.message_id
+            replyToMessageID: message.message_id,
+            askedMessageID: message.message_id,
+            repliedTo: TranscriptCapture.reply(from: message, botUsername: botUsername)
         )
     }
 }
@@ -106,7 +126,11 @@ final class GenerationCoordinator: Sendable {
     func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
         switch try await resolveProcessableContent(message: message, chatKey: chatKey) {
         case .content(let content):
-            try await processContent(origin: GenerationOrigin(message: message), content: content, chatKey: chatKey)
+            try await processContent(
+                origin: GenerationOrigin(message: message, botUsername: botUsername),
+                content: content,
+                chatKey: chatKey
+            )
         case .unsupported(let feedback):
             try await sendUserFeedback(chatKey: chatKey, text: feedback)
         case .none:
@@ -201,21 +225,31 @@ final class GenerationCoordinator: Sendable {
         await metrics?.increment(MetricName.generationsStarted)
         
         var processedContent = content
-        if let handle, let text = processedContent.text, !text.isEmpty {
-            processedContent.text = "Тебе пишет @\(handle): \(text)"
+        // Who is asking, and — in a listening chat — which overheard line they
+        // are asking about. Outside listen mode this is the «Тебе пишет @x: »
+        // it has always been.
+        let prefix = await state.questionPrefix(
+            chatKey: chatKey,
+            asker: askerKey,
+            handle: handle,
+            replyTo: origin.repliedTo
+        )
+        if !prefix.isEmpty, let text = processedContent.text, !text.isEmpty {
+            processedContent.text = prefix + text
         }
-        
+
         let hasAttachments = !processedContent.attachments.isEmpty
-        
+
         let historyContent = hasAttachments
             ? UserInputContent(text: processedContent.text, attachments: [])
             : processedContent
-        
+
         let snapshot = await state.snapshotAndAppend(
             chatKey: chatKey,
             generationID: generationID,
             content: historyContent,
-            username: handle
+            username: handle,
+            askedMessageID: origin.askedMessageID
         )
         
         let messages: [ChatMessage] = hasAttachments

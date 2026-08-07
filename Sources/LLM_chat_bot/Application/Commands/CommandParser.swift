@@ -39,6 +39,8 @@ enum BotCommandName: CaseIterable, Equatable {
     case reminders
     case examples
     case referral
+    /// Listen mode in a group: `/listen`, `/listen on|off|N`.
+    case listen
     case unknown
     
     private var baseCommand: String {
@@ -115,6 +117,8 @@ enum BotCommandName: CaseIterable, Equatable {
             return "examples"
         case .referral:
             return "ref"
+        case .listen:
+            return "listen"
         case .mention, .unknown:
             return ""
         }

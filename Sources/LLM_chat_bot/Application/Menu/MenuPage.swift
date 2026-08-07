@@ -42,6 +42,9 @@ enum MenuPage: String, CaseIterable {
     /// full access: a free user picks a reference mode, a paying one may take
     /// the settings apart.
     case tuning
+    /// Listen mode: the bot follows the whole group conversation and answers in
+    /// its context. Group chats only — see `renderListen`.
+    case listen
     case helpPage = "help"
     case pay
     case adminPanel = "admin"
@@ -112,7 +115,13 @@ enum MenuPage: String, CaseIterable {
         // user turning them up spends the owner's money, not their own. Sales:
         // "разобрать настройки по винтикам" is a real thing to sell, and this is
         // the one paywall a person meets *while already trying to do something*.
-        case .temp, .reasoning:
+        //
+        // Listening is the same class of thing, only more so: it adds the whole
+        // recent conversation to every single answer, which is the largest
+        // single multiplier the bot has. It is also the most obviously valuable
+        // thing a group can switch on, so it is priced rather than hidden — the
+        // page opens for anyone and the switch asks for premium.
+        case .temp, .reasoning, .listen:
             return .paidAccess
 
         // "Сервис ИИ" is plumbing — the wrong choice there silently disables
@@ -136,6 +145,7 @@ enum MenuPage: String, CaseIterable {
     var restrictedNotice: String {
         switch self {
         case .provider: return "🔒 Сервис ИИ настраивает владелец бота"
+        case .listen: return "🎧 Прослушка беседы — с премиумом или балансом"
         default: return access.refusal
         }
     }
@@ -166,6 +176,7 @@ enum MenuPage: String, CaseIterable {
         case .superChats: return "← К списку чатов"
         case .superAdminHelp: return "← К разделам справки"
         case .tuning: return "← К настройкам"
+        case .listen: return "← К прослушке"
         // The four chat-setting pickers are only ever returned to from the
         // preset editor, where "back" means "back to picking one".
         case .model, .role, .temp, .history: return "← К выбору"

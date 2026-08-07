@@ -131,6 +131,18 @@ extension BotMenuHandler {
         // free model with its price and lets anyone pick one. Without this a
         // free user has no way to see that the list exists.
         rows.row([menuButton("⚙️ Тонкая настройка", page: .tuning)])
+        // Listen mode belongs to group chats and to nowhere else: in a DM the
+        // "conversation" the bot would follow is the dialogue it is already
+        // having. Shown to everyone, including free chats — the page explains
+        // what it is and the switch behind it asks for premium, which is the
+        // one place a paywall meets somebody already reaching for the feature.
+        if isGroupChat {
+            let listening = await state.listening(chatKey: chatKey)
+            rows.row([menuButton(
+                listening.isOn ? "🎧 Прослушка беседы · 🟢" : "🎧 Прослушка беседы",
+                page: .listen
+            )])
+        }
 
         // Everything below is a different job — money and growth, not settings.
         // Telegram has no separators, so a dead button draws the line; without

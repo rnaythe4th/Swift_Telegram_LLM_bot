@@ -49,7 +49,8 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
 - `Telegram/`: `MessageRouting` (`MessageRoutingPolicy` — реагировать ли:
   личка всегда, группа только reply/@-упоминание; нормализация текста),
   `TelegramPhotoAlbumBuffer` (склейка `media_group`), `OnboardingPresenter`,
-  `ReferralPresenter`, `GroupWelcomePresenter`.
+  `ReferralPresenter`, `GroupWelcomePresenter`, `TranscriptCapture` (сообщение
+  Telegram → строка стенограммы, §5.7).
 - `Generation/`: `GenerationCoordinator` (весь пайплайн ответа, §7) +
   `+Streaming` (draft/edit-раннеры, разбивка длинных ответов) +
   `+Monetization` (`resolveDailyPremium`, `resolveBillingMode`, реклама, офферы,
@@ -60,6 +61,7 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   приходят как `ProviderStreamEvent.keepAlive` и продлевают жизнь потоку).
 - `Commands/`: `CommandParser` (`/cmd@bot`+суффикс), `BotCommandHandler`
   (обвязка, гейты, `handleIfCommand`) + `+Dispatch` (только switch) +
+  `+Listen` (`/listen`, §5.7) +
   `+ChatSettings/Start/Referral/Info/Onboarding/Balance/Reminders/Ads/Admin/
   Tenant/SuperAdmin/Buy`.
 - `Callbacks/`: `BotCallbackAction` (`stop`, `menu`, `faq`, `ex:<id>`),
@@ -73,7 +75,7 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   (диспетчер `processAction`, `showPage`/`renderPage`) + страницы по файлам:
   `MainPage`, `ChatSettings`(+`ChatSettingsPages`), `Modes`, `Purchase`,
   `Presets`, `Admin`, `Tenants`, `SuperAdmin`, `PaymentSettings`, `ExternalPay`,
-  `Retention`, `Onboarding`, `Referral`, `Growth`, `Spend`, `Help`,
+  `Retention`, `Onboarding`, `Referral`, `Growth`, `Spend`, `Help`, `Listen`,
   `TextInput`, `AdminInput`.
 - `Texts.swift` — каталог повторяющихся строк. **Только литералы**: всё, что
   называет человека/чат, собирается на месте через `displayLabel`/`sanitizeName`.
@@ -109,7 +111,7 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   (§3). Логика в расширениях `ChatContextStore+*`: `Identity`, `Tenants`,
   `Subscriptions`, `Auth`, `Presets`, `ChatContext`, `Chats`, `PendingInput`,
   `Payments`, `ExternalPayments`, `Models`, `Premium`, `Modes`, `Analytics`,
-  `Onboarding`, `Referral`, `Balances`, `Ads`, `Spend`, `Ledger`
+  `Onboarding`, `Referral`, `Balances`, `Ads`, `Spend`, `Listen`, `Ledger`
   (`applyCommitted*` — обновление кэша после коммита), `Persistence`
   (экспорт/импорт строк).
 - `Chat/ChatContextTypes.swift` — `TenantState`, `ChatContext`,
@@ -120,6 +122,8 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   `UserBalance` (+`ChatAccessStatus`), `ChatMetaInfo` (+`InviteRecord`),
   `PresetTypes` (`Preset` + `id`, `PresetList` — кап 12, `PresetCategory`),
   `PendingRequest` (`PendingKind` + владелец + TTL),
+  `ChatTranscript` (`TranscriptEntry`/`TranscriptAuthor`/`TranscriptReply`,
+  `ChatListening` — прослушка беседы, §5.7),
   `ModePreset`, `Onboarding`, `Referral`, `TrafficSource`, `AdCampaign`,
   `SubscriptionLifecycle`, `SpendPolicy`, `CreditPack`, `FunnelMetrics`,
   `MediaTypes`, `UserInputContent`, `PersistedSnapshots` (DTO строк/конфигов).
@@ -186,7 +190,8 @@ Telegram → webhook POST /telegram/webhook | long polling getUpdates
             route: 1 identifyUser → 2 migrate_to_chat_id (переезд, стоп)
                    → 3 recordChatMeta → 4 successful_payment → 5 /start|/buy до гейта
                    → 6 autoAssignIfNeeded → 7 BotCommandHandler.handleIfCommand
-                   → 8 BotMenuHandler.processTextInput → 9 GenerationCoordinator.handleIfNeeded
+                   → 8 BotMenuHandler.processTextInput → 9 запись в стенограмму
+                     (прослушка, §5.7) → 10 GenerationCoordinator.handleIfNeeded
 ```
 
 Вход в группу приходит **дважды** (`my_chat_member` + `/start <payload>` от
@@ -224,7 +229,7 @@ TenantState]`, `chatOwnership: [ChatID: tenant]`, `userTenantMap`, кошель�
 `provider`, `suffix` (test-mode), `reasoningEffort`, `backupNotify`,
 `cumulativeUsage`, per-chat пресеты, счётчики рекламы,
 `funnelFirstMessageCounted`, `downgradedFromModel` (платная модель, отложенная
-дневным лимитом), `activeModeID`.
+дневным лимитом), `activeModeID`, `listening` (прослушка беседы, §5.7).
 
 **`pendingTurns`**: пока идёт генерация, user-сообщение висит в pending; на
 `completed`/`cancelled` `flushResolvedTurns` дописывает пары user+assistant в
@@ -446,6 +451,57 @@ UTC на первой записи), пополняет `recordProviderSpend` и
 - **Спонсор-герой**: строка под ответом в спонсируемой группе (не чаще 1 ч на
   чат), благодарность в меню и на странице покупки, поздравление при оплате.
 
+### 5.7 Прослушка беседы (`ChatTranscript` / `ChatListening`)
+
+Вторая память чата, **только для групп**: обычная `history` — это диалог с
+ботом, а в группе большая часть сказанного сказана между людьми, и одна строка
+«@bot а он прав?» без двадцати предыдущих не значит ничего.
+
+Живёт в `ChatContext.listening` → значит, ключуется `ChatKey` (**у каждого
+топика буфер свой**), едет в `bot_chat_context.data`, переезжает вместе с чатом
+в супергруппу, чистится `/forget` и прунингом (§8.5). Всё, что чат никогда не
+включал, пишется как `nil` — строка не растёт.
+
+- **Захват** — в `route()` **последней строкой** перед генерацией: всё, что туда
+  дошло, — это разговор (команды и ответы на приглашение ввести текст уже
+  вернулись выше). `TranscriptCapture` даёт текст (текст ∪ подпись ∪ теги
+  `[фото]`/`[голосовое]`/`[видео]`; **картинки не сохраняются**) и цель ответа.
+  Первый вопрос — `isListening(chatKey:)`: один словарный lookup, контекста не
+  создаёт. Ответ бота пишет `appendAssistant` (с id доставленного сообщения) —
+  ответ бота это то, на что чаще всего отвечают.
+- **Хронология** — `TranscriptEntry.seq`, сквозной номер, а не индекс: буфер
+  теряет старейшее на каждом append, и ссылка-индекс каждый раз указывала бы на
+  другое сообщение. Автор хранится `UserKey`, метка резолвится при рендере
+  (переименование не переписывает сотню строк).
+- **Ответы**: `TranscriptReply` (id + автор + цитата ≤80). Цель в буфере →
+  `(в ответ на #N)`; цель уже выпала → `(в ответ @bob: «…»)` — иначе вопрос
+  теряет предмет. Тот же маркер уезжает в префикс вопроса
+  (`questionPrefix`), чтобы модель знала, о какой из ста строк спрашивают.
+- **Промпт**: `[system(роль + ChatTranscript.systemAddendum), user(стенограмма),
+  user(вопрос)]`. Адресующее сообщение **исключается** из стенограммы по
+  messageID и уезжает отдельно — оно задание, а не фон. Вне прослушки
+  `questionPrefix` — ровно прежнее «Тебе пишет @x: », включая «ничего, если ника
+  нет».
+- **Границы в типе** (§14): `sizeRange` 10…300 (дефолт 100), `entryTextLimit`
+  400 симв. на сообщение, `byteBudget` 60 КБ на весь буфер — набирается от
+  новейшего назад, как `trimHistory`. Это единственное, что реально держит счёт:
+  стенограмма уходит в **каждый** ответ. Уменьшение размера режет буфер сразу
+  (`resize`), а не со следующего сообщения. Переводы строк схлопываются: строка
+  — на сообщение, иначе участник подделает `#99 🤖 бот: …`.
+- **Гейт** — `MenuAccess.paidAccess` и на странице (`MenuPage.listen`), и на
+  тапе (`MenuCommand.listen`), и в команде (`/listen on|off`,
+  `requireFullAccessForTuning`): это самый большой множитель цены, какой есть.
+  **Размер буфера** строже — оператор (`requireOperator`), как длина памяти.
+  Стереть услышанное может тот же, кто может выключить: быть труднее стереть,
+  чем записать, — неверная сторона для приватности.
+- **Включение и выключение проговаривается в чат** (`listenAnnouncement`):
+  люди, чьи сообщения сохраняются, — не тот, кто нажал кнопку, и меню они не
+  видят. `resetChat` прослушку **не трогает** (ни флаг, ни буфер): это режим, о
+  котором чат объявили вслух, а не настройка ответа.
+- Кнопка «🎧 Прослушка беседы» на главной странице меню — **только в группе**;
+  `/listen` без аргумента показывает статус и цену буфера, `dump`/`clear` —
+  прочитать и забыть.
+
 ---
 
 ## 6. LLM-провайдеры
@@ -497,9 +553,12 @@ AsyncThrowingStream<ProviderStreamEvent>`, `fallbackModel(for:)`.
    кошелёк, возвращает `true` из `appendAssistant` → один оффер `balanceEmpty`.
 3. `SessionRegistry` + typing (живёт до старта стрима, гасится `defer`).
 4. `generationLimiter.acquire()` (`MAX_CONCURRENT_GENERATIONS`, дефолт 64).
-5. Текст оборачивается `"Тебе пишет @username: <text>"`; вложения в историю не
+5. Текст оборачивается `questionPrefix` — `"Тебе пишет @username: "`, а в
+   слушающем чате ещё и `(в ответ на #N)` (§5.7); вложения в историю не
    пишутся, в запрос идут.
-6. `snapshotAndAppend` — атомарный снапшот + pending turn.
+6. `snapshotAndAppend` — атомарный снапшот + pending turn. Слушающий чат
+   получает `[system+формат, стенограмма, вопрос]` вместо `visibleHistory`;
+   адресующее сообщение из стенограммы исключается (§5.7).
 7. Стрим: **draft** (`runDraftStreaming`, только личка, Bot API 9.3+;
    финальный текст всегда `sendMessage`, draft эфемерен) или **edit**
    (`runEditStreaming`, группы; правка раз в 3 с или +300 симв.).
@@ -693,7 +752,7 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
   `/historylength`, `/show_model`, `/show_cost`, `/show_tokens`, `/provider`,
   `/testmode`, `/reasoning`, `/help`, `/menu`, `/reset`, `/history`,
   `/reset_stats`, `/backup_notify`, `/chatid`, `/forget`, `/start`, `/buy`,
-  `/balance`, `/examples`, `/ref`.
+  `/balance`, `/examples`, `/ref`, `/listen` (только группа, §5.7).
   Гейты те же, что у страниц меню: `/settemp` и `/reasoning` — полный доступ
   (`requireFullAccessForTuning`), `/historylength` и `/provider` — оператор
   (`requireOperatorForTuning`).
@@ -715,7 +774,7 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
 ## 11. Inline-меню (`BotMenuHandler`)
 
 Страницы (`MenuPage`, `callback_data` `menu:<action>`): `main` (режимы, роль,
-сброс, тонкая настройка), `tuning`, `pay`, `ref`, админ-панель (`admin`,
+сброс, тонкая настройка), `tuning`, `listen` (§5.7, только группа), `pay`, `ref`, админ-панель (`admin`,
 `adminhelp`, `adminchats`, `adminusers`, `adminwl`, `admindef`, `admininvite`),
 супер-панель (`superadmin`, `superadminhelp`, `superstars`, `supercrypto`,
 `supercard`, `superextpay`, `superfreemodels`, `supertenants`, `superadmins`,
@@ -866,13 +925,15 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
   `tempRange`, `ClosedRange.clamping`), стор клампит сам.
 - Коллекция, которую растит **пользователь**, носит кап в типе, а не в
   вызывающем: `PresetList` (12 записей, `add` отвечает `.full`, `normalized`
-  режет длины и чинит id) — `append` в такую коллекцию не должен
+  режет длины и чинит id), `ChatTranscript` (`sizeRange`/`entryTextLimit`/
+  `byteBudget`, §5.7) — `append` в такую коллекцию не должен
   компилироваться. Переполнение проговаривается человеку, а не глотается.
 - Состояние чата ключуется `chatID`, поэтому смена id (апгрейд в супергруппу)
   обязана быть переездом: новая строка грязная, старая — удалённая (§3).
 - `resetChat` возвращает **настройки**, но переносит накопленное (usage,
-  пресеты, `funnelFirstMessageCounted`, счётчики рекламы). Новое поле
-  `ChatContext` обязано ответить, настройка оно или накопленное.
+  пресеты, `funnelFirstMessageCounted`, счётчики рекламы, `listening` целиком —
+  §5.7). Новое поле `ChatContext` обязано ответить, настройка оно или
+  накопленное.
 - jsonb-колонка с дефолтом `'{}'` требует **рукописного `init(from:)`**:
   синтезированный декодер игнорирует значения по умолчанию и бросает на
   отсутствующем ключе — одна строка кладёт весь restore.
@@ -1010,7 +1071,7 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 
 ## 15. Тесты
 
-`swift test` — цель `LLM_chat_botTests`, 541 тест в 59 классах; 520 без сети
+`swift test` — цель `LLM_chat_botTests`, 566 тестов в 60 классах; 545 без сети
 (`Fixtures.makeStore()`), 21 `PostgresIntegrationTests` сам себя пропускает без
 `TEST_DATABASE_URL` — и пропущенный набор **не** зелёный прогон:
 
@@ -1034,7 +1095,9 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 `CommandParserTests`, `MessageRoutingPolicyTests`, `UserIdentityTests`,
 `StoreRootOwnerTests`, `SubscriptionScheduleTests`, `Store*Tests`
 (доступ/подписки/кошельки/реферал/источники/реклама/free-модели/онбординг/
-воронка/dirty+restore), `StoreModePresetTests`, `StorePendingInputTests`,
+воронка/dirty+restore), `StoreModePresetTests`, `StoreListenModeTests` (прослушка беседы: захват,
+хронология, ответы, форма промпта, границы буфера, свой буфер у топика,
+переезд/reset/forget, round-trip строки), `StorePendingInputTests`,
 `StoreChatContextTests`, `StorePresetTests` (границы, id вместо позиции,
 экранирование), `StoreChatMigrationTests` (переезд в супергруппу),
 `UpdateIntakeTests`/`ChatUpdateDispatcherTests`/`GenerationRuntimeTests`

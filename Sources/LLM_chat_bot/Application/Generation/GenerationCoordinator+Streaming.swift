@@ -480,7 +480,16 @@ extension GenerationCoordinator {
             await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
             await self.refundPremium(premiumTicket)
         } else if !fullAccumulator.isEmpty {
-            let cost = await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: fullAccumulator, usage: streamMeta?.usage)
+            // The id of the message the answer actually landed in: in a
+            // listening chat this is what a later «а почему?» replies to, and
+            // the transcript resolves it to the line the model wrote.
+            let cost = await self.state.appendAssistant(
+                chatKey: chatKey,
+                generationID: generationID,
+                content: fullAccumulator,
+                usage: streamMeta?.usage,
+                botMessageID: currentPlaceholder.message_id
+            )
             let depleted = await self.chargeForAnswer(
                 billedTo: billedTo, cost: cost, generationID: generationID
             )

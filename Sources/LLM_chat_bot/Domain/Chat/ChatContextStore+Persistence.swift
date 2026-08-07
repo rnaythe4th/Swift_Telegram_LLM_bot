@@ -30,7 +30,10 @@ extension ChatContextStore {
             adLastShownAt: context.adLastShownAt,
             funnelCounted: context.funnelFirstMessageCounted ? true : nil,
             downgradedFrom: context.downgradedFromModel,
-            activeMode: context.activeModeID
+            activeMode: context.activeModeID,
+            // Written only for chats that listen: an `off` document in every
+            // other row is bytes on every flush for a feature nobody enabled.
+            listening: context.listening == .off ? nil : context.listening
         )
     }
 
@@ -82,7 +85,8 @@ extension ChatContextStore {
             adLastShownAt: snapshot.adLastShownAt,
             funnelFirstMessageCounted: snapshot.funnelCounted ?? false,
             downgradedFromModel: snapshot.downgradedFrom,
-            activeModeID: snapshot.activeMode
+            activeModeID: snapshot.activeMode,
+            listening: snapshot.listening ?? .off
         )
     }
 
