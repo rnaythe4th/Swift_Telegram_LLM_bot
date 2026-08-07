@@ -198,7 +198,7 @@ final class StoreListenModeTests: XCTestCase {
             replyTo: TranscriptReply(messageID: 10, author: .member(UserKey.identified(alice)), quote: "во сколько")
         )
 
-        let lines = await store.transcriptLines(chatKey: group).lines
+        let lines = await store.transcriptView(chatKey: group).lines
         XCTAssertTrue(lines[1].contains("(в ответ на #1)"), lines[1])
     }
 
@@ -213,7 +213,7 @@ final class StoreListenModeTests: XCTestCase {
             replyTo: TranscriptReply(messageID: 999, author: .member(UserKey.identified(alice)), quote: "надо переписать бэкенд")
         )
 
-        let lines = await store.transcriptLines(chatKey: group).lines
+        let lines = await store.transcriptView(chatKey: group).lines
         XCTAssertTrue(lines[0].contains("надо переписать бэкенд"), lines[0])
     }
 
@@ -229,7 +229,7 @@ final class StoreListenModeTests: XCTestCase {
             replyTo: TranscriptReply(messageID: 999, author: .member(UserKey.identified(alice)), quote: "if a < b && c > d")
         )
 
-        let dump = await store.transcriptLines(chatKey: group).lines[0]
+        let dump = await store.transcriptView(chatKey: group).lines[0]
         XCTAssertFalse(dump.contains("<b>"), dump)
         XCTAssertTrue(dump.contains("&lt;"), dump)
         XCTAssertFalse(dump.contains("a < b"), "the quote is markup too, not just the body")
@@ -519,6 +519,68 @@ final class StoreListenModeTests: XCTestCase {
         let target = ChatKey(chatID: -1_000_901, threadID: 0)
         let outcome = await store.setListenMode(chatKey: target, on: true)
         XCTAssertEqual(outcome.seeded, 1)
+    }
+
+    // MARK: - Reading the buffer back
+
+    /// "Does the bot see our messages" has to be answerable *before* switching
+    /// anything on. Otherwise the only way to find out that Telegram is handing
+    /// the bot nothing is to enable a feature and watch it do nothing.
+    func testTheReportShowsWhatIsHeardEvenWhenNothingIsBeingKept() async {
+        let store = await makeStore()
+        await overhear(store, id: 1, from: alice, "слышно ли меня")
+
+        let view = await store.transcriptView(chatKey: group)
+        XCTAssertTrue(view.isPreview, "these are heard, not kept — and the report has to say which")
+        XCTAssertEqual(view.total, 1)
+        XCTAssertTrue(view.lines[0].contains("слышно ли меня"))
+    }
+
+    func testTheReportShowsTheRealBufferOnceListeningIsOn() async {
+        let store = await makeStore()
+        await store.setListenMode(chatKey: group, on: true)
+        await overhear(store, id: 1, from: alice, "записано")
+
+        let view = await store.transcriptView(chatKey: group)
+        XCTAssertFalse(view.isPreview)
+        XCTAssertTrue(view.lines[0].contains("записано"))
+    }
+
+    /// An empty report has three causes with three different fixes, and the one
+    /// people will actually hit is the privacy switch. Saying «ничего не
+    /// слышал» told them apart from none of them.
+    func testAnEmptyReportNamesTheReasonItIsEmpty() {
+        let empty = TranscriptView(lines: [], total: 0, isPreview: false)
+
+        let blind = BotMenuHandler.transcriptDumpText(view: empty, isListening: true, canReadAll: false)
+        XCTAssertTrue(blind.contains("setprivacy"), blind)
+
+        let off = BotMenuHandler.transcriptDumpText(view: empty, isListening: false, canReadAll: true)
+        XCTAssertTrue(off.contains("выключена"), off)
+        XCTAssertFalse(off.contains("setprivacy"))
+
+        let quiet = BotMenuHandler.transcriptDumpText(view: empty, isListening: true, canReadAll: true)
+        XCTAssertTrue(quiet.contains("никто ничего не написал"), quiet)
+    }
+
+    /// Three lines out of two hundred is the same diagnosis as zero and easier
+    /// to miss, so the note is shown next to a full buffer too — and it is the
+    /// part that must survive the trim, not the part that gets trimmed.
+    func testThePrivacyNoteSurvivesAFullBuffer() {
+        let long = (1...400).map { "#\($0) [01.01 00:00] @someone: \(String(repeating: "текст ", count: 20))" }
+        let view = TranscriptView(lines: long, total: long.count, isPreview: false)
+
+        let dump = BotMenuHandler.transcriptDumpText(view: view, isListening: true, canReadAll: false)
+        XCTAssertTrue(dump.contains("setprivacy"), "the diagnosis is what the body gives way to")
+        XCTAssertLessThanOrEqual(dump.utf16.count, MessageSplitter.telegramMaxChars)
+    }
+
+    /// The header has to distinguish "бот это помнит" from "бот это слышит, но
+    /// не сохраняет" — they are the two halves of the answer.
+    func testTheReportSaysWhetherWhatItShowsIsBeingKept() {
+        let view = TranscriptView(lines: ["#1 [01.01 00:00] @alice: раз"], total: 1, isPreview: true)
+        let dump = BotMenuHandler.transcriptDumpText(view: view, isListening: false, canReadAll: true)
+        XCTAssertTrue(dump.contains("не сохраняет"), dump)
     }
 
     // MARK: - Surviving the row it is stored in

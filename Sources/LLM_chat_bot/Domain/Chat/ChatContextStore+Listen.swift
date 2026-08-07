@@ -188,14 +188,31 @@ extension ChatContextStore {
         ]
     }
 
-    /// The transcript as a person reads it back: escaped, newest lines kept.
-    /// Same buffer, same order, same numbering as the model sees — a report
-    /// that shows something else is a report nobody can debug with.
-    func transcriptLines(chatKey: ChatKey) -> (lines: [String], total: Int) {
+    /// What the bot is holding for this chat, as a person reads it back:
+    /// escaped, newest lines kept, same order and same numbering the model is
+    /// shown — a report that shows something else is a report nobody can debug
+    /// with, and debugging is what this is for.
+    ///
+    /// Falls back to the pre-roll when the chat is not listening. That is the
+    /// whole point: "видит ли бот наши сообщения" has to be answerable *before*
+    /// switching anything on, or the only way to find out that Telegram is
+    /// handing the bot nothing is to enable a feature and watch it do nothing.
+    /// It discloses no more than the page already does — the page states the
+    /// count, this states the same chat's own messages, back into that chat.
+    func transcriptView(chatKey: ChatKey) -> TranscriptView {
         let listening = listening(chatKey: chatKey)
-        return (
-            listening.transcript.lines(label: { [self] in transcriptLabel($0) }, escapeText: true),
-            listening.transcript.count
+        if listening.isOn || _overheardPreroll[chatKey] == nil {
+            return TranscriptView(
+                lines: listening.transcript.lines(label: { [self] in transcriptLabel($0) }, escapeText: true),
+                total: listening.transcript.count,
+                isPreview: false
+            )
+        }
+        let preroll = _overheardPreroll[chatKey]?.seed(size: listening.size) ?? .empty
+        return TranscriptView(
+            lines: preroll.lines(label: { [self] in transcriptLabel($0) }, escapeText: true),
+            total: preroll.count,
+            isPreview: true
         )
     }
 

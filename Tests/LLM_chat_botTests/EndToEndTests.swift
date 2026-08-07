@@ -206,7 +206,7 @@ final class EndToEndTests: XCTestCase {
         let spoken = await telegram.calls("sendMessage")
         XCTAssertTrue(spoken.isEmpty, "a listening bot must not join the conversation")
 
-        let lines = await store.transcriptLines(chatKey: chatKey).lines
+        let lines = await store.transcriptView(chatKey: chatKey).lines
         XCTAssertTrue(lines[1].contains("(в ответ на #1)"), lines[1])
 
         // Addressed at last. The answer arrives, and the bot's own line joins

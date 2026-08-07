@@ -46,12 +46,15 @@ extension BotMenuHandler {
                     .listen, "on"
                 )
         ])
-        if !listening.transcript.isEmpty {
-            rows.row([
-                menuButton("📜 Что бот слышал", .listen, "dump"),
-                menuButton("🧹 Забыть услышанное", .listen, "clear"),
-            ])
+        // Always offered, empty buffer included. This is the one button that
+        // answers «а он вообще меня слышит?», and hiding it when the buffer is
+        // empty took it away in exactly the case somebody needs to ask —
+        // leaving "it doesn't work" with nothing to look at.
+        var readRow = [menuButton("📜 Что бот слышал", .listen, "dump")]
+        if listening.transcript.count + waiting > 0 {
+            readRow.append(menuButton("🧹 Забыть услышанное", .listen, "clear"))
         }
+        rows.row(readRow)
         if isOperator {
             var sizeRow: [InlineKeyboardButton] = []
             for size in Self.listenSizes {
@@ -233,38 +236,77 @@ extension BotMenuHandler {
     /// it back" per memory, and both are capped the same way — a report that
     /// silently sends nothing reads as a broken button.
     func sendTranscriptDump(chatKey: ChatKey) async {
-        let (lines, total) = await state.transcriptLines(chatKey: chatKey)
-        let text: String
-        if lines.isEmpty {
-            // The page says «уже услышано · 47 сообщ.» in exactly this state, so
-            // "ничего не слышал" would contradict it. The count is disclosed,
-            // the contents are not: what the chat has not agreed to have kept
-            // does not get read back on request.
-            let waiting = await state.prerollCount(chatKey: chatKey)
-            text = waiting > 0
-                ? "🎧 В буфере пусто — прослушка выключена.\nПоследние <b>\(waiting)</b> сообщений бот слышал: они попадут в буфер, если её включить."
-                : "🎧 Бот пока ничего не слышал в этом чате."
-        } else {
-            text = Self.transcriptDumpText(lines: lines.map { "\n" + $0 }, total: total)
-        }
-        await sendPlain(chatKey: chatKey, text: text)
+        let view = await state.transcriptView(chatKey: chatKey)
+        let isOn = await state.listening(chatKey: chatKey).isOn
+        await sendPlain(chatKey: chatKey, text: Self.transcriptDumpText(
+            view: view,
+            isListening: isOn,
+            canReadAll: canReadAllGroupMessages
+        ))
     }
 
-    static func transcriptDumpText(lines: [String], total: Int) -> String {
+    /// The report, and — because this is what people open when something looks
+    /// wrong — the reason it says what it says.
+    ///
+    /// An empty buffer has three different causes with three different fixes,
+    /// and "🎧 Бот пока ничего не слышал" told them apart from none of them.
+    /// The note explaining which one it is has to survive the trim, so the body
+    /// gives way to it (`withTrailer`, §7) rather than the other way round.
+    static func transcriptDumpText(
+        view: TranscriptView,
+        isListening: Bool,
+        canReadAll: Bool
+    ) -> String {
+        // The setting that decides what Telegram hands over at all. Shown
+        // whether or not the buffer is empty: three lines out of two hundred is
+        // the same diagnosis as zero, and it is easier to miss.
+        let privacy = canReadAll
+            ? ""
+            : """
+
+
+            ⚠️ <b>Бот видит только обращения к нему.</b> У него включён режим приватности \
+            Telegram, поэтому остальные сообщения чата ему просто не приходят.
+            Владельцу бота: @BotFather → <code>/setprivacy</code> → <b>Disable</b>, затем \
+            удалить бота из этого чата и добавить заново.
+            """
+
+        guard !view.isEmpty else {
+            let reason: String
+            if !canReadAll {
+                reason = "🎧 <b>Бот здесь ничего не слышал.</b>"
+            } else if !isListening {
+                reason = """
+                🎧 <b>Пока ничего.</b> Прослушка выключена, и с последнего \
+                сообщения в чате бот ничего не запомнил — напишите что-нибудь \
+                и нажмите снова.
+                """
+            } else {
+                reason = """
+                🎧 <b>Буфер пуст.</b> Прослушка включена, но с этого момента в чате \
+                ещё никто ничего не написал — напишите что-нибудь и нажмите снова.
+                """
+            }
+            return reason + privacy
+        }
+
         var kept: [String] = []
         var used = 0
-        for line in lines.reversed() {
-            let cost = line.utf16.count + 1
-            guard used + cost <= MessageSplitter.charLimit else { break }
+        let budget = MessageSplitter.charLimit - MessageSplitter.renderedLength(privacy)
+        for line in view.lines.reversed() {
+            let cost = line.utf16.count + 2
+            guard used + cost <= budget else { break }
             used += cost
             kept.insert(line, at: 0)
         }
-        let header = kept.count == total
-            ? "<b>🎧 Что бот слышал</b> (\(total))"
-            : "<b>🎧 Что бот слышал</b> · последние <b>\(kept.count)</b> из \(total)"
-        guard !kept.isEmpty else {
-            return MessageSplitter.splitRendered(header + (lines.last ?? "")).done
-        }
-        return ([header] + kept).joined(separator: "\n")
+
+        let title = view.isPreview
+            ? "🎧 Бот это слышит, но <b>не сохраняет</b> — прослушка выключена"
+            : "🎧 Что бот помнит из этого чата"
+        let header = kept.count == view.total
+            ? "<b>\(title)</b> (\(view.total))"
+            : "<b>\(title)</b> · последние <b>\(kept.count)</b> из \(view.total)"
+        let body = ([header] + kept.map { "\n" + $0 }).joined(separator: "\n")
+        return MessageSplitter.withTrailer(body, trailer: privacy)
     }
 }

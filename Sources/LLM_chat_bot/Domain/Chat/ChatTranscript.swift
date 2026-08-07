@@ -435,6 +435,20 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     }
 }
 
+/// The buffer read back for a person: the lines that fit, how many there are in
+/// total, and which of the two buffers they came from.
+///
+/// `isPreview` is the difference between «бот это помнит» and «бот это слышит,
+/// но не сохраняет», and the report has to say which — they are the two halves
+/// of the answer to "does the bot see our messages at all".
+struct TranscriptView: Sendable {
+    let lines: [String]
+    let total: Int
+    let isPreview: Bool
+
+    var isEmpty: Bool { lines.isEmpty }
+}
+
 /// What flipping the switch did. Two facts rather than a `Bool`, because the
 /// chat is told both: whether anything changed at all (a stale button tapped
 /// twice must not announce itself twice), and how much of the conversation the

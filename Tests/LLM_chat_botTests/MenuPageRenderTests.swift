@@ -149,6 +149,19 @@ final class MenuPageRenderTests: XCTestCase {
         XCTAssertTrue(screen.text.contains("setprivacy"), "the one setting the feature cannot work without")
     }
 
+    /// «📜 Что бот слышал» is the button that answers "а он вообще нас
+    /// слышит?", so it is on the page whether or not the buffer has anything in
+    /// it. Hiding it when empty took the diagnostic away in exactly the case
+    /// somebody opens the page to ask.
+    func testTheListenPageAlwaysOffersToShowWhatWasHeard() async {
+        let group = ChatKey(chatID: -7_310, threadID: 0)
+        let screen = await menu.renderPage(.listen, chatKey: group, invoker: UserKey.identified(ownerID))
+        XCTAssertTrue(
+            menuActions(screen.markup).contains("listen:dump"),
+            "an empty buffer is the state that needs explaining most: \(menuActions(screen.markup))"
+        )
+    }
+
     /// "Fits" has to be measured the way Telegram measures — in UTF-16 code
     /// units. Every menu page starts with an emoji and is full of them; counting
     /// `Character`s said a page of emoji fits while the API was already cutting
