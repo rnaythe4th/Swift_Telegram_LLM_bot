@@ -47,9 +47,11 @@ extension ChatContextStore {
             context.listening.transcript = adopted
             seeded = adopted.count
         }
-        // Spent: the lines now live in the chat's own buffer, and keeping a
-        // second copy would double them back in on the next switch.
-        if seeded > 0 { _overheardPreroll[chatKey] = nil }
+        // Spent whether or not anything was taken: what was adopted now lives
+        // in the chat's own buffer (a second copy would double it back in on
+        // the next switch), and what was not adopted is a backlog for a chat
+        // that is recording anyway — kept, it would just sit there.
+        if on { _overheardPreroll[chatKey] = nil }
         return ListenSwitchOutcome(changed: true, seeded: seeded)
     }
 
@@ -68,13 +70,20 @@ extension ChatContextStore {
         return clamped
     }
 
+    /// «Забыть услышанное» — and that has to mean all of it.
+    ///
+    /// The pre-roll goes too. Leaving it would make the button a lie in the one
+    /// way that matters: switch listening off and on again and the messages
+    /// somebody just erased come back, because a second copy of them was
+    /// sitting in memory the whole time.
     @discardableResult
     func clearTranscript(chatKey: ChatKey) -> Int {
-        guard contexts[chatKey] != nil else { return 0 }
-        var erased = 0
-        mutate(chatKey: chatKey) { erased = $0.listening.transcript.clear() }
+        var erased = _overheardPreroll.removeValue(forKey: chatKey)?.count ?? 0
+        guard contexts[chatKey] != nil else { return erased }
+        mutate(chatKey: chatKey) { erased += $0.listening.transcript.clear() }
         return erased
     }
+
 
     // MARK: - Capture
 
@@ -135,8 +144,13 @@ extension ChatContextStore {
     /// How much of this chat's recent conversation the bot is holding but not
     /// using. The settings page shows it, so «включить» is a promise with a
     /// number on it instead of a leap of faith.
+    ///
+    /// Counted through the same `seed` the switch will run, with the same size
+    /// — a chat keeping 30 messages must not be shown "подхвачу 100" and then
+    /// handed 30.
     func prerollCount(chatKey: ChatKey) -> Int {
-        (_overheardPreroll[chatKey]?.seed(size: ChatTranscript.seedLimit))?.count ?? 0
+        guard let preroll = _overheardPreroll[chatKey] else { return 0 }
+        return preroll.seed(size: listening(chatKey: chatKey).size).count
     }
 
     /// How many chats the pre-roll is holding. For the bound, which is the only

@@ -50,11 +50,14 @@ enum TranscriptCapture {
     static func reply(from message: TelegramMessage, botUsername: String) -> TranscriptReply? {
         guard let target = message.reply_to_message else { return nil }
 
+        // "A bot" is not "this bot": groups routinely hold several, and
+        // answering «в ответ на твоё сообщение» about a message another bot
+        // wrote is a straight lie to the model. Only the name matches.
         let author: TranscriptAuthor?
         if let from = target.from {
-            let isBot = from.is_bot
-                && (from.username?.caseInsensitiveCompare(botUsername) == .orderedSame || botUsername.isEmpty)
-            author = isBot ? .bot : .member(UserKey.identified(from.id))
+            let isThisBot = from.is_bot
+                && from.username?.caseInsensitiveCompare(botUsername) == .orderedSame
+            author = isThisBot ? .bot : .member(UserKey.identified(from.id))
         } else {
             author = nil
         }

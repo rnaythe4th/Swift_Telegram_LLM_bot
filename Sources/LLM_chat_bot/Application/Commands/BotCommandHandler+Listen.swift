@@ -92,6 +92,10 @@ extension BotCommandHandler {
             )
 
         case "dump", "log", "показать":
+            // The same gate its twin carries: the button lives on a page behind
+            // `MenuAccess.paidAccess`, and a report with two doors and two
+            // different rules is the rule not existing (§14).
+            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
             await menuHandler.sendTranscriptDump(chatKey: chatKey)
 
         default:

@@ -10,6 +10,7 @@ import XCTest
 final class MenuPageRenderTests: XCTestCase {
 
     private var telegram: FakeTelegram!
+    private var gateway: TelegramHTTPGateway!
     private var store: ChatContextStore!
     private var menu: BotMenuHandler!
 
@@ -20,14 +21,15 @@ final class MenuPageRenderTests: XCTestCase {
         telegram = FakeTelegram()
         let baseURL = try await telegram.start()
         store = Fixtures.makeStore(ownerUsername: "owner", ownerUserID: ownerID, model: "paid/model")
+        gateway = TelegramHTTPGateway(
+            network: NetworkClient(),
+            botToken: "test-token",
+            apiBase: baseURL,
+            rateLimiter: nil,
+            metrics: nil
+        )
         menu = BotMenuHandler(
-            telegram: TelegramHTTPGateway(
-                network: NetworkClient(),
-                botToken: "test-token",
-                apiBase: baseURL,
-                rateLimiter: nil,
-                metrics: nil
-            ),
+            telegram: gateway,
             state: store,
             gateways: ProviderGatewayRegistry(providers: [.openrouter: FakeProviderGateway(reply: "ok")]),
             logger: SilentLogger(),
@@ -39,6 +41,7 @@ final class MenuPageRenderTests: XCTestCase {
     override func tearDown() async throws {
         await telegram.stop()
         telegram = nil
+        gateway = nil
         menu = nil
         store = nil
     }
@@ -122,6 +125,28 @@ final class MenuPageRenderTests: XCTestCase {
                 "\(page) is \(screen.text.count) chars and would be cut off"
             )
         }
+    }
+
+    /// The listen page has a branch the loop above never renders: the warning
+    /// shown when Telegram's privacy mode is on. It is the longest thing on
+    /// that page, and it is the one people will actually see — the setting is
+    /// on by default.
+    func testListenPageFitsWithThePrivacyWarning() async {
+        let blind = BotMenuHandler(
+            telegram: gateway,
+            state: store,
+            gateways: ProviderGatewayRegistry(providers: [.openrouter: FakeProviderGateway(reply: "ok")]),
+            logger: SilentLogger(),
+            formatOptions: "",
+            botUsername: "testbot",
+            canReadAllGroupMessages: false
+        )
+        let group = ChatKey(chatID: -7_300, threadID: 0)
+        await store.setListenMode(chatKey: group, on: true)
+
+        let screen = await blind.renderPage(.listen, chatKey: group, invoker: UserKey.identified(ownerID))
+        XCTAssertTrue(screen.fitsInOneMessage, "\(screen.length) UTF-16 units")
+        XCTAssertTrue(screen.text.contains("setprivacy"), "the one setting the feature cannot work without")
     }
 
     /// "Fits" has to be measured the way Telegram measures — in UTF-16 code

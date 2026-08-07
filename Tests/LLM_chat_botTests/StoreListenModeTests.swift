@@ -217,6 +217,24 @@ final class StoreListenModeTests: XCTestCase {
         XCTAssertTrue(lines[0].contains("надо переписать бэкенд"), lines[0])
     }
 
+    /// The quote is somebody's message, printed into an HTML page. Unescaped,
+    /// one `<` makes Telegram refuse the whole dump — the button silently doing
+    /// nothing for the whole chat until that message falls out of the buffer.
+    func testAQuotedMessageCannotBreakTheDump() async {
+        let store = await makeStore()
+        await store.setListenMode(chatKey: group, on: true)
+
+        await overhear(
+            store, id: 11, from: bob, "ага, <b>жирный</b>",
+            replyTo: TranscriptReply(messageID: 999, author: .member(UserKey.identified(alice)), quote: "if a < b && c > d")
+        )
+
+        let dump = await store.transcriptLines(chatKey: group).lines[0]
+        XCTAssertFalse(dump.contains("<b>"), dump)
+        XCTAssertTrue(dump.contains("&lt;"), dump)
+        XCTAssertFalse(dump.contains("a < b"), "the quote is markup too, not just the body")
+    }
+
     // MARK: - What the model is shown
 
     /// The whole point of the feature: the conversation is context, and the
@@ -444,6 +462,126 @@ final class StoreListenModeTests: XCTestCase {
         let listening = await store.listening(chatKey: group)
         XCTAssertTrue(listening.transcript.isEmpty)
         XCTAssertFalse(listening.isOn)
+    }
+
+    /// The backlog is this chat's conversation too. Leaving it behind would let
+    /// `/forget` be undone by switching listening on: the messages somebody was
+    /// told had been deleted would come straight back.
+    func testForgetAlsoErasesWhatWasOnlyOverheard() async {
+        let store = await makeStore()
+        await overhear(store, id: 1, from: alice, "секрет")
+
+        let erased = await store.forgetChat(chatKey: group)
+        XCTAssertTrue(erased, "a chat with no stored context can still have been overheard")
+
+        _ = await store.setListenMode(chatKey: group, on: true)
+        let count = await store.listening(chatKey: group).transcript.count
+        XCTAssertEqual(count, 0)
+    }
+
+    /// «Забыть услышанное» has to mean all of it, for the same reason.
+    func testClearingAlsoDropsTheBacklog() async {
+        let store = await makeStore()
+        await overhear(store, id: 1, from: alice, "до включения")
+        _ = await store.setListenMode(chatKey: group, on: true)
+        await overhear(store, id: 2, from: bob, "после")
+
+        let erased = await store.clearTranscript(chatKey: group)
+        XCTAssertEqual(erased, 2)
+
+        _ = await store.setListenMode(chatKey: group, on: false)
+        _ = await store.setListenMode(chatKey: group, on: true)
+        let count = await store.listening(chatKey: group).transcript.count
+        XCTAssertEqual(count, 0)
+    }
+
+    /// The page promises a number on the button and the switch has to deliver
+    /// exactly it — a chat keeping 10 messages must not be shown "подхвачу 40".
+    func testThePromisedBacklogIsTheOneActuallyAdopted() async {
+        let store = await makeStore()
+        _ = await store.setListenSize(chatKey: group, size: 10)
+        for id in 1...40 { await overhear(store, id: id, from: alice, "сообщение \(id)") }
+
+        let promised = await store.prerollCount(chatKey: group)
+        let outcome = await store.setListenMode(chatKey: group, on: true)
+        XCTAssertEqual(promised, 10)
+        XCTAssertEqual(outcome.seeded, promised)
+    }
+
+    /// The backlog moves with the chat: an hour of conversation must not be
+    /// lost because Telegram renumbered the room.
+    func testTheBacklogFollowsAGroupIntoItsSupergroup() async {
+        let store = await makeStore()
+        await overhear(store, id: 1, from: alice, "до переезда")
+
+        _ = await store.migrateChat(from: group.chatID, to: ChatID(-1_000_901))
+
+        let target = ChatKey(chatID: -1_000_901, threadID: 0)
+        let outcome = await store.setListenMode(chatKey: target, on: true)
+        XCTAssertEqual(outcome.seeded, 1)
+    }
+
+    // MARK: - Surviving the row it is stored in
+
+    /// The real round trip, through JSON — which is what `bot_chat_context.data`
+    /// actually is. The in-memory drain/restore path never encodes anything, so
+    /// a coding bug would sail straight past it and land on the first restart.
+    func testListeningSurvivesJSONEncoding() throws {
+        var listening = ChatListening(isOn: true, size: 40)
+        listening.transcript.append(
+            messageID: 5, author: .member(UserKey.identified(alice)), text: "сказал",
+            at: Date(timeIntervalSince1970: 1_700_000_000), replyTo: nil, size: 40
+        )
+        listening.transcript.append(
+            messageID: 6, author: .bot, text: "ответил",
+            at: Date(timeIntervalSince1970: 1_700_000_060), replyTo: nil, size: 40
+        )
+
+        let data = try JSONEncoder().encode(listening)
+        let restored = try JSONDecoder().decode(ChatListening.self, from: data)
+
+        XCTAssertEqual(restored, listening)
+        XCTAssertEqual(restored.transcript.entries.map(\.author),
+                       [.member(UserKey.identified(alice)), .bot])
+    }
+
+    /// One unreadable line must cost one line. This document is a chat's whole
+    /// context — its role, its model, its memory — and an array decoder that
+    /// gives up on the first bad element would cost all of it.
+    func testOneBrokenLineDoesNotTakeTheTranscriptWithIt() throws {
+        let json = """
+        {
+          "isOn": true,
+          "size": 40,
+          "transcript": {
+            "nextSeq": 4,
+            "entries": [
+              {"seq": 1, "messageID": 1, "author": "#4001", "text": "первое", "at": 0},
+              {"seq": 2, "messageID": 2, "author": "!чтоэто", "text": "битое", "at": 0},
+              null,
+              {"seq": 3, "messageID": 3, "author": "!bot", "text": "третье", "at": 0}
+            ]
+          }
+        }
+        """
+        let restored = try JSONDecoder().decode(ChatListening.self, from: Data(json.utf8))
+
+        XCTAssertTrue(restored.isOn)
+        XCTAssertEqual(restored.transcript.entries.map(\.text), ["первое", "третье"])
+        XCTAssertEqual(restored.transcript.entries.last?.author, .bot)
+    }
+
+    /// A `nextSeq` that went missing restarts after the highest line still
+    /// held. Restarting at 1 would give two lines the same `#N`, and a
+    /// reference that means two things in one prompt means nothing.
+    func testMissingSequenceRestartsAfterTheLastLine() throws {
+        let json = """
+        {"entries": [{"seq": 17, "messageID": 1, "author": "!bot", "text": "было", "at": 0}]}
+        """
+        var restored = try JSONDecoder().decode(ChatTranscript.self, from: Data(json.utf8))
+        restored.append(messageID: 2, author: .bot, text: "стало", at: Date(), replyTo: nil, size: 40)
+
+        XCTAssertEqual(restored.entries.map(\.seq), [17, 18])
     }
 
     /// A group upgraded to a supergroup gets a new chat id. The transcript is

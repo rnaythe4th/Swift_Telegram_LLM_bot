@@ -236,7 +236,14 @@ extension BotMenuHandler {
         let (lines, total) = await state.transcriptLines(chatKey: chatKey)
         let text: String
         if lines.isEmpty {
-            text = "🎧 Бот пока ничего не слышал в этом чате."
+            // The page says «уже услышано · 47 сообщ.» in exactly this state, so
+            // "ничего не слышал" would contradict it. The count is disclosed,
+            // the contents are not: what the chat has not agreed to have kept
+            // does not get read back on request.
+            let waiting = await state.prerollCount(chatKey: chatKey)
+            text = waiting > 0
+                ? "🎧 В буфере пусто — прослушка выключена.\nПоследние <b>\(waiting)</b> сообщений бот слышал: они попадут в буфер, если её включить."
+                : "🎧 Бот пока ничего не слышал в этом чате."
         } else {
             text = Self.transcriptDumpText(lines: lines.map { "\n" + $0 }, total: total)
         }

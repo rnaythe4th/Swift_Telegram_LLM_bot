@@ -139,6 +139,14 @@ extension ChatContextStore {
         if let shown = _sponsorCreditShownAt.removeValue(forKey: oldID) {
             _sponsorCreditShownAt[newID] = shown
         }
+        // The overheard backlog (§5.7) is keyed by `ChatKey` like the contexts
+        // above, so it moves the same way: a room that has been talking for an
+        // hour must not lose that hour because Telegram renumbered it.
+        for (key, preroll) in _overheardPreroll where key.chatID == oldID {
+            _overheardPreroll.removeValue(forKey: key)
+            let target = ChatKey(chatID: newID, threadID: key.threadID)
+            if _overheardPreroll[target] == nil { _overheardPreroll[target] = preroll }
+        }
         for (key, request) in _pendingRequests where key.chatID == oldID {
             _pendingRequests.removeValue(forKey: key)
             _pendingRequests[ChatKey(chatID: newID, threadID: key.threadID)] = request
@@ -184,7 +192,14 @@ extension ChatContextStore {
     /// evidence in a billing dispute, and deleting them would erase the proof
     /// rather than the data.
     func forgetChat(chatKey: ChatKey) -> Bool {
-        guard contexts.removeValue(forKey: chatKey) != nil else { return false }
+        // What the bot overheard but has not been asked to keep lives in memory
+        // only (§5.7). It is still this chat's conversation, so «переписка
+        // удалена» has to include it — otherwise the next time somebody turns
+        // listening on, the erased messages come back. It also counts as
+        // something erased on its own: a chat with no stored context can still
+        // have been overheard.
+        let hadBacklog = _overheardPreroll.removeValue(forKey: chatKey) != nil
+        guard contexts.removeValue(forKey: chatKey) != nil else { return hadBacklog }
         dirtyContexts.remove(chatKey)
         deletedContexts.insert(chatKey)
         return true

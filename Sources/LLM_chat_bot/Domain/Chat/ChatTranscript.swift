@@ -27,6 +27,42 @@ enum TranscriptAuthor: Codable, Sendable, Equatable, Hashable {
     /// the conversation — and because replying to it is the most common way
     /// anyone addresses the bot at all.
     case bot
+
+    /// One short string rather than the synthesised `{"member":{"_0":"#42"}}`.
+    ///
+    /// This is the field repeated on every line of every transcript, so the
+    /// twenty bytes it saves are twenty bytes × three hundred lines × every
+    /// flush while a chat is busy. `!` is not a username character
+    /// (`UserKey.normalizedHandle`), so the bot's marker cannot collide with a
+    /// person whose handle happens to be "bot".
+    private static let botToken = "!bot"
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        if raw == Self.botToken {
+            self = .bot
+            return
+        }
+        // A marker this build does not know is not a person: filing it as one
+        // would put the line under an invented name. It throws, and the line is
+        // dropped by `ChatTranscript`'s element-wise decode.
+        guard !raw.isEmpty, !raw.hasPrefix("!") else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "unknown transcript author \(raw)"
+            )
+        }
+        self = .member(UserKey(storageValue: raw))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .bot: try container.encode(Self.botToken)
+        case .member(let key): try container.encode(key.storageValue)
+        }
+    }
 }
 
 /// What a message was answering.
@@ -84,14 +120,18 @@ struct TranscriptEntry: Codable, Sendable, Equatable {
 
     /// Hand-written for the same reason `CumulativeUsage`'s is: this is the
     /// payload of a `jsonb` column, and a synthesised decoder throws on the
-    /// first key a future build adds and an old row does not have — taking the
-    /// whole chat context down with it, not just one line.
+    /// first key a future build adds and an old row does not have.
+    ///
+    /// Everything optional is defaulted; `author` is not. Guessing there would
+    /// put somebody's words under the bot's name, which is worse than losing
+    /// the line — and losing one line is all it costs, because
+    /// `ChatTranscript` decodes its entries one at a time.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
             seq: try c.decodeIfPresent(Int.self, forKey: .seq) ?? 0,
             messageID: try c.decodeIfPresent(Int.self, forKey: .messageID) ?? 0,
-            author: try c.decodeIfPresent(TranscriptAuthor.self, forKey: .author) ?? .bot,
+            author: try c.decode(TranscriptAuthor.self, forKey: .author),
             text: try c.decodeIfPresent(String.self, forKey: .text) ?? "",
             at: try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0),
             replyTo: try c.decodeIfPresent(TranscriptReply.self, forKey: .replyTo)
@@ -117,6 +157,55 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     private(set) var nextSeq: Int
 
     static let empty = ChatTranscript(entries: [], nextSeq: 1)
+
+    /// Private: `append` is the only way a line gets in, which is what keeps
+    /// the caps (`sizeRange`, `entryTextLimit`, `byteBudget`) impossible to
+    /// step around.
+    private init(entries: [TranscriptEntry], nextSeq: Int) {
+        self.entries = entries
+        self.nextSeq = nextSeq
+    }
+
+    /// One unreadable line must cost one line.
+    ///
+    /// The synthesised decoder for `[TranscriptEntry]` throws on the first
+    /// element it cannot read and takes the array with it — and this array is
+    /// inside `bot_chat_context.data`, so that would cost the chat its whole
+    /// context (its role, its model, its memory) over one malformed line.
+    /// Decoded element by element instead, exactly like `mapSkippingUnreadable`
+    /// treats the rows themselves (§8.3).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var kept: [TranscriptEntry] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .entries) {
+            while !list.isAtEnd {
+                // A *failed* decode does not advance the container, so the bad
+                // element has to be stepped over deliberately — first as a null,
+                // then as a value nothing is read out of. The index is checked
+                // afterwards because the alternative to giving up here is a
+                // restore that never finishes, which is worse than a lost tail:
+                // this runs on the boot path.
+                let position = list.currentIndex
+                if let entry = try? list.decode(TranscriptEntry.self) {
+                    kept.append(entry)
+                } else if (try? list.decodeNil()) != true {
+                    _ = try? list.decode(DiscardedEntry.self)
+                }
+                if list.currentIndex == position { break }
+            }
+        }
+        self.entries = kept
+        // A sequence that went missing restarts after the highest line still
+        // held, never at 1: two lines sharing a `#N` is a reference that means
+        // two different things in one prompt.
+        let stored = try c.decodeIfPresent(Int.self, forKey: .nextSeq) ?? 0
+        self.nextSeq = max(stored, (kept.last?.seq ?? 0) + 1)
+    }
+
+    /// Consumes one element of the array without reading anything out of it.
+    private struct DiscardedEntry: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
 
     // MARK: - Bounds
 
@@ -266,7 +355,7 @@ struct ChatTranscript: Codable, Sendable, Equatable {
         for entry in entries.reversed() {
             if let excluding, entry.messageID == excluding, entry.messageID != 0 { continue }
             let body = escapeText ? MessageText.escaped(entry.text) : entry.text
-            let reply = replyMarker(for: entry, label: label)
+            let reply = replyMarker(for: entry, label: label, escapeText: escapeText)
             let line = "#\(entry.seq) [\(formatter.string(from: entry.at))] \(label(entry.author))\(reply): \(body)"
             bytes += line.utf8.count
             if !kept.isEmpty, bytes > Self.byteBudget { break }
@@ -278,14 +367,25 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     /// «(в ответ на #12)» when the target is still in the buffer, «(в ответ
     /// @bob: «…»)» when it is not. A reply whose target has scrolled out is the
     /// case that matters: without the quote the question loses its subject.
-    private func replyMarker(for entry: TranscriptEntry, label: (TranscriptAuthor) -> String) -> String {
+    ///
+    /// The quote is somebody's message, so it is escaped wherever the line
+    /// becomes markup — exactly like the body next to it. It used to go in raw,
+    /// and one `<` in a quoted message made Telegram refuse the whole dump: the
+    /// «📜 Что бот слышал» button silently doing nothing, for the whole chat,
+    /// until that message fell out of the buffer.
+    private func replyMarker(
+        for entry: TranscriptEntry,
+        label: (TranscriptAuthor) -> String,
+        escapeText: Bool
+    ) -> String {
         guard let reply = entry.replyTo else { return "" }
         if let target = entries.first(where: { $0.messageID == reply.messageID && $0.messageID != 0 }) {
             return " (в ответ на #\(target.seq))"
         }
         let who = reply.author.map(label) ?? "кому-то"
         guard !reply.quote.isEmpty else { return " (в ответ \(who))" }
-        return " (в ответ \(who): «\(reply.quote)»)"
+        let quote = escapeText ? MessageText.escaped(reply.quote) : reply.quote
+        return " (в ответ \(who): «\(quote)»)"
     }
 
     // MARK: - Prompt shape
