@@ -116,6 +116,11 @@ struct TelegramUser: Codable, Sendable {
     let is_bot: Bool
     let first_name: String
     let username: String?
+    /// Filled by `getMe` for the bot itself and nowhere else: false means
+    /// Telegram's privacy mode is on and the bot is only handed group messages
+    /// addressed to it — which is the difference between listen mode (§5.7)
+    /// hearing a conversation and hearing nothing.
+    var can_read_all_group_messages: Bool?
 }
 
 struct TelegramChat: Codable, Sendable {

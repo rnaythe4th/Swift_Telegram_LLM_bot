@@ -78,6 +78,10 @@ struct AppAssembly {
             network: network,
             storage: storage,
             botUsername: botUsername,
+            // Privacy mode off = Telegram delivers every group message. Listen
+            // mode (§5.7) is useless without it and says so on its own page,
+            // rather than recording nothing and reading as a bug.
+            canReadAllGroupMessages: me.can_read_all_group_messages ?? false,
             logger: logger,
             metrics: metrics,
             flags: flags
@@ -230,6 +234,7 @@ struct AppAssembly {
         network: NetworkClient,
         storage: Storage,
         botUsername: String,
+        canReadAllGroupMessages: Bool = true,
         logger: LoggerPort,
         metrics: RuntimeMetrics,
         flags: RuntimeFlags
@@ -302,6 +307,7 @@ struct AppAssembly {
             flags: flags,
             generationLimiter: generationLimiter,
             botUsername: botUsername,
+            canReadAllGroupMessages: canReadAllGroupMessages,
             formatOptions: formatOptions,
             ledger: storage.ledger,
             fulfillment: fulfillment,

@@ -20,6 +20,9 @@ final class StoreListenModeTests: XCTestCase {
         return store
     }
 
+    /// Timestamps are minutes apart and near now on purpose: the pre-roll is
+    /// bounded by `ChatTranscript.seedLifetime`, so a fixture dated in the past
+    /// would test the expiry rather than the behaviour under test.
     private func overhear(
         _ store: ChatContextStore,
         id: Int,
@@ -33,7 +36,7 @@ final class StoreListenModeTests: XCTestCase {
             messageID: id,
             author: .member(UserKey.identified(user)),
             text: text,
-            at: Date(timeIntervalSince1970: 1_700_000_000 + TimeInterval(id)),
+            at: Date().addingTimeInterval(TimeInterval(id)),
             replyTo: replyTo
         )
     }
@@ -45,15 +48,100 @@ final class StoreListenModeTests: XCTestCase {
 
     // MARK: - Capture
 
-    /// Nothing is recorded until the chat is asked to listen. A bot that is
-    /// merely present in a group keeps no record of it.
-    func testNothingIsRecordedWhileListeningIsOff() async {
+    /// Nothing reaches the chat's own memory until it is asked to listen: what
+    /// is not turned on writes no row and answers no question.
+    func testNothingIsStoredWhileListeningIsOff() async {
         let store = await makeStore()
         await overhear(store, id: 1, from: alice, "привет")
 
         let listening = await store.listening(chatKey: group)
         XCTAssertFalse(listening.isOn)
         XCTAssertTrue(listening.transcript.isEmpty)
+    }
+
+    // MARK: - Starting with what came before
+
+    /// Telegram cannot hand a bot the history of a chat — there is no such
+    /// method, and messages sent before it joined are gone. What *is* possible
+    /// is the conversation this process already saw and used to throw away:
+    /// switching listening on adopts it, so the buffer starts full.
+    func testSwitchingOnAdoptsWhatWasAlreadyOverheard() async {
+        let store = await makeStore()
+
+        await overhear(store, id: 1, from: alice, "во сколько встречаемся?")
+        await overhear(store, id: 2, from: bob, "в семь")
+        let waiting = await store.prerollCount(chatKey: group)
+        XCTAssertEqual(waiting, 2, "the page promises a number before anyone taps")
+
+        let outcome = await store.setListenMode(chatKey: group, on: true)
+        XCTAssertEqual(outcome, ListenSwitchOutcome(changed: true, seeded: 2))
+
+        let entries = await store.listening(chatKey: group).transcript.entries
+        XCTAssertEqual(entries.map(\.text), ["во сколько встречаемся?", "в семь"])
+        XCTAssertEqual(entries.map(\.seq), [1, 2], "numbering carries over, it does not restart")
+    }
+
+    /// The seeded lines are the chat's now. Keeping a second copy would double
+    /// them back in the next time somebody flips the switch.
+    func testTheAdoptedBacklogIsNotAdoptedTwice() async {
+        let store = await makeStore()
+        await overhear(store, id: 1, from: alice, "первое")
+
+        _ = await store.setListenMode(chatKey: group, on: true)
+        _ = await store.setListenMode(chatKey: group, on: false)
+        let second = await store.setListenMode(chatKey: group, on: true)
+
+        XCTAssertEqual(second.seeded, 0)
+        let count = await store.listening(chatKey: group).transcript.count
+        XCTAssertEqual(count, 1)
+    }
+
+    /// Somebody wiped the buffer on purpose. Turning listening off and on again
+    /// must not resurrect what they erased.
+    func testAWipedBufferIsNotRefilledFromTheBacklog() async {
+        let store = await makeStore()
+        await overhear(store, id: 1, from: alice, "до включения")
+        _ = await store.setListenMode(chatKey: group, on: true)
+        await overhear(store, id: 2, from: bob, "после включения")
+
+        _ = await store.clearTranscript(chatKey: group)
+        _ = await store.setListenMode(chatKey: group, on: false)
+        _ = await store.setListenMode(chatKey: group, on: true)
+
+        let count = await store.listening(chatKey: group).transcript.count
+        XCTAssertEqual(count, 0)
+    }
+
+    /// The backlog is held for chats that never asked to be recorded, so it is
+    /// bounded by time as well as by count — yesterday's conversation is not
+    /// the context of today's question.
+    func testTheBacklogForgetsWhatIsTooOldToBeContext() async {
+        let store = await makeStore()
+        let old = Date().addingTimeInterval(-ChatTranscript.seedLifetime - 60)
+        await store.recordOverheard(
+            chatKey: group, messageID: 1, author: .member(UserKey.identified(alice)),
+            text: "вчерашнее", at: old, replyTo: nil
+        )
+        await store.recordOverheard(
+            chatKey: group, messageID: 2, author: .member(UserKey.identified(bob)),
+            text: "свежее", at: Date(), replyTo: nil
+        )
+
+        let outcome = await store.setListenMode(chatKey: group, on: true)
+        XCTAssertEqual(outcome.seeded, 1)
+        let entries = await store.listening(chatKey: group).transcript.entries
+        XCTAssertEqual(entries.map(\.text), ["свежее"])
+    }
+
+    /// It lives in memory, for every group the bot is in. The number of chats
+    /// has to be bounded or a busy bot pays for it in RAM forever.
+    func testTheBacklogIsBoundedByTheNumberOfChats() async {
+        let store = await makeStore()
+        for chat in 0...(ChatContextStore.prerollChatCap + 20) {
+            await overhear(store, id: 1, from: alice, "привет", chatKey: ChatKey(chatID: ChatID(-5_000 - chat), threadID: 0))
+        }
+        let held = await store.prerollChatCount()
+        XCTAssertLessThanOrEqual(held, ChatContextStore.prerollChatCap)
     }
 
     func testEveryMessageIsRecordedWithItsAuthorAndOrder() async {

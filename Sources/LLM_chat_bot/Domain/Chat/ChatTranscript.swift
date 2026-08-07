@@ -139,6 +139,18 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     /// the message count is the number people understand.
     static let byteBudget = 60_000
 
+    /// How much of what the bot overheard *before* being asked to listen is
+    /// carried over when it is (`ChatContextStore._overheardPreroll`). The
+    /// default buffer size, so a chat that switches listening on with the
+    /// settings it ships with starts full rather than empty.
+    static let seedLimit = defaultSize
+
+    /// How far back the pre-roll reaches. A conversation from three days ago is
+    /// not the context of today's question, and holding it in memory for a chat
+    /// that never asked to be recorded is the part of this worth bounding by
+    /// time and not only by count.
+    static let seedLifetime: TimeInterval = 12 * 60 * 60
+
     // MARK: - Writing
 
     /// Files one message. Returns false when there was nothing to overhear.
@@ -183,6 +195,27 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     /// because that is the only reason anybody shrinks it.
     mutating func resize(to size: Int) {
         trim(to: size)
+    }
+
+    /// Drops everything older than `cutoff`. Used on the pre-roll: what the bot
+    /// overheard yesterday is not the context of a question asked today.
+    mutating func prune(before cutoff: Date) {
+        entries.removeAll { $0.at < cutoff }
+    }
+
+    /// Timestamp of the newest line, or nil for an empty buffer. What decides
+    /// which pre-roll goes when there are too many of them.
+    var lastActivity: Date? { entries.last?.at }
+
+    /// Everything this buffer holds, trimmed to `size`, ready to become the
+    /// start of a chat's real transcript. The numbering comes with it, so a
+    /// seeded chat carries on from where the pre-roll left off instead of
+    /// re-using `#1` for a second message.
+    func seed(size: Int, now: Date = Date()) -> ChatTranscript {
+        var copy = self
+        copy.prune(before: now.addingTimeInterval(-Self.seedLifetime))
+        copy.trim(to: min(size, Self.seedLimit))
+        return copy
     }
 
     /// Both bounds, oldest first. `size` arrives from stored state and from a
@@ -300,6 +333,17 @@ struct ChatTranscript: Codable, Sendable, Equatable {
         guard flattened.count > limit else { return flattened }
         return String(flattened.prefix(limit)) + "…"
     }
+}
+
+/// What flipping the switch did. Two facts rather than a `Bool`, because the
+/// chat is told both: whether anything changed at all (a stale button tapped
+/// twice must not announce itself twice), and how much of the conversation the
+/// bot already had and has just adopted.
+struct ListenSwitchOutcome: Sendable, Equatable {
+    let changed: Bool
+    let seeded: Int
+
+    static let unchanged = ListenSwitchOutcome(changed: false, seeded: 0)
 }
 
 /// Listen mode as the chat holds it: the switch, the size and the buffer.

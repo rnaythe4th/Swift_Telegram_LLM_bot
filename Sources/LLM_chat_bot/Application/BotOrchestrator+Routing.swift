@@ -337,22 +337,25 @@ extension BotOrchestrator {
             return
         }
 
-        // Listen mode: everything that reaches this line is *conversation* —
-        // commands and answers to menu prompts have already returned above. It
-        // is filed before anyone is answered, so the question being asked is in
-        // the buffer in its own place in the order, with whatever it replied
-        // to; the generation then excludes it and asks it separately.
-        await recordOverheardIfListening(message: message, chatKey: chatKey)
+        // Listen mode (§5.7): everything that reaches this line is
+        // *conversation* — commands and answers to menu prompts have already
+        // returned above. It is filed before anyone is answered, so the question
+        // being asked is in the buffer in its own place in the order, with
+        // whatever it replied to; the generation then excludes it and asks it
+        // separately.
+        //
+        // Filed in every group, listening or not. Telegram has no way to hand a
+        // bot the history of a chat, so the only "what was said before you
+        // asked" that can ever exist is what this process already saw and used
+        // to throw away — it goes to an in-memory pre-roll and is adopted, or
+        // forgotten, when somebody decides (`ChatContextStore._overheardPreroll`).
+        await recordOverheard(message: message, chatKey: chatKey)
 
         try await generationCoordinator.handleIfNeeded(message: message, chatKey: chatKey)
     }
 
-    /// Files one group message into the chat's transcript. Cheap for everybody
-    /// else: the first thing it asks is whether this chat listens at all, which
-    /// is one dictionary lookup and creates nothing.
-    private func recordOverheardIfListening(message: TelegramMessage, chatKey: ChatKey) async {
+    private func recordOverheard(message: TelegramMessage, chatKey: ChatKey) async {
         guard chatKey.chatID.isGroup else { return }
-        guard await state.isListening(chatKey: chatKey) else { return }
         guard let author = TranscriptCapture.author(of: message),
               let text = TranscriptCapture.overheardText(from: message) else { return }
 

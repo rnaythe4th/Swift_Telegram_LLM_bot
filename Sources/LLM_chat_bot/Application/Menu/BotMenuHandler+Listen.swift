@@ -33,12 +33,18 @@ extension BotMenuHandler {
         let listening = await state.listening(chatKey: chatKey)
         let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
         let cost = listening.promptCost
+        // What the bot is already holding and would carry over. A promise with
+        // a number on it beats "включите и посмотрим".
+        let waiting = listening.isOn ? 0 : await state.prerollCount(chatKey: chatKey)
 
         var rows: Keyboard = []
         rows.row([
             listening.isOn
                 ? menuButton("🟢 Слушаю — выключить", .listen, "off")
-                : menuButton("⚪️ Не слушаю — включить", .listen, "on")
+                : menuButton(
+                    waiting > 0 ? "⚪️ Включить · подхвачу \(waiting) сообщ." : "⚪️ Не слушаю — включить",
+                    .listen, "on"
+                )
         ])
         if !listening.transcript.isEmpty {
             rows.row([
@@ -69,10 +75,25 @@ extension BotMenuHandler {
             ? "\n\nРазмер буфера меняет владелец бота: чем больше, тем лучше бот понимает разговор — и тем дороже каждый ответ (\(ChatTranscript.sizeRange.lowerBound)–\(ChatTranscript.sizeRange.upperBound))."
             : "\n\n<i>Размер буфера (сейчас \(listening.size)) настраивает владелец бота.</i>"
 
+        // The setting without which none of this works. Telegram hands a bot
+        // only the messages addressed to it until privacy mode is turned off,
+        // so a chat could switch listening on, be told it is being read, and
+        // record nothing — which looks like the same bug from every angle.
+        let privacyLine = canReadAllGroupMessages
+            ? ""
+            : """
+            \n\n⚠️ <b>Бот сейчас видит только обращения к нему.</b> Чтобы он читал чат целиком, \
+            владельцу бота нужно выключить режим приватности: @BotFather → /setprivacy → Disable, \
+            затем удалить бота из чата и добавить заново.
+            """
+        let seedLine = !listening.isOn && waiting > 0
+            ? "\n\n📥 Уже услышано и ждёт · <b>\(waiting) сообщ.</b> — при включении бот заберёт их с собой."
+            : ""
+
         let text = """
         <b>🎧 Прослушка беседы</b>
 
-        \(statusLine)\(costLine)
+        \(statusLine)\(costLine)\(seedLine)
 
         Когда включено, бот читает <b>все</b> сообщения этого чата и держит \
         последние \(listening.size) в памяти: кто написал, в каком порядке и кому отвечал. \
@@ -80,7 +101,8 @@ extension BotMenuHandler {
         именно на ваш вопрос, но зная, о чём шла речь до этого.
 
         <i>Картинки не сохраняются — только текст и подписи. У каждой темы (топика) \
-        буфер свой.</i>\(sizeHint)
+        буфер свой. Переписку до того, как бота добавили в чат, Telegram ботам не \
+        отдаёт — её не увидит никто.</i>\(sizeHint)\(privacyLine)
         """
         return MenuScreen(text, rows)
     }
@@ -101,17 +123,23 @@ extension BotMenuHandler {
         switch route.sub {
         case "on", "off":
             let on = route.sub == "on"
-            let changed = await state.setListenMode(chatKey: chatKey, on: on)
+            let outcome = await state.setListenMode(chatKey: chatKey, on: on)
             try? await telegram.answerCallback(
                 callbackQueryID: callback.id,
-                text: on ? "🎧 Слушаю этот чат" : "🎧 Больше не слушаю"
+                text: on
+                    ? (outcome.seeded > 0 ? "🎧 Слушаю · подхватил \(outcome.seeded) сообщ." : "🎧 Слушаю этот чат")
+                    : "🎧 Больше не слушаю"
             )
             // Said out loud, in the chat, every time it changes. A bot that
             // starts recording a room silently is a bot nobody should install:
             // the people whose messages are being kept are not the person who
             // tapped the button, and they never see this menu.
-            if changed {
-                await sendPlain(chatKey: chatKey, text: Self.listenAnnouncement(on: on))
+            if outcome.changed {
+                await sendPlain(chatKey: chatKey, text: Self.listenAnnouncement(
+                    on: on,
+                    seeded: outcome.seeded,
+                    canReadAll: canReadAllGroupMessages
+                ))
             }
             try await showPage(.listen, chatKey: chatKey, callback: callback, message: message)
 
@@ -163,22 +191,40 @@ extension BotMenuHandler {
     /// What the chat is told when listening is switched on or off. Plain and
     /// unmissable: this is the only notice the other members of the group ever
     /// get, and it has to be true about what is kept and for how long.
-    static func listenAnnouncement(on: Bool) -> String {
-        on
-            ? """
-            🎧 <b>Бот теперь читает этот чат.</b>
-
-            Последние сообщения (текст и подписи, без картинок) он держит в памяти, \
-            чтобы отвечать по делу, когда к нему обращаются. Посмотреть, что \
-            накопилось, или стереть — /menu → 🎧 Прослушка беседы.
-            """
-            : """
+    ///
+    /// `seeded` is said out loud too. Adopting the pre-roll means messages
+    /// written *before* anybody agreed to be recorded are now in the buffer —
+    /// telling the chat how many is the difference between a feature and a
+    /// surprise.
+    static func listenAnnouncement(on: Bool, seeded: Int = 0, canReadAll: Bool = true) -> String {
+        guard on else {
+            return """
             🎧 <b>Бот больше не читает этот чат.</b>
 
             Новые сообщения не сохраняются. Он отвечает только на то, что написали \
             лично ему. Накопленное осталось в буфере — стереть можно там же, \
             /menu → 🎧 Прослушка беседы.
             """
+        }
+        let carried = seeded > 0
+            ? """
+            \n\nОн уже слышал последние <b>\(seeded)</b> сообщений этого чата и забрал их с собой — \
+            то, что было до его появления здесь, Telegram ботам не отдаёт.
+            """
+            : ""
+        let blind = canReadAll
+            ? ""
+            : """
+            \n\n⚠️ Сейчас бот видит только сообщения, адресованные ему: у него включён режим \
+            приватности Telegram. Пока владелец его не выключит, читать беседу целиком не получится.
+            """
+        return """
+        🎧 <b>Бот теперь читает этот чат.</b>
+
+        Последние сообщения (текст и подписи, без картинок) он держит в памяти, \
+        чтобы отвечать по делу, когда к нему обращаются. Посмотреть, что \
+        накопилось, или стереть — /menu → 🎧 Прослушка беседы.\(carried)\(blind)
+        """
     }
 
     /// The buffer read back, the same way `sendHistoryDump` reads back the

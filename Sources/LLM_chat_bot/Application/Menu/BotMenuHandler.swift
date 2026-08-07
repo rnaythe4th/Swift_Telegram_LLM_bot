@@ -10,6 +10,11 @@ final class BotMenuHandler: Sendable {
     let logger: LoggerPort
     let formatOptions: String
     let botUsername: String
+    /// Whether Telegram's privacy mode is off, i.e. whether the bot is handed
+    /// every group message or only the ones addressed to it (`getMe`). Listen
+    /// mode (§5.7) is the one feature that is silently useless without it, so
+    /// its page says so rather than recording nothing and looking broken.
+    let canReadAllGroupMessages: Bool
     let modelPriceMonitor: ModelPriceMonitor?
     let cryptoService: CryptoPaymentService?
     let reminderService: SubscriptionReminderService?
@@ -35,6 +40,7 @@ final class BotMenuHandler: Sendable {
         logger: LoggerPort,
         formatOptions: String,
         botUsername: String = "",
+        canReadAllGroupMessages: Bool = true,
         modelPriceMonitor: ModelPriceMonitor? = nil,
         cryptoService: CryptoPaymentService? = nil,
         reminderService: SubscriptionReminderService? = nil,
@@ -49,6 +55,7 @@ final class BotMenuHandler: Sendable {
         self.logger = logger
         self.formatOptions = formatOptions
         self.botUsername = botUsername
+        self.canReadAllGroupMessages = canReadAllGroupMessages
         self.modelPriceMonitor = modelPriceMonitor
         self.cryptoService = cryptoService
         self.reminderService = reminderService

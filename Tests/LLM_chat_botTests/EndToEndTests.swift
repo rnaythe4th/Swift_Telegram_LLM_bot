@@ -220,6 +220,28 @@ final class EndToEndTests: XCTestCase {
         XCTAssertEqual(texts, ["во сколько встречаемся?", "в семь", "@testbot а это не поздно?", "ответ модели"])
     }
 
+    /// Telegram will not hand a bot the history of a chat, so the only "what
+    /// were you talking about before I asked" that can exist is what the
+    /// process already saw. Through the real router: messages arrive while
+    /// listening is off, and switching it on adopts them.
+    func testSwitchingListeningOnPicksUpTheConversationAlreadyOverheard() async throws {
+        let group: ChatID = -4_204
+        let chatKey = ChatKey(chatID: group, threadID: 0)
+
+        await orchestrator.dispatch(update: message("это было до включения", chatID: group, userID: userID, isGroup: true, messageID: 21))
+        await orchestrator.dispatch(update: message("и это тоже", chatID: group, userID: ownerID, username: "owner", isGroup: true, messageID: 22))
+        try await waitUntil { await self.store.prerollCount(chatKey: chatKey) == 2 }
+
+        // Nothing is stored for the chat until it asks — the backlog is memory.
+        let beforeSwitch = await store.listening(chatKey: chatKey)
+        XCTAssertTrue(beforeSwitch.transcript.isEmpty)
+
+        let outcome = await store.setListenMode(chatKey: chatKey, on: true)
+        XCTAssertEqual(outcome.seeded, 2)
+        let texts = await store.listening(chatKey: chatKey).transcript.entries.map(\.text)
+        XCTAssertEqual(texts, ["это было до включения", "и это тоже"])
+    }
+
     /// The switch is a paid feature, and a keyboard outlives the rights it was
     /// drawn for: a member of a free group tapping it is sold, not obeyed.
     func testListenSwitchInAFreeGroupSellsInsteadOfRecording() async throws {

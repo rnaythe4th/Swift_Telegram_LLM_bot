@@ -25,14 +25,32 @@ extension ChatContextStore {
     /// message that outlives the page it was drawn on, and two people tapping
     /// the stale copy of it must not flip listening back and forth.
     ///
-    /// Returns whether this call actually changed anything, so the caller knows
-    /// whether the chat still has to be told (the announcement is the whole
-    /// honesty of the feature — see `BotMenuHandler.listenAnnouncement`).
+    /// Switching on adopts the pre-roll — what this process has already
+    /// overheard in the chat (`_overheardPreroll`). Telegram cannot hand a bot
+    /// the history of a conversation, so this is the whole of "start with what
+    /// came before" that exists: only into an empty buffer, so re-enabling
+    /// after a wipe does not resurrect what somebody just erased.
+    ///
+    /// Returns whether anything changed and how many older messages came with
+    /// it — the chat is told both, because the announcement is the whole
+    /// honesty of the feature (`BotMenuHandler.listenAnnouncement`).
     @discardableResult
-    func setListenMode(chatKey: ChatKey, on: Bool) -> Bool {
-        guard listening(chatKey: chatKey).isOn != on else { return false }
-        mutate(chatKey: chatKey) { $0.listening.isOn = on }
-        return true
+    func setListenMode(chatKey: ChatKey, on: Bool) -> ListenSwitchOutcome {
+        guard listening(chatKey: chatKey).isOn != on else { return .unchanged }
+        var seeded = 0
+        mutate(chatKey: chatKey) { context in
+            context.listening.isOn = on
+            guard on, context.listening.transcript.isEmpty else { return }
+            guard let preroll = _overheardPreroll[chatKey] else { return }
+            let adopted = preroll.seed(size: context.listening.size)
+            guard !adopted.isEmpty else { return }
+            context.listening.transcript = adopted
+            seeded = adopted.count
+        }
+        // Spent: the lines now live in the chat's own buffer, and keeping a
+        // second copy would double them back in on the next switch.
+        if seeded > 0 { _overheardPreroll[chatKey] = nil }
+        return ListenSwitchOutcome(changed: true, seeded: seeded)
     }
 
     /// Clamped in the domain, like every other chat bound (CLAUDE.md §14): the
@@ -60,9 +78,14 @@ extension ChatContextStore {
 
     // MARK: - Capture
 
-    /// Files one overheard message. A no-op when the chat is not listening, so
-    /// the caller does not have to hold the answer to that question across an
-    /// actor hop.
+    /// Files one overheard message — into the chat's own transcript when it is
+    /// listening, into the pre-roll when it is not.
+    ///
+    /// The second half is what makes "switch it on and it already knows what we
+    /// were talking about" possible at all: the bot is handed these messages
+    /// either way, and dropping them meant every chat that ever enabled
+    /// listening started blind. Nothing about the pre-roll is written down or
+    /// leaves the process until somebody asks for it — see `_overheardPreroll`.
     func recordOverheard(
         chatKey: ChatKey,
         messageID: Int,
@@ -71,7 +94,20 @@ extension ChatContextStore {
         at: Date,
         replyTo: TranscriptReply?
     ) {
-        guard isListening(chatKey: chatKey) else { return }
+        guard isListening(chatKey: chatKey) else {
+            var preroll = _overheardPreroll[chatKey] ?? .empty
+            preroll.append(
+                messageID: messageID,
+                author: author,
+                text: text,
+                at: at,
+                replyTo: replyTo,
+                size: ChatTranscript.seedLimit
+            )
+            _overheardPreroll[chatKey] = preroll
+            prunePreroll()
+            return
+        }
         mutate(chatKey: chatKey) { context in
             context.listening.transcript.append(
                 messageID: messageID,
@@ -83,6 +119,29 @@ extension ChatContextStore {
             )
         }
     }
+
+    /// Keeps the pre-roll from growing with the number of groups the bot is in.
+    /// The quietest chats go first: a conversation nobody has added to in hours
+    /// is the one least likely to be worth seeding, and the time bound in
+    /// `seed` would have dropped it anyway.
+    private func prunePreroll() {
+        guard _overheardPreroll.count > Self.prerollChatCap else { return }
+        let stale = _overheardPreroll
+            .sorted { ($0.value.lastActivity ?? .distantPast) < ($1.value.lastActivity ?? .distantPast) }
+            .prefix(_overheardPreroll.count - Self.prerollChatCap)
+        for (key, _) in stale { _overheardPreroll[key] = nil }
+    }
+
+    /// How much of this chat's recent conversation the bot is holding but not
+    /// using. The settings page shows it, so «включить» is a promise with a
+    /// number on it instead of a leap of faith.
+    func prerollCount(chatKey: ChatKey) -> Int {
+        (_overheardPreroll[chatKey]?.seed(size: ChatTranscript.seedLimit))?.count ?? 0
+    }
+
+    /// How many chats the pre-roll is holding. For the bound, which is the only
+    /// thing about an in-memory map that can go wrong quietly.
+    func prerollChatCount() -> Int { _overheardPreroll.count }
 
     // MARK: - Reading
 

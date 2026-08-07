@@ -24,7 +24,15 @@ extension BotCommandHandler {
 
         // Status is a question, not a change: anyone in the chat may ask it.
         guard !argument.isEmpty else {
-            try await sendUserFeedback(chatKey: chatKey, text: Self.listenStatus(listening))
+            let waiting = listening.isOn ? 0 : await state.prerollCount(chatKey: chatKey)
+            try await sendUserFeedback(
+                chatKey: chatKey,
+                text: Self.listenStatus(
+                    listening,
+                    waiting: waiting,
+                    canReadAll: menuHandler.canReadAllGroupMessages
+                )
+            )
             return
         }
 
@@ -51,18 +59,24 @@ extension BotCommandHandler {
         switch argument {
         case "on", "вкл", "включить":
             guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
-            let changed = await state.setListenMode(chatKey: chatKey, on: true)
+            let outcome = await state.setListenMode(chatKey: chatKey, on: true)
             try await sendUserFeedback(
                 chatKey: chatKey,
-                text: changed ? BotMenuHandler.listenAnnouncement(on: true) : "🎧 Уже слушаю этот чат."
+                text: outcome.changed
+                    ? BotMenuHandler.listenAnnouncement(
+                        on: true,
+                        seeded: outcome.seeded,
+                        canReadAll: menuHandler.canReadAllGroupMessages
+                    )
+                    : "🎧 Уже слушаю этот чат."
             )
 
         case "off", "выкл", "выключить":
             guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
-            let changed = await state.setListenMode(chatKey: chatKey, on: false)
+            let outcome = await state.setListenMode(chatKey: chatKey, on: false)
             try await sendUserFeedback(
                 chatKey: chatKey,
-                text: changed ? BotMenuHandler.listenAnnouncement(on: false) : "🎧 И так не слушаю."
+                text: outcome.changed ? BotMenuHandler.listenAnnouncement(on: false) : "🎧 И так не слушаю."
             )
 
         case "clear", "стереть", "забыть":
@@ -96,11 +110,23 @@ extension BotCommandHandler {
         }
     }
 
-    private static func listenStatus(_ listening: ChatListening) -> String {
+    private static func listenStatus(_ listening: ChatListening, waiting: Int, canReadAll: Bool) -> String {
+        // The setting the whole feature depends on. Silence about it means a
+        // chat switches listening on, is told it is being read, and records
+        // nothing — indistinguishable from a broken bot.
+        let privacy = canReadAll
+            ? ""
+            : """
+            \n\n⚠️ У бота включён режим приватности Telegram — он видит только обращения к нему. \
+            Владельцу: @BotFather → /setprivacy → Disable, затем удалить бота из чата и добавить заново.
+            """
         guard listening.isOn else {
+            let carried = waiting > 0
+                ? "\nБот уже слышал <b>\(waiting)</b> последних сообщений и заберёт их с собой при включении."
+                : ""
             return """
-            ⚪️ <b>Прослушка выключена.</b> Бот отвечает только на то, что написали ему.
-            Включить — <code>/listen on</code> или /menu → 🎧 Прослушка беседы.
+            ⚪️ <b>Прослушка выключена.</b> Бот отвечает только на то, что написали ему.\(carried)
+            Включить — <code>/listen on</code> или /menu → 🎧 Прослушка беседы.\(privacy)
             """
         }
         let cost = listening.promptCost
@@ -109,7 +135,7 @@ extension BotCommandHandler {
         В буфере · <b>\(listening.transcript.count)</b> из \(listening.size) сообщ. \
         (≈ \(cost.characters) симв., ~\(cost.tokens) токенов к каждому ответу)
 
-        <code>/listen dump</code> — что бот слышал · <code>/listen off</code> — выключить
+        <code>/listen dump</code> — что бот слышал · <code>/listen off</code> — выключить\(privacy)
         """
     }
 }

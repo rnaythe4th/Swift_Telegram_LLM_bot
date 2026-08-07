@@ -60,6 +60,10 @@ final class BotOrchestrator: Sendable {
         flags: RuntimeFlags,
         generationLimiter: GenerationLimiter,
         botUsername: String,
+        /// Whether Telegram hands the bot every group message or only the ones
+        /// addressed to it (`getMe.can_read_all_group_messages`). Listen mode
+        /// (§5.7) is the one feature that silently does nothing without it.
+        canReadAllGroupMessages: Bool = true,
         formatOptions: String,
         /// Where money is written. Defaults to the in-memory ledger so tests
         /// (and a bot with no database) keep the same shape without one.
@@ -122,6 +126,7 @@ final class BotOrchestrator: Sendable {
             logger: logger,
             formatOptions: formatOptions,
             botUsername: botUsername,
+            canReadAllGroupMessages: canReadAllGroupMessages,
             modelPriceMonitor: modelPriceMonitor,
             cryptoService: cryptoService,
             reminderService: reminderService,

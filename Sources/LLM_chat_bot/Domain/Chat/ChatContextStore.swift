@@ -144,6 +144,23 @@ actor ChatContextStore {
     /// reads as the sponsor's standing credit.
     static let sponsorCreditCooldown: TimeInterval = 60 * 60
 
+    /// What the bot has overheard in groups that are *not* listening yet.
+    ///
+    /// Telegram has no way to hand a bot the history of a chat — there is no
+    /// such method, and messages sent before it joined are gone as far as it is
+    /// concerned. But a bot with privacy mode off is already handed every group
+    /// message as it happens, and until now those were read and thrown away. So
+    /// switching listening on does not have to start from an empty page: it
+    /// adopts what the process has already seen (`ChatTranscript.seedLimit`).
+    ///
+    /// In memory and never persisted, by the same §17 rule as the greeting
+    /// timers, and for a second reason: nothing a chat did not ask for should
+    /// end up in a database row. Bounded twice — per chat by the transcript's
+    /// own cap, across chats by `prunePreroll`.
+    var _overheardPreroll: [ChatKey: ChatTranscript] = [:]
+    /// Chats kept in the pre-roll at once. Beyond this the quietest ones go.
+    static let prerollChatCap = 256
+
     /// The one typed-value wait a chat can hold, whatever asked for it.
     /// See `PendingRequest` for why it is a single slot and not eight maps.
     var _pendingRequests: [ChatKey: PendingRequest] = [:]

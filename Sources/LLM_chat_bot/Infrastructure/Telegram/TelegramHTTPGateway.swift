@@ -666,7 +666,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
             id: UserID(user.id),
             is_bot: user.is_bot,
             first_name: user.first_name,
-            username: user.username
+            username: user.username,
+            can_read_all_group_messages: user.can_read_all_group_messages
         )
     }
     

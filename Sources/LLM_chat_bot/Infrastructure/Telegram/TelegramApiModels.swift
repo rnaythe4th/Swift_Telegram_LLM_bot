@@ -103,6 +103,11 @@ struct TelegramAPIUser: Decodable, Sendable {
     let is_bot: Bool
     let first_name: String
     let username: String?
+    /// Only `getMe` fills this, and only for the bot itself: whether privacy
+    /// mode is off, i.e. whether Telegram delivers *all* group messages or only
+    /// the ones addressed to the bot. It decides whether listen mode (§5.7) can
+    /// hear anything at all.
+    let can_read_all_group_messages: Bool?
 }
 
 struct TelegramAPIChat: Decodable, Sendable {

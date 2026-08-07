@@ -87,19 +87,23 @@ enum Fixtures {
         TelegramChat(id: id, type: type, title: title)
     }
 
+    /// `date` defaults to now, not to zero: Telegram sends the real send time,
+    /// and anything that judges a message by its age (the listen-mode pre-roll,
+    /// §5.7) reads a 1970 fixture as a message far too old to be about anything.
     static func message(
         id: Int = 1,
         text: String? = nil,
         caption: String? = nil,
         from: TelegramUser? = nil,
         chat: TelegramChat,
-        replyTo: TelegramMessage? = nil
+        replyTo: TelegramMessage? = nil,
+        date: Int = Int(Date().timeIntervalSince1970)
     ) -> TelegramMessage {
         TelegramMessage(
             message_id: id,
             from: from,
             chat: chat,
-            date: 0,
+            date: date,
             text: text,
             caption: caption,
             voice: nil,
