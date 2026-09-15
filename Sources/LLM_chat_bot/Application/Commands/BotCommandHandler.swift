@@ -1,194 +1,133 @@
 import Foundation
 
-final class BotCommandHandler: @unchecked Sendable {
-    private let telegram: TelegramGatewayPort
-    private let state: ChatContextStore
-    private let gateways: ProviderGatewayRegistry
-    private let botUsername: String
-    private let formatOptions: String
-    
+// Slash commands. Wiring, role gates and the shared send helper live here;
+// the command bodies are split across BotCommandHandler+*.swift by area.
+
+final class BotCommandHandler: Sendable {
+    let telegram: TelegramGatewayPort
+    let state: ChatContextStore
+    let gateways: ProviderGatewayRegistry
+    let botUsername: String
+    let formatOptions: String
+    let menuHandler: BotMenuHandler
+    let modelPriceMonitor: ModelPriceMonitor?
+    let cryptoService: CryptoPaymentService?
+    let reminderService: SubscriptionReminderService?
+    /// See `BotMenuHandler.durability` — the same gate, for `/buy`.
+    let durability: LockedValue<StateDurability>
+    /// Read-only here: `/balance` shows the last few movements, which is the
+    /// whole point of keeping a journal — "почему у меня было $2, а стало
+    /// $1.30" has to have an answer the person can see for themselves.
+    let ledger: LedgerPort
+    /// See `BotMenuHandler.subscriptions`.
+    let subscriptions: SubscriptionWriter?
+
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
         gateways: ProviderGatewayRegistry,
         botUsername: String,
-        formatOptions: String
+        formatOptions: String,
+        menuHandler: BotMenuHandler,
+        modelPriceMonitor: ModelPriceMonitor? = nil,
+        cryptoService: CryptoPaymentService? = nil,
+        reminderService: SubscriptionReminderService? = nil,
+        durability: LockedValue<StateDurability> = LockedValue(.durable),
+        ledger: LedgerPort = InMemoryLedger(),
+        subscriptions: SubscriptionWriter? = nil
     ) {
         self.telegram = telegram
         self.state = state
         self.gateways = gateways
         self.botUsername = botUsername
         self.formatOptions = formatOptions
+        self.menuHandler = menuHandler
+        self.modelPriceMonitor = modelPriceMonitor
+        self.cryptoService = cryptoService
+        self.reminderService = reminderService
+        self.durability = durability
+        self.ledger = ledger
+        self.subscriptions = subscriptions
     }
-    
-    func handleIfCommand(text: String?, chatKey: ChatKey) async throws -> Bool {
+
+    /// See `BotMenuHandler.wallets`: `/balance add|set` is a money write, so it
+    /// goes through a ledger transaction rather than the store's cache.
+    var wallets: WalletWriter {
+        WalletWriter(state: state, ledger: ledger, logger: menuHandler.logger)
+    }
+
+    func handleIfCommand(text: String?, chatKey: ChatKey, fromUser: TelegramUser?, isPrivate: Bool) async throws -> Bool {
         guard let text else {
             return false
         }
-        
+
+        // The test-mode suffix disambiguates multiple bot copies inside one group.
+        // Private chats only ever talk to a single copy, so commands must work
+        // bare (`/menu`) regardless of any inherited default suffix.
+        let suffix = isPrivate ? nil : await state.suffix(chatKey: chatKey)
+
         let parsed = ParsedBotCommand.parse(
             from: text,
             botUsername: botUsername,
-            suffix: await state.suffix(chatKey: chatKey)
+            suffix: suffix
         )
-        
+
         guard parsed.name != .unknown, parsed.name != .mention else {
             return false
         }
-        
-        try await handle(parsed, chatKey: chatKey)
+
+        try await handle(parsed, chatKey: chatKey, fromUser: fromUser)
         return true
     }
-    
-    private func handle(_ parsed: ParsedBotCommand, chatKey: ChatKey) async throws {
-        switch parsed.name {
-        case .setRole:
-            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: parsed.argument + formatOptions)
-            try await sendUserFeedback(chatKey: chatKey, text: "Роль изменена + история очищена")
-            
-        case .clearHistory:
-            await state.clearHistory(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "История очищена")
-            
-        case .setTemp:
-            guard let temp = Float(parsed.argument), (0.0...2.0).contains(temp) else {
-                let err = Float(parsed.argument) == nil
-                ? "Ошибка: укажите ЧИСЛО от 0 до 2"
-                : "Ошибка: укажите число от 0 до 2. Вы указали: \(Float(parsed.argument)!)"
-                try await sendUserFeedback(chatKey: chatKey, text: err)
-                return
-            }
-            await state.setTemperature(chatKey: chatKey, value: temp)
-            try await sendUserFeedback(chatKey: chatKey, text: "Temperature: \(await state.temperature(chatKey: chatKey))")
-            
-        case .model:
-            let changed = await state.setModelAndResetHistory(chatKey: chatKey, newModel: parsed.argument)
-            try await sendUserFeedback(chatKey: chatKey, text: """
-                Модель изменена:
-                \(changed.old) ----> \(changed.new).
-                История очищена.
-                """)
-            
-        case .showTokens:
-            let new = await state.toggleShowStats(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Показывать расход токенов: \(new)")
-            
-        case .showCost:
-            let new = await state.toggleShowCost(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Показывать стоимость сообщений: \(new)")
-            
-        case .showModel:
-            let new = await state.toggleShowModel(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Показывать использованную модель: \(new)")
-            
-        case .help:
-            let help = await state.fetchHelp(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: """
-                Текущие настройки для этого чата:
-                -------------------
-                • Провайдер: \(help.provider.commandValue)
-                • Модель: \(help.model)
-                • Temperature: \(help.temp)
-                • Длина истории: \(help.maxHistory)
-                • Показать расход токенов: \(help.showTokens)
-                • Показать стоимость сообщения: \(help.showCost)
-                • Показать использованную модель: \(help.showModel)
-                • Reasoning: \(help.reasoning)
-                • Роль: <blockquote>\(help.role)</blockquote>
-                • TestMode Suffix: \(help.testModeSuffix, default: "disabled")
-                -------------------
-                Команды:
-                -------------------                
-                /setrole #Новая_роль# - установить новую роль боту и очистить историю сообщений
-                /clear_history - очистить историю сообщений, сохранив роль
-                /settemp #число# - задать креативность бота. 2.0 - максимальная креативность, 0.0 - максимальна точность и стабильность ответов. (По умолчанию = 1.5)
-                /show_tokens - вкл/выкл показ расхода токенов, использованных для генерации сообщения. (По умолчанию = выкл)
-                /default_role - вернуть стандартную роль
-                /historylength #число# - задать количество последних сообщений, которые будет помнить бот. (По умолчанию = 11)
-                /model #новая_модель# - задать новую модель ИИ для ответов
-                /show_model - вкл/выкл показ использованной модели (По умолчанию = вкл)
-                /show_cost - вкл/выкл показ стоимости сгенерированного сообщения в $ (По умолчанию = выкл)
-                /provider #deepseek|openrouter|yandex# - сменить провайдер
-                /testmode - включить/выключить суффикс команд
-                /reasoning - включить/выключить reasoning
-                -------------------
-                Дефолтная роль:
-                -------------------
-                <blockquote>\(help.defaultRole)</blockquote>
-                """)
-            
-        case .defaultRole:
-            let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
-            _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: defaultRole)
-            try await sendUserFeedback(chatKey: chatKey, text: "Роль изменена на стандартную + история очищена")
-            
-        case .historyLength:
-            guard let newMax = Int(parsed.argument), (1...50).contains(newMax) else {
-                let err = Int(parsed.argument) == nil
-                ? "Ошибка: укажите ЧИСЛО от 1 до 50"
-                : "Ошибка: укажите число от 1 до 50. Вы указали: \(Int(parsed.argument)!)"
-                try await sendUserFeedback(chatKey: chatKey, text: err)
-                return
-            }
-            await state.setMaxHistory(chatKey: chatKey, newMax: newMax)
-            try await sendUserFeedback(chatKey: chatKey, text: "Длина истории: \(newMax) сообщений")
-            
-        case .provider:
-            let feedback: String
-            if let provider = ServiceProvider.parse(parsed.argument) {
-                let old = await state.changeProvider(chatKey: chatKey, newProvider: provider)
-                var lines = ["\(old.commandValue) ----> \(provider.commandValue)"]
-                
-                let gateway = try gateways.gateway(for: provider)
-                let reasoningEnabled = await state.reasoningEnabled(chatKey: chatKey)
-                if reasoningEnabled, !gateway.capabilities.supportsReasoning {
-                    await state.setReasoning(chatKey: chatKey, enabled: false)
-                    lines.append("Reasoning автоматически отключен: провайдер не поддерживает reasoning.")
-                }
-                
-                feedback = lines.joined(separator: "\n")
-            } else {
-                feedback = "Неверный провайдер. Доступны: deepseek, openrouter, yandex."
-            }
-            try await sendUserFeedback(chatKey: chatKey, text: feedback)
-            
-        case .testMode:
-            let suffix = await state.toggleTestMode(chatKey: chatKey)
-            if let suffix {
-                try await sendUserFeedback(chatKey: chatKey, text: """
-                    Test mode ENABLED.
-                    
-                    New suffix = \(suffix)
-                    
-                    Use it with bot commands, for example:
-                    /help\(suffix)
-                    /setrole\(suffix) You are Donald Trump.
-                    """)
-            } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Test mode DISABLED")
-            }
-            
-        case .reasoning:
-            let provider = await state.provider(chatKey: chatKey)
-            let gateway = try gateways.gateway(for: provider)
-            
-            guard gateway.capabilities.supportsReasoning else {
-                try await sendUserFeedback(
-                    chatKey: chatKey,
-                    text: "Провайдер \(provider.commandValue) не поддерживает reasoning."
-                )
-                return
-            }
-            
-            let enabled = await state.toggleReasoning(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "Reasoning: \(enabled)")
-            
-        case .mention, .unknown:
-            return
-        }
+
+    /// Storage key of whoever is issuing the command, userID first. Every stored
+    /// record — roles, ownership, wallets — is keyed this way, and someone with
+    /// no @key has nothing else to be recognised by; passing the raw handle
+    /// silently fails every gate for them (CLAUDE.md §6). Store methods take a
+    /// key through their `key:` parameter unchanged.
+    /// Reply when the caller's storage key cannot be resolved at all (no user
+    /// on the update). It used to read "У вас не задан @username", which is
+    /// both wrong — identity is the userID (§6) — and a dead end.
+    static let unknownAccountNotice =
+        "Не удалось определить ваш аккаунт. Напишите боту любое сообщение в личке и повторите команду."
+
+    /// How many rows a listing command prints before it says how many are left.
+    ///
+    /// Telegram does not shorten an overgrown message, it refuses it — so a
+    /// listing that grows with the number of customers is a command that stops
+    /// answering at all once the bot is successful, and stops on the day it
+    /// matters most. The menu pages already carry this cap (CLAUDE.md §17); the
+    /// commands are the same reports through a different door.
+    static let listCap = 40
+
+    func actorKey(_ user: TelegramUser?) async -> UserKey? {
+        if let userID = user?.id { return state.userKey(userID: userID) }
+        return await state.userKey(forHandle: user?.username)
     }
-    
-    private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
+
+    /// Alias used where the caller means "which tenant owns this" rather than
+    /// "who is asking" — same key, clearer at the call site.
+    func ownerKey(for user: TelegramUser?) async -> UserKey? {
+        await actorKey(user)
+    }
+
+    func isSuperAdmin(_ user: TelegramUser?) async -> Bool {
+        await state.isSuperAdmin(actorKey(user))
+    }
+
+    func isAdmin(_ user: TelegramUser?, chatID: ChatID) async -> Bool {
+        await state.isAdmin(actorKey(user), chatID: chatID)
+    }
+
+    func requireAdmin(_ user: TelegramUser?, chatKey: ChatKey) async throws -> Bool {
+        guard await isAdmin(user, chatID: chatKey.chatID) else {
+            try await sendUserFeedback(chatKey: chatKey, text: Texts.adminOnlyCommand)
+            return false
+        }
+        return true
+    }
+
+    func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
         _ = try await telegram.sendMessage(
             .init(
                 chatID: chatKey.chatID,
@@ -198,5 +137,32 @@ final class BotCommandHandler: @unchecked Sendable {
                 replyMarkup: nil
             )
         )
+    }
+}
+
+// Subscription dates and winback offers are not write-behind state: they live
+// in columns only the money transaction writes (§10.2). These four go through
+// `SubscriptionWriter` so a super-admin's change is still there after a
+// restart; without one wired (tests, a bot with no database) they fall back to
+// the in-memory path, which is all there is to change anyway.
+extension BotCommandHandler {
+    func extendSubscription(key: UserKey, days: Int) async -> SubscriptionExtensionOutcome {
+        if let subscriptions { return await subscriptions.extend(key: key, days: days) }
+        return await state.extendTenantSubscription(key, days: days)
+    }
+
+    func setSubscriptionUnlimited(key: UserKey) async -> Bool {
+        if let subscriptions { return await subscriptions.setUnlimited(key: key) }
+        return await state.setTenantUnlimited(key)
+    }
+
+    func expireSubscription(key: UserKey) async -> Bool {
+        if let subscriptions { return await subscriptions.expire(key: key) }
+        return await state.expireTenantSubscription(key)
+    }
+
+    func clearWinbackDiscounts() async -> Int {
+        if let subscriptions { return await subscriptions.clearAllWinback() }
+        return await state.clearAllWinbackDiscounts()
     }
 }

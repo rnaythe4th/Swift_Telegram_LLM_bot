@@ -1,6 +1,6 @@
 import Foundation
 
-final class DeepSeekProviderAdapter: ProviderGatewayPort, @unchecked Sendable {
+final class DeepSeekProviderAdapter: ProviderGatewayPort, Sendable {
     let provider: ServiceProvider = .deepseek
     let capabilities = ProviderCapabilities(
         supportsImageInput: false,
@@ -55,49 +55,34 @@ final class DeepSeekProviderAdapter: ProviderGatewayPort, @unchecked Sendable {
         
         return AsyncThrowingStream { continuation in
             let producer = Task {
-                var capturedUsage: DeepSeekUsage?
-                var didYieldMeta = false
-                
-                let yieldMetaIfNeeded: () -> Void = {
-                    guard !didYieldMeta else { return }
-                    didYieldMeta = true
-                    
-                    let usageSummary = capturedUsage.map { u in
-                        StreamUsageSummary(
-                            promptTokens: Double(u.prompt_tokens),
-                            completionTokens: Double(u.completion_tokens),
-                            totalTokens: Double(u.total_tokens),
-                            cacheHitTokens: Double(u.prompt_cache_hit_tokens),
-                            cacheWriteTokens: nil,
-                            cacheMissTokens: Double(u.prompt_cache_miss_tokens),
-                            reasoningTokens: u.completion_details.map { Double($0.reasoning_tokens) },
-                            cost: nil
-                        )
-                    }
-                    
-                    continuation.yield(.meta(.init(model: body.model, usage: usageSummary)))
-                }
-                
+                // Same dialect as OpenRouter, same failure mode: an error
+                // delivered inside a 200 OK stream must end the generation
+                // rather than fall through as empty text.
+                var accumulator = OpenAIStreamAccumulator<DeepSeekStreamChunk>()
+
                 do {
-                    for try await payload in network.ssePayloads(spec) {
+                    for try await event in network.ssePayloads(spec) {
                         if Task.isCancelled { break }
-                        if payload == "[DONE]" {
-                            yieldMetaIfNeeded()
+                        guard case .payload(let payload) = event else {
+                            // The connection spoke; nothing to show for it.
+                            continuation.yield(.keepAlive)
+                            continue
+                        }
+                        switch try accumulator.accept(payload, from: .deepseek) {
+                        case .text(let text):
+                            continuation.yield(.text(text))
+                        case .finished:
+                            continuation.yield(.meta(accumulator.meta(model: body.model)))
                             continuation.finish()
                             return
-                        }
-                        
-                        guard let json = payload.data(using: .utf8) else { continue }
-                        if let usage = parseUsage(jsonData: json) {
-                            capturedUsage = usage
-                        }
-                        
-                        if let text = parseDelta(jsonData: json), !text.isEmpty {
-                            continuation.yield(.text(text))
+                        case .ignore:
+                            // A role-only chunk, a reasoning delta, a shape
+                            // this version does not decode: still a live model.
+                            continuation.yield(.keepAlive)
                         }
                     }
-                    
-                    yieldMetaIfNeeded()
+
+                    continuation.yield(.meta(accumulator.meta(model: body.model)))
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -105,18 +90,10 @@ final class DeepSeekProviderAdapter: ProviderGatewayPort, @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
             }
-            
+
             continuation.onTermination = { @Sendable _ in
                 producer.cancel()
             }
         }
-    }
-    
-    private func parseUsage(jsonData: Data) -> DeepSeekUsage? {
-        (try? JSONDecoder().decode(DeepSeekStreamChunk.self, from: jsonData))?.usage
-    }
-    
-    private func parseDelta(jsonData: Data) -> String? {
-        (try? JSONDecoder().decode(DeepSeekStreamChunk.self, from: jsonData))?.choices.first?.delta?.content
     }
 }

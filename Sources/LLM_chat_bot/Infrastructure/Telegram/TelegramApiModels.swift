@@ -24,9 +24,29 @@ struct TelegramAPIUpdate: Decodable {
     let update_id: Int
     let message: TelegramAPIMessage?
     let callback_query: TelegramAPICallbackQuery?
+    let pre_checkout_query: TelegramAPIPreCheckoutQuery?
+    let my_chat_member: TelegramAPIChatMemberUpdated?
 }
 
-final class TelegramAPIMessage: Decodable, @unchecked Sendable {
+/// The bot's own membership in a chat changing (added / removed / promoted).
+/// Delivered as a `my_chat_member` update — the reliable signal that the bot
+/// was added to a group.
+struct TelegramAPIChatMemberUpdated: Decodable, Sendable {
+    let chat: TelegramAPIChat
+    let from: TelegramAPIUser
+    let date: Int
+    let old_chat_member: TelegramAPIChatMember
+    let new_chat_member: TelegramAPIChatMember
+}
+
+struct TelegramAPIChatMember: Decodable, Sendable {
+    let status: String
+    let user: TelegramAPIUser
+}
+
+/// Recursive for the same reason as `TelegramMessage`, immutable for the same
+/// reason, and checked by the compiler for the same reason.
+final class TelegramAPIMessage: Decodable, Sendable {
     let message_id: Int
     let from: TelegramAPIUser?
     let chat: TelegramAPIChat
@@ -39,6 +59,10 @@ final class TelegramAPIMessage: Decodable, @unchecked Sendable {
     let media_group_id: String?
     let reply_to_message: TelegramAPIMessage?
     let photo: [TelegramAPIPhotoSize]?
+    let successful_payment: TelegramAPISuccessfulPayment?
+    /// Set on the service message a group posts when Telegram turns it into a
+    /// supergroup — the chat's new id.
+    let migrate_to_chat_id: Int64?
 }
 
 struct TelegramAPIVoice: Decodable, Sendable {
@@ -79,11 +103,19 @@ struct TelegramAPIUser: Decodable, Sendable {
     let is_bot: Bool
     let first_name: String
     let username: String?
+    /// Only `getMe` fills this, and only for the bot itself: whether privacy
+    /// mode is off, i.e. whether Telegram delivers *all* group messages or only
+    /// the ones addressed to the bot. It decides whether listen mode (§5.7) can
+    /// hear anything at all.
+    let can_read_all_group_messages: Bool?
 }
 
 struct TelegramAPIChat: Decodable, Sendable {
     let id: Int
     let type: String
+    let title: String?
+    let username: String?
+    let first_name: String?
 }
 
 struct ReplyParameters: Codable, Sendable {
@@ -107,6 +139,19 @@ struct TelegramEditMessageTextBody: Codable {
     let reply_markup: InlineKeyboardMarkup?
 }
 
+struct TelegramSendMessageDraftBody: Codable {
+    let chat_id: Int
+    let message_thread_id: Int64?
+    let draft_id: Int
+    let text: String
+    let parse_mode: String?
+}
+
+struct TelegramDeleteMessageBody: Codable {
+    let chat_id: Int
+    let message_id: Int
+}
+
 struct TelegramAPICallbackQuery: Decodable, Sendable {
     let id: String
     let from: TelegramAPIUser
@@ -119,10 +164,48 @@ struct TelegramAPIMaybeInaccessibleMessage: Decodable, Sendable {
     let message_id: Int
     let date: Int
     let text: String?
+    let message_thread_id: Int64?
 }
 
 struct AnswerCallbackQueryBody: Codable {
     let callback_query_id: String
     let text: String?
     let show_alert: Bool?
+}
+
+struct TelegramAPIPreCheckoutQuery: Decodable, Sendable {
+    let id: String
+    let from: TelegramAPIUser
+    let currency: String
+    let total_amount: Int
+    let invoice_payload: String
+}
+
+struct TelegramAPISuccessfulPayment: Decodable, Sendable {
+    let currency: String
+    let total_amount: Int
+    let invoice_payload: String
+    let telegram_payment_charge_id: String
+    let provider_payment_charge_id: String
+}
+
+struct TelegramLabeledPrice: Codable, Sendable {
+    let label: String
+    let amount: Int
+}
+
+struct TelegramSendInvoiceBody: Codable {
+    let chat_id: Int
+    let title: String
+    let description: String
+    let payload: String
+    let currency: String
+    let prices: [TelegramLabeledPrice]
+    let provider_token: String
+}
+
+struct TelegramAnswerPreCheckoutQueryBody: Codable {
+    let pre_checkout_query_id: String
+    let ok: Bool
+    let error_message: String?
 }

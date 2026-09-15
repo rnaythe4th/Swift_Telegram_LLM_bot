@@ -14,19 +14,76 @@ struct TelegramAPIError: Error, LocalizedError {
         if let migrateToChatID { parts.append("migrate_to_chat_id=\(migrateToChatID)") }
         return parts.joined(separator: " | ")
     }
+
+    /// Telegram's way of saying the edit had nothing to do: the message already
+    /// reads exactly this. The caller's postcondition holds, so this is not a
+    /// failure — and it is reachable in the middle of a normal answer, because
+    /// Telegram strips trailing whitespace before comparing: a chunk of two
+    /// newlines arriving after a pause is an edit to a message Telegram
+    /// considers unchanged.
+    var isEditWithNothingToChange: Bool {
+        statusCode == 400 && descriptionText.lowercased().contains("message is not modified")
+    }
 }
 
-final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
+final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
+    /// Where the Bot API lives. Overridable (`TELEGRAM_API_BASE`) for one
+    /// reason: end-to-end tests point it at a local stand-in and then assert
+    /// what the bot actually sent — text, keyboard, parse mode — instead of
+    /// only that some call was made. Never set it in production.
+    static let defaultAPIBase = "https://api.telegram.org"
+
     private let network: NetworkClient
     private let telegramURL: String
+    private let fileURLBase: String
     private let botToken: String
-    
-    init(network: NetworkClient, botToken: String) {
+    private let rateLimiter: TelegramRateLimiter?
+    private let metrics: RuntimeMetrics?
+
+    init(
+        network: NetworkClient,
+        botToken: String,
+        apiBase: String = TelegramHTTPGateway.defaultAPIBase,
+        rateLimiter: TelegramRateLimiter? = nil,
+        metrics: RuntimeMetrics? = nil
+    ) {
+        let base = apiBase.hasSuffix("/") ? String(apiBase.dropLast()) : apiBase
         self.network = network
         self.botToken = botToken
-        self.telegramURL = "https://api.telegram.org/bot\(botToken)"
+        self.telegramURL = "\(base)/bot\(botToken)"
+        self.fileURLBase = "\(base)/file/bot\(botToken)"
+        self.rateLimiter = rateLimiter
+        self.metrics = metrics
     }
-    
+
+    /// `allowed_updates` as a percent-encoded JSON array, ready for a query
+    /// string. Built once: the list never changes at runtime.
+    private static let encodedAllowedUpdates: String = {
+        let json = "[" + TelegramUpdateSubscription.allowedUpdates.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+        // Only unreserved characters survive — brackets, quotes and commas all
+        // have to be escaped for Telegram to parse the array.
+        var unreserved = CharacterSet.alphanumerics
+        unreserved.insert(charactersIn: "-._~")
+        return json.addingPercentEncoding(withAllowedCharacters: unreserved) ?? json
+    }()
+
+    /// Retries a Telegram call that failed with 429, honoring `retry_after`.
+    /// Centralizes what used to be scattered per-call-site retry loops.
+    private func with429Retry<T>(attempts: Int = 3, _ op: () async throws -> T) async throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try await op()
+            } catch let error as TelegramAPIError where error.retryAfter != nil {
+                await metrics?.increment(MetricName.telegramRateLimited)
+                attempt += 1
+                guard attempt < attempts else { throw error }
+                let delay = min(error.retryAfter ?? 1, 30)
+                try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+            }
+        }
+    }
+
     func deleteWebhook() async throws {
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/deleteWebhook",
@@ -37,6 +94,39 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         )
         let raw = try await network.perform(spec)
         try validateTelegramEnvelope(action: "deleteWebhook", statusCode: raw.statusCode, data: raw.data)
+    }
+
+    func setWebhook(url: String, secretToken: String, allowedUpdates: [String]) async throws {
+        struct Body: Codable {
+            let url: String
+            let secret_token: String
+            let allowed_updates: [String]
+            let max_connections: Int
+            let drop_pending_updates: Bool
+        }
+        let body = Body(
+            url: url,
+            secret_token: secretToken,
+            allowed_updates: allowedUpdates,
+            max_connections: 40,
+            drop_pending_updates: false
+        )
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/setWebhook",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 15,
+            maxBodyBytes: 1 << 18,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "setWebhook", statusCode: raw.statusCode, data: raw.data)
+    }
+
+    func decodeIncomingUpdate(_ data: Data) throws -> TelegramUpdate {
+        let decoded = try JSONDecoder().decode(TelegramAPIUpdate.self, from: data)
+        return map(decoded)
     }
     
     func getMe() async throws -> TelegramUser {
@@ -55,7 +145,10 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     func getUpdates(offset: Int?) async throws -> [TelegramUpdate] {
-        let url = "\(telegramURL)/getUpdates?timeout=30&offset=\(offset ?? 0)"
+        // Same subscription the webhook registers: without an explicit list
+        // Telegram drops `my_chat_member` from long polling entirely.
+        let allowed = Self.encodedAllowedUpdates
+        let url = "\(telegramURL)/getUpdates?timeout=30&offset=\(offset ?? 0)&allowed_updates=\(allowed)"
         let spec = HTTPRequestSpec(url: url, method: .get, timeoutSeconds: 35, validStatusCodes: 100..<600)
         let raw = try await network.perform(spec)
         
@@ -72,15 +165,82 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage {
+        let html = TelegramHTMLFormatter.helper(text: request.text)
+        // Telegram counts UTF-16 code units and takes 4096 of them. Counting
+        // `Character`s here said a message of emoji fits at half its true size
+        // (a family emoji is one Character and eleven code units), and it spent
+        // the footer reserve a second time on top — so a message just inside
+        // `charLimit` skipped the splitter entirely and came back as 400
+        // «message is too long», with that whole part of the answer lost.
+        if html.utf16.count <= MessageSplitter.telegramMaxChars {
+            return try await sendSingle(request, html: html)
+        }
+        var remaining = request.text
+        var lastMessage: TelegramMessage?
+        var isFirst = true
+        while !remaining.isEmpty {
+            let (chunk, rest, chunkHTML) = Self.chunkFittingHTML(remaining)
+            guard !chunk.isEmpty else { break }
+            remaining = rest
+            let chunkRequest = SendMessageRequest(
+                chatID: request.chatID,
+                threadID: request.threadID,
+                replyTo: isFirst ? request.replyTo : nil,
+                text: chunk,
+                replyMarkup: isFirst ? request.replyMarkup : nil
+            )
+            lastMessage = try await sendSingle(chunkRequest, html: chunkHTML)
+            isFirst = false
+        }
+        guard let lastMessage else {
+            return try await sendSingle(request, html: html)
+        }
+        return lastMessage
+    }
+
+    /// Largest prefix of `text` whose *rendered* HTML fits Telegram's hard
+    /// limit, together with the rest and the rendering itself.
+    ///
+    /// `MessageSplitter.splitRendered` already budgets for escaping, but the
+    /// formatter can also add markup of its own (it closes tags left open by
+    /// the model), so the result is verified against the real rendering and
+    /// the budget halved until it fits. Rendering is the only authority here:
+    /// an over-long message is rejected outright and that piece of the answer
+    /// never reaches the chat.
+    static func chunkFittingHTML(_ text: String) -> (chunk: String, rest: String, html: String) {
+        // The budget is the whole message. `MessageSplitter.charLimit` keeps
+        // 200 characters in reserve, but that reserve exists for the *streaming*
+        // split, which appends a footer later — spending it again here just
+        // shaved 200 characters off every finished message, and what sits in
+        // the last 200 characters of a finished message is the footer.
+        var limit = MessageSplitter.telegramMaxChars
+        var (chunk, rest) = MessageSplitter.splitRendered(text, limit: limit)
+        var html = TelegramHTMLFormatter.helper(text: chunk)
+        // Telegram counts UTF-16 code units, not Characters: an answer full of
+        // emoji or CJK is twice as long to Telegram as it looks here, and the
+        // only honest measure of "does it fit" is the one Telegram uses.
+        while html.utf16.count > MessageSplitter.telegramMaxChars, limit > 256 {
+            // Shrink in proportion to the overshoot rather than halving: the
+            // formatter's own markup is a small addition, and halving throws
+            // away half an answer to make room for it.
+            let scaled = limit * MessageSplitter.telegramMaxChars / html.utf16.count
+            limit = max(256, min(limit - 1, scaled))
+            (chunk, rest) = MessageSplitter.splitRendered(text, limit: limit)
+            html = TelegramHTMLFormatter.helper(text: chunk)
+        }
+        return (chunk, rest, html)
+    }
+
+    private func sendSingle(_ request: SendMessageRequest, html: String) async throws -> TelegramMessage {
         let body = TelegramSendMessageBody(
-            chat_id: request.chatID,
-            text: TelegramHTMLFormatter.helper(text: request.text),
+            chat_id: request.chatID.value,
+            text: html,
             reply_parameters: request.replyTo.map { ReplyParameters(message_id: $0) },
             message_thread_id: request.threadID,
             parse_mode: "HTML",
             reply_markup: request.replyMarkup
         )
-        
+
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/sendMessage",
             method: .post,
@@ -89,26 +249,35 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             timeoutSeconds: 30,
             validStatusCodes: 100..<600
         )
-        
-        let raw = try await network.perform(spec)
-        let decoded: TelegramResponse<TelegramAPIMessage> = try decodeEnvelope(
-            action: "sendMessage",
-            statusCode: raw.statusCode,
-            data: raw.data
-        )
-        
-        guard decoded.ok, let result = decoded.result else {
-            throw buildTelegramError(action: "sendMessage", statusCode: raw.statusCode, data: raw.data)
+
+        await rateLimiter?.waitForMessageSlot(chatID: request.chatID)
+        return try await with429Retry {
+            let raw = try await network.perform(spec)
+            let decoded: TelegramResponse<TelegramAPIMessage> = try decodeEnvelope(
+                action: "sendMessage",
+                statusCode: raw.statusCode,
+                data: raw.data
+            )
+
+            guard decoded.ok, let result = decoded.result else {
+                throw buildTelegramError(action: "sendMessage", statusCode: raw.statusCode, data: raw.data)
+            }
+
+            return map(result)
         }
-        
-        return map(result)
     }
     
     func editMessage(_ request: EditMessageRequest) async throws {
+        // An edit cannot be split across two messages, so an over-long one is
+        // simply rejected (400 "message is too long") and the streamed text
+        // stops updating. Callers budget with `MessageSplitter`, which already
+        // accounts for escaping, so this only trims pathological input — and
+        // trimming shows most of the answer where the alternative shows none.
+        let html = Self.chunkFittingHTML(request.text).html
         let body = TelegramEditMessageTextBody(
-            chat_id: request.chatID,
+            chat_id: request.chatID.value,
             message_id: request.messageID,
-            text: TelegramHTMLFormatter.helper(text: request.text),
+            text: html,
             parse_mode: "HTML",
             reply_markup: request.replyMarkup
         )
@@ -122,18 +291,114 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             maxBodyBytes: 1 << 20,
             validStatusCodes: 100..<600
         )
-        
-        let raw = try await network.perform(spec)
-        try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
+
+        // Edits go through the bot-wide budget only: the per-chat group bucket
+        // counts sends (20/min), and the streaming edit loop would eat all of
+        // it, stalling the reply mid-generation.
+        await rateLimiter?.waitForEditSlot()
+        do {
+            try await with429Retry {
+                let raw = try await network.perform(spec)
+                try validateTelegramEnvelope(action: "editMessageText", statusCode: raw.statusCode, data: raw.data)
+            }
+        } catch let error as TelegramAPIError where error.isEditWithNothingToChange {
+            // The message already says this. Reporting it as a failure aborted
+            // whole answers: the streaming loop rethrows anything that is not a
+            // rate limit, and the catch replaces the placeholder with an error,
+            // throwing away everything streamed so far.
+            return
+        }
     }
     
+    func sendMessageDraft(_ request: SendMessageDraftRequest) async throws {
+        // Drafts are cosmetic previews: when the shared draft budget is spent,
+        // fail fast with a synthetic retry_after so DraftStreamer backs off
+        // one tick instead of queueing. The initial empty draft (generation
+        // start) always goes through — it happens once and drives the
+        // draft-capability probe.
+        if let rateLimiter, !request.text.isEmpty {
+            guard await rateLimiter.tryTakeDraftSlot() else {
+                throw TelegramAPIError(
+                    action: "sendMessageDraft",
+                    statusCode: 429,
+                    descriptionText: "local draft budget exhausted",
+                    retryAfter: 1,
+                    migrateToChatID: nil,
+                    rawBody: ""
+                )
+            }
+        }
+        let body = TelegramSendMessageDraftBody(
+            chat_id: request.chatID.value,
+            message_thread_id: request.threadID,
+            draft_id: request.draftID,
+            text: request.text.isEmpty ? "" : TelegramHTMLFormatter.helper(text: request.text),
+            parse_mode: request.text.isEmpty ? nil : "HTML"
+        )
+
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/sendMessageDraft",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 30,
+            maxBodyBytes: 1 << 20,
+            validStatusCodes: 100..<600
+        )
+
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "sendMessageDraft", statusCode: raw.statusCode, data: raw.data)
+    }
+
+    func deleteMessage(chatID: ChatID, messageID: Int) async throws {
+        let body = TelegramDeleteMessageBody(chat_id: chatID.value, message_id: messageID)
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/deleteMessage",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 10,
+            maxBodyBytes: 1 << 18,
+            validStatusCodes: 100..<600
+        )
+        await rateLimiter?.waitForGlobalSlot()
+        try await with429Retry {
+            let raw = try await network.perform(spec)
+            try validateTelegramEnvelope(action: "deleteMessage", statusCode: raw.statusCode, data: raw.data)
+        }
+    }
+
+    func sendChatAction(chatID: ChatID, threadID: Int64?, action: String) async throws {
+        // Typing indicators are cosmetic: skip silently under load.
+        if let rateLimiter {
+            guard await rateLimiter.tryTakeCosmeticSlot() else { return }
+        }
+        struct Body: Codable {
+            let chat_id: Int
+            let action: String
+            let message_thread_id: Int64?
+        }
+        let body = Body(chat_id: chatID.value, action: action, message_thread_id: threadID)
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/sendChatAction",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 10,
+            maxBodyBytes: 1 << 18,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "sendChatAction", statusCode: raw.statusCode, data: raw.data)
+    }
+
     func answerCallback(callbackQueryID: String, text: String?) async throws {
         let body = AnswerCallbackQueryBody(
             callback_query_id: callbackQueryID,
             text: text,
             show_alert: nil
         )
-        
+
         let spec = HTTPRequestSpec(
             url: "\(telegramURL)/answerCallbackQuery",
             method: .post,
@@ -143,7 +408,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             maxBodyBytes: 1 << 20,
             validStatusCodes: 100..<600
         )
-        
+
+        await rateLimiter?.waitForGlobalSlot()
         let raw = try await network.perform(spec)
         try validateTelegramEnvelope(action: "answerCallbackQuery", statusCode: raw.statusCode, data: raw.data)
     }
@@ -177,8 +443,9 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
     }
     
     func downloadFile(filePath: String) async throws -> Data {
+        let safePath = try Self.sanitizeFilePath(filePath)
         let spec = HTTPRequestSpec(
-            url: "https://api.telegram.org/file/bot\(botToken)/\(filePath)",
+            url: "\(fileURLBase)/\(safePath)",
             method: .get,
             timeoutSeconds: 35,
             maxBodyBytes: 20 << 20,
@@ -191,6 +458,90 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         return raw.data
     }
     
+    private static func sanitizeFilePath(_ filePath: String) throws -> String {
+        let segments = filePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        for segment in segments {
+            guard !segment.isEmpty, segment != "." , segment != ".." else {
+                throw TelegramAPIError(
+                    action: "downloadFile",
+                    statusCode: 0,
+                    descriptionText: "Invalid file_path",
+                    retryAfter: nil,
+                    migrateToChatID: nil,
+                    rawBody: ""
+                )
+            }
+            guard segment.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+                throw TelegramAPIError(
+                    action: "downloadFile",
+                    statusCode: 0,
+                    descriptionText: "Invalid file_path",
+                    retryAfter: nil,
+                    migrateToChatID: nil,
+                    rawBody: ""
+                )
+            }
+        }
+        return segments.joined(separator: "/")
+    }
+
+    func sendInvoice(_ request: SendInvoiceRequest) async throws {
+        let currency: String
+        let amount: Int
+        let providerToken: String
+        switch request.kind {
+        case .stars(let starsAmount):
+            currency = "XTR"
+            amount = starsAmount
+            providerToken = ""
+        case .fiat(let fiatCurrency, let minorUnits, let token):
+            currency = fiatCurrency
+            amount = minorUnits
+            providerToken = token
+        }
+        let body = TelegramSendInvoiceBody(
+            chat_id: request.chatID.value,
+            title: request.title,
+            description: request.description,
+            payload: request.payload,
+            currency: currency,
+            prices: [TelegramLabeledPrice(label: request.title, amount: amount)],
+            provider_token: providerToken
+        )
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/sendInvoice",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 30,
+            validStatusCodes: 100..<600
+        )
+        await rateLimiter?.waitForMessageSlot(chatID: request.chatID)
+        try await with429Retry {
+            let raw = try await network.perform(spec)
+            try validateTelegramEnvelope(action: "sendInvoice", statusCode: raw.statusCode, data: raw.data)
+        }
+    }
+
+    func answerPreCheckoutQuery(queryID: String, ok: Bool, errorMessage: String?) async throws {
+        let body = TelegramAnswerPreCheckoutQueryBody(
+            pre_checkout_query_id: queryID,
+            ok: ok,
+            error_message: errorMessage
+        )
+        let spec = HTTPRequestSpec(
+            url: "\(telegramURL)/answerPreCheckoutQuery",
+            method: .post,
+            headers: ["Content-Type": "application/json"],
+            body: .json(.init(body)),
+            timeoutSeconds: 10,
+            validStatusCodes: 100..<600
+        )
+        let raw = try await network.perform(spec)
+        try validateTelegramEnvelope(action: "answerPreCheckoutQuery", statusCode: raw.statusCode, data: raw.data)
+    }
+
     private func decodeEnvelope<T: Decodable>(action: String, statusCode: Int, data: Data) throws -> TelegramResponse<T> {
         do {
             return try JSONDecoder().decode(TelegramResponse<T>.self, from: data)
@@ -237,7 +588,18 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
         TelegramUpdate(
             update_id: update.update_id,
             message: update.message.map(map),
-            callback_query: update.callback_query.map(map)
+            callback_query: update.callback_query.map(map),
+            pre_checkout_query: update.pre_checkout_query.map(map),
+            my_chat_member: update.my_chat_member.map(map)
+        )
+    }
+
+    private func map(_ member: TelegramAPIChatMemberUpdated) -> ChatMemberUpdate {
+        ChatMemberUpdate(
+            chat: map(member.chat),
+            from: map(member.from),
+            oldStatus: member.old_chat_member.status,
+            newStatus: member.new_chat_member.status
         )
     }
     
@@ -254,7 +616,29 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             message_thread_id: message.message_thread_id,
             media_group_id: message.media_group_id,
             reply_to_message: message.reply_to_message.map(map),
-            photo: message.photo?.map(map)
+            photo: message.photo?.map(map),
+            successful_payment: message.successful_payment.map(map),
+            migrate_to_chat_id: message.migrate_to_chat_id.map { ChatID(Int($0)) }
+        )
+    }
+
+    private func map(_ preCheckout: TelegramAPIPreCheckoutQuery) -> TelegramPreCheckoutQuery {
+        TelegramPreCheckoutQuery(
+            id: preCheckout.id,
+            from: map(preCheckout.from),
+            currency: preCheckout.currency,
+            total_amount: preCheckout.total_amount,
+            invoice_payload: preCheckout.invoice_payload
+        )
+    }
+
+    private func map(_ payment: TelegramAPISuccessfulPayment) -> TelegramSuccessfulPayment {
+        TelegramSuccessfulPayment(
+            currency: payment.currency,
+            total_amount: payment.total_amount,
+            invoice_payload: payment.invoice_payload,
+            telegram_payment_charge_id: payment.telegram_payment_charge_id,
+            provider_payment_charge_id: payment.provider_payment_charge_id
         )
     }
     
@@ -272,21 +656,29 @@ final class TelegramHTTPGateway: TelegramGatewayPort, @unchecked Sendable {
             chat: map(message.chat),
             message_id: message.message_id,
             date: message.date,
-            text: message.text
+            text: message.text,
+            message_thread_id: message.message_thread_id
         )
     }
     
     private func map(_ user: TelegramAPIUser) -> TelegramUser {
         TelegramUser(
-            id: user.id,
+            id: UserID(user.id),
             is_bot: user.is_bot,
             first_name: user.first_name,
-            username: user.username
+            username: user.username,
+            can_read_all_group_messages: user.can_read_all_group_messages
         )
     }
     
     private func map(_ chat: TelegramAPIChat) -> TelegramChat {
-        TelegramChat(id: chat.id, type: chat.type)
+        TelegramChat(
+            id: ChatID(chat.id),
+            type: chat.type,
+            title: chat.title,
+            username: chat.username,
+            first_name: chat.first_name
+        )
     }
     
     private func map(_ voice: TelegramAPIVoice) -> TelegramVoice {

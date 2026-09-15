@@ -1,0 +1,483 @@
+import Foundation
+
+// Persistence side of the store: incremental dirty-batch export, row-based
+// restore, payment idempotency and the polling offset.
+extension ChatContextStore {
+
+    // MARK: - Snapshot builders
+
+    private func makeContextSnapshot(_ context: ChatContext) -> ChatContextSnapshot {
+        ChatContextSnapshot(
+            role: context.role,
+            history: context.history,
+            model: context.model,
+            modelProvider: context.modelProviderRouting,
+            temp: context.temp,
+            showStats: context.showStats,
+            maxHistory: context.maxHistory,
+            showCost: context.showCost,
+            showModel: context.showModel,
+            provider: context.provider,
+            suffix: context.suffix,
+            reasoningEffort: context.reasoningEffort,
+            backupNotify: context.backupNotify,
+            cumulativeUsage: context.cumulativeUsage,
+            chatModelPresets: context.chatModelPresets.isEmpty ? nil : context.chatModelPresets.asArray,
+            chatTempPresets: context.chatTempPresets.isEmpty ? nil : context.chatTempPresets.asArray,
+            chatHistoryLengthPresets: context.chatHistoryLengthPresets.isEmpty ? nil : context.chatHistoryLengthPresets.asArray,
+            chatRolePresets: context.chatRolePresets.isEmpty ? nil : context.chatRolePresets.asArray,
+            adReplyCounter: context.adReplyCounter == 0 ? nil : context.adReplyCounter,
+            adLastShownAt: context.adLastShownAt,
+            funnelCounted: context.funnelFirstMessageCounted ? true : nil,
+            downgradedFrom: context.downgradedFromModel,
+            activeMode: context.activeModeID,
+            // Written only for chats that listen: an `off` document in every
+            // other row is bytes on every flush for a feature nobody enabled.
+            listening: context.listening == .off ? nil : context.listening
+        )
+    }
+
+    private func makeTenantSnapshot(_ tenant: TenantState) -> TenantStateSnapshot {
+        TenantStateSnapshot(
+            ownerKey: tenant.ownerKey,
+            defaultModel: tenant.defaultModel,
+            defaultRole: tenant.defaultRole,
+            defaultHistoryLength: tenant.defaultHistoryLength,
+            modelPresets: tenant.modelPresets.asArray,
+            tempPresets: tenant.tempPresets.asArray,
+            historyLengthPresets: tenant.historyLengthPresets.asArray,
+            rolePresets: tenant.rolePresets.asArray,
+            whitelistedUserIDs: Array(tenant.whitelistedUserIDs),
+            adminKeys: Array(tenant.adminKeys),
+            licensedKeys: Array(tenant.licensedKeys),
+            cumulativeUsage: tenant.cumulativeUsage,
+            createdAt: tenant.createdAt,
+            paidUntil: tenant.paidUntil,
+            noticeCycleUntil: tenant.noticeCycleUntil,
+            sentNotices: tenant.sentNotices.isEmpty ? nil : Array(tenant.sentNotices),
+            winbackDiscount: tenant.winbackDiscount,
+            remindersOptOut: tenant.remindersOptOut ? true : nil
+        )
+    }
+
+    private func makeContext(from snapshot: ChatContextSnapshot) -> ChatContext {
+        ChatContext(
+            role: snapshot.role,
+            history: snapshot.history,
+            pendingTurns: [],
+            model: snapshot.model,
+            modelProviderRouting: snapshot.modelProvider,
+            temp: snapshot.temp,
+            showStats: snapshot.showStats,
+            maxHistory: snapshot.maxHistory,
+            showCost: snapshot.showCost,
+            showModel: snapshot.showModel,
+            provider: snapshot.provider,
+            suffix: snapshot.suffix,
+            reasoningEffort: snapshot.reasoningEffort,
+            backupNotify: snapshot.backupNotify,
+            cumulativeUsage: snapshot.cumulativeUsage ?? .zero,
+            chatModelPresets: PresetList(snapshot.chatModelPresets ?? []),
+            chatTempPresets: PresetList(snapshot.chatTempPresets ?? []),
+            chatHistoryLengthPresets: PresetList(snapshot.chatHistoryLengthPresets ?? []),
+            chatRolePresets: PresetList(snapshot.chatRolePresets ?? []),
+            adReplyCounter: snapshot.adReplyCounter ?? 0,
+            adLastShownAt: snapshot.adLastShownAt,
+            funnelFirstMessageCounted: snapshot.funnelCounted ?? false,
+            downgradedFromModel: snapshot.downgradedFrom,
+            activeModeID: snapshot.activeMode,
+            listening: snapshot.listening ?? .off
+        )
+    }
+
+    private func makeTenant(from snapshot: TenantStateSnapshot) -> TenantState {
+        TenantState(
+            ownerKey: snapshot.ownerKey,
+            defaultModel: snapshot.defaultModel,
+            defaultRole: snapshot.defaultRole,
+            defaultHistoryLength: snapshot.defaultHistoryLength,
+            modelPresets: PresetList(snapshot.modelPresets),
+            tempPresets: PresetList(snapshot.tempPresets),
+            historyLengthPresets: PresetList(snapshot.historyLengthPresets),
+            rolePresets: PresetList(snapshot.rolePresets),
+            whitelistedUserIDs: Set(snapshot.whitelistedUserIDs),
+            adminKeys: Set(snapshot.adminKeys),
+            licensedKeys: Set(snapshot.licensedKeys ?? []),
+            cumulativeUsage: snapshot.cumulativeUsage ?? .zero,
+            createdAt: snapshot.createdAt,
+            paidUntil: snapshot.paidUntil,
+            noticeCycleUntil: snapshot.noticeCycleUntil,
+            sentNotices: Set(snapshot.sentNotices ?? []),
+            winbackDiscount: snapshot.winbackDiscount,
+            remindersOptOut: snapshot.remindersOptOut ?? false
+        )
+    }
+
+    // MARK: - Dirty batch export
+
+    /// Everything that changed since the last drain, and nothing else. Each set
+    /// is emptied as it is read, so a change is written exactly once — and a
+    /// new mutable entity that forgets to mark its set is a value that silently
+    /// never reaches the database (which is why every set is drained here, in
+    /// one place, and why `StorePersistenceTests` checks the areas).
+    func drainDirtyBatch() -> PersistenceBatch {
+        var batch = PersistenceBatch()
+
+        for userID in dirtyUsers {
+            if let identity = userDirectoryValue.identity(userID: userID) {
+                batch.users.append(UserRow(identity: identity))
+            }
+        }
+        for key in dirtyContexts {
+            if let context = contexts[key] {
+                batch.contexts.append(ChatContextRow(key: key, snapshot: makeContextSnapshot(context)))
+            }
+        }
+        batch.deletedContexts = Array(deletedContexts)
+        for owner in dirtyTenants {
+            if let tenant = tenants[owner] {
+                batch.tenants.append(TenantRow(key: owner, snapshot: makeTenantSnapshot(tenant)))
+            }
+        }
+        batch.deletedTenants = Array(deletedTenants)
+        for chatID in dirtyChats {
+            batch.chats.append(ChatRow(
+                chatID: chatID,
+                meta: chatMetaByID[chatID],
+                ownerKey: chatOwnership[chatID]
+            ))
+        }
+        batch.deletedChats = Array(deletedChats)
+        for token in dirtyInvites {
+            if let record = inviteRecords[token] {
+                batch.invites.append(InviteRow(token: token, record: record))
+            }
+        }
+        batch.deletedInvites = Array(deletedInvites)
+        for subject in dirtyPremiumUsage {
+            if let usage = premiumDailyUsage[subject] {
+                batch.premiumUsage.append(PremiumUsageRow(subject: subject, usage: usage))
+            }
+        }
+        batch.deletedPremiumUsage = Array(deletedPremiumUsage)
+        for userID in dirtyReferrals {
+            if let record = referralLedgerValue.records[String(userID.value)] {
+                batch.referrals.append(ReferralRow(invitedUserID: userID, record: record))
+            }
+        }
+        batch.deletedReferrals = Array(deletedReferrals)
+        for userID in dirtyReferralTallies {
+            if let tally = referralLedgerValue.tallies[String(userID.value)] {
+                batch.referralTallies.append(ReferralTallyRow(inviterUserID: userID, tally: tally))
+            }
+        }
+        batch.deletedReferralTallies = Array(deletedReferralTallies)
+        for userID in dirtyTrafficAttributions {
+            if let attribution = trafficSourceLedgerValue.attributions[String(userID.value)] {
+                batch.trafficAttributions.append(TrafficAttributionRow(userID: userID, attribution: attribution))
+            }
+        }
+        batch.deletedTrafficAttributions = Array(deletedTrafficAttributions)
+        for cell in dirtyFunnelDays {
+            let count = funnelDailyValue.count(day: cell.day, event: cell.event)
+            batch.funnelDays.append(FunnelDayRow(day: cell.day, event: cell.event, count: count))
+        }
+        for id in dirtyCryptoInvoices {
+            if let invoice = _cryptoInvoices[id] {
+                batch.cryptoInvoices.append(CryptoInvoiceRow(invoice: invoice))
+            }
+        }
+        batch.deletedCryptoInvoices = Array(deletedCryptoInvoices)
+        for id in dirtyExternalOrders {
+            if let order = _externalOrders[id] {
+                batch.externalOrders.append(ExternalOrderRow(order: order))
+            }
+        }
+        batch.deletedExternalOrders = Array(deletedExternalOrders)
+        batch.configs = dirtyConfigs.map(currentConfig(for:))
+
+        dirtyUsers.removeAll()
+        dirtyContexts.removeAll()
+        deletedContexts.removeAll()
+        dirtyTenants.removeAll()
+        deletedTenants.removeAll()
+        dirtyChats.removeAll()
+        deletedChats.removeAll()
+        dirtyInvites.removeAll()
+        deletedInvites.removeAll()
+        dirtyPremiumUsage.removeAll()
+        deletedPremiumUsage.removeAll()
+        dirtyReferrals.removeAll()
+        deletedReferrals.removeAll()
+        dirtyReferralTallies.removeAll()
+        deletedReferralTallies.removeAll()
+        dirtyTrafficAttributions.removeAll()
+        deletedTrafficAttributions.removeAll()
+        dirtyFunnelDays.removeAll()
+        dirtyCryptoInvoices.removeAll()
+        deletedCryptoInvoices.removeAll()
+        dirtyExternalOrders.removeAll()
+        deletedExternalOrders.removeAll()
+        dirtyConfigs.removeAll()
+        return batch
+    }
+
+    /// Wallets changed outside a ledger transaction (a rename adopting one).
+    /// Drained separately because money is written through `LedgerPort`, not
+    /// through the write-behind batch.
+    func drainDirtyWallets() -> (changed: [UserKey: UserBalance], removed: [UserKey]) {
+        var changed: [UserKey: UserBalance] = [:]
+        for key in dirtyWallets {
+            if let wallet = userBalances[key] { changed[key] = wallet }
+        }
+        let removed = Array(deletedWallets)
+        dirtyWallets.removeAll()
+        deletedWallets.removeAll()
+        return (changed, removed)
+    }
+
+    /// Summed statement by statement for the same reason as
+    /// `PersistenceBatch.entityCount`: one long `+` chain over this many dirty
+    /// sets is what the type checker refuses to finish.
+    var dirtyEntityCount: Int {
+        var total = 0
+        total += dirtyUsers.count
+        total += dirtyContexts.count + deletedContexts.count
+        total += dirtyTenants.count + deletedTenants.count
+        total += dirtyChats.count + deletedChats.count
+        total += dirtyInvites.count + deletedInvites.count
+        total += dirtyPremiumUsage.count + deletedPremiumUsage.count
+        total += dirtyReferrals.count + deletedReferrals.count
+        total += dirtyReferralTallies.count + deletedReferralTallies.count
+        total += dirtyTrafficAttributions.count + deletedTrafficAttributions.count
+        total += dirtyFunnelDays.count
+        total += dirtyCryptoInvoices.count + deletedCryptoInvoices.count
+        total += dirtyExternalOrders.count + deletedExternalOrders.count
+        total += dirtyWallets.count + deletedWallets.count
+        total += dirtyConfigs.count
+        return total
+    }
+
+    /// What a row holds right now. Exhaustive over `ConfigName`, and each
+    /// branch has to name a `ConfigKey` to build its `StoredConfig` — so a new
+    /// row cannot be added without declaring its type and default, and cannot
+    /// be declared without being exported here. That pair of compile errors is
+    /// what replaced the two silent omissions this used to have (§5.4).
+    private func currentConfig(for name: ConfigName) -> StoredConfig {
+        switch name {
+        case .starsPrice:
+            return StoredConfig(Config.starsPrice, _starsPrice ?? 0)
+        case .starsPerUsd:
+            return StoredConfig(Config.starsPerUsd, _starsPerUsd)
+        case .freeModels:
+            return StoredConfig(Config.freeModels, _freeModelIDs)
+        case .crypto:
+            return StoredConfig(Config.crypto, cryptoConfigSnapshot())
+        case .card:
+            return StoredConfig(Config.card, _cardConfig)
+        case .superAdmins:
+            return StoredConfig(Config.superAdmins, Array(superAdminKeys.subtracting([rootSuperAdminKey, configuredOwnerKey])).sorted())
+        case .rootOwner:
+            return StoredConfig(Config.rootOwner, userDirectoryValue.rootKey)
+        case .pollingOffset:
+            return StoredConfig(Config.pollingOffset, pollingOffsetValue ?? 0)
+        case .ads:
+            return StoredConfig(Config.ads, adCampaignList)
+        case .markup:
+            return StoredConfig(Config.markup, markupPercentValue)
+        case .funnel:
+            return StoredConfig(Config.funnel, funnelCounters)
+        case .dailyPremiumLimit:
+            return StoredConfig(Config.dailyPremiumLimit, dailyPremiumLimitValue)
+        case .selfPromo:
+            return StoredConfig(Config.selfPromo, selfPromoConfigValue)
+        case .modes:
+            return StoredConfig(Config.modes, modeConfigValue)
+        case .reminders:
+            return StoredConfig(Config.reminders, reminderConfigValue)
+        case .onboarding:
+            return StoredConfig(Config.onboarding, onboardingConfigValue)
+        case .referrals:
+            return StoredConfig(Config.referrals, referralConfigValue)
+        case .referralTotals:
+            return StoredConfig(Config.referralTotals, referralLedgerValue.totals)
+        case .trafficTotals:
+            return StoredConfig(Config.trafficTotals, trafficSourceLedgerValue.totals)
+        case .externalPayments:
+            return StoredConfig(Config.externalPayments, _externalPaymentConfig)
+        case .spendPolicy:
+            return StoredConfig(Config.spendPolicy, spendPolicyValue)
+        }
+    }
+
+    /// Queues the whole current state for the next flush.
+    func markAllDirty() {
+        dirtyUsers.formUnion(userDirectoryValue.identities.keys)
+        dirtyContexts.formUnion(contexts.keys)
+        dirtyTenants.formUnion(tenants.keys)
+        dirtyChats.formUnion(Set(chatMetaByID.keys).union(chatOwnership.keys))
+        dirtyInvites.formUnion(inviteRecords.keys)
+        dirtyPremiumUsage.formUnion(premiumDailyUsage.keys)
+        dirtyWallets.formUnion(userBalances.keys)
+        dirtyReferrals.formUnion(referralLedgerValue.records.keys.compactMap { Int($0).map(UserID.init) })
+        dirtyReferralTallies.formUnion(referralLedgerValue.tallies.keys.compactMap { Int($0).map(UserID.init) })
+        dirtyTrafficAttributions.formUnion(trafficSourceLedgerValue.attributions.keys.compactMap { Int($0).map(UserID.init) })
+        dirtyFunnelDays.formUnion(funnelDailyValue.allCells)
+        dirtyCryptoInvoices.formUnion(_cryptoInvoices.keys)
+        dirtyExternalOrders.formUnion(_externalOrders.keys)
+        dirtyConfigs.formUnion(ConfigName.allCases)
+    }
+
+    // MARK: - Polling offset (long-polling mode only)
+
+    func pollingOffset() -> Int? {
+        pollingOffsetValue
+    }
+
+    func setPollingOffset(_ offset: Int) {
+        guard pollingOffsetValue != offset else { return }
+        pollingOffsetValue = offset
+        dirtyConfigs.insert(.pollingOffset)
+    }
+
+    // MARK: - Restore
+
+    func restore(from state: PersistedBotState) {
+        // The directory comes first: `defaultOwnerKey` / `rootSuperAdminKey`
+        // resolve through it, so seeding the owner rows before it is loaded
+        // would file them under the wrong key until that person next writes.
+        userDirectoryValue = .empty
+        for row in state.users {
+            userDirectoryValue.restore(row.identity)
+        }
+        // The owner pin is part of the directory but lives in its own row: the
+        // identities are a table, and this is the one field of the directory
+        // that is not per-person. Restored here, before anything resolves
+        // `rootSuperAdminKey` — `ensureDefaultOwnerTenant` and the super-admin
+        // set below both do.
+        userDirectoryValue.rootKey = state.configs[Config.rootOwner]
+
+        contexts.removeAll()
+        for row in state.contexts {
+            contexts[row.key] = makeContext(from: row.snapshot)
+        }
+
+        tenants.removeAll()
+        for row in state.tenants {
+            tenants[row.key] = makeTenant(from: row.snapshot)
+        }
+        ensureDefaultOwnerTenant()
+
+        chatMetaByID = [:]
+        chatOwnership.removeAll()
+        for row in state.chats {
+            if let meta = row.meta { chatMetaByID[row.chatID] = meta }
+            if let owner = row.ownerKey, !owner.storageValue.isEmpty { chatOwnership[row.chatID] = owner }
+        }
+
+        superAdminKeys = [rootSuperAdminKey]
+        for key in state.configs[Config.superAdmins] where !key.storageValue.isEmpty {
+            superAdminKeys.insert(key)
+        }
+
+        rebuildUserTenantMap()
+
+        // Absent and zero mean different things for these two: a stars price
+        // of nil is "not for sale", and no polling cursor is not offset 0.
+        _starsPrice = state.configs.stored(Config.starsPrice).flatMap { $0 > 0 ? $0 : nil }
+        _starsPerUsd = state.configs[Config.starsPerUsd]
+        _freeModelIDs = state.configs[Config.freeModels]
+        restoreCryptoConfig(state.configs.stored(Config.crypto))
+        restoreCryptoInvoices(state.cryptoInvoices.map(\.invoice))
+        _cardConfig = state.configs[Config.card]
+        pollingOffsetValue = state.configs.stored(Config.pollingOffset)
+
+        inviteRecords = [:]
+        for row in state.invites { inviteRecords[row.token] = row.record }
+
+        adCampaignList = state.configs[Config.ads]
+        markupPercentValue = state.configs[Config.markup]
+
+        userBalances = state.wallets
+
+        funnelCounters = state.configs[Config.funnel]
+        funnelDailyValue = FunnelDailyLog(rows: state.funnelDays.map { (day: $0.day, event: $0.event, count: $0.count) })
+        dailyPremiumLimitValue = state.configs[Config.dailyPremiumLimit]
+        // Yesterday's counters are dead weight — a restore is as good a moment
+        // to drop them as a write is. They are dropped from storage too, so the
+        // table tracks "free chats active today" rather than growing forever.
+        let today = FunnelDailyLog.dayNumber()
+        premiumDailyUsage = [:]
+        for row in state.premiumUsage {
+            if row.usage.day == today {
+                premiumDailyUsage[row.subject] = row.usage
+            } else {
+                deletedPremiumUsage.insert(row.subject)
+            }
+        }
+
+        selfPromoConfigValue = state.configs[Config.selfPromo].normalized
+        modeConfigValue = state.configs[Config.modes].normalized
+        reminderConfigValue = state.configs[Config.reminders].normalized
+        onboardingConfigValue = state.configs[Config.onboarding].normalized
+        referralConfigValue = state.configs[Config.referrals].normalized
+        spendPolicyValue = state.configs[Config.spendPolicy]
+
+        referralLedgerValue = .empty
+        referralLedgerValue.totals = state.configs[Config.referralTotals]
+        for row in state.referrals { referralLedgerValue.records[String(row.invitedUserID.value)] = row.record }
+        for row in state.referralTallies { referralLedgerValue.tallies[String(row.inviterUserID.value)] = row.tally }
+
+        // Campaign aggregates come from the stored document, not from a
+        // recount of the surviving attributions: attributions are pruned by
+        // age and can be cleared, and a campaign must not forget the customers
+        // it paid for just because their arrival rows aged out. The recount is
+        // kept as a fallback for a database whose rows predate the document —
+        // better an approximate history than none.
+        trafficSourceLedgerValue = .empty
+        trafficSourceLedgerValue.totals = state.configs[Config.trafficTotals]
+        for row in state.trafficAttributions {
+            trafficSourceLedgerValue.attributions[String(row.userID.value)] = row.attribution
+        }
+        if trafficSourceLedgerValue.tallies.isEmpty {
+            trafficSourceLedgerValue.rebuildTalliesFromAttributions()
+        }
+
+        restoreExternalPayments(
+            config: state.configs.stored(Config.externalPayments),
+            orders: state.externalOrders.map(\.order)
+        )
+    }
+
+    // MARK: - Shared restore helpers
+
+    private func ensureDefaultOwnerTenant() {
+        guard tenants[defaultOwnerKey] == nil else { return }
+        tenants[defaultOwnerKey] = TenantState(
+            ownerKey: defaultOwnerKey,
+            defaultModel: initialDefaultModel,
+            defaultRole: initialDefaultRole,
+            defaultHistoryLength: initialDefaultHistoryLength,
+            modelPresets: [],
+            tempPresets: [],
+            historyLengthPresets: [],
+            rolePresets: [],
+            whitelistedUserIDs: [],
+            adminKeys: [],
+            licensedKeys: [],
+            cumulativeUsage: .zero,
+            createdAt: Date(),
+            paidUntil: nil
+        )
+    }
+
+    /// The userID → tenant map is derived data: rebuilt from whitelists.
+    private func rebuildUserTenantMap() {
+        userTenantMap.removeAll()
+        for (owner, tenant) in tenants {
+            for userID in tenant.whitelistedUserIDs {
+                userTenantMap[userID] = owner
+            }
+        }
+    }
+}

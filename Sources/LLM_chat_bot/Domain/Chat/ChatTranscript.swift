@@ -1,0 +1,494 @@
+import Foundation
+
+// Listen mode: what the bot overhears in a group chat.
+//
+// The ordinary memory (`ChatContext.history`) is a dialogue — the bot's own
+// questions and answers, nothing else. A group is not a dialogue: most of what
+// is said there is said between people, and the one line addressed to the bot
+// («@bot а он прав?») means nothing without the twenty before it.
+//
+// So a listening chat keeps a second, differently shaped memory: a transcript.
+// Every message goes in with its author and its place in the order, replies
+// keep their target, and when somebody finally addresses the bot the transcript
+// is handed over as *background* while the addressing message stays the task.
+//
+// It lives inside `ChatContext`, which is keyed by `ChatKey` — so a forum topic
+// listens to itself and not to the room next door, the buffer moves with the
+// chat when a group is upgraded to a supergroup, and `/forget` erases it along
+// with everything else the chat said.
+
+/// Who said a line.
+enum TranscriptAuthor: Codable, Sendable, Equatable, Hashable {
+    /// A person, stored as their key rather than their name: names are rented,
+    /// and a rename must not leave a hundred stored lines attributed to
+    /// somebody who no longer exists.
+    case member(UserKey)
+    /// The bot's own answer. It belongs in the transcript because it is part of
+    /// the conversation — and because replying to it is the most common way
+    /// anyone addresses the bot at all.
+    case bot
+
+    /// One short string rather than the synthesised `{"member":{"_0":"#42"}}`.
+    ///
+    /// This is the field repeated on every line of every transcript, so the
+    /// twenty bytes it saves are twenty bytes × three hundred lines × every
+    /// flush while a chat is busy. `!` is not a username character
+    /// (`UserKey.normalizedHandle`), so the bot's marker cannot collide with a
+    /// person whose handle happens to be "bot".
+    private static let botToken = "!bot"
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        if raw == Self.botToken {
+            self = .bot
+            return
+        }
+        // A marker this build does not know is not a person: filing it as one
+        // would put the line under an invented name. It throws, and the line is
+        // dropped by `ChatTranscript`'s element-wise decode.
+        guard !raw.isEmpty, !raw.hasPrefix("!") else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "unknown transcript author \(raw)"
+            )
+        }
+        self = .member(UserKey(storageValue: raw))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .bot: try container.encode(Self.botToken)
+        case .member(let key): try container.encode(key.storageValue)
+        }
+    }
+}
+
+/// What a message was answering.
+struct TranscriptReply: Codable, Sendable, Equatable {
+    let messageID: Int
+    /// Author of the message answered, when the update told us. Optional
+    /// because Telegram omits `from` for messages posted on behalf of a chat.
+    let author: TranscriptAuthor?
+    /// Opening words of what was answered. Printed only when that message has
+    /// already fallen out of the buffer — where a `#N` reference would point at
+    /// nothing, and «в ответ на …» would be the only thing keeping the question
+    /// intelligible.
+    let quote: String
+
+    static let quoteLimit = 80
+
+    init(messageID: Int, author: TranscriptAuthor?, quote: String) {
+        self.messageID = messageID
+        self.author = author
+        self.quote = ChatTranscript.clip(quote, to: Self.quoteLimit)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            messageID: try c.decodeIfPresent(Int.self, forKey: .messageID) ?? 0,
+            author: try c.decodeIfPresent(TranscriptAuthor.self, forKey: .author),
+            quote: try c.decodeIfPresent(String.self, forKey: .quote) ?? ""
+        )
+    }
+}
+
+/// One overheard message.
+struct TranscriptEntry: Codable, Sendable, Equatable {
+    /// Place in the conversation — the `#N` the model is asked to reason about.
+    /// A running number, not an index: the oldest line falls off the buffer on
+    /// every append, and a reference that renumbers itself points at a
+    /// different message every time somebody speaks.
+    let seq: Int
+    /// Telegram's own id, which is what a reply points at.
+    let messageID: Int
+    let author: TranscriptAuthor
+    let text: String
+    let at: Date
+    let replyTo: TranscriptReply?
+
+    init(seq: Int, messageID: Int, author: TranscriptAuthor, text: String, at: Date, replyTo: TranscriptReply?) {
+        self.seq = seq
+        self.messageID = messageID
+        self.author = author
+        self.text = text
+        self.at = at
+        self.replyTo = replyTo
+    }
+
+    /// Hand-written for the same reason `CumulativeUsage`'s is: this is the
+    /// payload of a `jsonb` column, and a synthesised decoder throws on the
+    /// first key a future build adds and an old row does not have.
+    ///
+    /// Everything optional is defaulted; `author` is not. Guessing there would
+    /// put somebody's words under the bot's name, which is worse than losing
+    /// the line — and losing one line is all it costs, because
+    /// `ChatTranscript` decodes its entries one at a time.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            seq: try c.decodeIfPresent(Int.self, forKey: .seq) ?? 0,
+            messageID: try c.decodeIfPresent(Int.self, forKey: .messageID) ?? 0,
+            author: try c.decode(TranscriptAuthor.self, forKey: .author),
+            text: try c.decodeIfPresent(String.self, forKey: .text) ?? "",
+            at: try c.decodeIfPresent(Date.self, forKey: .at) ?? Date(timeIntervalSince1970: 0),
+            replyTo: try c.decodeIfPresent(TranscriptReply.self, forKey: .replyTo)
+        )
+    }
+
+    var byteCount: Int {
+        text.utf8.count + (replyTo?.quote.utf8.count ?? 0) + 48
+    }
+}
+
+/// The buffer itself: a bounded, append-only view of what was said.
+///
+/// The caps live here rather than at the call sites (CLAUDE.md §14): this is a
+/// collection *users* grow — one message at a time, as fast as they can type —
+/// and it is re-sent to the model on every answer and rewritten into a `jsonb`
+/// row twice a second while the chat is busy. `append` is the only way in, and
+/// it cannot be made to overflow.
+struct ChatTranscript: Codable, Sendable, Equatable {
+    private(set) var entries: [TranscriptEntry]
+    /// Next `#N`. Kept across trims and across restarts so a reference the model
+    /// was given in one answer still means the same message in the next.
+    private(set) var nextSeq: Int
+
+    static let empty = ChatTranscript(entries: [], nextSeq: 1)
+
+    /// Private: `append` is the only way a line gets in, which is what keeps
+    /// the caps (`sizeRange`, `entryTextLimit`, `byteBudget`) impossible to
+    /// step around.
+    private init(entries: [TranscriptEntry], nextSeq: Int) {
+        self.entries = entries
+        self.nextSeq = nextSeq
+    }
+
+    /// One unreadable line must cost one line.
+    ///
+    /// The synthesised decoder for `[TranscriptEntry]` throws on the first
+    /// element it cannot read and takes the array with it — and this array is
+    /// inside `bot_chat_context.data`, so that would cost the chat its whole
+    /// context (its role, its model, its memory) over one malformed line.
+    /// Decoded element by element instead, exactly like `mapSkippingUnreadable`
+    /// treats the rows themselves (§8.3).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var kept: [TranscriptEntry] = []
+        if var list = try? c.nestedUnkeyedContainer(forKey: .entries) {
+            while !list.isAtEnd {
+                // A *failed* decode does not advance the container, so the bad
+                // element has to be stepped over deliberately — first as a null,
+                // then as a value nothing is read out of. The index is checked
+                // afterwards because the alternative to giving up here is a
+                // restore that never finishes, which is worse than a lost tail:
+                // this runs on the boot path.
+                let position = list.currentIndex
+                if let entry = try? list.decode(TranscriptEntry.self) {
+                    kept.append(entry)
+                } else if (try? list.decodeNil()) != true {
+                    _ = try? list.decode(DiscardedEntry.self)
+                }
+                if list.currentIndex == position { break }
+            }
+        }
+        self.entries = kept
+        // A sequence that went missing restarts after the highest line still
+        // held, never at 1: two lines sharing a `#N` is a reference that means
+        // two different things in one prompt.
+        let stored = try c.decodeIfPresent(Int.self, forKey: .nextSeq) ?? 0
+        self.nextSeq = max(stored, (kept.last?.seq ?? 0) + 1)
+    }
+
+    /// Consumes one element of the array without reading anything out of it.
+    private struct DiscardedEntry: Decodable {
+        init(from decoder: Decoder) throws {}
+    }
+
+    // MARK: - Bounds
+
+    /// How many messages a chat may ask to keep. The lower bound is where the
+    /// feature stops being worth its cost; the upper one is where the prompt
+    /// stops being worth its price.
+    static let sizeRange = 10...300
+    static let defaultSize = 100
+
+    /// One message is clipped to this. A pasted log or a wall of text is one
+    /// person's message, and without a per-line cap it evicts the other
+    /// ninety-nine — the conversation is what this buffer is for, not the
+    /// contents of any single line of it.
+    static let entryTextLimit = 400
+
+    /// Ceiling on the whole buffer, in the units the wire and the column both
+    /// charge for. `sizeRange.upperBound` messages at `entryTextLimit` each
+    /// would be ~120 KB — a quarter of a megabyte of prompt on *every* answer,
+    /// re-paid every turn. This is the number that actually bounds the bill;
+    /// the message count is the number people understand.
+    static let byteBudget = 60_000
+
+    /// How much of what the bot overheard *before* being asked to listen is
+    /// carried over when it is (`ChatContextStore._overheardPreroll`). The
+    /// default buffer size, so a chat that switches listening on with the
+    /// settings it ships with starts full rather than empty.
+    static let seedLimit = defaultSize
+
+    /// How far back the pre-roll reaches. A conversation from three days ago is
+    /// not the context of today's question, and holding it in memory for a chat
+    /// that never asked to be recorded is the part of this worth bounding by
+    /// time and not only by count.
+    static let seedLifetime: TimeInterval = 12 * 60 * 60
+
+    // MARK: - Writing
+
+    /// Files one message. Returns false when there was nothing to overhear.
+    @discardableResult
+    mutating func append(
+        messageID: Int,
+        author: TranscriptAuthor,
+        text: String,
+        at: Date,
+        replyTo: TranscriptReply?,
+        size: Int
+    ) -> Bool {
+        let clipped = Self.clip(text, to: Self.entryTextLimit)
+        guard !clipped.isEmpty else { return false }
+        // Telegram re-delivers on retry, and an album arrives as several
+        // updates: the same message must not be counted twice.
+        if entries.last?.messageID == messageID, messageID != 0 { return false }
+
+        entries.append(
+            TranscriptEntry(
+                seq: nextSeq,
+                messageID: messageID,
+                author: author,
+                text: clipped,
+                at: at,
+                replyTo: replyTo
+            )
+        )
+        nextSeq += 1
+        trim(to: size)
+        return true
+    }
+
+    mutating func clear() -> Int {
+        let erased = entries.count
+        entries = []
+        return erased
+    }
+
+    /// Applies a new size to what is already stored. Growing changes nothing
+    /// (the buffer fills from here on); shrinking has to take effect at once,
+    /// because that is the only reason anybody shrinks it.
+    mutating func resize(to size: Int) {
+        trim(to: size)
+    }
+
+    /// Drops everything older than `cutoff`. Used on the pre-roll: what the bot
+    /// overheard yesterday is not the context of a question asked today.
+    mutating func prune(before cutoff: Date) {
+        entries.removeAll { $0.at < cutoff }
+    }
+
+    /// Timestamp of the newest line, or nil for an empty buffer. What decides
+    /// which pre-roll goes when there are too many of them.
+    var lastActivity: Date? { entries.last?.at }
+
+    /// Everything this buffer holds, trimmed to `size`, ready to become the
+    /// start of a chat's real transcript. The numbering comes with it, so a
+    /// seeded chat carries on from where the pre-roll left off instead of
+    /// re-using `#1` for a second message.
+    func seed(size: Int, now: Date = Date()) -> ChatTranscript {
+        var copy = self
+        copy.prune(before: now.addingTimeInterval(-Self.seedLifetime))
+        copy.trim(to: min(size, Self.seedLimit))
+        return copy
+    }
+
+    /// Both bounds, oldest first. `size` arrives from stored state and from a
+    /// typed value, so it is clamped here rather than trusted — the same
+    /// discipline `trimHistory` applies to `maxHistory`.
+    private mutating func trim(to size: Int) {
+        let cap = Self.sizeRange.clamping(size)
+        if entries.count > cap {
+            entries.removeFirst(entries.count - cap)
+        }
+        var bytes = entries.reduce(0) { $0 + $1.byteCount }
+        while bytes > Self.byteBudget, entries.count > 1 {
+            bytes -= entries.removeFirst().byteCount
+        }
+    }
+
+    // MARK: - Reading
+
+    var count: Int { entries.count }
+    var isEmpty: Bool { entries.isEmpty }
+    var byteCount: Int { entries.reduce(0) { $0 + $1.byteCount } }
+
+    /// The conversation as lines, oldest last — newest kept when there is not
+    /// room for all of them, because the end of a conversation is what a
+    /// question is about.
+    ///
+    /// - Parameters:
+    ///   - excluding: the message that is *asking*. It is already in the buffer
+    ///     (everything is filed on the way in), and it is about to be sent
+    ///     separately as the task — printing it twice invites the model to
+    ///     answer the transcript instead of the question.
+    ///   - label: how an author is named. Resolved by the caller against the
+    ///     live directory, so a renamed member reads correctly in lines stored
+    ///     under their old name.
+    ///   - escapeText: on for a page the *user* reads (the text is arbitrary
+    ///     and lands in HTML), off for the model.
+    func lines(
+        excluding: Int? = nil,
+        label: (TranscriptAuthor) -> String,
+        escapeText: Bool = false
+    ) -> [String] {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd.MM HH:mm"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+
+        var kept: [String] = []
+        var bytes = 0
+        for entry in entries.reversed() {
+            if let excluding, entry.messageID == excluding, entry.messageID != 0 { continue }
+            let body = escapeText ? MessageText.escaped(entry.text) : entry.text
+            let reply = replyMarker(for: entry, label: label, escapeText: escapeText)
+            let line = "#\(entry.seq) [\(formatter.string(from: entry.at))] \(label(entry.author))\(reply): \(body)"
+            bytes += line.utf8.count
+            if !kept.isEmpty, bytes > Self.byteBudget { break }
+            kept.append(line)
+        }
+        return Array(kept.reversed())
+    }
+
+    /// «(в ответ на #12)» when the target is still in the buffer, «(в ответ
+    /// @bob: «…»)» when it is not. A reply whose target has scrolled out is the
+    /// case that matters: without the quote the question loses its subject.
+    ///
+    /// The quote is somebody's message, so it is escaped wherever the line
+    /// becomes markup — exactly like the body next to it. It used to go in raw,
+    /// and one `<` in a quoted message made Telegram refuse the whole dump: the
+    /// «📜 Что бот слышал» button silently doing nothing, for the whole chat,
+    /// until that message fell out of the buffer.
+    private func replyMarker(
+        for entry: TranscriptEntry,
+        label: (TranscriptAuthor) -> String,
+        escapeText: Bool
+    ) -> String {
+        guard let reply = entry.replyTo else { return "" }
+        if let target = entries.first(where: { $0.messageID == reply.messageID && $0.messageID != 0 }) {
+            return " (в ответ на #\(target.seq))"
+        }
+        let who = reply.author.map(label) ?? "кому-то"
+        guard !reply.quote.isEmpty else { return " (в ответ \(who))" }
+        let quote = escapeText ? MessageText.escaped(reply.quote) : reply.quote
+        return " (в ответ \(who): «\(quote)»)"
+    }
+
+    // MARK: - Prompt shape
+
+    /// Added to the chat's own role when it is listening. Explains the format —
+    /// the numbering is useless to the model unless it is told what it means —
+    /// and, at the end where it is obeyed, what the transcript is *not*: a
+    /// conversation to join.
+    static let systemAddendum = """
+
+
+        Ты подключён к групповому чату и видишь его стенограмму.
+        Формат строки: «#номер [дд.ММ ЧЧ:мм UTC] Автор: текст». Пометка «(в ответ на #N)» \
+        значит, что сообщение отвечало на строку #N.
+        Стенограмма — это фон, а не задание. Отвечай только на последнее сообщение, \
+        адресованное тебе, опираясь на стенограмму как на контекст. Не пересказывай её, \
+        не отвечай за других участников и не продолжай их разговор. Если в стенограмме \
+        нет нужного, так и скажи.
+        """
+
+    /// Wraps the lines into the one message the transcript travels in.
+    static func promptBlock(lines: [String]) -> String? {
+        guard !lines.isEmpty else { return nil }
+        return """
+        📋 Стенограмма чата, последние сообщения (\(lines.count)):
+
+        \(lines.joined(separator: "\n"))
+
+        — конец стенограммы —
+        """
+    }
+
+    // MARK: - Helpers
+
+    /// Trimmed, collapsed to one line and cut to `limit`.
+    ///
+    /// Newlines go because a transcript is line-per-message: a message
+    /// containing its own newlines would otherwise forge extra lines, and the
+    /// model has no way to tell a forged `#12 @admin:` from a real one.
+    static func clip(_ raw: String, to limit: Int) -> String {
+        let flattened = raw
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard flattened.count > limit else { return flattened }
+        return String(flattened.prefix(limit)) + "…"
+    }
+}
+
+/// The buffer read back for a person: the lines that fit, how many there are in
+/// total, and which of the two buffers they came from.
+///
+/// `isPreview` is the difference between «бот это помнит» and «бот это слышит,
+/// но не сохраняет», and the report has to say which — they are the two halves
+/// of the answer to "does the bot see our messages at all".
+struct TranscriptView: Sendable {
+    let lines: [String]
+    let total: Int
+    let isPreview: Bool
+
+    var isEmpty: Bool { lines.isEmpty }
+}
+
+/// What flipping the switch did. Two facts rather than a `Bool`, because the
+/// chat is told both: whether anything changed at all (a stale button tapped
+/// twice must not announce itself twice), and how much of the conversation the
+/// bot already had and has just adopted.
+struct ListenSwitchOutcome: Sendable, Equatable {
+    let changed: Bool
+    let seeded: Int
+
+    static let unchanged = ListenSwitchOutcome(changed: false, seeded: 0)
+}
+
+/// Listen mode as the chat holds it: the switch, the size and the buffer.
+struct ChatListening: Codable, Sendable, Equatable {
+    var isOn: Bool
+    var size: Int
+    var transcript: ChatTranscript
+
+    static let off = ChatListening(isOn: false, size: ChatTranscript.defaultSize, transcript: .empty)
+
+    init(isOn: Bool = false, size: Int = ChatTranscript.defaultSize, transcript: ChatTranscript = .empty) {
+        self.isOn = isOn
+        self.size = ChatTranscript.sizeRange.clamping(size)
+        self.transcript = transcript
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            isOn: try c.decodeIfPresent(Bool.self, forKey: .isOn) ?? false,
+            size: try c.decodeIfPresent(Int.self, forKey: .size) ?? ChatTranscript.defaultSize,
+            transcript: try c.decodeIfPresent(ChatTranscript.self, forKey: .transcript) ?? .empty
+        )
+    }
+
+    /// What the buffer currently costs to carry, in the terms the settings page
+    /// speaks: characters of prompt, and a rough count of tokens for them.
+    /// Deliberately approximate — the point is the order of magnitude, which is
+    /// what tells somebody that 300 messages is a different decision from 50.
+    var promptCost: (characters: Int, tokens: Int) {
+        let characters = transcript.entries.reduce(0) { $0 + $1.text.count + 32 }
+        return (characters, characters / 3)
+    }
+}

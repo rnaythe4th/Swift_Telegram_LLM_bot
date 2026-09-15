@@ -122,4 +122,36 @@ struct ChatMessage: Codable, Sendable {
         
         return .init(role: "user", content: .parts(parts), name: username)
     }
+
+    /// What keeping this message costs, in the units both the wire and the
+    /// `jsonb` column charge for. Used by the history budget
+    /// (`ChatContext.historyByteBudget`); `utf8.count` is a stored property of
+    /// a native string, so measuring the whole conversation stays cheap.
+    var byteCount: Int {
+        content.byteCount
+    }
+}
+
+extension ChatMessageContent {
+    var byteCount: Int {
+        switch self {
+        case .text(let text):
+            return text.utf8.count
+        case .parts(let parts):
+            return parts.reduce(0) { $0 + $1.byteCount }
+        }
+    }
+}
+
+extension ChatMessageContentPart {
+    /// Attachments never reach the history (the coordinator strips them before
+    /// the turn is stored), but a part-shaped message can still arrive from a
+    /// row written by an older build — and a base64 payload is exactly the size
+    /// this budget exists to catch.
+    var byteCount: Int {
+        (text?.utf8.count ?? 0)
+            + (inputAudio?.data.utf8.count ?? 0)
+            + (inputImage?.url.utf8.count ?? 0)
+            + (inputVideo?.data.utf8.count ?? 0)
+    }
 }

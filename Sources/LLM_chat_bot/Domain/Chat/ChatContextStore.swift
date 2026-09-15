@@ -1,311 +1,248 @@
 import Foundation
 
-struct ChatContext: Sendable {
-    enum PendingTurnState: Sendable {
-        case pending
-        case completed(String)
-        case cancelled
-    }
-    
-    struct PendingTurn: Sendable {
-        let generationID: GenerationID
-        let userMessage: ChatMessage
-        var state: PendingTurnState
-    }
-    
-    var role: String
-    var history: [ChatMessage]
-    var pendingTurns: [PendingTurn]
-    var model: String
-    var temp: Float
-    var showStats: Bool
-    var maxHistory: Int
-    var showCost: Bool
-    var showModel: Bool
-    var provider: ServiceProvider
-    var suffix: Int?
-    var reasoning: Bool
-}
-
-struct GenerationSnapshot: Sendable {
-    let provider: ServiceProvider
-    let model: String
-    let temperature: Float
-    let options: GenerationOptions
-    let messages: [ChatMessage]
-}
-
-struct HelpData: Sendable {
-    let model: String
-    let role: String
-    let temp: Float
-    let maxHistory: Int
-    let showTokens: Bool
-    let showCost: Bool
-    let showModel: Bool
-    let defaultRole: String
-    let provider: ServiceProvider
-    let reasoning: Bool
-    let testModeSuffix: Int?
-}
+// The single owner of all mutable bot state. Storage and the boot wiring live
+// here; the behaviour is split across ChatContextStore+*.swift by area.
 
 actor ChatContextStore {
-    private var contexts: [ChatKey: ChatContext] = [:]
-    
-    let defaultHistoryLength: Int
-    let defaultModel: String
-    let systemPrompt: String
-    let formatOptions: String
-    let companyChatId: Int
+    // Storage is `internal` (not private) so the ChatContextStore+*.swift
+    // extensions can reach it; nothing outside the actor touches it directly.
+    var contexts: [ChatKey: ChatContext] = [:]
+    var tenants: [UserKey: TenantState] = [:]
+    var chatOwnership: [ChatID: UserKey] = [:]
+    var userTenantMap: [UserID: UserKey] = [:]
+
+    var superAdminKeys: Set<UserKey>
+    /// Owner as configured at boot (`OWNER_USER_ID` / `OWNER_USERNAME`). A seed:
+    /// `rootSuperAdminKey` prefers what the directory has pinned since.
+    let configuredOwnerKey: UserKey
+    /// Owner's Telegram userID when configured (`OWNER_USER_ID`). Root is then
+    /// this account and nothing else — not a stored key, not a handle.
+    let pinnedOwnerUserID: UserID?
+    var formatOptions: String
+    let companyChatId: ChatID
     let companyMembers: String
     let defaultSuffix: Int?
-    
+
+    let initialDefaultModel: String
+    let initialDefaultRole: String
+    let initialDefaultHistoryLength: Int
+
+    // MARK: - Dirty tracking (drained by PersistenceCoordinator)
+
+    // Every mutable entity has a set here, and every mutation marks its own.
+    // Anything that grows with the user base is tracked per row, so a flush
+    // writes the wallet that changed rather than the file that holds all of
+    // them (§2.1).
+    var dirtyContexts = Set<ChatKey>()
+    var deletedContexts = Set<ChatKey>()
+    var dirtyTenants = Set<UserKey>()
+    var deletedTenants = Set<UserKey>()
+    /// Chat identity *and* which tenant's licence covers it — one row, because
+    /// they describe one thing and are always read together.
+    var dirtyChats = Set<ChatID>()
+    var deletedChats = Set<ChatID>()
+    var dirtyUsers = Set<UserID>()
+    /// Wallets are drained by the ledger, not by the write-behind batch: money
+    /// is written through a transaction (§3.2). The set exists so a cache-only
+    /// change (a rename adopting a wallet) still reaches storage.
+    var dirtyWallets = Set<UserKey>()
+    var deletedWallets = Set<UserKey>()
+    var dirtyInvites = Set<String>()
+    var deletedInvites = Set<String>()
+    var dirtyPremiumUsage = Set<String>()
+    var deletedPremiumUsage = Set<String>()
+    var dirtyReferrals = Set<UserID>()
+    var deletedReferrals = Set<UserID>()
+    var dirtyReferralTallies = Set<UserID>()
+    var deletedReferralTallies = Set<UserID>()
+    var dirtyTrafficAttributions = Set<UserID>()
+    var deletedTrafficAttributions = Set<UserID>()
+    var dirtyFunnelDays = Set<FunnelDayKey>()
+    var dirtyCryptoInvoices = Set<String>()
+    var deletedCryptoInvoices = Set<String>()
+    var dirtyExternalOrders = Set<String>()
+    var deletedExternalOrders = Set<String>()
+    var dirtyConfigs = Set<ConfigName>()
+    var pollingOffsetValue: Int? = nil
+    var chatMetaByID: [ChatID: ChatMetaInfo] = [:]
+    var inviteRecords: [String: InviteRecord] = [:]
+    var adCampaignList: [AdCampaign] = []
+    /// Markup percent on provider prices for customer-facing costs and
+    /// balance charging.
+    var markupPercentValue: Int = 30
+    /// Free-premium "taste" answers granted per day to a free-tier chat (group,
+    /// shared) or user (private) before a paid model falls back to free (roadmap
+    /// step 6). Super-admin-configurable; persisted via
+    /// GlobalConfigKey.dailyPremiumLimit. 0 = no free premium taste at all.
+    var dailyPremiumLimitValue: Int = 5
+    /// Renewal-reminder / winback schedule (roadmap step 8). Super-admin knob,
+    /// persisted via GlobalConfigKey.reminders.
+    var reminderConfigValue: SubscriptionReminderConfig = .default
+    /// Greeting example prompts + their tap counters (roadmap step 9).
+    /// Super-admin knob, persisted via GlobalConfigKey.onboarding.
+    var onboardingConfigValue: OnboardingConfig = .default
+    /// Two-sided referral economics (roadmap step 10). Super-admin knob,
+    /// persisted via GlobalConfigKey.referrals.
+    var referralConfigValue: ReferralConfig = .default
+    /// Referral attributions + per-inviter aggregates (roadmap step 10).
+    /// Persisted as `bot_referral` / `bot_referral_tally` rows — the anti-fraud rules
+    /// ("one attribution per person, once per pair") depend on it surviving
+    /// restarts, so unlike the daily premium counter it is not in-memory.
+    var referralLedgerValue: ReferralLedger = .empty
+    /// Paid-traffic attributions + per-campaign aggregates behind `src_` deep
+    /// links. Persisted as `bot_traffic_attribution` rows: an ad buy is judged
+    /// weeks after the click, so these numbers have to outlive every redeploy in
+    /// between or the campaign becomes unmeasurable.
+    var trafficSourceLedgerValue: TrafficSourceLedger = .empty
+    /// Pay-as-you-go wallets, keyed by `UserKey`.
+    var userBalances: [UserKey: UserBalance] = [:]
+    /// userID ↔ @username directory. Everything above that is "keyed by user"
+    /// is keyed by `UserKey` (`#<userID>`), and this is what turns a typed
+    /// `@name` into that key and back into a label for the interface. Persisted
+    /// as `bot_user` rows.
+    var userDirectoryValue: UserDirectory = .empty
+
+    /// Conversion-funnel event counters (roadmap step 7), keyed by
+    /// FunnelEvent.rawValue. Persisted via GlobalConfigKey.funnel so the numbers
+    /// survive restarts/redeploys.
+    var funnelCounters: [String: Int] = [:]
+    /// The same events bucketed per day (roadmap step 7), so the page can show
+    /// a period and not only an all-time total. Persisted via
+    /// `bot_funnel_daily`, pruned to `FunnelDailyLog.windowDays`.
+    var funnelDailyValue: FunnelDailyLog = .empty
+
+    /// Provider spending ceilings (§4.1). Super-admin knob, persisted via
+    /// GlobalConfigKey.spendPolicy; the day's running spend next to it is
+    /// in-memory (see `DailySpendLedger`).
+    var spendPolicyValue: SpendPolicy = .default
+    var dailySpendValue: DailySpendLedger = DailySpendLedger()
+
+    /// Built-in self-promo that fills the ad slot when no paid campaign runs
+    /// (roadmap step 5). Super-admin knob, persisted via
+    /// GlobalConfigKey.selfPromo.
+    var selfPromoConfigValue: SelfPromoConfig = .default
+
+    /// Reference modes: the settings bundles a user picks in one tap, and which
+    /// of them the free tier may reach. Super-admin knob, persisted via
+    /// GlobalConfigKey.modes.
+    var modeConfigValue: ModePresetConfig = .default
+
+    /// Daily free "taste" of premium for free-tier chats/users (roadmap step 6).
+    /// Group chats share one counter (`c<chatID>`); private chats count per user
+    /// (`u<userID>`). Persisted as `bot_premium_usage` rows — see
+    /// `DailyPremiumUsage` for why this one is not in-memory.
+    var premiumDailyUsage: [String: DailyPremiumUsage] = [:]
+
+    /// When each group last got its welcome, and when each chat last showed the
+    /// sponsor credit. Both are anti-noise timers whose worst case on restart is
+    /// one extra line — in-memory by the same §17 rule as `_premiumDailyUsage`.
+    var _groupGreetedAt: [ChatID: Date] = [:]
+    var _sponsorCreditShownAt: [ChatID: Date] = [:]
+    static let groupGreetingCooldown: TimeInterval = 10 * 60
+    /// How often a sponsored group repeats "premium here was opened by @X".
+    /// Under every single answer it turns into noise; once an hour it still
+    /// reads as the sponsor's standing credit.
+    static let sponsorCreditCooldown: TimeInterval = 60 * 60
+
+    /// What the bot has overheard in groups that are *not* listening yet.
+    ///
+    /// Telegram has no way to hand a bot the history of a chat — there is no
+    /// such method, and messages sent before it joined are gone as far as it is
+    /// concerned. But a bot with privacy mode off is already handed every group
+    /// message as it happens, and until now those were read and thrown away. So
+    /// switching listening on does not have to start from an empty page: it
+    /// adopts what the process has already seen (`ChatTranscript.seedLimit`).
+    ///
+    /// In memory and never persisted, by the same §17 rule as the greeting
+    /// timers, and for a second reason: nothing a chat did not ask for should
+    /// end up in a database row. Bounded twice — per chat by the transcript's
+    /// own cap, across chats by `prunePreroll`.
+    var _overheardPreroll: [ChatKey: ChatTranscript] = [:]
+    /// Chats kept in the pre-roll at once. Beyond this the quietest ones go.
+    static let prerollChatCap = 256
+
+    /// The one typed-value wait a chat can hold, whatever asked for it.
+    /// See `PendingRequest` for why it is a single slot and not eight maps.
+    var _pendingRequests: [ChatKey: PendingRequest] = [:]
+    // Internal (not private): restored by ChatContextStore+Persistence.swift.
+    var _starsPrice: Int? = nil
+    /// Stars charged per $1 when buying credit packs. Telegram pays devs
+    /// ~$0.013/⭐, so 77⭐/$ recovers the pack's face value; the 30% spend
+    /// markup on top is the margin. Tunable live from the super-admin menu.
+    var _starsPerUsd: Int = 77
+    var _freeModelIDs: [String] = []
+    var _openRouterFreeModelIDs: Set<String>? = nil
+    var _openRouterModelPrices: [String: ModelPriceInfo] = [:]
+
+    var _cryptoPriceUsdCents: Int? = nil
+    // Internal (not private): restored by ChatContextStore+Persistence.swift.
+    var _cardConfig: CardPaymentConfig = .empty
+    var _cryptoAddresses: [CryptoChain: String] = [:]
+    var _cryptoInvoices: [String: CryptoInvoice] = [:]
+    var _cryptoSlotCounters: [CryptoAsset: Int] = [:]
+    var _cryptoMatchMode: CryptoMatchMode = .amountDelta
+    var _cryptoAddressPools: [CryptoChain: [String]] = [:]
+    /// Explorer scan positions, `"<asset>:<address>"` → unix seconds.
+    var _explorerCursors: [String: Int] = [:]
+
+    /// Hosted checkout (§7 «Внешняя касса»): merchant credentials, prices and
+    /// the rails offered. Persisted with the open orders next to it, because a
+    /// callback lands in whichever process is alive by then.
+    var _externalPaymentConfig: ExternalPaymentConfig = .default
+    var _externalOrders: [String: ExternalPaymentOrder] = [:]
+
+    var _simulatedRoles: [UserKey: SimulatedRole] = [:]
+
     init(
+        ownerUsername: String,
+        ownerUserID: UserID? = nil,
         model: String,
         systemPrompt: String,
         formatOptions: String,
-        companyChatId: Int,
+        companyChatId: ChatID,
         companyMembers: String,
         defaultHistoryLength: Int,
         defaultSuffix: Int?
     ) {
-        self.defaultModel = model
-        self.systemPrompt = systemPrompt
+        // The directory is empty here, so the owner starts as a pending key and
+        // is re-filed under `#<userID>` the first time they talk to the bot.
+        //
+        // Unless `ownerUserID` is configured, in which case root is that account
+        // from the start. A @username is rented: release it and whoever
+        // registers it next inherits the pending root record on their first
+        // message. A userID cannot change hands, so pinning root to one closes
+        // that door — and keeps the owner's own access from depending on a
+        // handle they might one day drop.
+        self.pinnedOwnerUserID = ownerUserID
+        let owner = ownerUserID.map { UserKey.identified($0) }
+            ?? UserKey.pending(ownerUsername)
+            ?? UserKey.sanitizedPendingFallback(ownerUsername)
+        self.superAdminKeys = [owner]
+        self.configuredOwnerKey = owner
         self.formatOptions = formatOptions
         self.companyChatId = companyChatId
         self.companyMembers = companyMembers
-        self.defaultHistoryLength = defaultHistoryLength
         self.defaultSuffix = defaultSuffix
-    }
-    
-    private func roleWithCompanyMembers(chatID: Int, role: String) -> String {
-        chatID == companyChatId ? role + companyMembers : role
-    }
-    
-    func defaultRole(chatID: Int) -> String {
-        roleWithCompanyMembers(chatID: chatID, role: systemPrompt + formatOptions)
-    }
-    
-    private func ensure(chatKey: ChatKey) -> ChatContext {
-        if let context = contexts[chatKey] {
-            return context
-        }
-        
-        let role = defaultRole(chatID: chatKey.chatID)
-        let context = ChatContext(
-            role: role,
-            history: [.init(role: "system", content: role)],
-            pendingTurns: [],
-            model: defaultModel,
-            temp: 1.5,
-            showStats: false,
-            maxHistory: defaultHistoryLength,
-            showCost: true,
-            showModel: true,
-            provider: .openrouter,
-            suffix: defaultSuffix,
-            reasoning: false
-        )
-        contexts[chatKey] = context
-        return context
-    }
-    
-    private func mutate(chatKey: ChatKey, _ block: (inout ChatContext) -> Void) {
-        var context = ensure(chatKey: chatKey)
-        block(&context)
-        contexts[chatKey] = context
-    }
-    
-    private func trimHistory(_ history: [ChatMessage], limit: Int) -> [ChatMessage] {
-        guard let first = history.first else { return history }
-        let safeLimit = max(1, limit)
-        let tail = Array(history.dropFirst())
-        let clipped = tail.suffix(safeLimit)
-        return [first] + clipped
-    }
-    
-    private func visibleHistory(for context: ChatContext) -> [ChatMessage] {
-        let pendingUserMessages = context.pendingTurns.map(\.userMessage)
-        return trimHistory(context.history + pendingUserMessages, limit: context.maxHistory)
-    }
-    
-    private func flushResolvedTurns(_ context: inout ChatContext) {
-        while let first = context.pendingTurns.first {
-            switch first.state {
-            case .pending:
-                context.history = trimHistory(context.history, limit: context.maxHistory)
-                return
-            case .completed(let assistantContent):
-                context.history.append(first.userMessage)
-                context.history.append(.init(role: "assistant", content: assistantContent))
-                context.pendingTurns.removeFirst()
-            case .cancelled:
-                context.pendingTurns.removeFirst()
-            }
-        }
-        
-        context.history = trimHistory(context.history, limit: context.maxHistory)
-    }
-    
-    func fetchHelp(chatKey: ChatKey) -> HelpData {
-        let context = ensure(chatKey: chatKey)
-        return .init(
-            model: context.model,
-            role: context.role,
-            temp: context.temp,
-            maxHistory: context.maxHistory,
-            showTokens: context.showStats,
-            showCost: context.showCost,
-            showModel: context.showModel,
-            defaultRole: defaultRole(chatID: chatKey.chatID),
-            provider: context.provider,
-            reasoning: context.reasoning,
-            testModeSuffix: context.suffix
-        )
-    }
-    
-    func suffix(chatKey: ChatKey) -> Int? {
-        ensure(chatKey: chatKey).suffix
-    }
-    
-    func toggleTestMode(chatKey: ChatKey) -> Int? {
-        let current = ensure(chatKey: chatKey).suffix
-        if current == nil {
-            let newSuffix = Int.random(in: 1...10)
-            mutate(chatKey: chatKey) { $0.suffix = newSuffix }
-            return newSuffix
-        }
-        mutate(chatKey: chatKey) { $0.suffix = nil }
-        return nil
-    }
-    
-    func toggleReasoning(chatKey: ChatKey) -> Bool {
-        mutate(chatKey: chatKey) { $0.reasoning.toggle() }
-        return ensure(chatKey: chatKey).reasoning
-    }
-    
-    func setReasoning(chatKey: ChatKey, enabled: Bool) {
-        mutate(chatKey: chatKey) { $0.reasoning = enabled }
-    }
-    
-    func reasoningEnabled(chatKey: ChatKey) -> Bool {
-        ensure(chatKey: chatKey).reasoning
-    }
-    
-    func setMaxHistory(chatKey: ChatKey, newMax: Int) {
-        mutate(chatKey: chatKey) { context in
-            context.maxHistory = max(1, newMax)
-            context.history = trimHistory(context.history, limit: context.maxHistory)
-        }
-    }
-    
-    func setRoleAndResetHistory(chatKey: ChatKey, role: String) -> String {
-        let effectiveRole = roleWithCompanyMembers(chatID: chatKey.chatID, role: role)
-        mutate(chatKey: chatKey) { context in
-            context.role = effectiveRole
-            context.history = [.init(role: "system", content: effectiveRole)]
-            context.pendingTurns = []
-        }
-        return effectiveRole
-    }
-    
-    func clearHistory(chatKey: ChatKey) {
-        mutate(chatKey: chatKey) { context in
-            context.history = [.init(role: "system", content: context.role)]
-            context.pendingTurns = []
-        }
-    }
-    
-    func setTemperature(chatKey: ChatKey, value: Float) {
-        mutate(chatKey: chatKey) { $0.temp = value }
-    }
-    
-    func temperature(chatKey: ChatKey) -> Float {
-        ensure(chatKey: chatKey).temp
-    }
-    
-    func setModelAndResetHistory(chatKey: ChatKey, newModel: String) -> (old: String, new: String) {
-        let old = ensure(chatKey: chatKey).model
-        mutate(chatKey: chatKey) { context in
-            context.model = newModel
-            context.history = [.init(role: "system", content: context.role)]
-            context.pendingTurns = []
-        }
-        return (old, newModel)
-    }
-    
-    func toggleShowStats(chatKey: ChatKey) -> Bool {
-        mutate(chatKey: chatKey) { $0.showStats.toggle() }
-        return ensure(chatKey: chatKey).showStats
-    }
-    
-    func toggleShowCost(chatKey: ChatKey) -> Bool {
-        mutate(chatKey: chatKey) { $0.showCost.toggle() }
-        return ensure(chatKey: chatKey).showCost
-    }
-    
-    func toggleShowModel(chatKey: ChatKey) -> Bool {
-        mutate(chatKey: chatKey) { $0.showModel.toggle() }
-        return ensure(chatKey: chatKey).showModel
-    }
-    
-    func changeProvider(chatKey: ChatKey, newProvider: ServiceProvider) -> ServiceProvider {
-        let oldProvider = ensure(chatKey: chatKey).provider
-        mutate(chatKey: chatKey) { $0.provider = newProvider }
-        return oldProvider
-    }
-    
-    func provider(chatKey: ChatKey) -> ServiceProvider {
-        ensure(chatKey: chatKey).provider
-    }
-    
-    func snapshotAndAppend(
-        chatKey: ChatKey,
-        generationID: GenerationID,
-        content: UserInputContent,
-        username: String?
-    ) -> GenerationSnapshot {
-        var context = ensure(chatKey: chatKey)
-        
-        let userMessage = ChatMessage.userContent(content, username: username)
-        context.pendingTurns.append(.init(generationID: generationID, userMessage: userMessage, state: .pending))
-        
-        let messages = visibleHistory(for: context)
-        contexts[chatKey] = context
-        
-        return .init(
-            provider: context.provider,
-            model: context.model,
-            temperature: context.temp,
-            options: .init(
-                showStats: context.showStats,
-                showCost: context.showCost,
-                showModel: context.showModel,
-                reasoningEnabled: context.reasoning
-            ),
-            messages: messages
-        )
-    }
-    
-    func appendAssistant(chatKey: ChatKey, generationID: GenerationID, content: String) {
-        mutate(chatKey: chatKey) { context in
-            guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
-                return
-            }
-            
-            context.pendingTurns[index].state = .completed(content)
-            flushResolvedTurns(&context)
-        }
-    }
-    
-    func cancelPendingTurn(chatKey: ChatKey, generationID: GenerationID) {
-        mutate(chatKey: chatKey) { context in
-            guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
-                return
-            }
-            
-            context.pendingTurns[index].state = .cancelled
-            flushResolvedTurns(&context)
-        }
+        self.initialDefaultModel = model
+        self.initialDefaultRole = systemPrompt
+        self.initialDefaultHistoryLength = defaultHistoryLength
+        self.tenants = [
+            owner: TenantState(
+                ownerKey: owner,
+                defaultModel: model,
+                defaultRole: systemPrompt,
+                defaultHistoryLength: defaultHistoryLength,
+                modelPresets: [],
+                tempPresets: [],
+                historyLengthPresets: [],
+                rolePresets: [],
+                whitelistedUserIDs: [],
+                adminKeys: [],
+                licensedKeys: [],
+                cumulativeUsage: .zero,
+                createdAt: Date(),
+                paidUntil: nil
+            )
+        ]
     }
 }

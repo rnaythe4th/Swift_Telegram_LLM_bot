@@ -1,20 +1,94 @@
 import Foundation
 
+// The generation pipeline: access gate, billing mode, history snapshot and the
+// hand-off to a streamer. Delivery and monetization live in the +*.swift files.
+
 private enum ReplyContentResolution {
     case none
     case unsupported(String)
     case content(UserInputContent)
 }
 
-final class GenerationCoordinator: @unchecked Sendable {
-    private let telegram: TelegramGatewayPort
-    private let state: ChatContextStore
-    private let sessionRegistry: SessionRegistry
+/// The answer outgrew one message and the continuation message could not be
+/// sent, so there is nowhere left to stream. Its own type because the only
+/// alternative on hand — `CancellationError` — makes the bot report «⏹
+/// Остановлено» to a user who stopped nothing.
+///
+/// It carries the part that *was* delivered: the failure happens after the
+/// current message has been edited to hold that part, so whoever writes the
+/// final text has to know where the visible answer ends. Rewriting the message
+/// with the whole accumulator instead puts an over-long text in front of
+/// `editMessage`, which keeps the prefix that fits and drops the tail — the
+/// tail being the notice that explains what happened.
+struct ContinuationUnavailable: Error {
+    let delivered: String
+}
+
+/// Everything a turn needs to know about who asked and where. A real Telegram
+/// message yields one; so does a synthetic turn started from a button (an
+/// onboarding example, roadmap step 9), which has no message of its own.
+struct GenerationOrigin: Sendable {
+    let user: TelegramUser?
+    let isPrivate: Bool
+    /// Message the reply should quote; nil = plain reply.
+    let replyToMessageID: Int?
+    /// The message that asked, when a message asked at all. The same number as
+    /// `replyToMessageID` for a typed question — but they answer different
+    /// questions ("what should the answer quote" versus "which line of the
+    /// transcript is the question"), and a button-started turn has the first
+    /// and not the second.
+    let askedMessageID: Int?
+    /// What the asking message was replying to. Listen mode turns it into the
+    /// «(в ответ на #12)» that tells the model which of a hundred overheard
+    /// lines the question is about.
+    let repliedTo: TranscriptReply?
+
+    /// Storage key of whoever asked. Built from the userID, which every update
+    /// carries — a @username is optional, and a gate keyed off one locks out
+    /// everybody who never set it (CLAUDE.md §6).
+    var userKey: UserKey? { user.map { UserKey.identified($0.id) } }
+
+    init(
+        user: TelegramUser?,
+        isPrivate: Bool,
+        replyToMessageID: Int?,
+        askedMessageID: Int? = nil,
+        repliedTo: TranscriptReply? = nil
+    ) {
+        self.user = user
+        self.isPrivate = isPrivate
+        self.replyToMessageID = replyToMessageID
+        self.askedMessageID = askedMessageID
+        self.repliedTo = repliedTo
+    }
+
+    init(message: TelegramMessage, botUsername: String) {
+        self.init(
+            user: message.from,
+            isPrivate: message.chat.type == "private",
+            replyToMessageID: message.message_id,
+            askedMessageID: message.message_id,
+            repliedTo: TranscriptCapture.reply(from: message, botUsername: botUsername)
+        )
+    }
+}
+
+final class GenerationCoordinator: Sendable {
+    let telegram: TelegramGatewayPort
+    let state: ChatContextStore
+    let sessionRegistry: SessionRegistry
     private let mediaResolver: MediaResolverPort
     private let gateways: ProviderGatewayRegistry
-    private let logger: LoggerPort
+    let logger: LoggerPort
     private let botUsername: String
-    
+    private let generationLimiter: GenerationLimiter
+    let metrics: RuntimeMetrics?
+    /// Charging for an answer moves money, so it goes where all money goes.
+    let ledger: LedgerPort
+    /// A spending ceiling that stops paid models is something the owner has to
+    /// hear about, not discover in the logs (§6.1).
+    let alerter: OwnerAlerter?
+
     init(
         telegram: TelegramGatewayPort,
         state: ChatContextStore,
@@ -22,7 +96,11 @@ final class GenerationCoordinator: @unchecked Sendable {
         mediaResolver: MediaResolverPort,
         gateways: ProviderGatewayRegistry,
         logger: LoggerPort,
-        botUsername: String
+        botUsername: String,
+        generationLimiter: GenerationLimiter,
+        ledger: LedgerPort,
+        alerter: OwnerAlerter? = nil,
+        metrics: RuntimeMetrics? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -31,17 +109,45 @@ final class GenerationCoordinator: @unchecked Sendable {
         self.gateways = gateways
         self.logger = logger
         self.botUsername = botUsername
+        self.generationLimiter = generationLimiter
+        self.ledger = ledger
+        self.alerter = alerter
+        self.metrics = metrics
     }
-    
+
+    /// Releases the concurrency slot and closes the session. Every generation
+    /// that passed `generationLimiter.acquire()` must end through here exactly
+    /// once, whatever path it takes.
+    func finishGeneration(_ generationID: GenerationID) async {
+        await generationLimiter.release()
+        await sessionRegistry.finish(generationID: generationID)
+    }
+
     func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
         switch try await resolveProcessableContent(message: message, chatKey: chatKey) {
         case .content(let content):
-            try await processContent(message: message, content: content, chatKey: chatKey)
+            try await processContent(
+                origin: GenerationOrigin(message: message, botUsername: botUsername),
+                content: content,
+                chatKey: chatKey
+            )
         case .unsupported(let feedback):
             try await sendUserFeedback(chatKey: chatKey, text: feedback)
         case .none:
             break
         }
+    }
+
+    /// Runs a ready-made prompt as a normal turn — the onboarding example
+    /// buttons (roadmap step 9). Skips only the routing policy (the tap *is* the
+    /// explicit address to the bot); the free-tier gate, billing, ads and
+    /// history all behave exactly as for a typed message.
+    func runReadyPrompt(text: String, chatKey: ChatKey, origin: GenerationOrigin) async throws {
+        try await processContent(
+            origin: origin,
+            content: UserInputContent(text: text, attachments: []),
+            chatKey: chatKey
+        )
     }
     
     private func resolveProcessableContent(message: TelegramMessage, chatKey: ChatKey) async throws -> ReplyContentResolution {
@@ -65,7 +171,7 @@ final class GenerationCoordinator: @unchecked Sendable {
             if !unsupportedKinds.isEmpty {
                 let kinds = unsupportedKinds.map(\.displayName).joined(separator: ", ")
                 return .unsupported(
-                    "Провайдер \(provider.commandValue) не поддерживает \(kinds). Смените провайдера или отправьте текст."
+                    "⚠️ Этот сервис ИИ не понимает: \(kinds).\nВыберите другой в /menu → 🔌 Сервис ИИ или отправьте только текст."
                 )
             }
         }
@@ -74,21 +180,82 @@ final class GenerationCoordinator: @unchecked Sendable {
         return .content(.init(text: normalizedText, attachments: resolved))
     }
     
-    private func processContent(message: TelegramMessage, content: UserInputContent, chatKey: ChatKey) async throws {
-        let username = message.from?.username
+    func processContent(origin: GenerationOrigin, content: UserInputContent, chatKey: ChatKey) async throws {
+        let handle = origin.user?.username
+        let askerKey = origin.userKey
+
+        // Funnel: count this chat's first real message (activation, once per chat).
+        await state.markFirstMessageIfNeeded(chatKey: chatKey)
+
+        // Referral (roadmap step 10): the invited friend's first real turn is
+        // what releases the two-sided reward — in a DM or in a group, since a
+        // friend who goes straight to a group chat did exactly what we wanted.
+        // Attribution alone pays nothing, so a farm of idle accounts earns
+        // nothing; both notices are delivered to DMs (see the method).
+        if let userID = origin.user?.id {
+            await payReferralIfDue(userID: userID, username: handle)
+            // Paid traffic: a click that never produced an answer is not an
+            // activation, so the campaign is credited here rather than at
+            // /start. Idempotent — this runs on every turn.
+            await state.markTrafficSourceActivation(userID: userID)
+        }
+
+        // Free-tier gate with a daily premium "taste" (see the gate itself in
+        // +Monetization.swift). A nil verdict means the turn cannot be answered
+        // at all — the user has been told why.
+        guard let premium = try await resolveDailyPremium(origin: origin, chatKey: chatKey) else { return }
+        let premiumTicket = premium.ticket
+        let lastPremiumCall = premium.lastCall
+
+        // Billing: covered by a subscription, charged to a wallet, or free-tier
+        // (which is what makes it ad-eligible).
+        let billing = await resolveBillingMode(origin: origin, chatKey: chatKey)
+        let billedTo = billing.billedTo
+        let adEligible = billing.adEligible
+
         let generationID = await sessionRegistry.register(chatKey: chatKey)
+
+        let typingTask = startTypingIndicator(chatKey: chatKey)
+        defer { typingTask.cancel() }
+
+        // Global concurrency cap: with hundreds of chats firing at once the
+        // excess waits here (typing indicator already running) instead of
+        // exhausting sockets/memory.
+        await generationLimiter.acquire()
+        await metrics?.increment(MetricName.generationsStarted)
         
         var processedContent = content
-        if let username, let text = processedContent.text, !text.isEmpty {
-            processedContent.text = "Тебе пишет @\(username): \(text)"
+        // Who is asking, and — in a listening chat — which overheard line they
+        // are asking about. Outside listen mode this is the «Тебе пишет @x: »
+        // it has always been.
+        let prefix = await state.questionPrefix(
+            chatKey: chatKey,
+            asker: askerKey,
+            handle: handle,
+            replyTo: origin.repliedTo
+        )
+        if !prefix.isEmpty, let text = processedContent.text, !text.isEmpty {
+            processedContent.text = prefix + text
         }
-        
+
+        let hasAttachments = !processedContent.attachments.isEmpty
+
+        let historyContent = hasAttachments
+            ? UserInputContent(text: processedContent.text, attachments: [])
+            : processedContent
+
         let snapshot = await state.snapshotAndAppend(
             chatKey: chatKey,
             generationID: generationID,
-            content: processedContent,
-            username: username
+            content: historyContent,
+            username: handle,
+            askedMessageID: origin.askedMessageID
         )
+        
+        let messages: [ChatMessage] = hasAttachments
+            ? Array(snapshot.messages.dropLast()) + [ChatMessage.userContent(processedContent, username: handle)]
+            : snapshot.messages
+        
         let provider = snapshot.provider
         
         do {
@@ -96,179 +263,66 @@ final class GenerationCoordinator: @unchecked Sendable {
             
             let plan = ProviderGenerationPlan(
                 model: snapshot.model,
-                messages: snapshot.messages,
+                messages: messages,
                 temperature: snapshot.temperature,
                 includeUsage: snapshot.options.showStats || snapshot.options.showCost,
-                reasoningEnabled: snapshot.options.reasoningEnabled
+                reasoningEffort: snapshot.options.reasoningEffort,
+                providerRouting: snapshot.providerRouting
             )
             
             let request = gateway.makeRequest(plan)
             let fallbackModel = gateway.fallbackModel(for: plan)
-            
+
+            let sponsorLine = await sponsorCreditLine(
+                chatID: chatKey.chatID,
+                asker: askerKey,
+                isPrivate: origin.isPrivate
+            )
+
             try await streamReply(
                 gateway: gateway,
                 request: request,
                 fallbackModel: fallbackModel,
                 options: snapshot.options,
                 chatKey: chatKey,
-                replyToMessageID: message.message_id,
-                generationID: generationID
+                replyToMessageID: origin.replyToMessageID,
+                generationID: generationID,
+                isPrivateChat: origin.isPrivate,
+                adEligible: adEligible,
+                billedTo: billedTo,
+                sponsorLine: sponsorLine,
+                premiumTicket: premiumTicket,
+                lastPremiumCall: lastPremiumCall
             )
         } catch {
             await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            await sessionRegistry.finish(generationID: generationID)
+            await refundPremium(premiumTicket)
+            await finishGeneration(generationID)
             throw error
         }
     }
-    
-    private func streamReply(
-        gateway: ProviderGatewayPort,
-        request: ProviderGatewayRequest,
-        fallbackModel: String,
-        options: GenerationOptions,
-        chatKey: ChatKey,
-        replyToMessageID: Int,
-        generationID: GenerationID
-    ) async throws {
-        let stopMarkup = InlineKeyboardMarkup(inline_keyboard: [[
-            .init(text: "🛑 СТОП", callback_data: BotCallbackAction.stop(generationID).rawData)
-        ]])
-        let placeholder: TelegramMessage
-        
-        do {
-            placeholder = try await telegram.sendMessage(
-                .init(
+
+    /// Typing runs while the answer has nowhere to appear yet: waiting for a
+    /// slot on the global limiter and for the first placeholder. Once the
+    /// stream starts the visible progress is the draft animation or the
+    /// placeholder being edited, so the caller's `defer` stops it as soon as
+    /// `streamReply` has handed the work to its task.
+    private func startTypingIndicator(chatKey: ChatKey) -> Task<Void, Never> {
+        Task {
+            while !Task.isCancelled {
+                try? await self.telegram.sendChatAction(
                     chatID: chatKey.chatID,
                     threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,
-                    replyTo: replyToMessageID,
-                    text: "Думаю...",
-                    replyMarkup: stopMarkup
+                    action: "typing"
                 )
-            )
-        } catch {
-            await state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            await sessionRegistry.finish(generationID: generationID)
-            throw error
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+            }
         }
-        
-        let logger = self.logger
-        
-        let streamTask = Task<Void, Never> {
-            var accumulator = ""
-            var streamMeta: StreamMeta?
-            var lastLength = 0
-            let clock = ContinuousClock()
-            var lastEdit = clock.now
-            var isCancelled = false
-            
-            do {
-                // A stop callback can arrive in the tiny gap between Task creation and
-                // SessionRegistry.attach(...). If that happens, attach cancels the task.
-                // We must observe cancellation before opening the provider stream so the
-                // stop action remains real and does not briefly start extra work.
-                try Task.checkCancellation()
-                let stream = gateway.stream(request)
-                
-                for try await event in stream {
-                    if Task.isCancelled {
-                        isCancelled = true
-                        break
-                    }
-                    
-                    switch event {
-                    case .text(let chunk):
-                        accumulator += chunk
-                        
-                        if clock.now - lastEdit > .seconds(3) || (accumulator.count - lastLength) > 300 {
-                            do {
-                                try await self.telegram.editMessage(
-                                    .init(
-                                        chatID: chatKey.chatID,
-                                        messageID: placeholder.message_id,
-                                        text: accumulator,
-                                        replyMarkup: stopMarkup
-                                    )
-                                )
-                                lastEdit = clock.now
-                                lastLength = accumulator.count
-                            } catch {
-                                if let telegramError = error as? TelegramAPIError,
-                                   let retryAfter = telegramError.retryAfter {
-                                    try? await Task.sleep(nanoseconds: UInt64(retryAfter) * 1_000_000_000)
-                                } else {
-                                    throw error
-                                }
-                            }
-                        }
-                        
-                    case .meta(let meta):
-                        streamMeta = meta
-                    }
-                }
-            } catch is CancellationError {
-                isCancelled = true
-            } catch {
-                logger.error("stream failed: \(error)")
-                try? await self.telegram.editMessage(
-                    .init(
-                        chatID: chatKey.chatID,
-                        messageID: placeholder.message_id,
-                        text: "❌ Ошибка: \(error)",
-                        replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
-                    )
-                )
-                await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-                await self.sessionRegistry.finish(generationID: generationID)
-                return
-            }
-            
-            if Task.isCancelled {
-                isCancelled = true
-            }
-            
-            let finalText: String
-            if isCancelled {
-                let stopNotice = await self.cancellationNotice(for: generationID)
-                finalText = accumulator.isEmpty
-                ? stopNotice
-                : accumulator + "\n\n" + stopNotice
-            } else {
-                let footer = ResponseFooterFormatter.formatFooter(
-                    meta: streamMeta,
-                    fallbackModel: fallbackModel,
-                    showTokens: options.showStats,
-                    showCost: options.showCost,
-                    showModel: options.showModel
-                ) ?? ""
-                
-                finalText = accumulator.isEmpty
-                ? "Пустой ответ.\(footer)\n\n✅ <b>Ответ завершен.</b>"
-                : accumulator + footer + "\n\n✅ <b>Ответ завершен.</b>"
-            }
-            
-            try? await self.telegram.editMessage(
-                .init(
-                    chatID: chatKey.chatID,
-                    messageID: placeholder.message_id,
-                    text: finalText,
-                    replyMarkup: InlineKeyboardMarkup(inline_keyboard: [])
-                )
-            )
-            
-            if isCancelled {
-                await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            } else if !accumulator.isEmpty {
-                await self.state.appendAssistant(chatKey: chatKey, generationID: generationID, content: accumulator)
-            } else {
-                await self.state.cancelPendingTurn(chatKey: chatKey, generationID: generationID)
-            }
-            await self.sessionRegistry.finish(generationID: generationID)
-        }
-        
-        await sessionRegistry.attach(generationID: generationID, task: streamTask)
     }
-    
-    private func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
+
+    /// Internal, not private: the gate and the offers in +Monetization.swift
+    /// speak to the user through it too.
+    func sendUserFeedback(chatKey: ChatKey, text: String) async throws {
         _ = try await telegram.sendMessage(
             .init(
                 chatID: chatKey.chatID,
@@ -312,12 +366,12 @@ final class GenerationCoordinator: @unchecked Sendable {
         return refs
     }
     
-    private func cancellationNotice(for generationID: GenerationID) async -> String {
+    func cancellationNotice(for generationID: GenerationID) async -> String {
         let reason = await sessionRegistry.cancellationReason(for: generationID) ?? .userRequested
         
         switch reason {
         case .userRequested:
-            return "🛑 <b>Остановлено пользователем.</b>"
+            return "⏹ <i>Остановлено</i>"
         }
     }
 }

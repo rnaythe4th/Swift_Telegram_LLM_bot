@@ -5,7 +5,9 @@ struct ProviderGenerationPlan: Sendable {
     let messages: [ChatMessage]
     let temperature: Float
     let includeUsage: Bool
-    let reasoningEnabled: Bool
+    let reasoningEffort: ReasoningEffort?
+    // OpenRouter upstream provider pin (provider routing); nil = let OpenRouter route.
+    let providerRouting: String?
 }
 
 protocol ProviderGatewayPort: Sendable {

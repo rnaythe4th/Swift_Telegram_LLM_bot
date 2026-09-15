@@ -19,6 +19,14 @@ actor SessionRegistry {
         return generationID
     }
     
+    /// Hands the registry the task that does the streaming.
+    ///
+    /// A generation is registered before it has a task: the slot on the global
+    /// limiter, the placeholder message and the draft handshake all happen
+    /// first, and the stop button lives on that placeholder. So «Стоп» can
+    /// arrive while `task` is still nil — `cancel` then records the reason and
+    /// has nothing to cancel. Without the check below the answer would be
+    /// generated, billed and posted after the user was told «Остановлено».
     func attach(generationID: GenerationID, task: Task<Void, Never>) {
         guard var existing = sessions[generationID] else {
             task.cancel()
@@ -26,6 +34,7 @@ actor SessionRegistry {
         }
         existing.task = task
         sessions[generationID] = existing
+        if cancellationReasons[generationID] != nil { task.cancel() }
     }
     
     func finish(generationID: GenerationID) {
@@ -33,18 +42,26 @@ actor SessionRegistry {
         sessions[generationID] = nil
     }
     
+    /// Cancels a generation and hands back its chat. The session stays
+    /// registered until the stream task actually unwinds through `finish` —
+    /// dropping it here would make `activeCount` read zero while the answer is
+    /// still being written to history, and graceful shutdown waits on that
+    /// count. A second tap on «Стоп» finds the session already cancelled and
+    /// gets nil, so the chat is not told twice.
     func cancel(generationID: GenerationID, reason: CancellationReason = .userRequested) -> ChatKey? {
-        if let session = sessions[generationID] {
-            cancellationReasons[generationID] = reason
-            session.task?.cancel()
-            sessions[generationID] = nil
-            return session.chatKey
-        }
-        
-        return nil
+        guard let session = sessions[generationID], cancellationReasons[generationID] == nil else { return nil }
+        cancellationReasons[generationID] = reason
+        session.task?.cancel()
+        return session.chatKey
     }
     
     func cancellationReason(for generationID: GenerationID) -> CancellationReason? {
         cancellationReasons[generationID]
+    }
+
+    /// Number of in-flight generations — used by graceful shutdown to wait for
+    /// streams to complete and by /metrics.
+    var activeCount: Int {
+        sessions.count
     }
 }

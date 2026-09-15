@@ -5,26 +5,35 @@ import NIOFoundationCompat
 enum RequestMethod {
     case get
     case post
+    case patch
+    case delete
 }
 
-struct AnyEncodable: Encodable, @unchecked Sendable {
-    private let encodeImpl: (Encoder) throws -> Void
-    
-    init<T: Encodable>(_ value: T) {
-        self.encodeImpl = value.encode(to:)
+/// Type-erased request body.
+///
+/// The initialiser takes `Encodable & Sendable`, not just `Encodable`: the
+/// closure it stores captures the value and the whole spec is handed to another
+/// task, so a non-`Sendable` payload here was a genuine data race wearing an
+/// `@unchecked` badge. Narrowing the requirement lets the compiler check it,
+/// and makes `HTTPBody` and `HTTPRequestSpec` plain `Sendable` in turn.
+struct AnyEncodable: Encodable, Sendable {
+    private let encodeImpl: @Sendable (Encoder) throws -> Void
+
+    init<T: Encodable & Sendable>(_ value: T) {
+        self.encodeImpl = { encoder in try value.encode(to: encoder) }
     }
-    
+
     func encode(to encoder: Encoder) throws {
         try encodeImpl(encoder)
     }
 }
 
-enum HTTPBody: @unchecked Sendable {
+enum HTTPBody: Sendable {
     case none
     case json(AnyEncodable)
 }
 
-struct HTTPRequestSpec: @unchecked Sendable {
+struct HTTPRequestSpec: Sendable {
     var url: String
     var method: RequestMethod = .get
     var headers: [String: String] = [:]
@@ -44,7 +53,9 @@ enum NetworkTransportError: Error, LocalizedError {
     case invalidStatus(HTTPResponseRaw)
     case decodeFailure(typeName: String, bodyPreview: String, underlying: Error)
     case encodeFailure(Error)
-    
+    /// An event stream sent more than `limit` bytes without ever ending a line.
+    case streamOverflow(limit: Int)
+
     var errorDescription: String? {
         switch self {
         case .invalidStatus(let response):
@@ -54,6 +65,8 @@ enum NetworkTransportError: Error, LocalizedError {
             return "Failed to decode \(typeName). Body: \(bodyPreview). Underlying: \(underlying)"
         case .encodeFailure(let underlying):
             return "Failed to encode request body: \(underlying)"
+        case .streamOverflow(let limit):
+            return "Event stream exceeded \(limit) bytes without a line break"
         }
     }
 }
@@ -62,7 +75,7 @@ enum SharedHTTPClient {
     static let instance = HTTPClient(eventLoopGroupProvider: .singleton)
 }
 
-final class NetworkClient: @unchecked Sendable {
+final class NetworkClient: Sendable {
     private let httpClient: HTTPClient
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -113,7 +126,13 @@ final class NetworkClient: @unchecked Sendable {
         return raw
     }
     
-    func ssePayloads(_ spec: HTTPRequestSpec) -> AsyncThrowingStream<String, Error> {
+    /// The event stream of `spec`, framed.
+    ///
+    /// Carries keep-alives as well as payloads: a caller that measures silence
+    /// has to be able to tell "nothing is being sent" from "nothing worth
+    /// decoding is being sent", and those look identical once the comments are
+    /// thrown away.
+    func ssePayloads(_ spec: HTTPRequestSpec) -> AsyncThrowingStream<ServerSentEventParser.Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -135,52 +154,26 @@ final class NetworkClient: @unchecked Sendable {
                         )
                     }
                     
-                    var accumulator = Data()
-                    var eventDataLines: [String] = []
-                    
-                    let flush: () -> Void = {
-                        guard !eventDataLines.isEmpty else { return }
-                        let payload = eventDataLines.joined(separator: "\n")
-                        eventDataLines.removeAll(keepingCapacity: true)
-                        continuation.yield(payload)
-                    }
-                    
+                    // Framing lives in its own type (and its own tests): a
+                    // chunk boundary inside a line, inside a UTF-8 sequence or
+                    // between `\r` and `\n` is what silently eats tokens.
+                    var parser = ServerSentEventParser(bufferLimit: spec.maxBodyBytes)
+
                     for try await var part in response.body {
                         if Task.isCancelled { break }
-                        if let bytes = part.readBytes(length: part.readableBytes) {
-                            accumulator.append(contentsOf: bytes)
-                        }
-                        
-                        while let lineEnd = accumulator.firstRange(of: Data([0x0A])) {
-                            var lineData = accumulator.subdata(in: 0..<lineEnd.lowerBound)
-                            accumulator.removeSubrange(0..<lineEnd.upperBound)
-                            
-                            if lineData.last == 0x0D {
-                                lineData.removeLast()
+                        guard let bytes = part.readBytes(length: part.readableBytes) else { continue }
+                        do {
+                            for payload in try parser.consume(Data(bytes)) {
+                                continuation.yield(payload)
                             }
-                            
-                            guard let line = String(data: lineData, encoding: .utf8) else { continue }
-                            if line.isEmpty {
-                                flush()
-                                continue
-                            }
-                            
-                            guard line.hasPrefix("data:") else { continue }
-                            let payloadLine = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                            eventDataLines.append(payloadLine)
+                        } catch let overflow as ServerSentEventParser.BufferOverflow {
+                            throw NetworkTransportError.streamOverflow(limit: overflow.limit)
                         }
                     }
-                    
-                    if !accumulator.isEmpty,
-                       var tail = String(data: accumulator, encoding: .utf8) {
-                        if tail.hasSuffix("\r") { tail.removeLast() }
-                        if tail.hasPrefix("data:") {
-                            let payloadLine = tail.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                            eventDataLines.append(payloadLine)
-                        }
+
+                    for payload in parser.finish() {
+                        continuation.yield(payload)
                     }
-                    
-                    flush()
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()
@@ -202,6 +195,10 @@ final class NetworkClient: @unchecked Sendable {
             request.method = .GET
         case .post:
             request.method = .POST
+        case .patch:
+            request.method = .PATCH
+        case .delete:
+            request.method = .DELETE
         }
         
         for (name, value) in spec.headers {

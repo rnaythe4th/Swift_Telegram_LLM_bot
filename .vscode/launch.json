@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:LLM_chat_bot}",
+            "name": "Debug LLM_chat_bot",
+            "target": "LLM_chat_bot",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug LLM_chat_bot"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:LLM_chat_bot}",
+            "name": "Release LLM_chat_bot",
+            "target": "LLM_chat_bot",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release LLM_chat_bot"
+        }
+    ]
+}
