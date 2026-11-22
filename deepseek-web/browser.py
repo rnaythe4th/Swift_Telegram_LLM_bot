@@ -150,6 +150,34 @@ for (let depth = 0; parent && depth < 4; ++depth, parent = parent.parentElement)
 return [];
 """
 
+READ_TOGGLES = """
+const buttons = Array.from(document.querySelectorAll('button, [role="button"], [role="switch"], .ds-toggle-button'))
+  .filter(node => node.getClientRects().length && getComputedStyle(node).visibility === 'visible');
+const candidates = buttons.map(button => ({
+  button,
+  labels: [button.getAttribute('aria-label'), button.innerText, button.getAttribute('title')]
+    .map(label => (label || '').trim().toLowerCase())
+}));
+
+function selected(button) {
+  for (const key of ['aria-pressed', 'aria-checked', 'data-state', 'data-active']) {
+    const value = button.getAttribute(key);
+    if (['true', 'checked', 'on', 'active'].includes(value)) return true;
+    if (['false', 'unchecked', 'off', 'inactive'].includes(value)) return false;
+  }
+  const classes = button.classList;
+  if (classes.contains('ds-button--selected') || classes.contains('ds-toggle-button--selected')) return true;
+  if (classes.contains('ds-button--unselected') || classes.contains('ds-toggle-button--unselected')) return false;
+  return null;
+}
+
+return Array.from(arguments).map(names => {
+  const match = candidates.find(({labels}) => labels.some(label =>
+    names.some(name => label === name || label.startsWith(name + ' ('))));
+  return match ? {button: match.button, selected: selected(match.button)} : null;
+});
+"""
+
 
 @dataclass
 class BrowserFailure(Exception):
@@ -361,52 +389,36 @@ class Browser:
             stop.wait(min(0.15, max(0, deadline - time.monotonic())))
         raise BrowserFailure(on_timeout)
 
+    def _chat_url(self, remote_id):
+        return self.home + (CHAT_PATH.lstrip("/") + remote_id if remote_id else "")
+
     def _go(self, remote_id):
         driver = self._open()
-        driver.get(self.home + (CHAT_PATH.lstrip("/") + remote_id if remote_id else ""))
+        driver.get(self._chat_url(remote_id))
         return driver
 
     def _read(self, driver):
         return driver.execute_script(READ_TURNS, STOP)
 
-    def _find_toggle(self, driver, names):
-        for button in self._elements(driver, 'button, [role="button"], [role="switch"], .ds-toggle-button'):
-            values = (button.get_attribute("aria-label"), button.text, button.get_attribute("title"))
-            for value in values:
-                label = (value or "").strip().casefold()
-                if any(label == name or label.startswith(name + " (") for name in names):
-                    return button
-        return None
-
-    @staticmethod
-    def _toggle_state(button):
-        if button is None:
-            return None
-        for key in ("aria-pressed", "aria-checked", "data-state", "data-active"):
-            if (value := button.get_dom_attribute(key)) in ("true", "checked", "on", "active"):
-                return True
-            if value in ("false", "unchecked", "off", "inactive"):
-                return False
-        classes = set((button.get_dom_attribute("class") or "").split())
-        if {"ds-button--selected", "ds-toggle-button--selected"} & classes:
-            return True
-        if {"ds-button--unselected", "ds-toggle-button--unselected"} & classes:
-            return False
-        return None
+    def _read_toggles(self, driver, *names):
+        return driver.execute_script(READ_TOGGLES, *names)
 
     def _set_toggle(self, driver, names, desired, stop, deadline):
-        button = self._wait(stop, deadline, lambda: self._find_toggle(driver, names), "unknownUI")
-        current = self._toggle_state(button)
-        if current is None:
+        toggle = self._wait(stop, deadline, lambda: self._read_toggles(driver, names)[0], "unknownUI")
+        if toggle["selected"] is None:
             raise BrowserFailure("unknownUI")
-        if current is not desired:
-            button.click()
-            self._wait(stop, deadline, lambda: True if self._toggle_state(self._find_toggle(driver, names)) is desired else None,
-                       "unknownUI")
+        if toggle["selected"] is not desired:
+            toggle["button"].click()
+
+            def applied():
+                current, = self._read_toggles(driver, names)
+                return True if current and current["selected"] is desired else None
+
+            self._wait(stop, deadline, applied, "unknownUI")
 
     def _toggles_match(self, driver, deep_think):
-        return (self._toggle_state(self._find_toggle(driver, DEEPTHINK)) is deep_think
-                and self._toggle_state(self._find_toggle(driver, SEARCH)) is False)
+        think, search = self._read_toggles(driver, DEEPTHINK, SEARCH)
+        return think and search and think["selected"] is deep_think and search["selected"] is False
 
     def _view_for(self, driver, expected_id, expected_tail):
         actual_id = self._identity(driver)
@@ -429,14 +441,24 @@ class Browser:
         return composer, len(turns)
 
     def prepare(self, request, stop):
+        from selenium.common.exceptions import StaleElementReferenceException
+
         deadline = time.monotonic() + self.prepare_seconds
-        driver = self._go(request.remote_id)
+        driver = self._open()
         timeout = "chatUnavailable" if request.remote_id else "unknownUI"
 
         def view():
             return self._view_for(driver, request.remote_id, request.tail)
 
-        self._wait(stop, deadline, view, timeout)
+        loaded = None
+        if request.remote_id and driver.current_url == self._chat_url(request.remote_id):
+            try:
+                loaded = view()
+            except StaleElementReferenceException:
+                pass
+        if loaded is None:
+            driver.get(self._chat_url(request.remote_id))
+            self._wait(stop, deadline, view, timeout)
         deep_think = self.deepthink if request.deep_think is None else request.deep_think
         self._set_toggle(driver, DEEPTHINK, deep_think, stop, deadline)
         self._set_toggle(driver, SEARCH, False, stop, deadline)
@@ -520,12 +542,13 @@ class Browser:
             if result_id:
                 remote_id = result_id
             state = self._read(driver)
-            answer, confirmed = self._match(state, request.prompt, prepared)
+            text, confirmed, complete = self._match(state, request.prompt, prepared)
             accepted |= confirmed
-            progress(remote_id, accepted)
-            self._identity(driver)
-            if remote_id and answer:
-                return Answer(remote_id, tail_for(state["turns"]), answer)
+            if self._identity(driver) != result_id:
+                return None
+            if result_id and complete:
+                return Answer(result_id, tail_for(state["turns"]), text)
+            progress(remote_id, accepted, text if result_id else None)
             return None
 
         try:
@@ -555,19 +578,20 @@ class Browser:
         turns = state["turns"]
         count = prepared.count
         if len(turns) < count or tail_for(turns[:count]) != prepared.tail:
-            return None, False
+            return None, False, False
         new = turns[count:]
         if (not new or new[0]["role"] != "user"
                 or new[0]["text"].replace("\r\n", "\n").strip() != prompt.replace("\r\n", "\n").strip()):
-            return None, False
+            return None, False, False
         if len(new) > 2:
             raise BrowserFailure("uncertain", accepted=True)
-        if len(new) != 2 or new[1]["role"] != "assistant" or not new[1]["complete"] or state["stopping"]:
-            return None, True
+        if len(new) != 2 or new[1]["role"] != "assistant":
+            return None, True, False
         answer = new[1]["text"]
-        if not answer or len(answer.encode()) > MAX_RESPONSE_BYTES:
+        complete = new[1]["complete"] and not state["stopping"]
+        if (complete and not answer) or len(answer.encode()) > MAX_RESPONSE_BYTES:
             raise BrowserFailure("uncertain", accepted=True)
-        return answer, True
+        return answer or None, True, complete
 
     def reconcile(self, request, stop, progress):
         if not request.remote_id:
@@ -581,9 +605,9 @@ class Browser:
             if self._identity(driver) != request.remote_id:
                 raise BrowserFailure("uncertain")
             state = self._read(driver)
-            answer, accepted = self._match(state, request.prompt, prepared)
+            answer, accepted, complete = self._match(state, request.prompt, prepared)
             progress(request.remote_id, accepted)
-            if answer:
+            if complete:
                 return Answer(request.remote_id, tail_for(state["turns"]), answer)
             return None
 

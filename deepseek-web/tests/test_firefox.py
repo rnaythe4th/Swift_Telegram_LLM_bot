@@ -55,8 +55,8 @@ class FirefoxTest(unittest.TestCase):
         return Request(uuid4(), self.epoch, None, previous.remote_id if previous else None,
                        previous.tail if previous else None, prompt)
 
-    def track(self, remote_id, accepted):
-        self.progress.append((remote_id, accepted))
+    def track(self, remote_id, accepted, text=None):
+        self.progress.append((remote_id, accepted, text))
 
     def run_turn(self, request):
         preparation = self.browser.prepare(request, self.stop)
@@ -96,6 +96,14 @@ class FirefoxTest(unittest.TestCase):
                 answer = self.run_turn(self.request("synthetic input"))
                 self.assertTrue(answer.text.endswith(" / 1 / synthetic input"))
 
+    def test_reports_growing_answer_before_completion(self):
+        self.site.mode = "streaming"
+        answer = self.run_turn(self.request("stream this"))
+        partials = {text for remote_id, accepted, text in self.progress
+                    if remote_id == answer.remote_id and accepted and text}
+        self.assertEqual(partials, {"First fragment", "First fragment < & next"})
+        self.assertTrue(answer.text.endswith(" / 1 / stream this"))
+
     def test_deep_think_overrides_worker_default_per_turn(self):
         previous = None
         for choice, default, expected in ((False, True, False), (True, False, True), (None, True, True)):
@@ -103,13 +111,14 @@ class FirefoxTest(unittest.TestCase):
                 self.browser.deepthink = default
                 request = replace(self.request("synthetic input", previous), deep_think=choice)
                 previous = self.run_turn(request)
-                toggle = self.browser._find_toggle(self.browser.session[0], DEEPTHINK)
-                self.assertIs(self.browser._toggle_state(toggle), expected)
+                toggle, = self.browser._read_toggles(self.browser.session[0], DEEPTHINK)
+                self.assertIs(toggle["selected"], expected)
 
     def test_deep_think_change_after_prepare_is_rejected_before_send(self):
         request = replace(self.request("synthetic input"), deep_think=True)
         prepared = self.browser.prepare(request, self.stop)
-        self.browser._find_toggle(self.browser.session[0], DEEPTHINK).click()
+        toggle, = self.browser._read_toggles(self.browser.session[0], DEEPTHINK)
+        toggle["button"].click()
         with self.assertRaises(BrowserFailure) as error:
             self.browser.send(request, prepared, self.stop, self.track)
         self.assertEqual(error.exception.status, "unknownUI")

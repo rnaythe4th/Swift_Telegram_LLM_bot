@@ -14,6 +14,7 @@ struct EditMessageRequest: Sendable {
     let messageID: Int
     let text: String
     let replyMarkup: InlineKeyboardMarkup?
+    var isPlainText = false
 }
 
 struct SendMessageDraftRequest: Sendable {

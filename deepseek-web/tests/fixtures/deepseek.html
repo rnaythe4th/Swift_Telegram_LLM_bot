@@ -140,12 +140,18 @@
     user(text);
     input.value = '';
     stop.hidden = false;
-    const wrap = answer(response, false);
+    const streaming = mode === 'streaming';
+    const wrap = answer(streaming ? 'First fragment' : response, false);
+    if (streaming) {
+      const content = wrap.querySelector('.ds-assistant-message-main-content p');
+      setTimeout(() => { content.textContent = 'First fragment < & next'; }, 400);
+      setTimeout(() => { content.textContent = response; }, 850);
+    }
     if (!stalled) {
       setTimeout(() => {
         stop.hidden = true;
         complete(wrap);
-      }, 150);
+      }, streaming ? 850 : 150);
     }
   }
 

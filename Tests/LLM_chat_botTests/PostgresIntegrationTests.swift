@@ -163,9 +163,19 @@ final class PostgresIntegrationTests: XCTestCase {
         for (id, key, text) in [(1, a, "один"), (2, a, "два"), (3, b, "три")] {
             let admitted = await turn(id, key, "@testbot " + text)
             XCTAssertEqual(admitted, true)
-            let call = await telegramDouble.waitForCall("sendMessage", containing: "turn \(id)")
+            if id == 1 {
+                let opening = await telegramDouble.waitForCall("sendMessage", containing: "открывает диалог")
+                XCTAssertEqual(opening?.buttonLabels, ["⏹ Остановить"])
+                let preview = await telegramDouble.waitForCall("editMessageText", containing: "First fragment")
+                XCTAssertEqual(preview?.text, "First fragment < &")
+                XCTAssertNil(preview?.parseMode)
+                XCTAssertEqual(preview?.buttonLabels, ["⏹ Остановить"])
+                await worker.completeFirstTurn()
+            }
+            let call = await telegramDouble.waitForCall("editMessageText", containing: "turn \(id)")
             XCTAssertEqual(call?.text, "turn \(id) < &")
             XCTAssertNil(call?.parseMode)
+            XCTAssertEqual(call?.buttonLabels, [])
         }
         let opened = await worker.turns()
         XCTAssertEqual(opened.map(\.remoteChatID), [nil, "fixture-1", nil])
@@ -178,10 +188,12 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertEqual(quota, true)
         let first = await telegramDouble.waitForCall("sendMessage", containing: "исчерпал лимит")
         XCTAssertNotNil(first)
+        let sendsBeforePausedTurn = await telegramDouble.calls("sendMessage").count
         let paused = await turn(5, a, "@testbot пауза")
         XCTAssertEqual(paused, true)
-        let messages = await telegramDouble.waitForCalls("sendMessage", count: 5)
+        let messages = await telegramDouble.waitForCalls("sendMessage", count: sendsBeforePausedTurn + 1)
         XCTAssertEqual(messages.last?.text, "DeepSeek Web исчерпал лимит запросов. Попробуйте позже.")
+        XCTAssertFalse(messages.contains { $0.contains("turn 1") })
         XCTAssertFalse(messages.contains { $0.contains("fixture promotion") })
         let clicks = await worker.turns()
         XCTAssertEqual(clicks.count, 4)
@@ -786,6 +798,7 @@ final class PostgresIntegrationTests: XCTestCase {
 private actor WebWorkerFixture: DeepSeekWebGateway {
     private var requests: [DeepSeekWebWorkerRequest] = []
     private var limited = false
+    private var firstTurn: CheckedContinuation<Void, Never>?
 
     func health() -> DeepSeekWebWorkerHealth {
         .init(version: 1, status: .ready, accountMarker: nil)
@@ -795,22 +808,33 @@ private actor WebWorkerFixture: DeepSeekWebGateway {
 
     func turns() -> [DeepSeekWebWorkerRequest] { requests }
 
-    func perform(_ action: DeepSeekWebWorkerAction, _ request: DeepSeekWebWorkerRequest) -> DeepSeekWebWorkerResponse {
+    func completeFirstTurn() {
+        firstTurn?.resume()
+        firstTurn = nil
+    }
+
+    func perform(_ action: DeepSeekWebWorkerAction, _ request: DeepSeekWebWorkerRequest) async -> DeepSeekWebWorkerResponse {
         if action == .send {
             requests.append(request)
+            if requests.count == 1 {
+                await withCheckedContinuation { firstTurn = $0 }
+            }
         }
+        let streaming = action == .status && firstTurn != nil && request.operationID == requests.first?.operationID
         let status: DeepSeekWebWorkerStatus = switch action {
         case .prepare: .prepared
-        case .status, .reconcile: .notAccepted
+        case .status: streaming ? .inProgress : .notAccepted
+        case .reconcile: .notAccepted
         case .cancel: .cancelled
         case .send: limited ? .quota : .completed
         }
         let completed = status == .completed
         return .init(
-            version: 1, operationID: request.operationID, status: status, accepted: completed,
-            remoteChatID: completed ? (request.remoteChatID ?? "fixture-\(requests.count)") : nil,
+            version: 1, operationID: request.operationID, status: status, accepted: completed || streaming,
+            remoteChatID: completed || streaming ? (request.remoteChatID ?? "fixture-\(requests.count)") : nil,
             remoteTail: completed ? "tail-\(requests.count)" : nil,
-            text: completed ? "turn \(requests.count) < &" : nil, retryAfterSeconds: nil
+            text: completed ? "turn \(requests.count) < &" : nil, retryAfterSeconds: nil,
+            partialText: streaming ? "First fragment < &" : nil
         )
     }
 }

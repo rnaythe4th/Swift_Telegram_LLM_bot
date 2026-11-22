@@ -276,12 +276,12 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
         // stops updating. Callers budget with `MessageSplitter`, which already
         // accounts for escaping, so this only trims pathological input — and
         // trimming shows most of the answer where the alternative shows none.
-        let html = Self.chunkFittingHTML(request.text).html
+        let text = request.isPlainText ? request.text : Self.chunkFittingHTML(request.text).html
         let body = TelegramEditMessageTextBody(
             chat_id: request.chatID.value,
             message_id: request.messageID,
-            text: html,
-            parse_mode: "HTML",
+            text: text,
+            parse_mode: request.isPlainText ? nil : "HTML",
             reply_markup: request.replyMarkup
         )
         

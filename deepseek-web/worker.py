@@ -58,6 +58,7 @@ class Operation:
     deadline: float = 0
     candidate_id: str | None = None
     accepted: bool = False
+    partial_text: str | None = None
 
 
 def check_version(payload):
@@ -193,7 +194,7 @@ class Worker:
                 if self.active and self.active.phase == "prepared" and self.active.deadline <= now:
                     self._release_prepared("cancelled")
                 if (self.active or self.closing_browser or self.browser.session is None
-                        or now - self.last_activity < self.idle_seconds):
+                        or self.idle_seconds is None or now - self.last_activity < self.idle_seconds):
                     self.lock.wait(0.5)
                     continue
                 self.closing_browser = True
@@ -210,15 +211,17 @@ class Worker:
         self.last_activity = time.monotonic()
         self.lock.notify_all()
 
-    def _progress(self, operation, remote_id, accepted):
+    def _progress(self, operation, remote_id, accepted, partial_text):
         with self.lock:
             operation.candidate_id = remote_id or operation.candidate_id
             operation.accepted |= accepted
+            operation.partial_text = partial_text if remote_id and accepted else None
 
     def _in_progress(self, request, operation):
         phase = "prepared" if operation.phase == "prepared" else "inProgress"
+        partial = operation.partial_text if operation.phase == "sending" and not operation.stop.is_set() else None
         return reply(request, phase, operation.accepted, remoteChatID=operation.candidate_id,
-                     mayHaveSent=operation.phase in {"sending", "reconciling"})
+                     partialText=partial, mayHaveSent=operation.phase in {"sending", "reconciling"})
 
     def perform(self, request, action):
         oversized = request.prompt and len(request.prompt.encode()) > MAX_PROMPT_BYTES
@@ -305,8 +308,8 @@ class Worker:
         start = time.monotonic()
         result = reply(request, "unavailable")
 
-        def update(remote_id, accepted):
-            self._progress(operation, remote_id, accepted)
+        def update(remote_id, accepted, partial_text=None):
+            self._progress(operation, remote_id, accepted, partial_text)
 
         try:
             if operation.phase == "preparing":
@@ -316,6 +319,7 @@ class Worker:
                         operation.prepared = prepared
                         operation.phase = "prepared"
                         operation.deadline = time.monotonic() + self.prepared_ttl
+                        LOG.info("operation %s preparing prepared %.2fs", request.id, time.monotonic() - start)
                         return self._in_progress(request, operation)
                 raise BrowserFailure("cancelled")
 
@@ -578,7 +582,9 @@ def main():
     if any(not os.access(binary, os.X_OK) for binary in (browser.firefox, browser.geckodriver)):
         raise SystemExit("Firefox ESR or geckodriver is missing")
     port = integer_env("DEEPSEEK_WEB_WORKER_PORT", 8765, 1, 65535)
-    worker = Worker(browser, idle_seconds=integer_env("DEEPSEEK_WEB_IDLE_SECONDS", 60, 0, 3600))
+    idle_seconds = (None if os.getenv("DEEPSEEK_WEB_IDLE_SECONDS") == "never"
+                    else integer_env("DEEPSEEK_WEB_IDLE_SECONDS", 60, 0, 3600))
+    worker = Worker(browser, idle_seconds=idle_seconds)
     server = Server(port, os.environ["DEEPSEEK_WEB_WORKER_TOKEN"], worker)
 
     def terminate(signum, frame):

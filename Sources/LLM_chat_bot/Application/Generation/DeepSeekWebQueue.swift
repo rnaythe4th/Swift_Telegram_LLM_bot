@@ -8,9 +8,17 @@ actor DeepSeekWebQueue {
     private struct ActiveRequest {
         let key: ChatKey
         let operationID: UUID
-        let request: DeepSeekWebWorkerRequest
+        var request: DeepSeekWebWorkerRequest?
         var stopRequested = false
     }
+
+    private struct PreviewPart {
+        let messageID: Int
+        var text: String
+    }
+
+    private static let openingMessage = "🌐 DeepSeek Web открывает диалог…"
+    private static let waitingMessage = "💭 DeepSeek Web отвечает…"
 
     private let store: ChatContextStore
     private let persistence: PersistenceCoordinator?
@@ -25,7 +33,7 @@ actor DeepSeekWebQueue {
     private var runner: Task<Void, Never>?
     private var activeRequest: ActiveRequest?
     private var inAdmission = 0
-    private var deliveries: [ChatKey: Task<TelegramMessage, Error>] = [:]
+    private var deliveries: [ChatKey: Task<Void, Never>] = [:]
 
     private let queueLimit = 16
     private let perChatLimit = 3
@@ -119,12 +127,14 @@ actor DeepSeekWebQueue {
         guard let activeRequest, activeRequest.key == chatKey, activeRequest.operationID == generationID.raw,
               !activeRequest.stopRequested else { return false }
         self.activeRequest?.stopRequested = true
-        _ = try? await gateway.perform(.cancel, activeRequest.request)
+        if let request = activeRequest.request {
+            _ = try? await gateway.perform(.cancel, request)
+        }
         return true
     }
 
     func waitForDelivery(chatKey: ChatKey) async {
-        _ = try? await deliveries[chatKey]?.value
+        await deliveries[chatKey]?.value
     }
 
     private func drain() async {
@@ -230,91 +240,71 @@ actor DeepSeekWebQueue {
             try await fail(Self.message(.uncertain), key, queued, rotate: true, persistence: persistence)
             return
         }
-        let typing = Task { [telegram] in
-            while !Task.isCancelled {
-                try? await telegram.sendChatAction(chatID: key.chatID, threadID: queued.telegramThreadID, action: "typing")
-                try? await Task.sleep(for: .seconds(4))
+        activeRequest = ActiveRequest(key: key, operationID: queued.id)
+        let markup = Self.stopMarkup(for: queued)
+        let notice = Task { [telegram] () -> Int? in
+            try? await telegram.sendMessage(.init(
+                chatID: key.chatID, threadID: queued.telegramThreadID, replyTo: queued.replyToMessageID,
+                text: Self.openingMessage, replyMarkup: markup
+            )).message_id
+        }
+        var noticeRecorded = false
+        defer {
+            activeRequest = nil
+            if !noticeRecorded {
+                Task { [telegram] in
+                    if let id = await notice.value { try? await telegram.deleteMessage(chatID: key.chatID, messageID: id) }
+                }
             }
         }
-        defer { typing.cancel() }
         var context = state
         if context.remoteUnits >= remoteUnitLimit { context.rotate() }
-        var prepared = try await prepare(queued, state: context, account: account)
-        if prepared.1.status == .chatUnavailable, context.remoteChatID != nil, !prepared.1.accepted {
+        var prepared = await prepare(queued, state: context, account: account)
+        if prepared.1.status == .chatUnavailable, context.remoteChatID != nil, !prepared.1.accepted,
+           activeRequest?.stopRequested == false, canRun, !Task.isCancelled, await isCurrent(key, queued) {
             context.rotate()
-            prepared = try await prepare(queued, state: context, account: account)
+            prepared = await prepare(queued, state: context, account: account)
         }
 
         let (operation, status) = prepared
+        let request = request(for: operation, account: account)
+        if activeRequest?.stopRequested == true {
+            _ = try? await gateway.perform(.cancel, request)
+            try await fail(Self.message(.cancelled), key, queued, persistence: persistence)
+            return
+        }
         guard status.status == .prepared else {
             try await consume(status, key, operation, account: account, persistence: persistence)
             return
         }
-        let request = request(for: operation, account: account)
+        var staged = operation
+        if let id = await notice.value { staged.previewMessageIDs = [id] }
+        let sending = staged
         do {
-            guard canRun, await store.mutateWeb(chatKey: key, contextEpoch: queued.contextEpoch, { state in
-                if state.remoteChatID != operation.remoteChatID { state.rotate() }
+            guard canRun, !Task.isCancelled, await store.mutateWeb(chatKey: key, contextEpoch: queued.contextEpoch, { state in
+                if state.remoteChatID != sending.remoteChatID { state.rotate() }
                 state.accountEpoch = account.epoch
-                if let index = state.operations.firstIndex(where: { $0.id == operation.id }) {
-                    state.operations[index] = operation
+                if let index = state.operations.firstIndex(where: { $0.id == sending.id }) {
+                    state.operations[index] = sending
                 }
             }) else { throw DeepSeekWebPersistenceError.superseded }
-            try await persistence.webCheckpoint(chatKey: key, contextEpoch: operation.contextEpoch)
-            guard canRun, await isCurrent(key, operation) else { throw DeepSeekWebPersistenceError.superseded }
+            noticeRecorded = true
+            try await persistence.webCheckpoint(chatKey: key, contextEpoch: sending.contextEpoch)
+            guard canRun, !Task.isCancelled, await isCurrent(key, sending) else { throw DeepSeekWebPersistenceError.superseded }
         } catch {
             _ = try? await gateway.perform(.cancel, request)
+            if !(await isCurrent(key, sending)) { noticeRecorded = false }
             throw error
         }
 
-        activeRequest = ActiveRequest(key: key, operationID: operation.id, request: request)
-        let control = Task { [telegram] () -> Int? in
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return nil }
-            let action = BotCallbackAction.stop(GenerationID(raw: operation.id)).rawData
-            let markup = InlineKeyboardMarkup(inline_keyboard: [[.init(text: "⏹ Остановить", callback_data: action)]])
-            return try? await telegram.sendMessage(.init(
-                chatID: key.chatID, threadID: operation.telegramThreadID, replyTo: operation.replyToMessageID,
-                text: "💭 DeepSeek Web отвечает…", replyMarkup: markup
-            )).message_id
+        if activeRequest?.stopRequested == true {
+            _ = try? await gateway.perform(.cancel, request)
+            try await fail(Self.message(.cancelled), key, sending, persistence: persistence)
+            return
         }
-        defer {
-            activeRequest = nil
-            control.cancel()
-            Task { [telegram] in
-                if let messageID = await control.value {
-                    try? await telegram.deleteMessage(chatID: key.chatID, messageID: messageID)
-                }
-            }
+        let observer = Task {
+            await observeTurn(key, sending, request: request, persistence: persistence)
         }
-
-        let observer = Task { [self, gateway] in
-            var savedCandidate: String?
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                if Task.isCancelled { return }
-                guard canRun, await isCurrent(key, operation) else {
-                    _ = try? await gateway.perform(.cancel, request)
-                    return
-                }
-                if operation.remoteChatID == nil, savedCandidate == nil,
-                   let response = try? await gateway.perform(.status, request),
-                   response.accepted, let candidate = response.remoteChatID,
-                   !Task.isCancelled,
-                   await store.mutateWeb(chatKey: key, contextEpoch: operation.contextEpoch, { state in
-                       guard let index = state.operations.firstIndex(where: { $0.id == operation.id }),
-                             state.operations[index].stage == .sending else { return }
-                       state.operations[index].candidateRemoteChatID = candidate
-                   }) {
-                    do {
-                        try await persistence.webCheckpoint(chatKey: key, contextEpoch: operation.contextEpoch)
-                        savedCandidate = candidate
-                    } catch {
-                        if Task.isCancelled { return }
-                    }
-                }
-            }
-        }
-        defer { observer.cancel() }
         await metrics.increment(MetricName.generationsStarted)
         let outcome: DeepSeekWebWorkerResponse
         do {
@@ -324,15 +314,16 @@ actor DeepSeekWebQueue {
                 Task.detached { _ = try? await gateway.perform(.cancel, request) }
             }
         } catch {
-            guard canRun, await isCurrent(key, operation), !Task.isCancelled else { return }
-            let candidate = await store.webState(chatKey: key)?.operations.first(where: { $0.id == operation.id })?.candidateRemoteChatID
-            outcome = try await reconcile(request, candidateRemoteChatID: candidate)
+            observer.cancel()
+            await observer.value
+            guard canRun, !Task.isCancelled, let current = await currentOperation(key, sending) else { return }
+            outcome = try await reconcile(request, candidateRemoteChatID: current.candidateRemoteChatID)
         }
         observer.cancel()
         await observer.value
-        guard canRun, await isCurrent(key, operation), !Task.isCancelled else { return }
+        guard canRun, !Task.isCancelled, let current = await currentOperation(key, sending) else { return }
         if activeRequest?.stopRequested == true {
-            try await fail(Self.message(.cancelled), key, operation,
+            try await fail(Self.message(.cancelled), key, current,
                            rotate: outcome.accepted || outcome.mayHaveSent == true, persistence: persistence)
             return
         }
@@ -350,13 +341,103 @@ actor DeepSeekWebQueue {
                 throw DeepSeekWebPersistenceError.unavailable
             }
         }
-        try await consume(result, key, operation, account: account, persistence: persistence)
+        try await consume(result, key, current, account: account, persistence: persistence)
+    }
+
+    private func observeTurn(
+        _ key: ChatKey, _ operation: DeepSeekWebOperation, request: DeepSeekWebWorkerRequest,
+        persistence: PersistenceCoordinator
+    ) async {
+        var candidate = operation.remoteChatID
+        var previews = (operation.previewMessageIDs ?? []).map { PreviewPart(messageID: $0, text: Self.openingMessage) }
+        var canPreview = true
+        var showedText = false
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(750))
+            if Task.isCancelled { break }
+            guard canRun, await isCurrent(key, operation) else {
+                _ = try? await gateway.perform(.cancel, request)
+                break
+            }
+            guard activeRequest?.stopRequested == false else { break }
+            guard let response = try? await gateway.perform(.status, request), response.status == .inProgress,
+                  response.accepted, let remoteID = response.remoteChatID, !remoteID.isEmpty else { continue }
+            if let candidate, candidate != remoteID { continue }
+            if candidate == nil {
+                guard await store.webBindingAvailable(chatKey: key, accountEpoch: request.accountEpoch, remoteChatID: remoteID) else {
+                    _ = try? await gateway.perform(.cancel, request)
+                    break
+                }
+                guard !Task.isCancelled, await store.mutateWeb(chatKey: key, contextEpoch: operation.contextEpoch, { state in
+                    guard let index = state.operations.firstIndex(where: { $0.id == operation.id }) else { return }
+                    state.operations[index].candidateRemoteChatID = remoteID
+                }) else { break }
+                do {
+                    try await persistence.webCheckpoint(chatKey: key, contextEpoch: operation.contextEpoch)
+                } catch {
+                    continue
+                }
+                candidate = remoteID
+            }
+
+            guard canPreview else { continue }
+            let parts: [String]
+            if let partial = response.partialText, !partial.isEmpty {
+                parts = Self.parts(partial)
+                showedText = true
+            } else {
+                guard !showedText, !previews.isEmpty else { continue }
+                parts = [Self.waitingMessage]
+            }
+            let previousCount = previews.count
+            let markup = Self.stopMarkup(for: operation)
+            for (index, text) in parts.enumerated() {
+                guard canRun, !Task.isCancelled, activeRequest?.stopRequested == false,
+                      await isCurrent(key, operation) else { break }
+                do {
+                    if index < previews.count {
+                        let preview = previews[index]
+                        guard preview.text != text else { continue }
+                        try await editPreview(preview.messageID, text: text, key: key, markup: index == 0 ? markup : nil)
+                        previews[index].text = text
+                    } else {
+                        let delivery = SendMessageRequest(
+                            chatID: key.chatID, threadID: operation.telegramThreadID,
+                            replyTo: previews.last?.messageID ?? operation.replyToMessageID,
+                            text: text, replyMarkup: index == 0 ? markup : nil, isPlainText: true
+                        )
+                        let message = try await deliverToTelegram(key) { [telegram] in try await telegram.sendMessage(delivery) }
+                        previews.append(.init(messageID: message.message_id, text: text))
+                    }
+                } catch {
+                    canPreview = false
+                    break
+                }
+            }
+
+            if previews.count != previousCount {
+                let ids = previews.map(\.messageID)
+                guard await store.mutateWeb(chatKey: key, contextEpoch: operation.contextEpoch, { state in
+                    guard let index = state.operations.firstIndex(where: { $0.id == operation.id }) else { return }
+                    state.operations[index].previewMessageIDs = ids
+                }) else { break }
+                try? await persistence.webCheckpoint(chatKey: key, contextEpoch: operation.contextEpoch)
+            }
+        }
+        if !(await isCurrent(key, operation)) {
+            removePreviews(previews.map(\.messageID), key: key)
+        }
+    }
+
+    private static func stopMarkup(for operation: DeepSeekWebOperation) -> InlineKeyboardMarkup {
+        let action = BotCallbackAction.stop(GenerationID(raw: operation.id)).rawData
+        return .init(inline_keyboard: [[.init(text: "⏹ Остановить", callback_data: action)]])
     }
 
     private func prepare(
         _ queued: DeepSeekWebOperation, state: DeepSeekWebChatState,
         account: DeepSeekWebAccount
-    ) async throws -> (DeepSeekWebOperation, DeepSeekWebWorkerResponse) {
+    ) async -> (DeepSeekWebOperation, DeepSeekWebWorkerResponse) {
         var operation = queued
         operation.workerOperationID = UUID()
         guard let prompt = DeepSeekWebPrompt.build(operation: queued, state: state) else {
@@ -372,6 +453,7 @@ actor DeepSeekWebQueue {
         operation.stage = .sending
 
         let request = request(for: operation, account: account)
+        activeRequest?.request = request
         let result: DeepSeekWebWorkerResponse
         do {
             result = try await gateway.perform(.prepare, request)
@@ -479,10 +561,19 @@ actor DeepSeekWebQueue {
 
         let parts = Self.parts(response)
         var ids = operation.deliveryMessageIDs
-        for part in parts.dropFirst(ids.count) {
-            let priorIDs = ids
+        let previews = operation.previewMessageIDs ?? []
+        for (index, part) in parts.enumerated().dropFirst(ids.count) {
             guard canRun, await isCurrent(key, operation) else { return }
-            try await updateDelivery(key, operation, ids: priorIDs, inFlight: true, persistence: persistence)
+            if previews.indices.contains(index) {
+                let messageID = previews[index]
+                if try await finalizePreview(messageID, text: part, key: key) {
+                    ids.append(messageID)
+                    try await updateDelivery(key, operation, ids: ids, inFlight: false, persistence: persistence)
+                    continue
+                }
+            }
+
+            try await updateDelivery(key, operation, ids: ids, inFlight: true, persistence: persistence)
             guard canRun, await isCurrent(key, operation) else { return }
             let message: TelegramMessage
             do {
@@ -491,10 +582,7 @@ actor DeepSeekWebQueue {
                     replyTo: ids.last ?? operation.replyToMessageID,
                     text: part, replyMarkup: nil, isPlainText: true
                 )
-                let pending = Task { [telegram] in try await telegram.sendMessage(request) }
-                deliveries[key] = pending
-                defer { deliveries[key] = nil }
-                message = try await pending.value
+                message = try await deliverToTelegram(key) { [telegram] in try await telegram.sendMessage(request) }
             } catch {
                 try await fail("Не удалось доставить весь ответ DeepSeek Web.", key, operation,
                                persistence: persistence, uncertainDelivery: true)
@@ -506,11 +594,47 @@ actor DeepSeekWebQueue {
         guard canRun, await store.finishWebDelivery(chatKey: key, contextEpoch: operation.contextEpoch,
                                                    operationID: operation.id) else { return }
         try await persistence.webCheckpoint(chatKey: key, contextEpoch: operation.contextEpoch)
+        removePreviews(previews.filter { !ids.contains($0) }, key: key)
         let covered = await store.hasSubscriptionCoverage(
             key: operation.requesterID.map(UserKey.identified), userID: operation.requesterID, chatID: key.chatID
         )
         if !covered, canRun, await store.webState(chatKey: key)?.contextEpoch == operation.contextEpoch {
             await GenerationCoordinator.serveAd(state: store, telegram: telegram, chatKey: key, isPrivate: !key.chatID.isGroup)
+        }
+    }
+
+    private func editPreview(
+        _ id: Int, text: String, key: ChatKey, markup: InlineKeyboardMarkup?
+    ) async throws {
+        let request = EditMessageRequest(chatID: key.chatID, messageID: id, text: text, replyMarkup: markup, isPlainText: true)
+        try await deliverToTelegram(key) { [telegram] in try await telegram.editMessage(request) }
+    }
+
+    private func finalizePreview(_ id: Int, text: String, key: ChatKey) async throws -> Bool {
+        do {
+            try await editPreview(id, text: text, key: key, markup: .init(inline_keyboard: []))
+            return true
+        } catch let error as TelegramAPIError where error.statusCode == 400 && (
+            error.descriptionText.contains("message to edit not found") || error.descriptionText.contains("message can't be edited")
+        ) {
+            return false
+        }
+    }
+
+    private func deliverToTelegram<Result: Sendable>(
+        _ key: ChatKey, _ send: @escaping @Sendable () async throws -> Result
+    ) async throws -> Result {
+        // Wait for an in-flight preview edit before publishing the final text.
+        let pending = Task { try await send() }
+        deliveries[key] = Task { _ = try? await pending.value }
+        defer { deliveries[key] = nil }
+        return try await pending.value
+    }
+
+    private func removePreviews(_ ids: [Int], key: ChatKey) {
+        guard !ids.isEmpty else { return }
+        Task { [telegram] in
+            for id in ids { try? await telegram.deleteMessage(chatID: key.chatID, messageID: id) }
         }
     }
 
@@ -531,18 +655,24 @@ actor DeepSeekWebQueue {
         _ text: String, _ key: ChatKey, _ operation: DeepSeekWebOperation, rotate: Bool = false,
         persistence: PersistenceCoordinator, uncertainDelivery: Bool = false
     ) async throws {
-        guard canRun, await store.mutateWeb(chatKey: key, contextEpoch: operation.contextEpoch, { state in
+        guard canRun, let current = await currentOperation(key, operation),
+              await store.mutateWeb(chatKey: key, contextEpoch: operation.contextEpoch, { state in
             if rotate { state.rotate() }
             if uncertainDelivery { state.hasUncertainDelivery = true }
             state.operations.removeAll { $0.id == operation.id }
         }) else { return }
         try await persistence.webCheckpoint(chatKey: key, contextEpoch: operation.contextEpoch)
+        removePreviews((current.previewMessageIDs ?? []).filter { !current.deliveryMessageIDs.contains($0) }, key: key)
         await notify(text, key, operation.telegramThreadID, replyTo: operation.replyToMessageID)
     }
 
     private func isCurrent(_ key: ChatKey, _ operation: DeepSeekWebOperation) async -> Bool {
-        guard let state = await store.webState(chatKey: key), state.contextEpoch == operation.contextEpoch else { return false }
-        return state.operations.contains { $0.id == operation.id }
+        await currentOperation(key, operation) != nil
+    }
+
+    private func currentOperation(_ key: ChatKey, _ operation: DeepSeekWebOperation) async -> DeepSeekWebOperation? {
+        guard let state = await store.webState(chatKey: key), state.contextEpoch == operation.contextEpoch else { return nil }
+        return state.operations.first { $0.id == operation.id }
     }
 
     private func notify(_ text: String, _ key: ChatKey, _ thread: Int64?, replyTo: Int? = nil) async {

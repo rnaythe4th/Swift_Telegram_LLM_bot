@@ -46,7 +46,7 @@ class FakeBrowser:
 
     def send(self, request, prepared, stop, progress):
         self.send_count += 1
-        progress("new-chat", True)
+        progress("new-chat", True, "First fragment")
         self.sending.set()
         while not self.release.wait(0.02):
             if stop.is_set():
@@ -101,17 +101,29 @@ class WorkerTest(unittest.TestCase):
         self.addCleanup(running.join, 5)
         self.addCleanup(self.browser.allow_close.set)
         self.assertTrue(self.browser.sending.wait(2))
-        status = self.worker.perform(self.request, "reconcile")
+        status = self.worker.perform(self.request, "status")
         self.assertEqual(status["status"], "inProgress")
         self.assertTrue(status["accepted"])
         self.assertEqual(status["remoteChatID"], "new-chat")
-        self.assertEqual(self.worker.perform(self.request, "cancel")["status"], "inProgress")
+        self.assertEqual(status["partialText"], "First fragment")
+        cancelled = self.worker.perform(self.request, "cancel")
+        self.assertEqual(cancelled["status"], "inProgress")
+        self.assertNotIn("partialText", cancelled)
         self.assertEqual(self.worker.perform(other, "prepare")["status"], "busy")
         self.browser.allow_close.set()
         running.join(3)
         self.assertFalse(running.is_alive())
         self.assertEqual(self.worker.perform(self.request, "status")["status"], "uncertain")
         self.assertEqual(self.worker.perform(other, "prepare")["status"], "prepared")
+
+    def test_firefox_can_stay_open_until_shutdown(self):
+        self.worker.idle_seconds = None
+        self.assertEqual(self.worker.perform(self.request, "prepare")["status"], "prepared")
+        self.browser.release.set()
+        self.assertEqual(self.worker.perform(self.request, "send")["status"], "completed")
+        self.assertFalse(self.browser.closed.wait(0.65))
+        self.worker.shutdown()
+        self.assertTrue(self.browser.closed.is_set())
 
     def test_deep_think_selection_is_part_of_operation_binding(self):
         enabled = replace(self.request, deep_think=True)
