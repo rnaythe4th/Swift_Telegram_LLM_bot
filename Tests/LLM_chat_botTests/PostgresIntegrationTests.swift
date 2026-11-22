@@ -128,6 +128,10 @@ final class PostgresIntegrationTests: XCTestCase {
         let telegram = TelegramHTTPGateway(network: NetworkClient(), botToken: "test-token",
                                            apiBase: base, rateLimiter: nil, metrics: nil)
         let store = Fixtures.makeStore(ownerUsername: "owner", ownerUserID: 321)
+        await store.identifyUser(userID: 321, username: "owner", firstName: "Owner")
+        _ = await store.activatePaidSubscription(.identified(321))
+        await store.setSelfPromoConfig(.init(enabled: true, text: "fixture promotion", everyNReplies: 1,
+                                            minIntervalSeconds: 0, impressions: 0))
         let metrics = RuntimeMetrics()
         let writer = PersistenceCoordinator(store: store, persistence: persistence, ledger: ledger,
                                             logger: SilentLogger(), metrics: metrics)
@@ -178,6 +182,7 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertEqual(paused, true)
         let messages = await telegramDouble.waitForCalls("sendMessage", count: 5)
         XCTAssertEqual(messages.last?.text, "DeepSeek Web исчерпал лимит запросов. Попробуйте позже.")
+        XCTAssertFalse(messages.contains { $0.contains("fixture promotion") })
         let clicks = await worker.turns()
         XCTAssertEqual(clicks.count, 4)
         let saved = try await writer.webAccount()

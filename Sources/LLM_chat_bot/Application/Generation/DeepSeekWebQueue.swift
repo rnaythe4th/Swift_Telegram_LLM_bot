@@ -506,7 +506,10 @@ actor DeepSeekWebQueue {
         guard canRun, await store.finishWebDelivery(chatKey: key, contextEpoch: operation.contextEpoch,
                                                    operationID: operation.id) else { return }
         try await persistence.webCheckpoint(chatKey: key, contextEpoch: operation.contextEpoch)
-        if canRun, await store.webState(chatKey: key)?.contextEpoch == operation.contextEpoch {
+        let covered = await store.hasSubscriptionCoverage(
+            key: operation.requesterID.map(UserKey.identified), userID: operation.requesterID, chatID: key.chatID
+        )
+        if !covered, canRun, await store.webState(chatKey: key)?.contextEpoch == operation.contextEpoch {
             await GenerationCoordinator.serveAd(state: store, telegram: telegram, chatKey: key, isPrivate: !key.chatID.isGroup)
         }
     }

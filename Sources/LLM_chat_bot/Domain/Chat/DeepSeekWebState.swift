@@ -26,6 +26,7 @@ struct DeepSeekWebOperation: Codable, Sendable {
     let listeningThrough: Int
     let reply: DeepSeekWebQuote?
 
+    var requesterID: UserID?
     var stage: Stage = .queued
     var workerOperationID: UUID?
     var candidateRemoteChatID: String?

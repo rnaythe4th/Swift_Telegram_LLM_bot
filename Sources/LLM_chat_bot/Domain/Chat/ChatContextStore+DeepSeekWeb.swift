@@ -83,7 +83,8 @@ extension ChatContextStore {
                 )
             },
             listeningThrough: boundary,
-            reply: reply.flatMap(quote)
+            reply: reply.flatMap(quote),
+            requesterID: asker?.userID
         )
     }
 
