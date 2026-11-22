@@ -352,6 +352,14 @@ extension BotMenuHandler {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
         let supported = gateways.capabilities(for: provider)?.supportsReasoning ?? false
+        if provider == .deepseekWeb, supported {
+            let on = help.webDeepThinkEnabled ? "✓ Включить" : "Включить"
+            let off = help.webDeepThinkEnabled ? "Выключить" : "✓ Выключить"
+            return MenuScreen(
+                "<b>🧠 DeepThink</b>\n\nСейчас · <b>\(help.webDeepThinkLabel)</b>",
+                [[menuButton(on, .reasoning, "web", "on"), menuButton(off, .reasoning, "web", "off")], navButtons()]
+            )
+        }
         let current = help.reasoningEffort?.rawValue
 
         if !supported {

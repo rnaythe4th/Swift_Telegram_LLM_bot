@@ -3,6 +3,14 @@ import Logging
 import NIOSSL
 import PostgresNIO
 
+enum DatabaseTLSConfigurationError: LocalizedError {
+    case invalidRootCertificate
+
+    var errorDescription: String? {
+        "DATABASE_URL sslrootcert must be an absolute path to a readable PEM certificate file"
+    }
+}
+
 /// Where the database is and how to talk to it, parsed from one `DATABASE_URL`.
 ///
 /// `postgres://user:password@host:port/database?sslmode=require`
@@ -26,6 +34,7 @@ struct DatabaseEndpoint: Sendable {
     /// `sslmode=verify-full` / `verify-ca`. Off for `require`/`prefer`, which
     /// is what those modes mean in libpq: encrypt, do not check who answered.
     let verifiesCertificate: Bool
+    private let rootCertificatePath: String?
 
     /// Parses `DATABASE_URL`. Returns nil for anything that is not a Postgres
     /// URL with a host and a user — the bot then runs memory-only, which is a
@@ -51,6 +60,9 @@ struct DatabaseEndpoint: Sendable {
         let sslMode = url.queryItems?.first { $0.name.lowercased() == "sslmode" }?.value?.lowercased()
         self.requiresTLS = sslMode != "disable"
         self.verifiesCertificate = sslMode == "verify-full" || sslMode == "verify-ca"
+        self.rootCertificatePath = url.queryItems?
+            .first { $0.name.lowercased() == "sslrootcert" }
+            .map { $0.value ?? "" }
     }
 
     /// Host and port only — safe to log. The password never appears.
@@ -72,6 +84,14 @@ struct DatabaseEndpoint: Sendable {
             // to verification would refuse to start on a working database —
             // but an operator who wants the check now has a way to ask for it.
             config.certificateVerification = verifiesCertificate ? .fullVerification : .none
+            if verifiesCertificate, let rootCertificatePath {
+                guard rootCertificatePath.hasPrefix("/"),
+                      let roots = try? NIOSSLCertificate.fromPEMFile(rootCertificatePath),
+                      !roots.isEmpty else {
+                    throw DatabaseTLSConfigurationError.invalidRootCertificate
+                }
+                config.trustRoots = .certificates(roots)
+            }
             tls = .require(config)
         }
         var configuration = PostgresClient.Configuration(

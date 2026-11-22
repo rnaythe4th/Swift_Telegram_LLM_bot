@@ -26,7 +26,9 @@ extension BotOrchestrator {
     /// never repair itself — it is a rolled-back deploy — so the process
     /// refuses to start instead of running as a healthy-looking bot that has
     /// quietly stopped persisting anything.
-    func bootstrapState(storage: AppAssembly.Storage) async throws -> Bool {
+    func bootstrapState(
+        storage: AppAssembly.Storage, onWriterLoss: (@Sendable () -> Void)? = nil
+    ) async throws -> Bool {
         writerLock.value = storage.writerLock
         guard let persistence = storage.persistence, storage.coordinator != nil else {
             flags.durability.value = .volatile(reason: "no DATABASE_URL")
@@ -47,11 +49,11 @@ extension BotOrchestrator {
         }
         storedState.value = persistence
         retention.value = RetentionService(state: state, persistence: persistence, logger: logger)
-        return await claimWriterAndRestore()
+        return await claimWriterAndRestore(onWriterLoss: onWriterLoss)
     }
 
     /// One attempt at the lock, and a full restore if it lands.
-    func claimWriterAndRestore() async -> Bool {
+    func claimWriterAndRestore(onWriterLoss: (@Sendable () -> Void)? = nil) async -> Bool {
         guard let persistence = storedState.value else { return false }
 
         if let lock = writerLock.value {
@@ -60,7 +62,10 @@ extension BotOrchestrator {
                 // any more. Writing on top of whoever took it is worse than
                 // stopping, so the process leaves rather than argues.
                 guard let self else { return }
-                Task { await self.stepDownAsWriter() }
+                Task {
+                    await self.stepDownAsWriter()
+                    onWriterLoss?()
+                }
             }
             guard acquired else {
                 flags.durability.value = .readOnly(reason: "another instance is the writer")
@@ -182,6 +187,7 @@ extension BotOrchestrator {
         })
         backgroundTasks.value.append(contentsOf: tasks)
 
+        guard !flags.draining.value, flags.durability.value.acceptsUpdates else { return }
         switch mode {
         case .webhook(let publicBaseURL, let secret):
             do {
@@ -201,6 +207,7 @@ extension BotOrchestrator {
                 // A half-registered webhook (or one left by a previous deploy)
                 // makes every getUpdates fail with "webhook is active" — the
                 // fallback would spin on errors instead of serving anyone.
+                guard !flags.draining.value, flags.durability.value.acceptsUpdates else { return }
                 try? await telegram.deleteWebhook()
                 await runPollingLoop(intake: intake)
             }
@@ -213,9 +220,10 @@ extension BotOrchestrator {
 
     private func runPollingLoop(intake: UpdateIntake) async {
         var offset = await state.pollingOffset()
-        while !flags.draining.value {
+        while !flags.draining.value && flags.durability.value.acceptsUpdates {
             do {
                 let updates = try await telegram.getUpdates(offset: offset)
+                guard !flags.draining.value, flags.durability.value.acceptsUpdates else { return }
                 let accepted = await intake.enqueue(updates)
                 if let maxUpdateID = updates.prefix(accepted).map(\.update_id).max() {
                     let next = maxUpdateID + 1

@@ -386,7 +386,7 @@ actor DeepSeekWebQueue {
     private func request(for operation: DeepSeekWebOperation, account: DeepSeekWebAccount) -> DeepSeekWebWorkerRequest {
         .init(operationID: operation.workerOperationID ?? operation.id, accountEpoch: account.epoch,
               accountMarker: account.workerMarker, remoteChatID: operation.remoteChatID,
-              remoteTail: operation.remoteTail, prompt: operation.prompt)
+              remoteTail: operation.remoteTail, prompt: operation.prompt, deepThink: operation.deepThink)
     }
 
     private func reconcile(

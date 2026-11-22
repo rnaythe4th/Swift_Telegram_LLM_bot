@@ -9,6 +9,15 @@ extension ChatContextStore {
         !chatKey.chatID.isGroup || contexts[chatKey]?.deepSeekWeb?.groupAllowed == true
     }
 
+    /// A nil setting toggles the current value, including the deployment default.
+    func setWebDeepThink(chatKey: ChatKey, enabled: Bool?) -> Bool? {
+        let context = ensure(chatKey: chatKey)
+        guard let web = context.deepSeekWeb else { return nil }
+        let next = enabled ?? !(context.webDeepThink ?? webDeepThinkDefault)
+        guard mutateWeb(chatKey: chatKey, contextEpoch: web.contextEpoch, { $0.deepThink = next }) else { return nil }
+        return next
+    }
+
     func webOperations() -> [(ChatKey, DeepSeekWebOperation)] {
         contexts.flatMap { key, context in
             (context.deepSeekWeb?.operations ?? []).map { (key, $0) }
@@ -84,6 +93,7 @@ extension ChatContextStore {
             },
             listeningThrough: boundary,
             reply: reply.flatMap(quote),
+            deepThink: context.webDeepThink,
             requesterID: asker?.userID
         )
     }
@@ -192,7 +202,8 @@ extension ChatContextStore {
             listeningBoundary: boundary,
             listeningThrough: boundary,
             history: keepingIndependentTurns ? previous?.history.filter { !$0.usesListening } ?? [] : [],
-            groupAllowed: previous?.groupAllowed ?? false
+            groupAllowed: previous?.groupAllowed ?? false,
+            deepThink: previous?.deepThink
         )
         _overheardPreroll.removeValue(forKey: chatKey)
     }

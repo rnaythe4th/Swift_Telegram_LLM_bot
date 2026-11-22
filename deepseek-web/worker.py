@@ -38,10 +38,11 @@ class Request:
     tail: str | None
     prompt: str | None
     candidate_id: str | None = None
+    deep_think: bool | None = None
 
     @property
     def binding(self):
-        return self.account_epoch, self.account_marker, self.remote_id, self.tail
+        return self.account_epoch, self.account_marker, self.remote_id, self.tail, self.deep_think
 
     @property
     def prompt_digest(self):
@@ -68,7 +69,7 @@ def parse_request(payload, action):
     check_version(payload)
     if set(payload) - {
         "version", "operationID", "accountEpoch", "accountMarker", "remoteChatID", "remoteTail", "prompt",
-        "candidateRemoteChatID",
+        "candidateRemoteChatID", "deepThink",
     }:
         raise ValueError
     operation_id = UUID(payload["operationID"])
@@ -90,7 +91,10 @@ def parse_request(payload, action):
         raise ValueError
     if prompt is not None:
         prompt.encode("utf-8")  # Reject unpaired surrogates before dispatch.
-    return Request(operation_id, account_epoch, account_marker, remote_id, tail, prompt, candidate_id)
+    deep_think = payload.get("deepThink")
+    if "deepThink" in payload and type(deep_think) is not bool:
+        raise ValueError
+    return Request(operation_id, account_epoch, account_marker, remote_id, tail, prompt, candidate_id, deep_think)
 
 
 def reply(request, status, accepted=False, **fields):

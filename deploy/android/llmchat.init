@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+root=/opt/llmchat
+pidfile=/run/llmchat-runsvdir.pid
+supervisor=$(readlink -f "$(command -v runsvdir)")
+cd "$root"
+
+supervisor_running() {
+    [ -f "$pidfile" ] || return 1
+    pid=$(cat "$pidfile")
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pid" -gt 1 ] || return 1
+    [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$supervisor" ] || return 1
+    [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$(id -u llmchat)" ] || return 1
+    [ "$(tr '\000' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n '2p')" = "$root/service" ]
+}
+
+case "${1:-}" in
+    start)
+        supervisor_running && exit 0
+        rm -f "$pidfile"
+        start-stop-daemon --start --quiet --background --make-pidfile \
+            --pidfile "$pidfile" --chuid llmchat --chdir "$root" \
+            --exec "$supervisor" -- "$root/service"
+        ;;
+    stop)
+        if supervisor_running; then
+            runuser -u llmchat -- sv -w 45 down "$root/service/bot"
+            runuser -u llmchat -- sv -w 45 down "$root/service/web"
+            if ! start-stop-daemon --stop --quiet --retry HUP/10/TERM/5 \
+                --pidfile "$pidfile" --exec "$supervisor"; then
+                if supervisor_running; then
+                    echo 'Supervisor stop was not confirmed.' >&2
+                    exit 1
+                fi
+            fi
+        fi
+        rm -f "$pidfile"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        printf 'Usage: %s {start|stop|restart}\n' "$0" >&2
+        exit 1
+        ;;
+esac

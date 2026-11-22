@@ -22,13 +22,15 @@ TAIL = re.compile(r"v1:([1-9][0-9]{0,8}):[a-f0-9]{64}", re.ASCII)
 MAX_RESPONSE_BYTES = 64_000
 COMPOSER = '#chat-input, [data-testid="chat-input"], textarea[placeholder], [contenteditable="true"][role="textbox"]'
 SEND = '[data-testid="send-button"], [aria-label="Send" i], [aria-label="Send message" i], [title="Send message" i]'
+NATIVE_SEND = 'div[role="button"].ds-button.ds-button--primary.ds-button--filled.ds-button--circle'
 STOP = '[data-testid="stop-button"], [aria-label="Stop generating" i], [aria-label="Stop" i], [title="Stop generating" i]'
 ATTACHMENT = '[data-testid="attachment-preview"], [data-testid="file-preview"], .ds-file-preview'
 ALERT = '[role="alert"], [data-testid="chat-error"], .ds-toast, .ds-message-error'
 MODEL_BODY = (
     '[data-message-role="assistant"], [data-role="assistant"], '
     '.ds-assistant-message-main-content, .ds-think-content, '
-    '[data-message-role="user"], [data-role="user"], .md-user-markdown'
+    '[data-message-role="user"], [data-role="user"], .md-user-markdown, '
+    '.ds-message > div > .ds-collapsible-text'
 )
 DEEPTHINK = ("deepthink", "deep think", "глубокое мышление", "深度思考")
 SEARCH = ("search", "web search", "поиск", "联网搜索", "智能搜索")
@@ -97,7 +99,10 @@ return {
   stopping: stop,
   turns: elements.map(element => {
     const id = element.getAttribute('data-message-id') || '';
-    const question = element.querySelector(userBody);
+    const nativeQuestion = element.matches('.ds-message') && !element.matches(assistant) &&
+      !element.querySelector(main + ', ' + reasoning)
+      ? element.querySelector(':scope > div > .ds-collapsible-text') : null;
+    const question = element.querySelector(userBody) || nativeQuestion;
     if (element.matches(user) || question) {
       const text = withoutControls(question || element);
       for (const br of text.querySelectorAll('br')) br.replaceWith('\n');
@@ -133,6 +138,16 @@ if (element instanceof HTMLTextAreaElement) {
 } else return false;
 element.dispatchEvent(new InputEvent('input', {bubbles: true, data: text, inputType: 'insertText'}));
 return (element.value ?? element.textContent) === text;
+"""
+
+NEAREST_SEND_CONTROLS = """
+const [composer, selector] = arguments;
+let parent = composer.parentElement;
+for (let depth = 0; parent && depth < 4; ++depth, parent = parent.parentElement) {
+  const controls = parent.querySelectorAll(selector);
+  if (controls.length) return Array.from(controls);
+}
+return [];
 """
 
 
@@ -251,6 +266,7 @@ class Browser:
         options = webdriver.FirefoxOptions()
         options.binary_location = self.firefox
         options.accept_insecure_certs = False
+        options.page_load_strategy = "eager"
         options.set_preference("intl.accept_languages", "en-US,en")
         options.add_argument("-profile")
         options.add_argument(str(self.profile))
@@ -388,6 +404,10 @@ class Browser:
             self._wait(stop, deadline, lambda: True if self._toggle_state(self._find_toggle(driver, names)) is desired else None,
                        "unknownUI")
 
+    def _toggles_match(self, driver, deep_think):
+        return (self._toggle_state(self._find_toggle(driver, DEEPTHINK)) is deep_think
+                and self._toggle_state(self._find_toggle(driver, SEARCH)) is False)
+
     def _view_for(self, driver, expected_id, expected_tail):
         actual_id = self._identity(driver)
         if actual_id != expected_id:
@@ -417,9 +437,12 @@ class Browser:
             return self._view_for(driver, request.remote_id, request.tail)
 
         self._wait(stop, deadline, view, timeout)
-        self._set_toggle(driver, DEEPTHINK, self.deepthink, stop, deadline)
+        deep_think = self.deepthink if request.deep_think is None else request.deep_think
+        self._set_toggle(driver, DEEPTHINK, deep_think, stop, deadline)
         self._set_toggle(driver, SEARCH, False, stop, deadline)
         _, count = self._wait(stop, deadline, view, timeout)
+        if not self._toggles_match(driver, deep_think):
+            raise BrowserFailure("unknownUI")
         return Prepared(request.remote_id, request.tail, count)
 
     def verify(self, stop):
@@ -427,8 +450,16 @@ class Browser:
         self._wait(stop, time.monotonic() + self.prepare_seconds,
                    lambda: self._view_for(driver, None, None), "unknownUI")
 
+    @staticmethod
+    def _can_send(control):
+        return (control.is_displayed() and control.is_enabled()
+                and control.get_dom_attribute("disabled") is None
+                and control.get_dom_attribute("aria-disabled") != "true"
+                and "ds-button--disabled" not in (control.get_dom_attribute("class") or "").split())
+
     def send(self, request, prepared, stop, progress):
         from selenium.common.exceptions import WebDriverException
+        from selenium.webdriver.common.keys import Keys
 
         if len(request.prompt.encode("utf-16-le")) // 2 > self.max_prompt_units:
             raise BrowserFailure("inputTooLong")
@@ -440,26 +471,36 @@ class Browser:
         limit = composer.get_dom_attribute("maxlength")
         if limit and limit.isdecimal() and len(request.prompt.encode("utf-16-le")) // 2 > int(limit):
             raise BrowserFailure("inputTooLong")
+        composer.click()
         if not driver.execute_script(SET_COMPOSER, composer, request.prompt):
             raise BrowserFailure("inputTooLong")
 
         def send_control():
             if self._identity(driver) != prepared.remote_id:
                 raise BrowserFailure("unknownUI")
-            send = self._visible(driver, SEND)
-            if send and send.is_enabled() and send.get_dom_attribute("aria-disabled") != "true":
-                return send
+            controls = driver.find_elements("css selector", SEND)
+            for send in controls:
+                if self._can_send(send):
+                    return send.click
+            if controls:
+                return None
+            controls = driver.execute_script(NEAREST_SEND_CONTROLS, composer, NATIVE_SEND)
+            if controls:
+                return controls[0].click if len(controls) == 1 and self._can_send(controls[0]) else None
+            # The native composer handles Enter on layouts with an unlabeled send icon.
+            if composer.get_dom_attribute("id") == "chat-input":
+                return lambda: composer.send_keys(Keys.ENTER)
             return None
 
-        send = self._wait(stop, time.monotonic() + min(self.prepare_seconds, 5), send_control, "unknownUI")
+        submit = self._wait(stop, time.monotonic() + min(self.prepare_seconds, 5), send_control, "unknownUI")
         current = driver.execute_script("return arguments[0].value ?? arguments[0].textContent", composer)
         state = self._read(driver)
         if current != request.prompt:
             raise BrowserFailure("inputTooLong")
+        deep_think = self.deepthink if request.deep_think is None else request.deep_think
         if (self._identity(driver) != prepared.remote_id or state["stopping"] or len(state["turns"]) != prepared.count
                 or tail_for(state["turns"]) != prepared.tail or self._visible(driver, ATTACHMENT)
-                or self._toggle_state(self._find_toggle(driver, DEEPTHINK)) is not self.deepthink
-                or self._toggle_state(self._find_toggle(driver, SEARCH)) is not False):
+                or not self._toggles_match(driver, deep_think)):
             raise BrowserFailure("unknownUI")
         if stop.is_set():
             raise BrowserFailure("cancelled")
@@ -467,7 +508,7 @@ class Browser:
         # This is the only send call. A driver error can happen after delivery.
         remote_id, accepted = prepared.remote_id, False
         try:
-            send.click()
+            submit()
         except WebDriverException:
             pass
 

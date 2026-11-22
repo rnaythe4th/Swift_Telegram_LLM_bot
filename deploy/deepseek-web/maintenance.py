@@ -7,20 +7,30 @@ from http.client import HTTPConnection, HTTPException
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
 
-RUNTIME = Path("/run/deepseek-web")
+RUNTIME = Path(os.environ.get("DEEPSEEK_WEB_RUNTIME_DIR", "/run/deepseek-web"))
 WINDOW_SOCKET = RUNTIME / "window.sock"
 WINDOW_LOCK = RUNTIME / "window.lock"
-DISPLAY = ":93"
-VNC_PORT = 15943
+
+
+def window_settings():
+    display = os.environ.get("DEEPSEEK_WEB_DISPLAY", ":93")
+    if not re.fullmatch(r":[0-9]{1,4}", display):
+        raise ValueError("DEEPSEEK_WEB_DISPLAY must name a local X display (for example :93)")
+    port = int(os.environ.get("DEEPSEEK_WEB_VNC_PORT", "15943"))
+    if not 1024 <= port <= 65535:
+        raise ValueError("DEEPSEEK_WEB_VNC_PORT must be in the range 1024..65535")
+    return display, port
 
 
 def worker_request(action, payload=None, timeout=15):
@@ -91,10 +101,10 @@ def stop_requested(listener, seconds):
     return True
 
 
-def gui_environment(xauthority):
-    allowed = {"HOME", "LANG", "PATH", "TZ"}
+def gui_environment(xauthority, display):
+    allowed = {"HOME", "LANG", "PATH", "TMPDIR", "TZ", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"}
     env = {key: value for key, value in os.environ.items() if key in allowed or key.startswith("LC_")}
-    env.update({"DISPLAY": DISPLAY, "XAUTHORITY": str(xauthority)})
+    env.update({"DISPLAY": display, "XAUTHORITY": str(xauthority)})
     return env
 
 
@@ -147,23 +157,23 @@ def display_available(env):
         return False
 
 
-def vnc_available():
+def vnc_available(port):
     try:
-        with socket.create_connection(("127.0.0.1", VNC_PORT), timeout=0.5) as connection:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5) as connection:
             return connection.recv(12).startswith(b"RFB ")
     except OSError:
         return False
 
 
-def open_window(profile, listener, seconds):
+def open_window(profile, listener, seconds, display, port):
     with tempfile.TemporaryDirectory(prefix="auth-", dir=RUNTIME) as temp_dir:
         directory = Path(temp_dir)
         xauthority = directory / "Xauthority"
         xauthority.touch(mode=0o600)
-        env = gui_environment(xauthority)
+        env = gui_environment(xauthority, display)
         subprocess.run(
             ["xauth", "-q"], env=env, check=True,
-            input=f"add {DISPLAY} . {secrets.token_hex(16)}\n", text=True,
+            input=f"add {display} . {secrets.token_hex(16)}\n", text=True,
         )
         password_file = directory / "vnc.pass"
         password = secrets.token_urlsafe(6)
@@ -174,17 +184,17 @@ def open_window(profile, listener, seconds):
         if saved_password.returncode != 0:
             raise RuntimeError("Temporary VNC password could not be saved")
         with (directory / "session.log").open("w") as log, gui_processes() as spawn:
-            xvfb = spawn(["Xvfb", DISPLAY, "-screen", "0", "1280x800x24",
+            xvfb = spawn(["Xvfb", display, "-screen", "0", "1280x800x24",
                           "-nolisten", "tcp", "-auth", str(xauthority)], env, log)
             wait_for_gui(lambda: display_available(env), xvfb, "Temporary X display failed to start")
-            vnc = spawn(["x11vnc", "-display", DISPLAY, "-localhost", "-noipv6",
-                         "-rfbport", str(VNC_PORT), "-rfbauth", str(password_file),
+            vnc = spawn(["x11vnc", "-display", display, "-localhost", "-noipv6",
+                         "-rfbport", str(port), "-rfbauth", str(password_file),
                          "-noshm", "-shared", "-forever"], env, log)
-            wait_for_gui(vnc_available, vnc, "Loopback VNC failed to start")
+            wait_for_gui(lambda: vnc_available(port), vnc, "Loopback VNC failed to start")
             firefox = spawn([os.environ.get("DEEPSEEK_WEB_FIREFOX_BINARY", "/usr/bin/firefox-esr"),
                              "--no-remote", "--profile", str(profile),
                              "https://chat.deepseek.com/"], env, log)
-            print(f"VNC on 127.0.0.1:{VNC_PORT}. One-time password: {password}", flush=True)
+            print(f"VNC on 127.0.0.1:{port}. One-time password: {password}", flush=True)
             print(f"Window expires in {seconds} seconds. Close it with the finish command.", flush=True)
             deadline = time.monotonic() + seconds
             while time.monotonic() < deadline and all(p.poll() is None for p in (firefox, xvfb, vnc)):
@@ -193,6 +203,7 @@ def open_window(profile, listener, seconds):
 
 
 def start(seconds):
+    display, port = window_settings()
     profile_dir = os.environ.get("DEEPSEEK_WEB_PROFILE_DIR")
     if not profile_dir or not Path(profile_dir).is_dir():
         raise RuntimeError("DeepSeek Web profile is unavailable")
@@ -212,7 +223,7 @@ def start(seconds):
         if stop_requested(listener, 0):
             return
         with exclusive_lock(profile / ".deepseek-web.lock", timeout=8):
-            open_window(profile, listener, seconds)
+            open_window(profile, listener, seconds, display, port)
 
 
 def finish(account_changed):
@@ -249,6 +260,10 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGHUP, stop)
     try:
+        runtime = RUNTIME.lstat()
+        if (not RUNTIME.is_absolute() or not stat.S_ISDIR(runtime.st_mode)
+                or runtime.st_uid != os.getuid() or runtime.st_mode & 0o077):
+            raise RuntimeError("Maintenance runtime directory must be private and owned by this user")
         if args.command == "start":
             start(args.seconds)
             print("Temporary Firefox closed. Web stays paused until finish verifies sign-in.")

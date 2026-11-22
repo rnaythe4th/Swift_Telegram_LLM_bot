@@ -32,6 +32,19 @@ final class DatabaseEndpointTests: XCTestCase {
         XCTAssertTrue(verified.verifiesCertificate)
     }
 
+    func testCertificateVerificationRejectsAnInvalidExplicitRoot() throws {
+        for root in ["relative.pem", "/nonexistent/ca.pem", ""] {
+            let endpoint = try XCTUnwrap(DatabaseEndpoint(
+                urlString: "postgres://bot:p@host/db?sslmode=verify-full&sslrootcert=\(root)"
+            ))
+            XCTAssertThrowsError(try endpoint.clientConfiguration(maximumConnections: 2)) { error in
+                guard case DatabaseTLSConfigurationError.invalidRootCertificate = error else {
+                    return XCTFail("Unexpected TLS configuration error: \(error)")
+                }
+            }
+        }
+    }
+
     /// The transaction pooler answers `pg_try_advisory_lock` with `true` and
     /// then drops the lock with the connection. Spotting the port is the only
     /// warning anyone gets before the single-writer guarantee quietly stops

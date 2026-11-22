@@ -404,8 +404,19 @@ extension BotMenuHandler {
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage
     ) async throws {
-        guard route.sub == "set" else { return }
         let provider = await state.provider(chatKey: chatKey)
+        if route.sub == "web" {
+            guard provider == .deepseekWeb, gateways.capabilities(for: provider)?.supportsReasoning == true,
+                  let value = route.arg(2), ["on", "off"].contains(value) else { return try await staleTap(callback) }
+            guard let enabled = await state.setWebDeepThink(chatKey: chatKey, enabled: value == "on") else {
+                throw DeepSeekWebPersistenceError.unavailable
+            }
+            try await checkpointWebSettings(chatKey: chatKey)
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "DeepThink \(enabled ? "включён" : "выключен")")
+            try await showPage(.reasoning, chatKey: chatKey, callback: callback, message: message)
+            return
+        }
+        guard route.sub == "set", provider != .deepseekWeb else { return try await staleTap(callback) }
         if gateways.capabilities(for: provider)?.supportsReasoning == true {
             if route.arg(2) == "off" {
                 await state.setReasoningEffort(chatKey: chatKey, effort: nil)

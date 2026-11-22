@@ -35,7 +35,7 @@ struct BlueprintBotApp {
         let logger = ConsoleLogger.fromEnvironment()
         let app = try await AppAssembly.build(config: config, logger: logger)
 
-        let server = app.makeHTTPServer(port: config.healthPort)
+        let server = app.makeHTTPServer(port: config.healthPort, host: config.httpBindHost)
         try await server.start()
         logger.info("HTTP server started on port \(config.healthPort) (/health, /ready, /metrics, webhook)")
 
@@ -47,7 +47,16 @@ struct BlueprintBotApp {
         // Throws only for a database newer than this binary: a storage problem
         // that cannot be survived by degrading, so it stops the deploy here
         // rather than at the first silently-dropped write.
-        let persistenceHealthy = try await app.orchestrator.bootstrapState(storage: app.storage)
+        let onWriterLoss: (@Sendable () -> Void)? = config.requireDurableState
+            ? { @Sendable () -> Void in exit(EXIT_FAILURE) }
+            : nil
+        let persistenceHealthy = try await app.orchestrator.bootstrapState(
+            storage: app.storage, onWriterLoss: onWriterLoss
+        )
+        if config.requireDurableState && !persistenceHealthy {
+            logger.error("REQUIRE_DURABLE_STATE is enabled and Postgres state is unavailable. Exiting before Telegram intake.")
+            exit(EXIT_FAILURE)
+        }
 
         installShutdownHandlers(orchestrator: app.orchestrator, logger: logger)
 

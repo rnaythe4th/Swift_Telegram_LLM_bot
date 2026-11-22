@@ -125,6 +125,10 @@ struct ChatContext: Sendable {
     var listening: ChatListening = .off
     var apiProvider: ServiceProvider? = nil
     var deepSeekWeb: DeepSeekWebChatState? = nil
+
+    var webDeepThink: Bool? {
+        deepSeekWeb?.deepThink ?? reasoningEffort.map { _ in true }
+    }
 }
 
 extension ChatContext {
@@ -177,6 +181,7 @@ struct HelpData: Sendable {
     let defaultRole: String
     let provider: ServiceProvider
     let reasoningEffort: ReasoningEffort?
+    let webDeepThinkEnabled: Bool
     let testModeSuffix: Int?
     let backupNotify: Bool
     let cumulativeUsage: CumulativeUsage
@@ -192,4 +197,5 @@ struct HelpData: Sendable {
     var escapedModel: String { MessageText.escaped(model) }
     var escapedRole: String { MessageText.escaped(role) }
     var escapedModelProviderRouting: String? { modelProviderRouting.map(MessageText.escaped) }
+    var webDeepThinkLabel: String { webDeepThinkEnabled ? "включён" : "выключен" }
 }

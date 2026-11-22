@@ -220,8 +220,15 @@ extension BotCommandHandler {
             }
 
         case .reasoning:
-            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
             let provider = await state.provider(chatKey: chatKey)
+            if provider == .deepseekWeb {
+                if chatKey.chatID.isGroup {
+                    guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
+                                                         refusal: "🔒 DeepThink настраивает администратор чата.") else { return }
+                }
+            } else {
+                guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
+            }
             guard let capabilities = gateways.capabilities(for: provider) else {
                 throw ProviderGatewayRegistryError.missingAdapter(provider)
             }
@@ -235,6 +242,23 @@ extension BotCommandHandler {
             }
 
             let arg = parsed.argument.trimmingCharacters(in: .whitespaces).lowercased()
+            if provider == .deepseekWeb {
+                let selection: Bool?
+                switch arg {
+                case "on", "вкл": selection = true
+                case "off", "выкл": selection = false
+                case "": selection = nil
+                default:
+                    try await sendUserFeedback(chatKey: chatKey, text: "<i>Как пользоваться:</i> <code>/reasoning on|off</code>")
+                    return
+                }
+                guard let enabled = await state.setWebDeepThink(chatKey: chatKey, enabled: selection) else {
+                    throw DeepSeekWebPersistenceError.unavailable
+                }
+                try await menuHandler.checkpointWebSettings(chatKey: chatKey)
+                try await sendUserFeedback(chatKey: chatKey, text: "🧠 DeepThink · <b>\(enabled ? "включён" : "выключен")</b>")
+                return
+            }
             if let effort = ReasoningEffort(userInput: arg) {
                 await state.setReasoningEffort(chatKey: chatKey, effort: effort)
             } else if arg == "off" || arg == "выкл" {

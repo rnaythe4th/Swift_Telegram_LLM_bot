@@ -109,6 +109,7 @@ final class BotCallbackHandler: Sendable {
 
 <b>⚙️ Тонкая настройка</b> — стиль ответа и обдумывание по отдельности, если готовых режимов мало. Открывается с премиумом или балансом.
 /menu → ⚙️ Тонкая настройка · команды <code>/settemp 0.0–2.0</code>, <code>/reasoning быстро|средне|глубоко|выкл</code>
+Для DeepSeek Web — /menu → 🧠 DeepThink или <code>/reasoning on|off</code>.
 
 Начать заново: <code>/clear_history</code> — забыть переписку · <code>/reset</code> — вернуть стандартные настройки · <code>/history</code> — что бот помнит.
 

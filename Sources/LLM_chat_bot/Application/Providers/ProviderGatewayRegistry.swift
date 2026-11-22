@@ -28,7 +28,7 @@ struct ProviderGatewayRegistry {
     func capabilities(for provider: ServiceProvider) -> ProviderCapabilities? {
         if provider == .deepseekWeb {
             guard web != nil else { return nil }
-            return .init(supportsImageInput: false, supportsAudioInput: false, supportsVideoInput: false, supportsReasoning: false)
+            return .init(supportsImageInput: false, supportsAudioInput: false, supportsVideoInput: false, supportsReasoning: true)
         }
         return providers[provider]?.capabilities
     }

@@ -8,7 +8,7 @@ import threading
 import unittest
 from uuid import uuid4
 
-from browser import Browser, BrowserFailure
+from browser import DEEPTHINK, Browser, BrowserFailure
 from worker import Request
 
 FIREFOX = os.getenv("DEEPSEEK_WEB_TEST_FIREFOX")
@@ -89,6 +89,33 @@ class FirefoxTest(unittest.TestCase):
         third = self.run_turn(self.request("A3", same))
         self.assertIn(" / 3 / A3", third.text)
 
+    def test_native_composer_submits_without_labeled_send(self):
+        for mode in ("keyboard-submit", "native-submit"):
+            with self.subTest(mode=mode):
+                self.site.mode = mode
+                answer = self.run_turn(self.request("synthetic input"))
+                self.assertTrue(answer.text.endswith(" / 1 / synthetic input"))
+
+    def test_deep_think_overrides_worker_default_per_turn(self):
+        previous = None
+        for choice, default, expected in ((False, True, False), (True, False, True), (None, True, True)):
+            with self.subTest(choice=choice, default=default):
+                self.browser.deepthink = default
+                request = replace(self.request("synthetic input", previous), deep_think=choice)
+                previous = self.run_turn(request)
+                toggle = self.browser._find_toggle(self.browser.session[0], DEEPTHINK)
+                self.assertIs(self.browser._toggle_state(toggle), expected)
+
+    def test_deep_think_change_after_prepare_is_rejected_before_send(self):
+        request = replace(self.request("synthetic input"), deep_think=True)
+        prepared = self.browser.prepare(request, self.stop)
+        self.browser._find_toggle(self.browser.session[0], DEEPTHINK).click()
+        with self.assertRaises(BrowserFailure) as error:
+            self.browser.send(request, prepared, self.stop, self.track)
+        self.assertEqual(error.exception.status, "unknownUI")
+        self.assertFalse(error.exception.may_have_sent)
+        self.assertEqual(self.progress, [])
+
     def test_refusals_and_unknown_ui(self):
         for mode, expected in (
             ("login", "loginRequired"),
@@ -97,6 +124,8 @@ class FirefoxTest(unittest.TestCase):
             ("old-home", "unknownUI"),
             ("draft", "unknownUI"),
             ("before-click", "unknownUI"),
+            ("native-disabled", "unknownUI"),
+            ("native-ambiguous", "unknownUI"),
             ("low-limit", "inputTooLong"),
             ("busy", "busy"),
             ("quota", "quota"),

@@ -150,6 +150,7 @@ extension ChatContextStore {
             defaultRole: displayRole(defaultRole(chatID: chatKey.chatID), chatID: chatKey.chatID),
             provider: context.provider,
             reasoningEffort: context.reasoningEffort,
+            webDeepThinkEnabled: context.webDeepThink ?? webDeepThinkDefault,
             testModeSuffix: context.suffix,
             backupNotify: context.backupNotify,
             cumulativeUsage: context.cumulativeUsage
@@ -532,6 +533,7 @@ extension ChatContextStore {
         if defaultProvider != .deepseekWeb || previous?.provider != .deepseekWeb {
             context.deepSeekWeb?.groupAllowed = false
         }
+        context.deepSeekWeb?.deepThink = nil
         resetWebContext(&context, chatKey: chatKey)
         contexts[chatKey] = context
         dirtyContexts.insert(chatKey)

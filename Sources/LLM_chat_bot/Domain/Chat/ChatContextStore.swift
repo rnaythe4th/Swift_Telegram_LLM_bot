@@ -23,6 +23,7 @@ actor ChatContextStore {
     let companyMembers: String
     let defaultSuffix: Int?
     let defaultProvider: ServiceProvider
+    let webDeepThinkDefault: Bool
 
     let initialDefaultModel: String
     let initialDefaultRole: String
@@ -204,7 +205,8 @@ actor ChatContextStore {
         companyMembers: String,
         defaultHistoryLength: Int,
         defaultSuffix: Int?,
-        defaultProvider: ServiceProvider = .openrouter
+        defaultProvider: ServiceProvider = .openrouter,
+        webDeepThinkDefault: Bool = false
     ) {
         // The directory is empty here, so the owner starts as a pending key and
         // is re-filed under `#<userID>` the first time they talk to the bot.
@@ -226,6 +228,7 @@ actor ChatContextStore {
         self.companyMembers = companyMembers
         self.defaultSuffix = defaultSuffix
         self.defaultProvider = defaultProvider
+        self.webDeepThinkDefault = webDeepThinkDefault
         self.initialDefaultModel = model
         self.initialDefaultRole = systemPrompt
         self.initialDefaultHistoryLength = defaultHistoryLength

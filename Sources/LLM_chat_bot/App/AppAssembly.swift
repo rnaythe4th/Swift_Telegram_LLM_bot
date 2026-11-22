@@ -56,6 +56,7 @@ struct AppAssembly {
 
         let metrics = RuntimeMetrics()
         let flags = RuntimeFlags()
+        let database = try makeDatabaseConfiguration(config: config, logger: logger)
 
         let network = NetworkClient()
         let telegram = makeTelegram(config: config, network: network, metrics: metrics)
@@ -70,7 +71,7 @@ struct AppAssembly {
         }
 
         let state = await makeStore(config: config, botUsername: botUsername)
-        let storage = makeStorage(config: config, state: state, logger: logger, metrics: metrics)
+        let storage = makeStorage(database: database, state: state, logger: logger, metrics: metrics)
 
         let orchestrator = makeOrchestrator(
             config: config,
@@ -147,7 +148,8 @@ struct AppAssembly {
             // message on every turn), so users no longer set it themselves.
             defaultHistoryLength: 20,
             defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil,
-            defaultProvider: config.defaultProvider
+            defaultProvider: config.defaultProvider,
+            webDeepThinkDefault: config.deepSeekWebDeepThink
         )
 
         await state.setPresets(.model, [
@@ -186,19 +188,16 @@ struct AppAssembly {
         }
     }
 
-    static func makeStorage(
-        config: AppConfig,
-        state: ChatContextStore,
-        logger: LoggerPort,
-        metrics: RuntimeMetrics
-    ) -> Storage {
+    private static func makeDatabaseConfiguration(
+        config: AppConfig, logger: LoggerPort
+    ) throws -> (configuration: PostgresClient.Configuration, displayName: String)? {
         guard let urlString = config.databaseURL else {
             logger.warning("DATABASE_URL is not set — state is in-memory only and nothing will be sold")
-            return Storage(client: nil, persistence: nil, coordinator: nil, ledger: InMemoryLedger(), writerLock: nil)
+            return nil
         }
         guard let endpoint = DatabaseEndpoint(urlString: urlString) else {
             logger.error("DATABASE_URL is not a usable postgres:// URL — state is in-memory only")
-            return Storage(client: nil, persistence: nil, coordinator: nil, ledger: InMemoryLedger(), writerLock: nil)
+            return nil
         }
         if endpoint.looksLikeTransactionPooler {
             // Worth a loud line: in transaction mode the advisory lock returns
@@ -208,31 +207,47 @@ struct AppAssembly {
         }
 
         do {
-            let client = PostgresClient(
-                configuration: try endpoint.clientConfiguration(maximumConnections: 8),
-                backgroundLogger: Logger(label: "postgres") { _ in PostgresLogHandler(sink: logger) }
-            )
-            let persistence = PostgresStatePersistence(client: client, logger: logger)
-            let ledger = PostgresLedger(client: client, logger: logger)
-            let coordinator = PersistenceCoordinator(
-                store: state,
-                persistence: persistence,
-                ledger: ledger,
-                logger: logger,
-                metrics: metrics
-            )
-            logger.info("postgres persistence enabled at \(endpoint.displayName)")
-            return Storage(
-                client: client,
-                persistence: persistence,
-                coordinator: coordinator,
-                ledger: ledger,
-                writerLock: WriterLock(client: client, logger: logger)
-            )
+            return (try endpoint.clientConfiguration(maximumConnections: 8), endpoint.displayName)
         } catch {
-            logger.error("could not configure the database connection — state is in-memory only: \(error)")
+            if config.requireDurableState {
+                logger.error("could not configure the required database connection: \(error.localizedDescription)")
+                throw error
+            }
+            logger.error("could not configure the database connection — state is in-memory only: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private static func makeStorage(
+        database: (configuration: PostgresClient.Configuration, displayName: String)?,
+        state: ChatContextStore,
+        logger: LoggerPort,
+        metrics: RuntimeMetrics
+    ) -> Storage {
+        guard let database else {
             return Storage(client: nil, persistence: nil, coordinator: nil, ledger: InMemoryLedger(), writerLock: nil)
         }
+        let client = PostgresClient(
+            configuration: database.configuration,
+            backgroundLogger: Logger(label: "postgres") { _ in PostgresLogHandler(sink: logger) }
+        )
+        let persistence = PostgresStatePersistence(client: client, logger: logger)
+        let ledger = PostgresLedger(client: client, logger: logger)
+        let coordinator = PersistenceCoordinator(
+            store: state,
+            persistence: persistence,
+            ledger: ledger,
+            logger: logger,
+            metrics: metrics
+        )
+        logger.info("postgres persistence enabled at \(database.displayName)")
+        return Storage(
+            client: client,
+            persistence: persistence,
+            coordinator: coordinator,
+            ledger: ledger,
+            writerLock: WriterLock(client: client, logger: logger)
+        )
     }
 
     static func makeOrchestrator(
@@ -385,8 +400,8 @@ struct AppAssembly {
     }
 
     /// `/health`, `/ready`, token-guarded `/metrics` and the webhook endpoint.
-    func makeHTTPServer(port: Int) -> AppHTTPServer {
-        AppHTTPServer(port: port) { [orchestrator, intake, telegram, flags, webhookSecret, metricsToken] head, body in
+    func makeHTTPServer(port: Int, host: String) -> AppHTTPServer {
+        AppHTTPServer(port: port, host: host) { [orchestrator, intake, telegram, flags, webhookSecret, metricsToken] head, body in
             let path = head.uri.split(separator: "?", maxSplits: 1).first.map(String.init) ?? "/"
             switch (head.method, path) {
             case (.GET, "/health"), (.HEAD, "/health"):

@@ -8,11 +8,13 @@
     <a href="/a/chat/s/old-b">Same title</a>
   </aside>
   <div data-testid="conversation"></div>
-  <textarea id="chat-input" placeholder="Message DeepSeek"></textarea>
-  <button aria-pressed="true">DeepThink</button>
-  <button aria-pressed="true">Search</button>
-  <button data-testid="send-button" type="button">Send</button>
-  <button data-testid="stop-button" type="button" hidden>Stop</button>
+  <section>
+    <textarea id="chat-input" placeholder="Message DeepSeek"></textarea>
+    <button aria-pressed="true">DeepThink</button>
+    <button aria-pressed="true">Search</button>
+    <button data-testid="send-button" type="button">Send</button>
+    <button data-testid="stop-button" type="button" hidden>Stop</button>
+  </section>
   <div data-testid="chat-error" role="alert" hidden></div>
 </main>
 <script>
@@ -21,7 +23,7 @@
   const error = document.querySelector('[role="alert"]');
   const input = document.querySelector('#chat-input');
   const [deepThink, search] = document.querySelectorAll('[aria-pressed]');
-  const send = document.querySelector('[data-testid="send-button"]');
+  let send = document.querySelector('[data-testid="send-button"]');
   const stop = document.querySelector('[data-testid="stop-button"]');
   const prefix = '/a/chat/s/';
   const stored = JSON.parse(localStorage.getItem('chats') || '{}');
@@ -32,7 +34,7 @@
   const chats = {...seeded, ...stored};
   let id = location.pathname.startsWith(prefix) ? location.pathname.slice(prefix.length) : null;
 
-  const add = (parent, tag, attributes, text) => {
+  const add = (parent, tag, attributes = {}, text) => {
     const node = document.createElement(tag);
     for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
     if (text !== undefined) node.textContent = text;
@@ -47,7 +49,12 @@
 
   function user(text) {
     const turn = add(conversation, 'div', {class: 'ds-message'});
-    add(turn, 'div', {class: 'ds-markdown md-user-markdown'}, text);
+    if (mode.startsWith('native-')) {
+      const body = add(add(turn, 'div'), 'div', {class: 'ds-collapsible-text'});
+      add(add(body, 'div'), 'span', {}, text);
+    } else {
+      add(turn, 'div', {class: 'ds-markdown md-user-markdown'}, text);
+    }
   }
 
   function answer(text, finished) {
@@ -97,10 +104,22 @@
   if (mode === 'draft') input.value = 'Existing draft';
   if (mode === 'old-home') user('Old question');
   if (mode === 'before-click') send.hidden = true;
+  if (mode === 'keyboard-submit') send.removeAttribute('data-testid');
+  if (mode.startsWith('native-')) {
+    const icon = {role: 'button', class: 'ds-button ds-button--primary ds-button--filled ds-button--circle'};
+    input.removeAttribute('id');
+    send.remove();
+    send = add(input.parentElement, 'div', {...icon, 'aria-disabled': 'true'}, '↑');
+    add(document.querySelector('aside'), 'div', icon, 'Unrelated button');
+    if (mode !== 'native-disabled') {
+      input.addEventListener('input', () => send.setAttribute('aria-disabled', String(!input.value)));
+    }
+    if (mode === 'native-ambiguous') add(input.parentElement, 'div', icon, 'Second composer icon');
+  }
   if (mode === 'unknown-dialog') alert('Something entirely unexpected');
   if (mode === 'low-limit') input.setAttribute('maxlength', '4');
 
-  send.addEventListener('click', () => {
+  function submit(event) {
     if (mode === 'quota') return alert('Rate limit: try again in 10 minutes');
     if (mode === 'busy') return alert('Server is busy');
     const text = input.value;
@@ -128,6 +147,15 @@
         complete(wrap);
       }, 150);
     }
-  });
+  }
+
+  send.addEventListener('click', submit);
+  if (mode === 'keyboard-submit') {
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      submit(event);
+    });
+  }
 </script>
 </html>

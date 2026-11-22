@@ -113,6 +113,20 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.worker.perform(self.request, "status")["status"], "uncertain")
         self.assertEqual(self.worker.perform(other, "prepare")["status"], "prepared")
 
+    def test_deep_think_selection_is_part_of_operation_binding(self):
+        enabled = replace(self.request, deep_think=True)
+        disabled = replace(self.request, deep_think=False)
+        self.assertEqual(self.worker.perform(enabled, "prepare")["status"], "prepared")
+        for action in ("send", "status", "cancel", "reconcile"):
+            with self.subTest(action=action):
+                self.assertEqual(self.worker.perform(disabled, action)["status"], "notAccepted")
+        self.assertEqual(self.worker.perform(self.request, "send")["status"], "notAccepted")
+        self.browser.release.set()
+        self.assertEqual(self.worker.perform(enabled, "send")["status"], "completed")
+        self.assertEqual(self.worker.perform(disabled, "status")["status"], "notAccepted")
+        self.assertEqual(self.worker.perform(enabled, "status")["status"], "completed")
+        self.assertEqual(self.browser.send_count, 1)
+
     def test_uncertain_new_dialog_reconciles_known_candidate_without_send(self):
         self.browser.uncertain = True
         self.browser.release.set()
@@ -172,6 +186,11 @@ class WorkerTest(unittest.TestCase):
         data = {"version": 1, "operationID": str(self.request.id).upper(),
                 "accountEpoch": str(self.request.account_epoch).upper(), "prompt": self.request.prompt}
         self.assertEqual(parse_request(data, "send"), self.request)
+        for choice in (True, False):
+            self.assertEqual(parse_request(dict(data, deepThink=choice), "send").deep_think, choice)
+        for choice in (None, 0, 1, "false"):
+            with self.subTest(deep_think=choice), self.assertRaises(ValueError):
+                parse_request(dict(data, deepThink=choice), "send")
         for field in ("a/b", "../../x", "?mode=foo", "%2f"):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 parse_request(dict(data, remoteChatID=field, remoteTail=TAIL), "send")

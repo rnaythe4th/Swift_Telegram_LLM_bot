@@ -2,6 +2,39 @@ import XCTest
 @testable import LLM_chat_bot
 
 final class DeepSeekWebStateTests: XCTestCase {
+    func testDeepThinkIsSavedPerTopicAndCapturedWhenQueued() async throws {
+        let store = Fixtures.makeStore()
+        let key = ChatKey(chatID: -100, threadID: 5)
+        let other = ChatKey(chatID: -100, threadID: 6)
+        await store.setReasoningEffort(chatKey: key, effort: .high)
+        _ = await store.changeProvider(chatKey: key, newProvider: .deepseekWeb)
+        _ = await store.changeProvider(chatKey: other, newProvider: .deepseekWeb)
+
+        let toggle = await store.setWebDeepThink(chatKey: key, enabled: nil)
+        XCTAssertEqual(toggle, false, "A legacy enabled grade is treated as on")
+        let candidate = await store.webCandidate(
+            chatKey: key, operationID: UUID(), updateID: 1, question: "question",
+            messageID: 10, telegramThreadID: 5, reply: nil
+        )
+        let operation = try XCTUnwrap(candidate)
+        _ = await store.setWebDeepThink(chatKey: key, enabled: true)
+        await store.clearHistory(chatKey: key)
+
+        let policy = await store.webState(chatKey: key)
+        let otherPolicy = await store.webState(chatKey: other)
+        let originalEffort = await store.reasoningEffort(chatKey: key)
+        XCTAssertEqual(policy?.deepThink, true)
+        XCTAssertNil(otherPolicy?.deepThink)
+        XCTAssertEqual(originalEffort, .high)
+
+        let saved = try JSONEncoder().encode(operation)
+        XCTAssertEqual(try JSONDecoder().decode(DeepSeekWebOperation.self, from: saved).deepThink, false)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
+        legacy.removeValue(forKey: "deepThink")
+        let old = try JSONSerialization.data(withJSONObject: legacy)
+        XCTAssertNil(try JSONDecoder().decode(DeepSeekWebOperation.self, from: old).deepThink)
+    }
+
     func testWebPromptKeepsQuestionOnceAndDropsNestedQuoteFromOldProvider() async throws {
         let store = Fixtures.makeStore()
         let key = ChatKey(chatID: -100, threadID: 5)

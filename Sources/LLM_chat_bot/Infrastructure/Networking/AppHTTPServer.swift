@@ -27,6 +27,8 @@ typealias AppHTTPRouteHandler = @Sendable (_ head: HTTPRequestHead, _ body: Data
 /// Small NIO HTTP/1.1 server serving liveness/readiness/metrics endpoints and
 /// the Telegram webhook. One shared handler closure routes by method + path.
 final class AppHTTPServer {
+    static let defaultBindHost = "0.0.0.0"
+
     /// Silence on an open connection before it is dropped. Generous next to
     /// anything a request here does (the webhook only enqueues), tight enough
     /// that abandoned sockets do not accumulate for the life of the process.
@@ -34,11 +36,13 @@ final class AppHTTPServer {
 
     private let group: MultiThreadedEventLoopGroup
     private let port: Int
+    private let host: String
     private let handler: AppHTTPRouteHandler
     private var channel: Channel?
 
-    init(port: Int, handler: @escaping AppHTTPRouteHandler) {
+    init(port: Int, host: String = AppHTTPServer.defaultBindHost, handler: @escaping AppHTTPRouteHandler) {
         self.port = port
+        self.host = host
         self.handler = handler
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
     }
@@ -64,7 +68,7 @@ final class AppHTTPServer {
                 }
             }
 
-        let boundChannel = try await bootstrap.bind(host: "0.0.0.0", port: port).get()
+        let boundChannel = try await bootstrap.bind(host: host, port: port).get()
         self.channel = boundChannel
     }
 

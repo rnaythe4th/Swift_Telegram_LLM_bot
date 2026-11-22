@@ -25,6 +25,7 @@ struct DeepSeekWebOperation: Codable, Sendable {
     let listening: [DeepSeekWebTranscriptLine]
     let listeningThrough: Int
     let reply: DeepSeekWebQuote?
+    let deepThink: Bool?
 
     var requesterID: UserID?
     var stage: Stage = .queued
@@ -82,11 +83,12 @@ struct DeepSeekWebChatState: Codable, Sendable {
     var usesListening = false
     var hasUncertainDelivery = false
     var groupAllowed = false
+    var deepThink: Bool?
 
     enum CodingKeys: String, CodingKey {
         case version, contextEpoch, revision, accountEpoch, remoteChatID, remoteTail, remoteUnits
         case listeningBoundary, listeningThrough, sentListeningSequences, nativeMessageIDs
-        case history, operations, usesListening, hasUncertainDelivery, groupAllowed
+        case history, operations, usesListening, hasUncertainDelivery, groupAllowed, deepThink
     }
 
     mutating func rotate() {

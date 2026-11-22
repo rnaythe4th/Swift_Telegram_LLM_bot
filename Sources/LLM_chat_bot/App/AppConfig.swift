@@ -8,6 +8,7 @@ enum EnvironmentKey: String {
     case deepSeekWebEnabled = "DEEPSEEK_WEB_ENABLED"
     case deepSeekWebWorkerToken = "DEEPSEEK_WEB_WORKER_TOKEN"
     case deepSeekWebWorkerPort = "DEEPSEEK_WEB_WORKER_PORT"
+    case deepSeekWebDeepThink = "DEEPSEEK_WEB_DEEPTHINK"
     case deepSeekWebQuotaPause = "DEEPSEEK_WEB_QUOTA_PAUSE_SECONDS"
     case deepSeekWebRemoteUnitLimit = "DEEPSEEK_WEB_REMOTE_UNIT_LIMIT"
     case companyChatId = "COMPANY_CHAT_ID"
@@ -16,7 +17,9 @@ enum EnvironmentKey: String {
     /// `postgres://user:password@host:5432/database` — the **session** pooler
     /// or a direct connection, never the transaction pooler on 6543 (§1).
     case databaseURL = "DATABASE_URL"
+    case requireDurableState = "REQUIRE_DURABLE_STATE"
     case healthPort = "PORT"
+    case httpBindHost = "HTTP_BIND_HOST"
     case bscscanApiKey = "BSCSCAN_API_KEY"
     case etherscanApiKey = "ETHERSCAN_API_KEY"
     case trongridApiKey = "TRONGRID_API_KEY"
@@ -84,6 +87,7 @@ struct AppConfig: Sendable {
     let defaultProvider: ServiceProvider
     let deepSeekWebToken: String?
     let deepSeekWebPort: Int
+    let deepSeekWebDeepThink: Bool
     let deepSeekWebQuotaPause: Int
     let deepSeekWebRemoteUnitLimit: Int
     /// Legacy operational chat id. Optional: it feeds one unused member list,
@@ -93,7 +97,9 @@ struct AppConfig: Sendable {
     /// Owner's @username, without the `@`.
     let ownerUsername: String
     let databaseURL: String?
+    let requireDurableState: Bool
     let healthPort: Int
+    let httpBindHost: String
     let bscscanApiKey: String?
     let etherscanApiKey: String?
     let trongridApiKey: String?
@@ -132,11 +138,14 @@ struct AppConfig: Sendable {
             throw AppConfigError.invalidEnvironment(.defaultAIProvider)
         }
         let databaseURL = optionalEnv(.databaseURL)
+        let requireDurableState = ["true", "1"].contains(optionalEnv(.requireDurableState)?.lowercased() ?? "")
         let webToken = webEnabled ? try env(.deepSeekWebWorkerToken) : nil
         if let webToken {
             guard AppConfig.isValidWebhookSecret(webToken), webToken.count >= 32 else {
                 throw AppConfigError.invalidEnvironment(.deepSeekWebWorkerToken)
             }
+        }
+        if webEnabled || requireDurableState {
             guard let databaseURL else { throw AppConfigError.missingEnvironment(.databaseURL) }
             guard let endpoint = DatabaseEndpoint(urlString: databaseURL), !endpoint.looksLikeTransactionPooler else {
                 throw AppConfigError.invalidEnvironment(.databaseURL)
@@ -182,6 +191,7 @@ struct AppConfig: Sendable {
             defaultProvider: defaultProvider,
             deepSeekWebToken: webToken,
             deepSeekWebPort: webPort,
+            deepSeekWebDeepThink: optionalEnv(.deepSeekWebDeepThink) == "1",
             deepSeekWebQuotaPause: min(3600, max(30, webQuotaPause)),
             deepSeekWebRemoteUnitLimit: min(200_000, max(12_000, webRemoteUnitLimit)),
             companyChatId: companyChatId,
@@ -189,7 +199,9 @@ struct AppConfig: Sendable {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
                 .lowercased(),
             databaseURL: databaseURL,
+            requireDurableState: requireDurableState,
             healthPort: healthPort,
+            httpBindHost: optionalEnv(.httpBindHost) ?? AppHTTPServer.defaultBindHost,
             bscscanApiKey: optionalEnv(.bscscanApiKey),
             etherscanApiKey: optionalEnv(.etherscanApiKey),
             trongridApiKey: optionalEnv(.trongridApiKey),

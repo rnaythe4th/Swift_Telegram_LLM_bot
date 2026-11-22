@@ -84,6 +84,9 @@ extension BotMenuHandler {
         var settingsSummary: String
         if web {
             settingsSummary = "🔌 <b>DeepSeek Web</b>\(webStatus)\n📝 Локальная история · <b>\(help.maxHistory) пар</b>"
+            if reasoningSupported {
+                settingsSummary += "\n🧠 DeepThink · <b>\(help.webDeepThinkLabel)</b>"
+            }
         } else if modesOn {
             // The name and the line under it are the super-admin's text on
             // the one page every user opens: escaped, or a stray `<` in a mode
@@ -115,6 +118,9 @@ extension BotMenuHandler {
         var rows: Keyboard = []
         if web {
             rows.row([menuButton("🎭 Роль", page: .role), menuButton("📝 История", page: .history)])
+            if reasoningSupported {
+                rows.row([menuButton("🧠 DeepThink", page: .reasoning)])
+            }
             rows.row([menuButton("🔌 Сервис ИИ", page: .provider), menuButton("↺ Сбросить", command: .reset)])
         } else if modesOn {
             rows = modeRows(config: modeConfig, activeID: activeMode?.id, hasFullAccess: hasFullAccess)

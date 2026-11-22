@@ -16,7 +16,7 @@ extension BotMenuHandler {
     static let webListenDisclosure = "При обращении к боту часть реплик участников будет отправляться в этот аккаунт DeepSeek."
 
     func webAccess(_ access: MenuAccess, feature: String, chatKey: ChatKey) async -> MenuAccess {
-        guard ["role", "listen", "mode", "reset"].contains(feature),
+        guard ["role", "listen", "mode", "reset", "reasoning"].contains(feature),
               await state.provider(chatKey: chatKey) == .deepseekWeb else { return access }
         return chatKey.chatID.isGroup ? .chatOperator : .everyone
     }

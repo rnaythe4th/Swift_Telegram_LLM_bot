@@ -219,12 +219,13 @@ final class BotMenuHandler: Sendable {
             // list fell through to `default: break` and opened for anyone.
             let access = await webAccess(menuPage.access, feature: menuPage.rawValue, chatKey: chatKey)
             if !(await satisfies(access, chatKey: chatKey, invoker: invokerKey(callback), userID: callback.from.id)) {
-                try? await telegram.answerCallback(callbackQueryID: callback.id, text: menuPage.restrictedNotice)
+                let refusal = access == menuPage.access ? menuPage.restrictedNotice : access.refusal
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: refusal)
                 // Sell rather than refuse, but only where there is something to
                 // sell: this is somebody actively reaching for what premium
                 // includes, the one moment a paywall is welcome instead of
                 // annoying (GROWTH.md P0.4). A missing *role* is not for sale.
-                if menuPage.access == .paidAccess {
+                if access == .paidAccess {
                     try await showPage(.pay, chatKey: chatKey, callback: callback, message: message, purchaseSource: .tuning)
                 }
                 return
@@ -358,11 +359,12 @@ final class BotMenuHandler: Sendable {
         let access = await webAccess(page.access, feature: page.rawValue, chatKey: chatKey)
         if !(await satisfies(access, chatKey: chatKey, invoker: invoker)) {
             var rows = Keyboard()
-            if page.access == .paidAccess {
+            if access == .paidAccess {
                 rows.row([buyButton("⚡ Открыть тонкую настройку", source: .tuning)])
             }
             rows.row(navButtons())
-            return MenuScreen(page.restrictedNotice, rows)
+            let refusal = access == page.access ? page.restrictedNotice : access.refusal
+            return MenuScreen(refusal, rows)
         }
         switch page {
         case .main:
