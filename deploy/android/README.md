@@ -4,7 +4,7 @@
 
 Установите `DEEPSEEK_WEB_IDLE_SECONDS=never` в `/opt/llmchat/.env`, чтобы Firefox оставался запущенным между запросами. При обычной настройке он закрывается после 60 секунд простоя.
 
-До установки сверить статусы всех работающих ботов, свободные порты, память и место на диске. Из прежнего `.env` нужны `TG_BOT_TOKEN` и `DATABASE_URL` с сессионным подключением к PostgreSQL, а также `STATE_ENCRYPTION_KEY`, если он использовался раньше. Добавить новый `DEEPSEEK_WEB_WORKER_TOKEN` со значением из `openssl rand -hex 32`. Скопировать файл по SSH с правами `0600`. Если предыдущий экземпляр этого же Telegram-бота активен, остановить его перед включением polling на телефоне.
+До установки сверить статусы всех работающих ботов, свободные порты, память и место на диске. Из прежнего `.env` нужны `TG_BOT_TOKEN` и `DATABASE_URL` с сессионным подключением к PostgreSQL, а также `STATE_ENCRYPTION_KEY`, если он использовался раньше. Перенести `ROUTER_API_KEY` для OpenRouter и Yandex и `DEEPSEEK_API_KEY` для DeepSeek API, чтобы сохранить доступ к этим сервисам. Добавить новый `DEEPSEEK_WEB_WORKER_TOKEN` со значением из `openssl rand -hex 32`. Скопировать файл по SSH с правами `0600`. Если предыдущий экземпляр этого же Telegram-бота активен, остановить его перед включением polling на телефоне.
 
 Для Supabase взять корневой сертификат в настройках базы. После установки пользователя разместить его в `/opt/llmchat/certs/supabase-ca.crt` с владельцем `root:llmchat` и правами `0640`, каталог создать с тем же владельцем и правами `0750`. В URL подключения указать `sslmode=verify-full&sslrootcert=/opt/llmchat/certs/supabase-ca.crt`. Использовать хост и порт Session pooler из настроек своего проекта. [Подключение и проверка сертификата Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres#connecting-with-ssl)
 
@@ -47,7 +47,7 @@ runuser -u llmchat -- sv -w 45 up /opt/llmchat/service/bot
 wget -qO- http://127.0.0.1:18080/ready
 ```
 
-Проверить запуск polling и восстановление PostgreSQL по `/opt/llmchat/log/bot/current`. Для чатов с ранее выбранным провайдером владелец может использовать `/provider deepseek-web`. DeepThink включается или выключается отдельно для каждого чата командами `/reasoning on` и `/reasoning off`.
+Проверить запуск polling и восстановление PostgreSQL по `/opt/llmchat/log/bot/current`. DeepSeek Web выбран в новых чатах и автоматически применяется к ранее сохранённым чатам при первом запуске этой версии. Выбор другого сервиса через /menu → «Сервис ИИ» сохраняется после перезапуска. При выбранном DeepSeek Web команды `/reasoning on` и `/reasoning off` управляют DeepThink отдельно для каждого чата.
 
 ## Управление
 

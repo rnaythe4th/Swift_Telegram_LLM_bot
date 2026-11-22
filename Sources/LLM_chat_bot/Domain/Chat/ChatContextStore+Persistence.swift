@@ -34,7 +34,8 @@ extension ChatContextStore {
             // Written only for chats that listen: an `off` document in every
             // other row is bytes on every flush for a feature nobody enabled.
             listening: context.listening == .off ? nil : context.listening,
-            webSelected: context.provider == .deepseekWeb ? true : nil,
+            webSelected: context.provider == .deepseekWeb || context.hasProviderOverride
+                ? context.provider == .deepseekWeb : nil,
             deepSeekWeb: context.deepSeekWeb
         )
     }
@@ -62,8 +63,13 @@ extension ChatContextStore {
         )
     }
 
-    private func makeContext(from snapshot: ChatContextSnapshot) -> ChatContext {
-        ChatContext(
+    private func makeContext(from snapshot: ChatContextSnapshot, useWeb: Bool) -> ChatContext {
+        let listening = snapshot.listening ?? .off
+        let boundary = listening.transcript.nextSeq - 1
+        let web = useWeb
+            ? snapshot.deepSeekWeb ?? DeepSeekWebChatState(listeningBoundary: boundary, listeningThrough: boundary)
+            : snapshot.deepSeekWeb
+        return ChatContext(
             role: snapshot.role,
             history: snapshot.history,
             pendingTurns: [],
@@ -74,7 +80,7 @@ extension ChatContextStore {
             maxHistory: snapshot.maxHistory,
             showCost: snapshot.showCost,
             showModel: snapshot.showModel,
-            provider: snapshot.webSelected == true ? .deepseekWeb : snapshot.provider,
+            provider: useWeb ? .deepseekWeb : snapshot.provider,
             suffix: snapshot.suffix,
             reasoningEffort: snapshot.reasoningEffort,
             backupNotify: snapshot.backupNotify,
@@ -88,9 +94,10 @@ extension ChatContextStore {
             funnelFirstMessageCounted: snapshot.funnelCounted ?? false,
             downgradedFromModel: snapshot.downgradedFrom,
             activeModeID: snapshot.activeMode,
-            listening: snapshot.listening ?? .off,
-            apiProvider: snapshot.webSelected == true ? snapshot.provider : nil,
-            deepSeekWeb: snapshot.deepSeekWeb
+            listening: listening,
+            apiProvider: useWeb ? snapshot.provider : nil,
+            hasProviderOverride: snapshot.webSelected == false,
+            deepSeekWeb: web
         )
     }
 
@@ -363,7 +370,13 @@ extension ChatContextStore {
 
         contexts.removeAll()
         for row in state.contexts {
-            contexts[row.key] = makeContext(from: row.snapshot)
+            let adoptWebDefault = row.snapshot.webSelected == nil && defaultProvider == .deepseekWeb
+            let useWeb = adoptWebDefault || row.snapshot.webSelected == true
+            contexts[row.key] = makeContext(from: row.snapshot, useWeb: useWeb)
+            if adoptWebDefault || (useWeb && row.snapshot.deepSeekWeb == nil) {
+                dirtyContexts.insert(row.key)
+                deletedContexts.remove(row.key)
+            }
         }
 
         tenants.removeAll()

@@ -64,7 +64,8 @@ enum Fixtures {
         ownerUsername: String = Fixtures.ownerHandle,
         ownerUserID: UserID? = Fixtures.ownerUserID,
         model: String = "test/model",
-        defaultHistoryLength: Int = 10
+        defaultHistoryLength: Int = 10,
+        defaultProvider: ServiceProvider = .openrouter
     ) -> ChatContextStore {
         ChatContextStore(
             ownerUsername: ownerUsername,
@@ -75,7 +76,8 @@ enum Fixtures {
             companyChatId: -1,
             companyMembers: "",
             defaultHistoryLength: defaultHistoryLength,
-            defaultSuffix: nil
+            defaultSuffix: nil,
+            defaultProvider: defaultProvider
         )
     }
 

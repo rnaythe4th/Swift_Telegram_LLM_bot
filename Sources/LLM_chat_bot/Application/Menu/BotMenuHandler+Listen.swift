@@ -33,20 +33,23 @@ extension BotMenuHandler {
         let listening = await state.listening(chatKey: chatKey)
         let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
         let web = await state.provider(chatKey: chatKey) == .deepseekWeb
+        let sharingAllowed = await state.webListeningAllowed(chatKey: chatKey)
         let cost = listening.promptCost
         // What the bot is already holding and would carry over. A promise with
         // a number on it beats "включите и посмотрим".
         let waiting = listening.isOn ? 0 : await state.prerollCount(chatKey: chatKey)
 
         var rows: Keyboard = []
-        rows.row([
-            listening.isOn
-                ? menuButton("🟢 Слушаю — выключить", .listen, "off")
-                : menuButton(
-                    waiting > 0 ? "⚪️ Включить · подхвачу \(waiting) сообщ." : "⚪️ Не слушаю — включить",
-                    .listen, "on"
-                )
-        ])
+        if listening.isOn {
+            var controls = [menuButton("🟢 Слушаю — выключить", .listen, "off")]
+            if web && !sharingAllowed {
+                controls.append(menuButton("Передавать контекст в DeepSeek Web", .listen, "on"))
+            }
+            rows.row(controls)
+        } else {
+            let label = waiting > 0 ? "⚪️ Включить · подхвачу \(waiting) сообщ." : "⚪️ Не слушаю — включить"
+            rows.row([menuButton(label, .listen, "on")])
+        }
         // Always offered, empty buffer included. This is the one button that
         // answers «а он вообще меня слышит?», and hiding it when the buffer is
         // empty took it away in exactly the case somebody needs to ask —
@@ -72,9 +75,12 @@ extension BotMenuHandler {
             : "⚪️ <b>Не слушаю.</b> Бот отвечает только на то, что написали ему."
         // The number that decides whether 200 is a good idea. Approximate on
         // purpose — the order of magnitude is the whole message.
-        let costLine = web ? "\n" + Self.webListenDisclosure : listening.isOn && !listening.transcript.isEmpty
-            ? "\n💸 К каждому ответу добавляется ≈ <b>\(cost.characters)</b> симв. (~\(cost.tokens) токенов) — это платно."
-            : ""
+        var costLine = ""
+        if web {
+            costLine = "\n" + (sharingAllowed ? Texts.webListenDisclosure : Texts.webListeningNeedsApproval)
+        } else if listening.isOn && !listening.transcript.isEmpty {
+            costLine = "\n💸 К каждому ответу добавляется ≈ <b>\(cost.characters)</b> симв. (~\(cost.tokens) токенов) — это платно."
+        }
         let sizeHint = isOperator
             ? "\n\nРазмер буфера меняет владелец бота: чем больше, тем лучше бот понимает разговор — и тем дороже каждый ответ (\(ChatTranscript.sizeRange.lowerBound)–\(ChatTranscript.sizeRange.upperBound))."
             : "\n\n<i>Размер буфера (сейчас \(listening.size)) настраивает владелец бота.</i>"
@@ -113,6 +119,23 @@ extension BotMenuHandler {
 
     // MARK: - Actions
 
+    func setChatListening(chatKey: ChatKey, threadID: Int64?, on: Bool) async throws -> ListenSwitchOutcome {
+        let web = await state.provider(chatKey: chatKey) == .deepseekWeb
+        if on && web {
+            let listening = await state.listening(chatKey: chatKey).isOn
+            let sharingAllowed = await state.webListeningAllowed(chatKey: chatKey)
+            if !listening || !sharingAllowed {
+                let disclosure = Texts.webGroupDisclosure + "\n" + Texts.webListenDisclosure
+                _ = try await telegram.sendMessage(.init(chatID: chatKey.chatID, threadID: threadID, replyTo: nil,
+                                                          text: disclosure, replyMarkup: nil))
+            }
+        }
+        let outcome = await state.setListenMode(chatKey: chatKey, on: on)
+        if on && web { await state.allowWebListening(chatKey: chatKey) }
+        try await checkpointWebSettings(chatKey: chatKey)
+        return outcome
+    }
+
     func processListenAction(
         route: MenuRoute,
         chatKey: ChatKey,
@@ -127,13 +150,7 @@ extension BotMenuHandler {
         switch route.sub {
         case "on", "off":
             let on = route.sub == "on"
-            if on, await state.provider(chatKey: chatKey) == .deepseekWeb,
-               !(await state.listening(chatKey: chatKey).isOn) {
-                _ = try await telegram.sendMessage(.init(chatID: chatKey.chatID, threadID: message.message_thread_id,
-                                                         replyTo: nil, text: Self.webListenDisclosure, replyMarkup: nil))
-            }
-            let outcome = await state.setListenMode(chatKey: chatKey, on: on)
-            try await checkpointWebSettings(chatKey: chatKey)
+            let outcome = try await setChatListening(chatKey: chatKey, threadID: message.message_thread_id, on: on)
             try? await telegram.answerCallback(
                 callbackQueryID: callback.id,
                 text: on

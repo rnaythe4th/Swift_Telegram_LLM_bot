@@ -149,12 +149,15 @@ extension BotMenuHandler {
         }
 
         let routingLine = help.escapedModelProviderRouting.map { "\nСервис · 📡 <code>\($0)</code>" } ?? ""
+        let modelHint = help.provider == .deepseekWeb
+            ? "Выбор модели применяется к ответам через API. При смене модели очищается история API."
+            : "При смене модели переписка очищается."
         let text = """
         <b>🤖 Модель</b>
 
         Сейчас · <code>\(help.escapedModel)</code>\(routingLine)\(legendLine)\(priceSection)
 
-        <i>При смене модели переписка очищается.</i>
+        <i>\(modelHint)</i>
         Своя модель — /model &lt;id&gt;
         <i>С конкретным сервисом — /model &lt;id&gt; | &lt;сервис&gt;</i>
         <i>Названия моделей — на openrouter.ai</i>\(accessLine)
@@ -195,13 +198,14 @@ extension BotMenuHandler {
         rows.row(navButtons())
 
         let bucket = Self.tempBucket(help.temp)
+        let apiNote = help.provider == .deepseekWeb ? "\n<i>Стиль применяется к ответам через API.</i>" : ""
         let text = """
         <b>🌡 Стиль ответа</b>
 
         Сейчас · <b>\(bucket)</b> (\(Self.formatTemp(help.temp)))
 
         <i>Насколько свободно бот отвечает: 0.0 — строго по фактам и предсказуемо, 2.0 — творчески и непредсказуемо.</i>
-        ✏️ — задать своё число (или /settemp &lt;0.0–2.0&gt;)
+        ✏️ — задать своё число (или /settemp &lt;0.0–2.0&gt;)\(apiNote)
         """
         return MenuScreen(text, rows)
     }
@@ -241,6 +245,9 @@ extension BotMenuHandler {
         let testHint = testModeOn
             ? "\n\n<i>🧪 Тест-режим включён — дописывайте <code>\(help.testModeSuffix!)</code> к командам, чтобы их выполнял именно этот бот.</i>"
             : ""
+        let apiNote = help.provider == .deepseekWeb
+            ? "\n\n<i>Объём текста, стоимость и название модели показываются под ответами через API.</i>"
+            : ""
         let text = """
         <b>📊 Что показывать под ответом</b>
 
@@ -249,7 +256,7 @@ extension BotMenuHandler {
 
         <i>Объём текста — сколько текста обработано на этот ответ
         Стоимость — сколько списалось за этот ответ
-        Модель — какая модель отвечала</i>\(testHint)
+        Модель — какая модель отвечала</i>\(apiNote)\(testHint)
         """
         return MenuScreen(text, rows)
     }
@@ -317,12 +324,12 @@ extension BotMenuHandler {
 
     func renderProvider(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let providers = gateways.available
         var rows: Keyboard = []
         var currentRow: [InlineKeyboardButton] = []
-        for provider in providers {
-            let label = (provider == help.provider ? "✓ " : "") + provider.rawValue
-            currentRow.append(menuButton(label, .provider, "\(provider.commandValue)"))
+        for provider in ServiceProvider.allCases {
+            let mark = provider == help.provider ? "✓ " : ""
+            let status = gateways.capabilities(for: provider) == nil ? " · не настроен" : ""
+            currentRow.append(menuButton(mark + provider.rawValue + status, .provider, provider.commandValue))
             if currentRow.count == 2 {
                 rows.row(currentRow)
                 currentRow = []
@@ -332,25 +339,22 @@ extension BotMenuHandler {
             rows.row(currentRow)
         }
         rows.row(navButtons())
-        let availability = providers.contains(help.provider) ? "" : " · отключён"
-        let disclosure = providers.contains(.deepseekWeb) ? "\nDeepSeek Web — текстовые ответы через веб-аккаунт владельца" : ""
         let text = """
         <b>🔌 Сервис ИИ</b>
 
-        Сейчас · <b>\(help.provider.rawValue)</b>\(availability)
-
-        <i>Через кого бот ходит к моделям. Обычно менять не нужно — если не знаете, что выбрать, оставьте как есть.</i>
+        Сейчас · <b>\(help.provider.rawValue)</b>
 
         <i>OpenRouter — тысячи моделей (GPT, Claude, Gemini, DeepSeek…)
         DeepSeek — только модели DeepSeek, напрямую
-        Yandex — YandexGPT\(disclosure)</i>
+        DeepSeek Web — текстовые ответы через веб-аккаунт владельца
+        Yandex — YandexGPT</i>
         """
         return MenuScreen(text, rows)
     }
 
     func renderReasoning(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let provider = await state.provider(chatKey: chatKey)
+        let provider = help.provider
         let supported = gateways.capabilities(for: provider)?.supportsReasoning ?? false
         if provider == .deepseekWeb, supported {
             let on = help.webDeepThinkEnabled ? "✓ Включить" : "Включить"

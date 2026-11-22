@@ -124,11 +124,8 @@ struct ChatContext: Sendable {
     /// therefore free, in every chat that has not asked for it.
     var listening: ChatListening = .off
     var apiProvider: ServiceProvider? = nil
+    var hasProviderOverride = false
     var deepSeekWeb: DeepSeekWebChatState? = nil
-
-    var webDeepThink: Bool? {
-        deepSeekWeb?.deepThink ?? reasoningEffort.map { _ in true }
-    }
 }
 
 extension ChatContext {

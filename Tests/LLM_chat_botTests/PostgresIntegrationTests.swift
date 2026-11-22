@@ -127,7 +127,7 @@ final class PostgresIntegrationTests: XCTestCase {
         let base = try await telegramDouble.start()
         let telegram = TelegramHTTPGateway(network: NetworkClient(), botToken: "test-token",
                                            apiBase: base, rateLimiter: nil, metrics: nil)
-        let store = Fixtures.makeStore(ownerUsername: "owner", ownerUserID: 321)
+        let store = Fixtures.makeStore(ownerUsername: "owner", ownerUserID: 321, defaultProvider: .deepseekWeb)
         await store.identifyUser(userID: 321, username: "owner", firstName: "Owner")
         _ = await store.activatePaidSubscription(.identified(321))
         await store.setSelfPromoConfig(.init(enabled: true, text: "fixture promotion", everyNReplies: 1,
@@ -148,7 +148,6 @@ final class PostgresIntegrationTests: XCTestCase {
         let a = ChatKey(chatID: chatID, threadID: 5)
         let b = ChatKey(chatID: chatID, threadID: 9)
         _ = await store.changeProvider(chatKey: a, newProvider: .deepseekWeb)
-        _ = await store.changeProvider(chatKey: b, newProvider: .deepseekWeb)
 
         func turn(_ id: Int, _ key: ChatKey, _ text: String) async -> Bool? {
             let message = TelegramMessage(
@@ -180,6 +179,8 @@ final class PostgresIntegrationTests: XCTestCase {
         let opened = await worker.turns()
         XCTAssertEqual(opened.map(\.remoteChatID), [nil, "fixture-1", nil])
         XCTAssertEqual(Set(opened.map(\.operationID)).count, 3)
+        let notices = await telegramDouble.calls("sendMessage").filter { $0.text == Texts.webGroupDisclosure }
+        XCTAssertEqual(notices.count, 1, "The topic using the Web default answers after the group notice")
 
         let duplicate = await turn(2, a, "@testbot два")
         XCTAssertEqual(duplicate, true)

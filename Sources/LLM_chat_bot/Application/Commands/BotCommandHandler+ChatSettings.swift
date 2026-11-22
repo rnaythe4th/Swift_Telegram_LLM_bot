@@ -12,10 +12,6 @@ extension BotCommandHandler {
             guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
                                                  refusal: "🔒 Эти настройки меняет администратор чата.") else { return }
         }
-        if web && [.setTemp, .model].contains(parsed.name) {
-            try await sendUserFeedback(chatKey: chatKey, text: "Эта настройка доступна для API-сервисов. Сейчас выбран DeepSeek Web.")
-            return
-        }
         switch parsed.name {
         case .setRole:
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -46,7 +42,8 @@ extension BotCommandHandler {
             }
             await state.setTemperature(chatKey: chatKey, value: temp)
             let bucket = BotMenuHandler.tempBucket(temp)
-            try await sendUserFeedback(chatKey: chatKey, text: "✓ Стиль ответа: <b>\(bucket)</b> (\(BotMenuHandler.formatTemp(temp)))")
+            let note = web ? "\nНастройка действует для ответов через API." : ""
+            try await sendUserFeedback(chatKey: chatKey, text: "✓ Стиль ответа: <b>\(bucket)</b> (\(BotMenuHandler.formatTemp(temp)))\(note)")
 
         case .model:
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -55,13 +52,14 @@ extension BotCommandHandler {
                     🤖 Укажите название модели.
                     <i>Пример:</i> <code>/model openai/gpt-4o</code>
                     <i>Через конкретный сервис:</i> <code>/model deepseek/deepseek-v4-pro | deepseek</code>
-                    Готовые варианты — /menu → 🤖 Модель
+                    Готовые варианты в /menu → ⚙️ Тонкая настройка → 🤖 Модель
                     """)
                 return
             }
             // Optional second part after "|": OpenRouter upstream provider pin.
-            let modelParts = trimmed.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            let modelID = modelParts[0]
+            let modelParts = trimmed.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            let modelID = modelParts.first ?? ""
             let providerRouting = modelParts.count > 1 && !modelParts[1].isEmpty ? modelParts[1] : nil
             guard !modelID.isEmpty else {
                 try await sendUserFeedback(chatKey: chatKey, text: "⚠️ Укажите модель перед <code>|</code>.")
@@ -104,10 +102,11 @@ extension BotCommandHandler {
             if isPaidModel, case .dailyTaste(let remaining, let limit) = access {
                 tasteNote = "\n🚦 Умных ответов сегодня: <b>\(remaining) из \(limit)</b>, дальше отвечаю на бесплатной."
             }
+            let historyNote = web ? "Модель сохранена для ответов через API." : "Переписка очищена."
             try await sendUserFeedback(chatKey: chatKey, text: """
                 ✓ Модель: <code>\(MessageText.escaped(changed.new))</code>\(providerNote)
                 <i>Была:</i> <code>\(MessageText.escaped(changed.old))</code>
-                Переписка очищена.\(priceNote)\(tasteNote)
+                \(historyNote)\(priceNote)\(tasteNote)
                 """)
 
         case .defaultRole:
@@ -136,18 +135,20 @@ extension BotCommandHandler {
 
     /// What the bot prints under an answer, plus test mode and the resets.
     func handleChatToggleCommand(_ parsed: ParsedBotCommand, chatKey: ChatKey) async throws {
+        let web = await state.selectedProvider(chatKey: chatKey) == .deepseekWeb
+        let note = web ? "\nНастройка действует для ответов через API." : ""
         switch parsed.name {
         case .showTokens:
             let new = await state.toggleShowStats(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "📊 Объём текста под ответом · <b>\(onOff(new))</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "📊 Объём текста под ответом · <b>\(onOff(new))</b>\(note)")
 
         case .showCost:
             let new = await state.toggleShowCost(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "💵 Стоимость под ответом · <b>\(onOff(new))</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "💵 Стоимость под ответом · <b>\(onOff(new))</b>\(note)")
 
         case .showModel:
             let new = await state.toggleShowModel(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "🤖 Название модели под ответом · <b>\(onOff(new))</b>")
+            try await sendUserFeedback(chatKey: chatKey, text: "🤖 Название модели под ответом · <b>\(onOff(new))</b>\(note)")
 
         case .backupNotify:
             let new = await state.toggleBackupNotify(chatKey: chatKey)
@@ -194,9 +195,9 @@ extension BotCommandHandler {
                 guard let capabilities = gateways.capabilities(for: provider) else {
                     throw ProviderGatewayRegistryError.missingAdapter(provider)
                 }
-                if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webAllowed(chatKey: chatKey)) {
+                if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webListeningAllowed(chatKey: chatKey)) {
                     let listening = await state.listening(chatKey: chatKey).isOn
-                    let disclosure = BotMenuHandler.webGroupDisclosure + (listening ? "\n" + BotMenuHandler.webListenDisclosure : "")
+                    let disclosure = Texts.webGroupDisclosure + (listening ? "\n" + Texts.webListenDisclosure : "")
                     try await sendUserFeedback(chatKey: chatKey, text: disclosure)
                 }
                 let old = await state.changeProvider(chatKey: chatKey, newProvider: provider)
@@ -207,9 +208,8 @@ extension BotCommandHandler {
 
                 try await menuHandler.checkpointWebSettings(chatKey: chatKey)
                 let reasoningEnabled = await state.reasoningEnabled(chatKey: chatKey)
-                if reasoningEnabled, !capabilities.supportsReasoning && provider != .deepseekWeb {
-                    await state.setReasoningEffort(chatKey: chatKey, effort: nil)
-                    lines.append("<i>Обдумывание выключено — этот сервис его не умеет.</i>")
+                if reasoningEnabled, !capabilities.supportsReasoning {
+                    lines.append("<i>На этом сервисе уровни обдумывания недоступны.</i>")
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             } else {

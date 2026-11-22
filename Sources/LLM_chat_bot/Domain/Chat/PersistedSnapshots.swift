@@ -107,6 +107,7 @@ struct ChatContextSnapshot: Codable, Sendable {
     // Listen mode and the overheard conversation; absent in every chat that
     // never turned it on, which is what keeps the row the size it was.
     var listening: ChatListening?
+    // True for Web, false for a chat that chose an API, absent for legacy/default API settings.
     var webSelected: Bool?
     var deepSeekWeb: DeepSeekWebChatState?
 }

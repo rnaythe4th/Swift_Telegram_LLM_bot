@@ -5,15 +5,34 @@ extension ChatContextStore {
         contexts[chatKey]?.deepSeekWeb
     }
 
-    func webAllowed(chatKey: ChatKey) -> Bool {
+    func webListeningAllowed(chatKey: ChatKey) -> Bool {
         !chatKey.chatID.isGroup || contexts[chatKey]?.deepSeekWeb?.groupAllowed == true
+    }
+
+    func webGroupNoticeEpoch(chatKey: ChatKey) -> UUID? {
+        guard chatKey.chatID.isGroup else { return nil }
+        let context = ensure(chatKey: chatKey)
+        guard context.provider == .deepseekWeb, let web = context.deepSeekWeb,
+              !web.groupAllowed, web.groupNoticeSent != true else { return nil }
+        return web.contextEpoch
+    }
+
+    func allowWebListening(chatKey: ChatKey) {
+        guard chatKey.chatID.isGroup, let context = contexts[chatKey],
+              let web = context.deepSeekWeb, !web.groupAllowed else { return }
+        let boundary = context.listening.transcript.nextSeq - 1
+        mutateWeb(chatKey: chatKey, contextEpoch: web.contextEpoch) {
+            $0.groupAllowed = true
+            $0.listeningBoundary = boundary
+            $0.listeningThrough = boundary
+        }
     }
 
     /// A nil setting toggles the current value, including the deployment default.
     func setWebDeepThink(chatKey: ChatKey, enabled: Bool?) -> Bool? {
         let context = ensure(chatKey: chatKey)
         guard let web = context.deepSeekWeb else { return nil }
-        let next = enabled ?? !(context.webDeepThink ?? webDeepThinkDefault)
+        let next = enabled ?? !(web.deepThink ?? webDeepThinkDefault)
         guard mutateWeb(chatKey: chatKey, contextEpoch: web.contextEpoch, { $0.deepThink = next }) else { return nil }
         return next
     }
@@ -40,11 +59,10 @@ extension ChatContextStore {
         now: Date = Date()
     ) -> DeepSeekWebOperation? {
         let context = ensure(chatKey: chatKey)
-        guard context.provider == .deepseekWeb, webAllowed(chatKey: chatKey),
-              let web = context.deepSeekWeb, web.version == 1 else { return nil }
+        guard context.provider == .deepseekWeb, let web = context.deepSeekWeb, web.version == 1 else { return nil }
         // A snapshot survives queue waits and transcript eviction. Only
         // replies whose source we can locate in this topic are eligible.
-        let entries = context.listening.isOn
+        let entries = context.listening.isOn && webListeningAllowed(chatKey: chatKey)
             ? context.listening.transcript.entries.filter { $0.seq > web.listeningBoundary }
             : []
         let boundary = max(web.listeningBoundary, entries.last?.seq ?? 0)
@@ -93,7 +111,7 @@ extension ChatContextStore {
             },
             listeningThrough: boundary,
             reply: reply.flatMap(quote),
-            deepThink: context.webDeepThink,
+            deepThink: web.deepThink,
             requesterID: asker?.userID
         )
     }
@@ -203,6 +221,7 @@ extension ChatContextStore {
             listeningThrough: boundary,
             history: keepingIndependentTurns ? previous?.history.filter { !$0.usesListening } ?? [] : [],
             groupAllowed: previous?.groupAllowed ?? false,
+            groupNoticeSent: previous?.groupNoticeSent,
             deepThink: previous?.deepThink
         )
         _overheardPreroll.removeValue(forKey: chatKey)

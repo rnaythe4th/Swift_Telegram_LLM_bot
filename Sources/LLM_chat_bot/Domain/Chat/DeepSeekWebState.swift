@@ -83,13 +83,15 @@ struct DeepSeekWebChatState: Codable, Sendable {
     var operations: [DeepSeekWebOperation] = []
     var usesListening = false
     var hasUncertainDelivery = false
+    // Group operator approved sharing the listening buffer with DeepSeek.
     var groupAllowed = false
+    var groupNoticeSent: Bool?
     var deepThink: Bool?
 
     enum CodingKeys: String, CodingKey {
         case version, contextEpoch, revision, accountEpoch, remoteChatID, remoteTail, remoteUnits
         case listeningBoundary, listeningThrough, sentListeningSequences, nativeMessageIDs
-        case history, operations, usesListening, hasUncertainDelivery, groupAllowed, deepThink
+        case history, operations, usesListening, hasUncertainDelivery, groupAllowed, groupNoticeSent, deepThink
     }
 
     mutating func rotate() {

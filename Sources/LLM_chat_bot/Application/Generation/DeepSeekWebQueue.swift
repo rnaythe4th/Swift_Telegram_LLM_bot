@@ -77,10 +77,6 @@ actor DeepSeekWebQueue {
             await notify(Self.message(.unavailable), chatKey, origin.telegramThreadID)
             return false
         }
-        guard await store.webAllowed(chatKey: chatKey) else {
-            await notify("Попросите администратора включить DeepSeek Web в этом чате через /provider deepseek-web.", chatKey, origin.telegramThreadID)
-            return false
-        }
         // Count admission calls while awaiting actor and database work.
         inAdmission += 1
         defer { inAdmission -= 1 }
@@ -89,6 +85,16 @@ actor DeepSeekWebQueue {
               items.lazy.filter({ $0.0 == chatKey }).count < perChatLimit else {
             await notify("⏳ Очередь DeepSeek Web заполнена. Попробуйте позже.", chatKey, origin.telegramThreadID)
             return false
+        }
+
+        if let epoch = await store.webGroupNoticeEpoch(chatKey: chatKey) {
+            _ = try await telegram.sendMessage(.init(
+                chatID: chatKey.chatID, threadID: origin.telegramThreadID, replyTo: nil,
+                text: Texts.webGroupDisclosure, replyMarkup: nil
+            ))
+            guard await store.mutateWeb(chatKey: chatKey, contextEpoch: epoch, { $0.groupNoticeSent = true }) else {
+                return false
+            }
         }
 
         do {

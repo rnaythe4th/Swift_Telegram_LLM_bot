@@ -2,6 +2,73 @@ import XCTest
 @testable import LLM_chat_bot
 
 final class DeepSeekWebStateTests: XCTestCase {
+    func testWebDefaultMigratesStoredChatsAndKeepsLaterProviderChoices() async throws {
+        let original = Fixtures.makeStore()
+        let dm = ChatKey(chatID: 100, threadID: 0)
+        let topic = ChatKey(chatID: -100, threadID: 5)
+        await original.setReasoningEffort(chatKey: dm, effort: .high)
+        await original.setTemperature(chatKey: dm, value: 0.5)
+        let generation = GenerationID()
+        _ = await original.snapshotAndAppend(chatKey: dm, generationID: generation,
+                                             content: .init(text: "old question", attachments: []), username: nil)
+        _ = await original.appendAssistant(chatKey: dm, generationID: generation, content: "old answer")
+        _ = await original.fetchHelp(chatKey: topic)
+
+        var saved = PersistedBotState()
+        saved.contexts = await original.drainDirtyBatch().contexts
+        let store = Fixtures.makeStore(defaultProvider: .deepseekWeb)
+        await store.restore(from: saved)
+
+        let migrated = await store.drainDirtyBatch().contexts
+        XCTAssertEqual(Set(migrated.map(\.key)), [dm, topic])
+        XCTAssertTrue(migrated.allSatisfy { $0.snapshot.webSelected == true && $0.snapshot.deepSeekWeb != nil })
+        let fresh = await store.provider(chatKey: ChatKey(chatID: 101, threadID: 0))
+        XCTAssertEqual(fresh, .deepseekWeb)
+
+        _ = await store.changeProvider(chatKey: dm, newProvider: .openrouter)
+        let api = await store.fetchHelp(chatKey: dm)
+        let history = await store.history(chatKey: dm)
+        XCTAssertEqual(api.reasoningEffort, .high)
+        XCTAssertEqual(api.temp, 0.5)
+        XCTAssertEqual(history.map(\.role), ["system", "user", "assistant"])
+
+        let updated = await store.drainDirtyBatch().contexts
+        let choice = try XCTUnwrap(updated.first { $0.key == dm })
+        XCTAssertEqual(choice.snapshot.webSelected, false)
+        saved.contexts = [choice] + migrated.filter { $0.key != dm }
+        let restarted = Fixtures.makeStore(defaultProvider: .deepseekWeb)
+        await restarted.restore(from: saved)
+        let selected = await restarted.provider(chatKey: dm)
+        let groupProvider = await restarted.provider(chatKey: topic)
+        XCTAssertEqual(selected, .openrouter)
+        XCTAssertEqual(groupProvider, .deepseekWeb)
+    }
+
+    func testWebDefaultAcceptsGroupQuestionsBeforeSharingListeningBuffer() async throws {
+        let store = Fixtures.makeStore(defaultProvider: .deepseekWeb)
+        let topic = ChatKey(chatID: -100, threadID: 5)
+        await store.setListenMode(chatKey: topic, on: true)
+        await store.recordOverheard(chatKey: topic, messageID: 10, author: .member(Fixtures.ownerKey),
+                                    text: "before approval", at: Date(), replyTo: nil)
+        let first = await store.webCandidate(
+            chatKey: topic, operationID: UUID(), updateID: 1, question: "a question",
+            messageID: 11, telegramThreadID: 5,
+            reply: TranscriptReply(messageID: 10, author: .member(Fixtures.ownerKey), quote: "before approval")
+        )
+        let operation = try XCTUnwrap(first)
+        XCTAssertTrue(operation.listening.isEmpty)
+        XCTAssertNil(operation.reply)
+
+        await store.allowWebListening(chatKey: topic)
+        await store.recordOverheard(chatKey: topic, messageID: 12, author: .member(Fixtures.ownerKey),
+                                    text: "after approval", at: Date(), replyTo: nil)
+        let second = await store.webCandidate(
+            chatKey: topic, operationID: UUID(), updateID: 2, question: "another question",
+            messageID: 13, telegramThreadID: 5, reply: nil
+        )
+        XCTAssertEqual(second?.listening.map(\.text), ["after approval"])
+    }
+
     func testDeepThinkIsSavedPerTopicAndCapturedWhenQueued() async throws {
         let store = Fixtures.makeStore()
         let key = ChatKey(chatID: -100, threadID: 5)
@@ -11,24 +78,24 @@ final class DeepSeekWebStateTests: XCTestCase {
         _ = await store.changeProvider(chatKey: other, newProvider: .deepseekWeb)
 
         let toggle = await store.setWebDeepThink(chatKey: key, enabled: nil)
-        XCTAssertEqual(toggle, false, "A legacy enabled grade is treated as on")
+        XCTAssertEqual(toggle, true, "An API grade leaves the Web default in effect")
         let candidate = await store.webCandidate(
             chatKey: key, operationID: UUID(), updateID: 1, question: "question",
             messageID: 10, telegramThreadID: 5, reply: nil
         )
         let operation = try XCTUnwrap(candidate)
-        _ = await store.setWebDeepThink(chatKey: key, enabled: true)
+        _ = await store.setWebDeepThink(chatKey: key, enabled: false)
         await store.clearHistory(chatKey: key)
 
         let policy = await store.webState(chatKey: key)
         let otherPolicy = await store.webState(chatKey: other)
         let originalEffort = await store.reasoningEffort(chatKey: key)
-        XCTAssertEqual(policy?.deepThink, true)
+        XCTAssertEqual(policy?.deepThink, false)
         XCTAssertNil(otherPolicy?.deepThink)
         XCTAssertEqual(originalEffort, .high)
 
         let saved = try JSONEncoder().encode(operation)
-        XCTAssertEqual(try JSONDecoder().decode(DeepSeekWebOperation.self, from: saved).deepThink, false)
+        XCTAssertEqual(try JSONDecoder().decode(DeepSeekWebOperation.self, from: saved).deepThink, true)
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
         legacy.removeValue(forKey: "deepThink")
         let old = try JSONSerialization.data(withJSONObject: legacy)

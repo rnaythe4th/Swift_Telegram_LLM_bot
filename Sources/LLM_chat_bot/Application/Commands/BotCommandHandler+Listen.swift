@@ -22,16 +22,19 @@ extension BotCommandHandler {
         let argument = argument.trimmingCharacters(in: .whitespaces).lowercased()
         let listening = await state.listening(chatKey: chatKey)
         let web = await state.provider(chatKey: chatKey) == .deepseekWeb
+        let threadID = chatKey.threadID == 0 ? nil : chatKey.threadID
 
         // Status is a question, not a change: anyone in the chat may ask it.
         guard !argument.isEmpty else {
             let waiting = listening.isOn ? 0 : await state.prerollCount(chatKey: chatKey)
+            let sharingAllowed = await state.webListeningAllowed(chatKey: chatKey)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: Self.listenStatus(
                     listening,
                     waiting: waiting,
-                    canReadAll: menuHandler.canReadAllGroupMessages
+                    canReadAll: menuHandler.canReadAllGroupMessages,
+                    webSharing: web ? sharingAllowed : nil
                 )
             )
             return
@@ -63,11 +66,7 @@ extension BotCommandHandler {
                 ? await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser, refusal: "🔒 Прослушку настраивает администратор чата.")
                 : await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser)
             guard allowed else { return }
-            if web && !listening.isOn {
-                try await sendUserFeedback(chatKey: chatKey, text: BotMenuHandler.webListenDisclosure)
-            }
-            let outcome = await state.setListenMode(chatKey: chatKey, on: true)
-            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
+            let outcome = try await menuHandler.setChatListening(chatKey: chatKey, threadID: threadID, on: true)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: outcome.changed
@@ -76,7 +75,7 @@ extension BotCommandHandler {
                         seeded: outcome.seeded,
                         canReadAll: menuHandler.canReadAllGroupMessages
                     )
-                    : "🎧 Уже слушаю этот чат."
+                    : (web ? "🎧 DeepSeek Web учитывает новые реплики беседы." : "🎧 Уже слушаю этот чат.")
             )
 
         case "off", "выкл", "выключить":
@@ -84,8 +83,7 @@ extension BotCommandHandler {
                 ? await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser, refusal: "🔒 Прослушку настраивает администратор чата.")
                 : await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser)
             guard allowed else { return }
-            let outcome = await state.setListenMode(chatKey: chatKey, on: false)
-            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
+            let outcome = try await menuHandler.setChatListening(chatKey: chatKey, threadID: threadID, on: false)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: outcome.changed ? BotMenuHandler.listenAnnouncement(on: false) : "🎧 И так не слушаю."
@@ -133,7 +131,7 @@ extension BotCommandHandler {
         }
     }
 
-    private static func listenStatus(_ listening: ChatListening, waiting: Int, canReadAll: Bool) -> String {
+    private static func listenStatus(_ listening: ChatListening, waiting: Int, canReadAll: Bool, webSharing: Bool?) -> String {
         // The setting the whole feature depends on. Silence about it means a
         // chat switches listening on, is told it is being read, and records
         // nothing — indistinguishable from a broken bot.
@@ -153,10 +151,16 @@ extension BotCommandHandler {
             """
         }
         let cost = listening.promptCost
+        let contextLine: String
+        if let webSharing {
+            contextLine = webSharing ? Texts.webListenDisclosure : Texts.webListeningNeedsApproval
+        } else {
+            contextLine = "(≈ \(cost.characters) симв., ~\(cost.tokens) токенов к каждому ответу)"
+        }
         return """
         🟢 <b>Слушаю этот чат.</b>
-        В буфере · <b>\(listening.transcript.count)</b> из \(listening.size) сообщ. \
-        (≈ \(cost.characters) симв., ~\(cost.tokens) токенов к каждому ответу)
+        В буфере · <b>\(listening.transcript.count)</b> из \(listening.size) сообщ.
+        \(contextLine)
 
         <code>/listen dump</code> — что бот слышал · <code>/listen off</code> — выключить\(privacy)
         """

@@ -133,7 +133,7 @@ struct AppConfig: Sendable {
         let routerApiKey = optionalEnv(.routerApiKey)
         let webEnabled = ["true", "1"].contains(optionalEnv(.deepSeekWebEnabled)?.lowercased() ?? "")
         let defaultName = optionalEnv(.defaultAIProvider)
-            ?? (routerApiKey != nil ? "openrouter" : (deepseekKey != nil ? "deepseek" : "deepseek-web"))
+            ?? (webEnabled ? "deepseek-web" : (routerApiKey != nil ? "openrouter" : "deepseek"))
         guard let defaultProvider = ServiceProvider.parse(defaultName) else {
             throw AppConfigError.invalidEnvironment(.defaultAIProvider)
         }

@@ -125,7 +125,7 @@ TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disabl
 | `TG_BOT_TOKEN`                                          | обязательный токен Telegram-бота                                                              |
 | `ROUTER_API_KEY`, `DEEPSEEK_API_KEY`                     | ключи соответствующих API-провайдеров                                                        |
 | `DATABASE_URL`                                          | Postgres в **session**-режиме пула (порт 5432), обязателен для DeepSeek Web                     |
-| `DEFAULT_AI_PROVIDER`                                   | начальный провайдер, например `openrouter`, `deepseek` или `deepseek-web`                      |
+| `DEFAULT_AI_PROVIDER`                                   | при включённом Web по умолчанию `deepseek-web`. Можно указать другой настроенный сервис       |
 | `DEEPSEEK_WEB_ENABLED`, `DEEPSEEK_WEB_WORKER_TOKEN`      | включает браузерный сервис и задаёт отдельный токен для loopback                              |
 | `STATE_ENCRYPTION_KEY`                                  | 32 байта base64; шифрует платёжные секреты в базе                                             |
 | `TELEGRAM_WEBHOOK_SECRET`, `METRICS_TOKEN`              | аутентификация вебхука, bearer-токен `/metrics`                                               |
@@ -269,7 +269,7 @@ Deploy using the `Dockerfile`. See the [DeepSeek Web runbook for Railway, Supaba
 | `TG_BOT_TOKEN`                                          | required Telegram bot token                                                                          |
 | `ROUTER_API_KEY`, `DEEPSEEK_API_KEY`                     | keys for the corresponding API providers                                                             |
 | `DATABASE_URL`                                          | Postgres in **session** pool mode (port 5432), required for DeepSeek Web                               |
-| `DEFAULT_AI_PROVIDER`                                   | starting provider, such as `openrouter`, `deepseek`, or `deepseek-web`                                 |
+| `DEFAULT_AI_PROVIDER`                                   | defaults to `deepseek-web` when Web is enabled. Set it to another configured provider to override        |
 | `DEEPSEEK_WEB_ENABLED`, `DEEPSEEK_WEB_WORKER_TOKEN`      | enable the browser service and give it a separate loopback token                                     |
 | `STATE_ENCRYPTION_KEY`                                  | 32 bytes base64; encrypts payment secrets in the database                                            |
 | `TELEGRAM_WEBHOOK_SECRET`, `METRICS_TOKEN`              | webhook authentication, `/metrics` bearer token                                                      |

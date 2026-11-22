@@ -150,7 +150,7 @@ extension ChatContextStore {
             defaultRole: displayRole(defaultRole(chatID: chatKey.chatID), chatID: chatKey.chatID),
             provider: context.provider,
             reasoningEffort: context.reasoningEffort,
-            webDeepThinkEnabled: context.webDeepThink ?? webDeepThinkDefault,
+            webDeepThinkEnabled: context.deepSeekWeb?.deepThink ?? webDeepThinkDefault,
             testModeSuffix: context.suffix,
             backupNotify: context.backupNotify,
             cumulativeUsage: context.cumulativeUsage
@@ -260,7 +260,6 @@ extension ChatContextStore {
             context.modelProviderRouting = providerRouting
             context.history = [.init(role: "system", content: context.role)]
             context.pendingTurns = []
-            resetWebContext(&context, chatKey: chatKey)
             // An explicit choice supersedes the cap fallback: nothing left to
             // restore later (roadmap step 6).
             context.downgradedFromModel = nil
@@ -291,17 +290,19 @@ extension ChatContextStore {
 
     func changeProvider(chatKey: ChatKey, newProvider: ServiceProvider) -> ServiceProvider {
         let oldProvider = ensure(chatKey: chatKey).provider
+        if oldProvider == .deepseekWeb, newProvider == .deepseekWeb {
+            allowWebListening(chatKey: chatKey)
+            return oldProvider
+        }
         mutate(chatKey: chatKey) { context in
+            context.hasProviderOverride = newProvider != .deepseekWeb
             guard oldProvider == .deepseekWeb || newProvider == .deepseekWeb else {
                 context.provider = newProvider
                 return
             }
-            let wasAllowed = webAllowed(chatKey: chatKey)
-            guard oldProvider != newProvider || !wasAllowed else { return }
             if oldProvider != .deepseekWeb {
                 context.apiProvider = oldProvider
             }
-            context.history = [.init(role: "system", content: context.role)]
             context.pendingTurns = []
             if newProvider == .deepseekWeb {
                 context.provider = newProvider

@@ -12,9 +12,6 @@ import Foundation
 // userID (CLAUDE.md §17), and a raw handle locks out everyone without one.
 
 extension BotMenuHandler {
-    static let webGroupDisclosure = "Вопросы из этой темы будут отправляться в аккаунт DeepSeek, подключённый владельцем бота."
-    static let webListenDisclosure = "При обращении к боту часть реплик участников будет отправляться в этот аккаунт DeepSeek."
-
     func webAccess(_ access: MenuAccess, feature: String, chatKey: ChatKey) async -> MenuAccess {
         guard ["role", "listen", "mode", "reset", "reasoning"].contains(feature),
               await state.provider(chatKey: chatKey) == .deepseekWeb else { return access }

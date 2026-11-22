@@ -70,7 +70,6 @@ def process_environment(values):
         "REQUIRE_DURABLE_STATE": "true",
         "HTTP_BIND_HOST": "127.0.0.1",
         "PORT": "18080",
-        "DEFAULT_AI_PROVIDER": "deepseek-web",
         "DEEPSEEK_WEB_ENABLED": "true",
         "DEEPSEEK_WEB_PROFILE_DIR": str(ROOT / "data/firefox-profile"),
         "DEEPSEEK_WEB_RUNTIME_DIR": str(WORKER_RUNTIME),

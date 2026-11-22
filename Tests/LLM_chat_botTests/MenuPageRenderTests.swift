@@ -73,6 +73,65 @@ final class MenuPageRenderTests: XCTestCase {
 
     // MARK: - Tests
 
+    func testProviderListAndReasoningFollowTheSelectedService() async throws {
+        let store = Fixtures.makeStore(ownerUserID: ownerID, defaultProvider: .deepseekWeb)
+        let menu = BotMenuHandler(
+            telegram: gateway,
+            state: store,
+            gateways: ProviderGatewayRegistry(
+                providers: [.openrouter: OpenRouterProviderAdapter(network: NetworkClient(), apiKey: "fixture")],
+                web: DeepSeekWebProviderAdapter(network: NetworkClient(), port: 8765, token: "fixture")
+            ),
+            logger: SilentLogger(),
+            formatOptions: "",
+            botUsername: "testbot"
+        )
+        let chat = ChatKey(chatID: ownerID.privateChat, threadID: 0)
+        let owner = UserKey.identified(ownerID)
+        _ = await store.seedBalance(key: owner, amount: .usd(1))
+        let commands = BotCommandHandler(telegram: gateway, state: store, gateways: menu.gateways,
+                                         botUsername: "testbot", formatOptions: "", menuHandler: menu)
+        let user = Fixtures.user(id: ownerID, username: "owner")
+        func sendCommand(_ text: String) async throws {
+            let handled = try await commands.handleIfCommand(text: text, chatKey: chat, fromUser: user, isPrivate: true)
+            XCTAssertTrue(handled)
+        }
+        let picker = await menu.renderPage(.provider, chatKey: chat, invoker: owner)
+        let providerButtons = picker.markup.inline_keyboard.flatMap { $0 }
+        XCTAssertTrue(providerButtons.contains { $0.text == "✓ DeepSeek Web" })
+        XCTAssertTrue(providerButtons.contains { $0.text == "Openrouter" })
+        XCTAssertTrue(providerButtons.contains { $0.text == "Deepseek · не настроен" })
+        XCTAssertTrue(providerButtons.contains { $0.text == "Yandex · не настроен" })
+
+        let main = await menu.renderPage(.main, chatKey: chat, invoker: owner)
+        XCTAssertTrue(menuActions(main.markup).contains(MenuRoute.navigation(to: .tuning)))
+        let tuning = await menu.renderPage(.tuning, chatKey: chat, invoker: owner)
+        let actions = menuActions(tuning.markup)
+        for page in [MenuPage.model, .temp, .stats, .history, .reasoning] {
+            XCTAssertTrue(actions.contains(MenuRoute.navigation(to: page)))
+        }
+        let deepThink = await menu.renderPage(.reasoning, chatKey: chat, invoker: owner)
+        XCTAssertEqual(menuActions(deepThink.markup).filter { $0.hasPrefix("reasoning:") },
+                       ["reasoning:web:on", "reasoning:web:off"])
+
+        try await sendCommand("/reasoning high")
+        try await sendCommand("/reasoning on")
+        let afterWebCommand = await store.fetchHelp(chatKey: chat)
+        XCTAssertTrue(afterWebCommand.webDeepThinkEnabled)
+        XCTAssertNil(afterWebCommand.reasoningEffort)
+
+        try await sendCommand("/provider openrouter")
+        let reasoning = await menu.renderPage(.reasoning, chatKey: chat, invoker: owner)
+        XCTAssertEqual(menuActions(reasoning.markup).filter { $0.hasPrefix("reasoning:") },
+                       ["reasoning:set:low", "reasoning:set:medium", "reasoning:set:high", "reasoning:set:off"])
+        try await sendCommand("/reasoning medium")
+        try await sendCommand("/reasoning on")
+        let afterAPICommands = await store.fetchHelp(chatKey: chat)
+        XCTAssertEqual(afterAPICommands.provider, .openrouter)
+        XCTAssertEqual(afterAPICommands.reasoningEffort, .medium)
+        XCTAssertTrue(afterAPICommands.webDeepThinkEnabled)
+    }
+
     /// No button may carry a callback the dispatcher cannot route. This is the
     /// failure the old `[String]` handling could not catch: a mistyped literal
     /// rendered fine and did nothing at all when tapped.

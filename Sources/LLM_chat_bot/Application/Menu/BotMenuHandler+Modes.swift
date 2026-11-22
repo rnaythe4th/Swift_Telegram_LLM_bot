@@ -42,8 +42,7 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modeNotFound)
                 return
             }
-            let web = await state.provider(chatKey: chatKey) == .deepseekWeb
-            let isPaid = mode.tier == .premium && !web
+            let isPaid = mode.tier == .premium
             var access = ChatContextStore.PaidModelAccess.full
             if isPaid {
                 access = await state.paidModelAccess(
@@ -118,11 +117,8 @@ extension BotMenuHandler {
     /// redraw-after-input path).
     func renderTuning(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let provider = await state.provider(chatKey: chatKey)
-        if provider == .deepseekWeb {
-            return await renderMain(chatKey: chatKey, invoker: invoker)
-        }
-        let reasoningSupported = gateways.capabilities(for: provider)?.supportsReasoning ?? false
+        let web = help.provider == .deepseekWeb
+        let reasoningSupported = gateways.capabilities(for: help.provider)?.supportsReasoning ?? false
         let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
         // A fact about the chat, not about the tapper: in a group this page is
         // one shared message (CLAUDE.md §13).
@@ -136,7 +132,7 @@ extension BotMenuHandler {
             [menuButton("🤖 Модель", page: .model), menuButton("🌡 Стиль ответа" + lock, page: .temp)],
         ]
         if reasoningSupported {
-            rows.row([menuButton("🧠 Обдумывание" + lock, page: .reasoning)])
+            rows.row([menuButton(web ? "🧠 DeepThink" : "🧠 Обдумывание" + lock, page: .reasoning)])
         }
         rows.row([menuButton("📊 Что показывать под ответом", page: .stats)])
         // Memory and the AI service are the owner's levers: memory multiplies
@@ -152,9 +148,14 @@ extension BotMenuHandler {
         }
         rows.row(navButtons())
 
-        let reasoningLine = reasoningSupported
-            ? "\n🧠 Обдумывание · <b>\(help.reasoningEffort?.displayName ?? "выключено")</b>"
-            : ""
+        var reasoningLine = ""
+        if reasoningSupported {
+            reasoningLine = web
+                ? "\n🧠 DeepThink · <b>\(help.webDeepThinkLabel)</b>"
+                : "\n🧠 Обдумывание · <b>\(help.reasoningEffort?.displayName ?? "выключено")</b>"
+        }
+        let historyUnit = web ? "пар" : "сообщ."
+        let providerNote = web ? "\n\n<i>Модель и стиль применяются к ответам через API.</i>" : ""
         let footer = hasFullAccess
             ? "<i>Здесь настройки правятся по отдельности. Вернуться к проверенной связке — «↺ Рабочий режим» в настройках.</i>"
             : "<i>⭐ — правится с премиумом или балансом. Без них работают готовые режимы: связка настроек в один тап.</i>"
@@ -163,7 +164,7 @@ extension BotMenuHandler {
 
         🤖 Модель · <code>\(help.escapedModel)</code>
         🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
-        📝 Память · <b>\(help.maxHistory) сообщ.</b>\(reasoningLine)
+        📝 Память · <b>\(help.maxHistory) \(historyUnit)</b>\(reasoningLine)\(providerNote)
 
         \(footer)
         """

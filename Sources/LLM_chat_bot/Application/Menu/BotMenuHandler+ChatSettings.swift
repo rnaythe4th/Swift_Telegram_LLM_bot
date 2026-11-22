@@ -376,19 +376,18 @@ extension BotMenuHandler {
             guard let capabilities = gateways.capabilities(for: provider) else {
                 throw ProviderGatewayRegistryError.missingAdapter(provider)
             }
-            if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webAllowed(chatKey: chatKey)) {
+            if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webListeningAllowed(chatKey: chatKey)) {
                 let listening = await state.listening(chatKey: chatKey).isOn
-                let disclosure = Self.webGroupDisclosure + (listening ? "\n" + Self.webListenDisclosure : "")
+                let disclosure = Texts.webGroupDisclosure + (listening ? "\n" + Texts.webListenDisclosure : "")
                 _ = try await telegram.sendMessage(.init(chatID: chatKey.chatID, threadID: message.message_thread_id,
                                                          replyTo: nil, text: disclosure, replyMarkup: nil))
             }
             _ = await state.changeProvider(chatKey: chatKey, newProvider: provider)
             try await checkpointWebSettings(chatKey: chatKey)
-            if await state.reasoningEnabled(chatKey: chatKey), !capabilities.supportsReasoning, provider != .deepseekWeb {
-                 await state.setReasoningEffort(chatKey: chatKey, effort: nil)
+            if !capabilities.supportsReasoning, await state.reasoningEnabled(chatKey: chatKey) {
                 try? await telegram.answerCallback(
                     callbackQueryID: callback.id,
-                    text: "Сервис ИИ сменён. Обдумывание выключено — он его не умеет."
+                    text: "Сервис ИИ сменён. Здесь уровни обдумывания недоступны."
                 )
             } else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Сервис ИИ: \(provider.commandValue)")
