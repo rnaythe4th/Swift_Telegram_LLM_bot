@@ -11,6 +11,10 @@ struct ChatKey: Hashable, Codable, Sendable {
         self.threadID = threadID
     }
 
+    init(telegramChatID: ChatID, threadID: Int64?) {
+        self.init(chatID: telegramChatID, threadID: telegramChatID.isGroup && threadID == 1 ? 0 : (threadID ?? 0))
+    }
+
     /// Forum topics are separate contexts; thread 0 is the main one.
     var isThread: Bool { threadID != 0 }
 }

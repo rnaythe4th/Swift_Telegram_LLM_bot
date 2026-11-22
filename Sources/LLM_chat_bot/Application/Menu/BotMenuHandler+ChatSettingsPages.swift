@@ -300,12 +300,16 @@ extension BotMenuHandler {
         let hint = isOperator
             ? "✏️ — задать своё число (или /historylength &lt;1–50&gt;)"
             : "<i>Длину памяти задаёт владелец бота — она влияет на стоимость каждого ответа.</i>"
+        let web = help.provider == .deepseekWeb
+        let explanation = web
+            ? "Локальное окно доставленных пар вопрос–ответ для истории и восстановления диалога."
+            : "Чем больше прошлых сообщений бот помнит, тем медленнее и дороже ответ."
         let text = """
         <b>📝 Память бота</b>
 
-        Помнит последние · <b>\(help.maxHistory) сообщ.</b>
+        Помнит последние · <b>\(help.maxHistory) \(web ? "пар" : "сообщ.")</b>
 
-        <i>Сколько прошлых сообщений бот держит в голове. Чем больше — тем лучше он понимает, о чём речь, но ответ медленнее и дороже.</i>
+        <i>\(explanation)</i>
         \(hint)
         """
         return MenuScreen(text, rows)
@@ -313,7 +317,7 @@ extension BotMenuHandler {
 
     func renderProvider(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let providers = ServiceProvider.allCases
+        let providers = gateways.available
         var rows: Keyboard = []
         var currentRow: [InlineKeyboardButton] = []
         for provider in providers {
@@ -328,16 +332,18 @@ extension BotMenuHandler {
             rows.row(currentRow)
         }
         rows.row(navButtons())
+        let availability = providers.contains(help.provider) ? "" : " · отключён"
+        let disclosure = providers.contains(.deepseekWeb) ? "\nDeepSeek Web — текстовые ответы через веб-аккаунт владельца" : ""
         let text = """
         <b>🔌 Сервис ИИ</b>
 
-        Сейчас · <b>\(help.provider.commandValue)</b>
+        Сейчас · <b>\(help.provider.rawValue)</b>\(availability)
 
         <i>Через кого бот ходит к моделям. Обычно менять не нужно — если не знаете, что выбрать, оставьте как есть.</i>
 
         <i>OpenRouter — тысячи моделей (GPT, Claude, Gemini, DeepSeek…)
         DeepSeek — только модели DeepSeek, напрямую
-        Yandex — YandexGPT</i>
+        Yandex — YandexGPT\(disclosure)</i>
         """
         return MenuScreen(text, rows)
     }
@@ -345,8 +351,7 @@ extension BotMenuHandler {
     func renderReasoning(chatKey: ChatKey) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
-        let gateway = try? gateways.gateway(for: provider)
-        let supported = gateway?.capabilities.supportsReasoning ?? false
+        let supported = gateways.capabilities(for: provider)?.supportsReasoning ?? false
         let current = help.reasoningEffort?.rawValue
 
         if !supported {

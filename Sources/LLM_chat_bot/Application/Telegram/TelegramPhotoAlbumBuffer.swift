@@ -143,7 +143,7 @@ struct TelegramPhotoAlbumBuffer {
     }
     
     private func chatKey(for message: TelegramMessage) -> ChatKey {
-        ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+        ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
     }
     
     private func chatKeyIfPresent(for message: TelegramMessage?) -> ChatKey? {

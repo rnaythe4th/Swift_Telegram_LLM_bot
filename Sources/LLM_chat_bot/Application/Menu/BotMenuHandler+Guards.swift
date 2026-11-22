@@ -12,6 +12,27 @@ import Foundation
 // userID (CLAUDE.md §17), and a raw handle locks out everyone without one.
 
 extension BotMenuHandler {
+    static let webGroupDisclosure = "Вопросы из этой темы будут отправляться в аккаунт DeepSeek, подключённый владельцем бота."
+    static let webListenDisclosure = "При обращении к боту часть реплик участников будет отправляться в этот аккаунт DeepSeek."
+
+    func webAccess(_ access: MenuAccess, feature: String, chatKey: ChatKey) async -> MenuAccess {
+        guard ["role", "listen", "mode", "reset"].contains(feature),
+              await state.provider(chatKey: chatKey) == .deepseekWeb else { return access }
+        return chatKey.chatID.isGroup ? .chatOperator : .everyone
+    }
+
+    func checkpointWebSettings(chatKey: ChatKey, deleted: Bool = false) async throws {
+        guard let persistence else { return }
+        if deleted {
+            try await persistence.webCheckpoint(chatKey: chatKey, contextEpoch: nil)
+        } else if let context = await state.webState(chatKey: chatKey) {
+            try await persistence.webCheckpoint(chatKey: chatKey, contextEpoch: context.contextEpoch)
+        } else {
+            return
+        }
+        await webQueue?.waitForDelivery(chatKey: chatKey)
+    }
+
     /// True when the tapper may act. On refusal the toast is already sent, so
     /// the caller only has to `return`.
     func requireSuperAdmin(_ callback: CallbackQuery) async -> Bool {

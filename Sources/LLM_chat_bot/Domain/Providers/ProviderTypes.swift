@@ -3,6 +3,7 @@ import Foundation
 enum ServiceProvider: String, Codable, Sendable, Equatable {
     case openrouter = "Openrouter"
     case deepseek = "Deepseek"
+    case deepseekWeb = "DeepSeek Web"
     case yandex = "Yandex"
     
     static func parse(_ rawValue: String) -> Self? {
@@ -11,6 +12,8 @@ enum ServiceProvider: String, Codable, Sendable, Equatable {
             return .openrouter
         case "deepseek":
             return .deepseek
+        case "deepseek-web":
+            return .deepseekWeb
         case "yandex":
             return .yandex
         default:
@@ -24,6 +27,8 @@ enum ServiceProvider: String, Codable, Sendable, Equatable {
             return "openrouter"
         case .deepseek:
             return "deepseek"
+        case .deepseekWeb:
+            return "deepseek-web"
         case .yandex:
             return "yandex"
         }
@@ -214,6 +219,6 @@ enum ReasoningEffort: String, Codable, Sendable, CaseIterable {
 
 extension ServiceProvider: CaseIterable {
     public static var allCases: [ServiceProvider] {
-        [.openrouter, .deepseek, .yandex]
+        [.openrouter, .deepseek, .yandex, .deepseekWeb]
     }
 }

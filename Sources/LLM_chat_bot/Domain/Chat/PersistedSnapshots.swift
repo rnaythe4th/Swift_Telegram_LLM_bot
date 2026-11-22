@@ -107,6 +107,8 @@ struct ChatContextSnapshot: Codable, Sendable {
     // Listen mode and the overheard conversation; absent in every chat that
     // never turned it on, which is what keeps the row the size it was.
     var listening: ChatListening?
+    var webSelected: Bool?
+    var deepSeekWeb: DeepSeekWebChatState?
 }
 
 // The whole-state `BotStateSnapshot` blob and its one-time import are gone

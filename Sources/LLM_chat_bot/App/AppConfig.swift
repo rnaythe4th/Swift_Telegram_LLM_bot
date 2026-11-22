@@ -4,6 +4,12 @@ enum EnvironmentKey: String {
     case telegramToken = "TG_BOT_TOKEN"
     case deepseekKey = "DEEPSEEK_API_KEY"
     case routerApiKey = "ROUTER_API_KEY"
+    case defaultAIProvider = "DEFAULT_AI_PROVIDER"
+    case deepSeekWebEnabled = "DEEPSEEK_WEB_ENABLED"
+    case deepSeekWebWorkerToken = "DEEPSEEK_WEB_WORKER_TOKEN"
+    case deepSeekWebWorkerPort = "DEEPSEEK_WEB_WORKER_PORT"
+    case deepSeekWebQuotaPause = "DEEPSEEK_WEB_QUOTA_PAUSE_SECONDS"
+    case deepSeekWebRemoteUnitLimit = "DEEPSEEK_WEB_REMOTE_UNIT_LIMIT"
     case companyChatId = "COMPANY_CHAT_ID"
     /// Owner's @invoker. The composition root should not know a person's name.
     case ownerUsername = "OWNER_USERNAME"
@@ -37,11 +43,14 @@ enum AppConfigError: LocalizedError {
     case missingEnvironment(EnvironmentKey)
     case badEncryptionKey
     case badWebhookSecret
+    case invalidEnvironment(EnvironmentKey)
 
     var errorDescription: String? {
         switch self {
         case .missingEnvironment(let key):
             return "Missing env: \(key.rawValue)"
+        case .invalidEnvironment(let key):
+            return "Invalid or unavailable selection: \(key.rawValue)"
         case .badWebhookSecret:
             return """
                 \(EnvironmentKey.webhookSecret.rawValue) must be 1–256 characters of A-Z, a-z, 0-9, \
@@ -70,8 +79,13 @@ enum UpdateMode: String, Sendable {
 
 struct AppConfig: Sendable {
     let telegramToken: String
-    let deepseekKey: String
-    let routerApiKey: String
+    let deepseekKey: String?
+    let routerApiKey: String?
+    let defaultProvider: ServiceProvider
+    let deepSeekWebToken: String?
+    let deepSeekWebPort: Int
+    let deepSeekWebQuotaPause: Int
+    let deepSeekWebRemoteUnitLimit: Int
     /// Legacy operational chat id. Optional: it feeds one unused member list,
     /// and a required variable that does nothing is one more way to fail to
     /// start for no reason.
@@ -109,11 +123,42 @@ struct AppConfig: Sendable {
 
     static func load() throws -> AppConfig {
         let telegramToken = try env(.telegramToken)
-        let deepseekKey = try env(.deepseekKey)
-        let routerApiKey = try env(.routerApiKey)
+        let deepseekKey = optionalEnv(.deepseekKey)
+        let routerApiKey = optionalEnv(.routerApiKey)
+        let webEnabled = ["true", "1"].contains(optionalEnv(.deepSeekWebEnabled)?.lowercased() ?? "")
+        let defaultName = optionalEnv(.defaultAIProvider)
+            ?? (routerApiKey != nil ? "openrouter" : (deepseekKey != nil ? "deepseek" : "deepseek-web"))
+        guard let defaultProvider = ServiceProvider.parse(defaultName) else {
+            throw AppConfigError.invalidEnvironment(.defaultAIProvider)
+        }
+        let databaseURL = optionalEnv(.databaseURL)
+        let webToken = webEnabled ? try env(.deepSeekWebWorkerToken) : nil
+        if let webToken {
+            guard AppConfig.isValidWebhookSecret(webToken), webToken.count >= 32 else {
+                throw AppConfigError.invalidEnvironment(.deepSeekWebWorkerToken)
+            }
+            guard let databaseURL else { throw AppConfigError.missingEnvironment(.databaseURL) }
+            guard let endpoint = DatabaseEndpoint(urlString: databaseURL), !endpoint.looksLikeTransactionPooler else {
+                throw AppConfigError.invalidEnvironment(.databaseURL)
+            }
+        }
+        guard let webPort = Int(optionalEnv(.deepSeekWebWorkerPort) ?? "8765"), (1024...65535).contains(webPort) else {
+            throw AppConfigError.invalidEnvironment(.deepSeekWebWorkerPort)
+        }
+        switch defaultProvider {
+        case .openrouter, .yandex:
+            guard routerApiKey != nil else { throw AppConfigError.missingEnvironment(.routerApiKey) }
+        case .deepseek:
+            guard deepseekKey != nil else { throw AppConfigError.missingEnvironment(.deepseekKey) }
+        case .deepseekWeb:
+            guard webToken != nil else { throw AppConfigError.invalidEnvironment(.defaultAIProvider) }
+        }
         let companyChatId = ChatID(Int(optionalEnv(.companyChatId) ?? "") ?? 0)
 
         let healthPort = Int(optionalEnv(.healthPort) ?? "") ?? 8000
+        if webEnabled && healthPort == webPort {
+            throw AppConfigError.invalidEnvironment(.deepSeekWebWorkerPort)
+        }
 
         // Railway injects RAILWAY_PUBLIC_DOMAIN for services with a domain;
         // an explicit WEBHOOK_PUBLIC_URL always wins.
@@ -128,15 +173,22 @@ struct AppConfig: Sendable {
             throw AppConfigError.badWebhookSecret
         }
 
+        let webQuotaPause = Int(optionalEnv(.deepSeekWebQuotaPause) ?? "") ?? 300
+        let webRemoteUnitLimit = Int(optionalEnv(.deepSeekWebRemoteUnitLimit) ?? "") ?? 60_000
         return .init(
             telegramToken: telegramToken,
             deepseekKey: deepseekKey,
             routerApiKey: routerApiKey,
+            defaultProvider: defaultProvider,
+            deepSeekWebToken: webToken,
+            deepSeekWebPort: webPort,
+            deepSeekWebQuotaPause: min(3600, max(30, webQuotaPause)),
+            deepSeekWebRemoteUnitLimit: min(200_000, max(12_000, webRemoteUnitLimit)),
             companyChatId: companyChatId,
             ownerUsername: (optionalEnv(.ownerUsername) ?? "maythe4th")
                 .trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
                 .lowercased(),
-            databaseURL: optionalEnv(.databaseURL),
+            databaseURL: databaseURL,
             healthPort: healthPort,
             bscscanApiKey: optionalEnv(.bscscanApiKey),
             etherscanApiKey: optionalEnv(.etherscanApiKey),

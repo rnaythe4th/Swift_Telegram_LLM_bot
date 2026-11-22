@@ -54,6 +54,9 @@ final class BotOrchestrator: Sendable {
         sessionRegistry: SessionRegistry,
         mediaResolver: MediaResolverPort,
         providers: [ServiceProvider: ProviderGatewayPort],
+        webGateway: (any DeepSeekWebGateway)? = nil,
+        webQuotaPause: Int = 300,
+        webRemoteUnitLimit: Int = 60_000,
         persistence: PersistenceCoordinator?,
         logger: LoggerPort,
         metrics: RuntimeMetrics,
@@ -100,7 +103,15 @@ final class BotOrchestrator: Sendable {
         self.externalPayments = externalPayments
         self.botUsername = botUsername
 
-        let gatewayRegistry = ProviderGatewayRegistry(providers: providers)
+        let gatewayRegistry = ProviderGatewayRegistry(providers: providers, web: webGateway)
+        let ownerAlerter = self.alerter
+        let webQueue = webGateway.map {
+            DeepSeekWebQueue(
+                store: state, persistence: persistence, gateway: $0, telegram: telegram, flags: flags,
+                logger: logger, alerter: ownerAlerter, metrics: metrics, quotaPause: webQuotaPause,
+                remoteUnitLimit: webRemoteUnitLimit
+            )
+        }
         // Subscription dates and winback offers live in columns the write-behind
         // flush never touches, so every path that changes one goes through this
         // (§10.2) — otherwise the change is correct until the next restart.
@@ -133,7 +144,9 @@ final class BotOrchestrator: Sendable {
             externalPayments: externalPayments,
             durability: flags.durability,
             subscriptions: subscriptions,
-            ledger: ledger
+            ledger: ledger,
+            persistence: persistence,
+            webQueue: webQueue
         )
 
         self.menuHandler = menuHandler
@@ -171,7 +184,8 @@ final class BotOrchestrator: Sendable {
             generationLimiter: generationLimiter,
             ledger: ledger,
             alerter: alerter,
-            metrics: metrics
+            metrics: metrics,
+            webQueue: webQueue
         )
     }
 }

@@ -21,6 +21,7 @@ extension BotCommandHandler {
 
         let argument = argument.trimmingCharacters(in: .whitespaces).lowercased()
         let listening = await state.listening(chatKey: chatKey)
+        let web = await state.provider(chatKey: chatKey) == .deepseekWeb
 
         // Status is a question, not a change: anyone in the chat may ask it.
         guard !argument.isEmpty else {
@@ -58,8 +59,15 @@ extension BotCommandHandler {
 
         switch argument {
         case "on", "вкл", "включить":
-            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
+            let allowed = web
+                ? await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser, refusal: "🔒 Прослушку настраивает администратор чата.")
+                : await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser)
+            guard allowed else { return }
+            if web && !listening.isOn {
+                try await sendUserFeedback(chatKey: chatKey, text: BotMenuHandler.webListenDisclosure)
+            }
             let outcome = await state.setListenMode(chatKey: chatKey, on: true)
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: outcome.changed
@@ -72,8 +80,12 @@ extension BotCommandHandler {
             )
 
         case "off", "выкл", "выключить":
-            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
+            let allowed = web
+                ? await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser, refusal: "🔒 Прослушку настраивает администратор чата.")
+                : await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser)
+            guard allowed else { return }
             let outcome = await state.setListenMode(chatKey: chatKey, on: false)
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: outcome.changed ? BotMenuHandler.listenAnnouncement(on: false) : "🎧 И так не слушаю."
@@ -84,8 +96,12 @@ extension BotCommandHandler {
             // erase what it produced. Being harder to erase than to record is
             // the wrong way round for something that keeps what other people
             // said.
-            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
+            let allowed = web
+                ? await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser, refusal: "🔒 Прослушку настраивает администратор чата.")
+                : await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser)
+            guard allowed else { return }
             let erased = await state.clearTranscript(chatKey: chatKey)
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
             try await sendUserFeedback(
                 chatKey: chatKey,
                 text: erased > 0 ? "🧹 Бот забыл услышанное: \(erased) сообщ." : "🧹 Буфер и так пуст."
@@ -95,7 +111,10 @@ extension BotCommandHandler {
             // The same gate its twin carries: the button lives on a page behind
             // `MenuAccess.paidAccess`, and a report with two doors and two
             // different rules is the rule not existing (§14).
-            guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
+            let allowed = web
+                ? await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser, refusal: "🔒 Прослушку настраивает администратор чата.")
+                : await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser)
+            guard allowed else { return }
             await menuHandler.sendTranscriptDump(chatKey: chatKey)
 
         default:

@@ -42,7 +42,8 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modeNotFound)
                 return
             }
-            let isPaid = mode.tier == .premium
+            let web = await state.provider(chatKey: chatKey) == .deepseekWeb
+            let isPaid = mode.tier == .premium && !web
             var access = ChatContextStore.PaidModelAccess.full
             if isPaid {
                 access = await state.paidModelAccess(
@@ -66,6 +67,7 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modeUnavailable)
                 return
             }
+            try await checkpointWebSettings(chatKey: chatKey)
             await state.noteModeTap(id: id)
             let suffix = Self.dailyTasteToastSuffix(access, isPaidModel: isPaid)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ \(applied.title)\(suffix)")
@@ -80,6 +82,7 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.modeUnavailable)
                 return
             }
+            try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "↺ \(working.title)")
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
 
@@ -116,8 +119,10 @@ extension BotMenuHandler {
     func renderTuning(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
-        let gateway = try? gateways.gateway(for: provider)
-        let reasoningSupported = gateway?.capabilities.supportsReasoning ?? false
+        if provider == .deepseekWeb {
+            return await renderMain(chatKey: chatKey, invoker: invoker)
+        }
+        let reasoningSupported = gateways.capabilities(for: provider)?.supportsReasoning ?? false
         let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
         // A fact about the chat, not about the tapper: in a group this page is
         // one shared message (CLAUDE.md §13).

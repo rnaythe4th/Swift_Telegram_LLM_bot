@@ -28,6 +28,9 @@ actor PersistenceCoordinator {
     /// cancelled task falls straight through burns a core during shutdown.
     private var flushChain: Task<Void, Never>?
     private var abandoned = false
+    /// A dropped connection while committing admission can hide a successful
+    /// transaction. Only these updates need a read-back on retransmission.
+    private var uncertainWebAdmissions = Set<Int64>()
 
     private var lastErrorMessage: String?
     private var lastSuccessAt: Date?
@@ -66,6 +69,88 @@ actor PersistenceCoordinator {
         await flushOnce()
     }
 
+    func webUpdateSeen(_ updateID: Int64) async throws -> Bool {
+        guard !abandoned else { throw DeepSeekWebPersistenceError.unavailable }
+        let seen = try await persistence.webUpdateSeen(updateID)
+        if seen, uncertainWebAdmissions.contains(updateID),
+           let (key, operation) = try await persistence.recoverWebAdmission(updateID) {
+            await store.acceptWebAdmission(chatKey: key, operation: operation)
+        }
+        if seen { uncertainWebAdmissions.remove(updateID) }
+        return seen
+    }
+
+    func webAdmit(chatKey: ChatKey, operation: DeepSeekWebOperation) async throws -> Bool {
+        try await serializeWebWrite {
+            try await self.performWebAdmission(chatKey: chatKey, operation: operation)
+        }
+    }
+
+    private func performWebAdmission(chatKey: ChatKey, operation: DeepSeekWebOperation) async throws -> Bool {
+        guard let row = await store.webAdmissionRow(chatKey: chatKey, operation: operation) else {
+            throw DeepSeekWebPersistenceError.superseded
+        }
+        guard !abandoned else { throw DeepSeekWebPersistenceError.unavailable }
+        do {
+            switch try await persistence.admitWebUpdate(operation.updateID, row: row) {
+            case .inserted:
+                uncertainWebAdmissions.remove(operation.updateID)
+                await store.acceptWebAdmission(chatKey: chatKey, operation: operation)
+                return true
+            case .duplicate(let storedOperation):
+                if uncertainWebAdmissions.remove(operation.updateID) != nil, let storedOperation {
+                    await store.acceptWebAdmission(chatKey: chatKey, operation: storedOperation)
+                }
+                return false
+            }
+        } catch {
+            uncertainWebAdmissions.insert(operation.updateID)
+            throw error
+        }
+    }
+
+    /// Confirms a Web row revision or a deletion through the same chain as
+    /// write-behind. The caller must still fence its next action to the epoch.
+    func webCheckpoint(chatKey: ChatKey, contextEpoch: UUID?) async throws {
+        let revision = try await store.webCheckpointRevision(chatKey: chatKey, contextEpoch: contextEpoch)
+        try await serializeWebWrite {
+            guard await self.performFlush() else { throw DeepSeekWebPersistenceError.unavailable }
+            let current = try await self.store.webCheckpointRevision(chatKey: chatKey, contextEpoch: contextEpoch)
+            guard current == revision else { throw DeepSeekWebPersistenceError.superseded }
+        }
+    }
+
+    func webAccount(workerMarker: UUID? = nil) async throws -> DeepSeekWebAccount {
+        try await serializeWebWrite {
+            let current = try await self.persistence.webAccount()
+            guard let workerMarker, workerMarker != current.workerMarker else { return current }
+            // The first marker identifies the current account. A new marker
+            // replaces its epoch and expires the previous account pauses.
+            let updated = DeepSeekWebAccount(workerMarker: workerMarker)
+            try await self.persistence.saveWebAccount(updated)
+            return updated
+        }
+    }
+
+    func saveWebAccount(_ account: DeepSeekWebAccount) async throws {
+        try await serializeWebWrite {
+            let current = try await self.persistence.webAccount()
+            guard current.epoch == account.epoch else { throw DeepSeekWebPersistenceError.superseded }
+            try await self.persistence.saveWebAccount(account)
+        }
+    }
+
+    private func serializeWebWrite<T: Sendable>(_ work: @Sendable @escaping () async throws -> T) async throws -> T {
+        let previous = flushChain
+        let task = Task {
+            await previous?.value
+            guard !self.abandoned else { throw DeepSeekWebPersistenceError.unavailable }
+            return try await work()
+        }
+        flushChain = Task { _ = try? await task.value }
+        return try await task.value
+    }
+
     /// Cancels the loop and flushes whatever is still dirty. One retry after a
     /// short pause — this runs during the SIGTERM grace window.
     func stop() async {
@@ -101,14 +186,14 @@ actor PersistenceCoordinator {
         let previous = flushChain
         let task = Task { [weak self] in
             await previous?.value
-            await self?.performFlush()
+            _ = await self?.performFlush()
         }
         flushChain = task
         await task.value
     }
 
-    private func performFlush() async {
-        guard !abandoned else { return }
+    private func performFlush() async -> Bool {
+        guard !abandoned else { return false }
 
         var pending = PendingFlush(
             batch: await store.drainDirtyBatch(),
@@ -118,18 +203,24 @@ actor PersistenceCoordinator {
             pending = PendingFlush.merged(older: carry, newer: pending)
             retryCarry = nil
         }
-        guard !pending.isEmpty else { return }
+        guard !pending.isEmpty else { return !abandoned }
         // The lock may have gone while we were draining. These rows describe a
         // world another instance now owns, and `abandon()` already accepted
         // losing them — writing them anyway is the one thing it exists to stop.
-        guard !abandoned else { return }
+        guard !abandoned else { return false }
 
+        let entityCount = pending.entityCount
+        var statePersisted = false
         do {
             try await persistence.apply(pending.batch)
+            statePersisted = true
+            // Direct admissions share this chain. Retrying a row already
+            // committed earlier could otherwise overwrite a later admission.
+            pending.batch = PersistenceBatch()
             try await ledger.syncWallets(changed: pending.changedWallets, removed: Array(pending.removedWallets))
             lastSuccessAt = Date()
             lastErrorMessage = nil
-            totalEntitiesFlushed += pending.entityCount
+            totalEntitiesFlushed += entityCount
             totalFlushes += 1
             await metrics.increment(MetricName.persistenceFlushes)
         } catch {
@@ -139,6 +230,7 @@ actor PersistenceCoordinator {
             logger.error("persistence flush failed (\(pending.entityCount) entities, will retry): \(error)")
             await metrics.increment(MetricName.persistenceErrors)
         }
+        return statePersisted && !abandoned
     }
 
     /// One drain, both halves of it.

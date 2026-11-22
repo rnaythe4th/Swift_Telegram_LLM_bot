@@ -42,6 +42,8 @@ struct GenerationOrigin: Sendable {
     /// «(в ответ на #12)» that tells the model which of a hundred overheard
     /// lines the question is about.
     let repliedTo: TranscriptReply?
+    let updateID: Int?
+    let telegramThreadID: Int64?
 
     /// Storage key of whoever asked. Built from the userID, which every update
     /// carries — a @username is optional, and a gate keyed off one locks out
@@ -53,22 +55,28 @@ struct GenerationOrigin: Sendable {
         isPrivate: Bool,
         replyToMessageID: Int?,
         askedMessageID: Int? = nil,
-        repliedTo: TranscriptReply? = nil
+        repliedTo: TranscriptReply? = nil,
+        updateID: Int? = nil,
+        telegramThreadID: Int64? = nil
     ) {
         self.user = user
         self.isPrivate = isPrivate
         self.replyToMessageID = replyToMessageID
         self.askedMessageID = askedMessageID
         self.repliedTo = repliedTo
+        self.updateID = updateID
+        self.telegramThreadID = telegramThreadID
     }
 
-    init(message: TelegramMessage, botUsername: String) {
+    init(message: TelegramMessage, botUsername: String, updateID: Int? = nil) {
         self.init(
             user: message.from,
             isPrivate: message.chat.type == "private",
             replyToMessageID: message.message_id,
             askedMessageID: message.message_id,
-            repliedTo: TranscriptCapture.reply(from: message, botUsername: botUsername)
+            repliedTo: TranscriptCapture.reply(from: message, botUsername: botUsername),
+            updateID: updateID,
+            telegramThreadID: message.message_thread_id
         )
     }
 }
@@ -83,6 +91,7 @@ final class GenerationCoordinator: Sendable {
     private let botUsername: String
     private let generationLimiter: GenerationLimiter
     let metrics: RuntimeMetrics?
+    let webQueue: DeepSeekWebQueue?
     /// Charging for an answer moves money, so it goes where all money goes.
     let ledger: LedgerPort
     /// A spending ceiling that stops paid models is something the owner has to
@@ -100,7 +109,8 @@ final class GenerationCoordinator: Sendable {
         generationLimiter: GenerationLimiter,
         ledger: LedgerPort,
         alerter: OwnerAlerter? = nil,
-        metrics: RuntimeMetrics? = nil
+        metrics: RuntimeMetrics? = nil,
+        webQueue: DeepSeekWebQueue? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -113,6 +123,7 @@ final class GenerationCoordinator: Sendable {
         self.ledger = ledger
         self.alerter = alerter
         self.metrics = metrics
+        self.webQueue = webQueue
     }
 
     /// Releases the concurrency slot and closes the session. Every generation
@@ -123,11 +134,11 @@ final class GenerationCoordinator: Sendable {
         await sessionRegistry.finish(generationID: generationID)
     }
 
-    func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey) async throws {
+    func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey, updateID: Int? = nil) async throws {
         switch try await resolveProcessableContent(message: message, chatKey: chatKey) {
         case .content(let content):
             try await processContent(
-                origin: GenerationOrigin(message: message, botUsername: botUsername),
+                origin: GenerationOrigin(message: message, botUsername: botUsername, updateID: updateID),
                 content: content,
                 chatKey: chatKey
             )
@@ -165,9 +176,10 @@ final class GenerationCoordinator: Sendable {
         
         if !refs.isEmpty {
             let provider = await state.provider(chatKey: chatKey)
-            let adapter = try gateways.gateway(for: provider)
-            
-            let unsupportedKinds = unsupportedMediaKinds(in: refs, capabilities: adapter.capabilities)
+            guard let capabilities = gateways.capabilities(for: provider) else {
+                throw ProviderGatewayRegistryError.missingAdapter(provider)
+            }
+            let unsupportedKinds = unsupportedMediaKinds(in: refs, capabilities: capabilities)
             if !unsupportedKinds.isEmpty {
                 let kinds = unsupportedKinds.map(\.displayName).joined(separator: ", ")
                 return .unsupported(
@@ -181,6 +193,17 @@ final class GenerationCoordinator: Sendable {
     }
     
     func processContent(origin: GenerationOrigin, content: UserInputContent, chatKey: ChatKey) async throws {
+        let provider = await state.provider(chatKey: chatKey)
+        guard gateways.capabilities(for: provider) != nil else {
+            throw ProviderGatewayRegistryError.missingAdapter(provider)
+        }
+        if provider == .deepseekWeb {
+            if let text = content.text, !text.isEmpty {
+                try await webQueue?.admit(question: text, origin: origin, chatKey: chatKey)
+            }
+            return
+        }
+
         let handle = origin.user?.username
         let askerKey = origin.userKey
 
@@ -256,10 +279,8 @@ final class GenerationCoordinator: Sendable {
             ? Array(snapshot.messages.dropLast()) + [ChatMessage.userContent(processedContent, username: handle)]
             : snapshot.messages
         
-        let provider = snapshot.provider
-        
         do {
-            let gateway = try gateways.gateway(for: provider)
+            let gateway = try gateways.gateway(for: snapshot.provider)
             
             let plan = ProviderGenerationPlan(
                 model: snapshot.model,

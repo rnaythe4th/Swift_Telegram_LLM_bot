@@ -8,6 +8,12 @@ extension GenerationCoordinator {
     /// active paid licence, the store may pick an ad campaign to show
     /// (frequency + pacing rules live there). Failure to send is non-fatal.
     func maybeServeAd(chatKey: ChatKey, isPrivate: Bool) async {
+        await Self.serveAd(state: state, telegram: telegram, chatKey: chatKey, isPrivate: isPrivate)
+    }
+
+    static func serveAd(
+        state: ChatContextStore, telegram: any TelegramGatewayPort, chatKey: ChatKey, isPrivate: Bool
+    ) async {
         guard let ad = await state.nextAdToShow(chatKey: chatKey) else { return }
         var markup: InlineKeyboardMarkup?
         let isSelfPromo = ad.id == AdCampaign.selfPromoID

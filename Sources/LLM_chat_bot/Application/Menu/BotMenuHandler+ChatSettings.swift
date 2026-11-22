@@ -38,6 +38,7 @@ extension BotMenuHandler {
         case .reset:
             await state.clearPending(chatKey: chatKey)
             await state.resetChat(chatKey: chatKey)
+            try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Настройки сброшены")
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
             return
@@ -73,6 +74,7 @@ extension BotMenuHandler {
         } else if route.sub == "default" {
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: defaultRole)
+            try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль по умолчанию")
             try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             return
@@ -88,6 +90,7 @@ extension BotMenuHandler {
                 return
             }
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: preset.value + formatOptions)
+            try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Роль: \(preset.display)")
             try await showPage(.role, chatKey: chatKey, callback: callback, message: message)
             return
@@ -329,6 +332,7 @@ extension BotMenuHandler {
         guard !route.sub.isEmpty else { return }
         if route.sub == "clear" {
             await state.clearHistory(chatKey: chatKey)
+            try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Переписка очищена")
             try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
             return
@@ -369,9 +373,18 @@ extension BotMenuHandler {
     ) async throws {
         guard !route.sub.isEmpty else { return }
         if let provider = ServiceProvider.parse(route.sub) {
+            guard let capabilities = gateways.capabilities(for: provider) else {
+                throw ProviderGatewayRegistryError.missingAdapter(provider)
+            }
+            if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webAllowed(chatKey: chatKey)) {
+                let listening = await state.listening(chatKey: chatKey).isOn
+                let disclosure = Self.webGroupDisclosure + (listening ? "\n" + Self.webListenDisclosure : "")
+                _ = try await telegram.sendMessage(.init(chatID: chatKey.chatID, threadID: message.message_thread_id,
+                                                         replyTo: nil, text: disclosure, replyMarkup: nil))
+            }
             _ = await state.changeProvider(chatKey: chatKey, newProvider: provider)
-            let gateway = try gateways.gateway(for: provider)
-            if await state.reasoningEnabled(chatKey: chatKey), !gateway.capabilities.supportsReasoning {
+            try await checkpointWebSettings(chatKey: chatKey)
+            if await state.reasoningEnabled(chatKey: chatKey), !capabilities.supportsReasoning, provider != .deepseekWeb {
                  await state.setReasoningEffort(chatKey: chatKey, effort: nil)
                 try? await telegram.answerCallback(
                     callbackQueryID: callback.id,
@@ -393,8 +406,7 @@ extension BotMenuHandler {
     ) async throws {
         guard route.sub == "set" else { return }
         let provider = await state.provider(chatKey: chatKey)
-        let gateway = try gateways.gateway(for: provider)
-        if gateway.capabilities.supportsReasoning {
+        if gateways.capabilities(for: provider)?.supportsReasoning == true {
             if route.arg(2) == "off" {
                 await state.setReasoningEffort(chatKey: chatKey, effort: nil)
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Обдумывание выключено")

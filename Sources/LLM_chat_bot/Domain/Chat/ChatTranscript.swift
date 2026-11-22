@@ -300,10 +300,20 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     /// start of a chat's real transcript. The numbering comes with it, so a
     /// seeded chat carries on from where the pre-roll left off instead of
     /// re-using `#1` for a second message.
-    func seed(size: Int, now: Date = Date()) -> ChatTranscript {
+    func seed(size: Int, now: Date = Date(), startingAt minimum: Int = 1) -> ChatTranscript {
         var copy = self
         copy.prune(before: now.addingTimeInterval(-Self.seedLifetime))
         copy.trim(to: min(size, Self.seedLimit))
+        if let first = copy.entries.first, first.seq < minimum {
+            let shift = minimum - first.seq
+            copy.entries = copy.entries.map {
+                TranscriptEntry(
+                    seq: $0.seq + shift, messageID: $0.messageID, author: $0.author,
+                    text: $0.text, at: $0.at, replyTo: $0.replyTo
+                )
+            }
+            copy.nextSeq += shift
+        }
         return copy
     }
 
@@ -344,7 +354,9 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     func lines(
         excluding: Int? = nil,
         label: (TranscriptAuthor) -> String,
-        escapeText: Bool = false
+        escapeText: Bool = false,
+        afterSequence: Int = -1,
+        requireKnownReply: Bool = false
     ) -> [String] {
         let formatter = DateFormatter()
         formatter.dateFormat = "dd.MM HH:mm"
@@ -352,10 +364,13 @@ struct ChatTranscript: Codable, Sendable, Equatable {
 
         var kept: [String] = []
         var bytes = 0
-        for entry in entries.reversed() {
+        for entry in entries.reversed() where entry.seq > afterSequence {
             if let excluding, entry.messageID == excluding, entry.messageID != 0 { continue }
             let body = escapeText ? MessageText.escaped(entry.text) : entry.text
-            let reply = replyMarker(for: entry, label: label, escapeText: escapeText)
+            let reply = replyMarker(
+                for: entry, label: label, escapeText: escapeText,
+                afterSequence: afterSequence, requireKnownReply: requireKnownReply
+            )
             let line = "#\(entry.seq) [\(formatter.string(from: entry.at))] \(label(entry.author))\(reply): \(body)"
             bytes += line.utf8.count
             if !kept.isEmpty, bytes > Self.byteBudget { break }
@@ -376,12 +391,18 @@ struct ChatTranscript: Codable, Sendable, Equatable {
     private func replyMarker(
         for entry: TranscriptEntry,
         label: (TranscriptAuthor) -> String,
-        escapeText: Bool
+        escapeText: Bool,
+        afterSequence: Int,
+        requireKnownReply: Bool
     ) -> String {
         guard let reply = entry.replyTo else { return "" }
-        if let target = entries.first(where: { $0.messageID == reply.messageID && $0.messageID != 0 }) {
+        if let target = entries.first(where: {
+            $0.messageID == reply.messageID && $0.messageID != 0
+                && $0.seq > afterSequence
+        }) {
             return " (в ответ на #\(target.seq))"
         }
+        if requireKnownReply { return "" }
         let who = reply.author.map(label) ?? "кому-то"
         guard !reply.quote.isEmpty else { return " (в ответ \(who))" }
         let quote = escapeText ? MessageText.escaped(reply.quote) : reply.quote

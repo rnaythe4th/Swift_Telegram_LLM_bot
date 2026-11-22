@@ -28,8 +28,7 @@
 - **PostgresNIO** — Postgres.
 - **swift-crypto** — AES-GCM для платёжных секретов в базе, проверка подписей уведомлений кассы.
 - **Telegram Bot API** — webhook или long polling, HTML, inline-меню, draft-стриминг.
-- **LLM-провайдеры** — OpenRouter (текст/картинки/аудио/видео, обдумывание, provider routing) и
-  DeepSeek, оба за одним портом и общим OpenAI-совместимым декодером потока.
+- **LLM-провайдеры** — OpenRouter, DeepSeek API и текстовый DeepSeek Web через Firefox.
 - **Docker**
 
 ---
@@ -117,14 +116,17 @@ docker run -d --rm --name pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=botdb \
 TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disable' swift test
 ```
 
-Деплой — `Dockerfile`
+Деплой через `Dockerfile`. Для DeepSeek Web доступны [настройка Railway с Supabase и вход с Mac](docs/deepseek-web-deploy.md).
 
 ### Переменные окружения
 
 | Переменная                                              |                                                                                               |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `TG_BOT_TOKEN`, `ROUTER_API_KEY`, `DEEPSEEK_API_KEY`    | обязательные                                                                                  |
-| `DATABASE_URL`                                          | Postgres в **session**-режиме пула (порт 5432); без неё бот работает memory-only и не продаёт |
+| `TG_BOT_TOKEN`                                          | обязательный токен Telegram-бота                                                              |
+| `ROUTER_API_KEY`, `DEEPSEEK_API_KEY`                     | ключи соответствующих API-провайдеров                                                        |
+| `DATABASE_URL`                                          | Postgres в **session**-режиме пула (порт 5432), обязателен для DeepSeek Web                     |
+| `DEFAULT_AI_PROVIDER`                                   | начальный провайдер, например `openrouter`, `deepseek` или `deepseek-web`                      |
+| `DEEPSEEK_WEB_ENABLED`, `DEEPSEEK_WEB_WORKER_TOKEN`      | включает браузерный сервис и задаёт отдельный токен для loopback                              |
 | `STATE_ENCRYPTION_KEY`                                  | 32 байта base64; шифрует платёжные секреты в базе                                             |
 | `TELEGRAM_WEBHOOK_SECRET`, `METRICS_TOKEN`              | аутентификация вебхука, bearer-токен `/metrics`                                               |
 | `UPDATE_MODE`, `WEBHOOK_PUBLIC_URL`, `PORT`             | транспорт: `auto` / `webhook` / `polling`                                                     |
@@ -166,8 +168,7 @@ presets, licences and money. State survives restarts: everything is written to P
 - **swift-crypto** — AES-GCM for payment secrets in the database, signature checks for checkout
   callbacks.
 - **Telegram Bot API** — webhook or long polling, HTML, inline menus, draft streaming.
-- **LLM providers** — OpenRouter (text/images/audio/video, reasoning effort, provider routing) and
-  DeepSeek, both behind one port and one shared OpenAI-compatible stream decoder.
+- **LLM providers** — OpenRouter, DeepSeek API, and text-only DeepSeek Web through Firefox.
 - **Docker**
 
 ---
@@ -259,14 +260,17 @@ docker run -d --rm --name pg -e POSTGRES_PASSWORD=test -e POSTGRES_DB=botdb \
 TEST_DATABASE_URL='postgres://postgres:test@127.0.0.1:55432/botdb?sslmode=disable' swift test
 ```
 
-Deployment — `Dockerfile`
+Deploy using the `Dockerfile`. See the [DeepSeek Web runbook for Railway, Supabase, and Mac sign-in](docs/deepseek-web-deploy.md).
 
 ### Environment
 
 | Variable                                                |                                                                                                      |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `TG_BOT_TOKEN`, `ROUTER_API_KEY`, `DEEPSEEK_API_KEY`    | required                                                                                             |
-| `DATABASE_URL`                                          | Postgres in **session** pool mode (port 5432); without it the bot runs memory-only and does not sell |
+| `TG_BOT_TOKEN`                                          | required Telegram bot token                                                                          |
+| `ROUTER_API_KEY`, `DEEPSEEK_API_KEY`                     | keys for the corresponding API providers                                                             |
+| `DATABASE_URL`                                          | Postgres in **session** pool mode (port 5432), required for DeepSeek Web                               |
+| `DEFAULT_AI_PROVIDER`                                   | starting provider, such as `openrouter`, `deepseek`, or `deepseek-web`                                 |
+| `DEEPSEEK_WEB_ENABLED`, `DEEPSEEK_WEB_WORKER_TOKEN`      | enable the browser service and give it a separate loopback token                                     |
 | `STATE_ENCRYPTION_KEY`                                  | 32 bytes base64; encrypts payment secrets in the database                                            |
 | `TELEGRAM_WEBHOOK_SECRET`, `METRICS_TOKEN`              | webhook authentication, `/metrics` bearer token                                                      |
 | `UPDATE_MODE`, `WEBHOOK_PUBLIC_URL`, `PORT`             | transport: `auto` / `webhook` / `polling`                                                            |

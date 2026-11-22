@@ -28,6 +28,10 @@ enum UserFacingError {
             return "Операция отменена"
         }
 
+        if error is DeepSeekWebPersistenceError || error is DeepSeekWebAdmissionRetry {
+            return "Не удалось подтвердить сохранение в базе данных. Повторите позже."
+        }
+
         if let transport = error as? NetworkTransportError {
             return describeTransport(transport)
         }

@@ -96,6 +96,16 @@ extension BotCommandHandler {
             try await handleChatValueCommand(parsed, chatKey: chatKey, fromUser: fromUser)
 
         case .showTokens, .showCost, .showModel, .backupNotify, .testMode, .reset, .resetStats:
+            if await state.provider(chatKey: chatKey) == .deepseekWeb {
+                if [.showTokens, .showCost, .showModel].contains(parsed.name) {
+                    try await sendUserFeedback(chatKey: chatKey, text: "DeepSeek Web не предоставляет статистику токенов, стоимость и идентификатор модели.")
+                    return
+                }
+                if parsed.name == .reset && chatKey.chatID.isGroup {
+                    guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
+                                                         refusal: "🔒 Эти настройки меняет администратор чата.") else { return }
+                }
+            }
             try await handleChatToggleCommand(parsed, chatKey: chatKey)
 
         case .provider, .reasoning:

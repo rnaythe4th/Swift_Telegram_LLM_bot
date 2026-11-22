@@ -32,6 +32,7 @@ extension BotMenuHandler {
 
         let listening = await state.listening(chatKey: chatKey)
         let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
+        let web = await state.provider(chatKey: chatKey) == .deepseekWeb
         let cost = listening.promptCost
         // What the bot is already holding and would carry over. A promise with
         // a number on it beats "включите и посмотрим".
@@ -71,7 +72,7 @@ extension BotMenuHandler {
             : "⚪️ <b>Не слушаю.</b> Бот отвечает только на то, что написали ему."
         // The number that decides whether 200 is a good idea. Approximate on
         // purpose — the order of magnitude is the whole message.
-        let costLine = listening.isOn && !listening.transcript.isEmpty
+        let costLine = web ? "\n" + Self.webListenDisclosure : listening.isOn && !listening.transcript.isEmpty
             ? "\n💸 К каждому ответу добавляется ≈ <b>\(cost.characters)</b> симв. (~\(cost.tokens) токенов) — это платно."
             : ""
         let sizeHint = isOperator
@@ -126,7 +127,13 @@ extension BotMenuHandler {
         switch route.sub {
         case "on", "off":
             let on = route.sub == "on"
+            if on, await state.provider(chatKey: chatKey) == .deepseekWeb,
+               !(await state.listening(chatKey: chatKey).isOn) {
+                _ = try await telegram.sendMessage(.init(chatID: chatKey.chatID, threadID: message.message_thread_id,
+                                                         replyTo: nil, text: Self.webListenDisclosure, replyMarkup: nil))
+            }
             let outcome = await state.setListenMode(chatKey: chatKey, on: on)
+            try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(
                 callbackQueryID: callback.id,
                 text: on
@@ -152,6 +159,7 @@ extension BotMenuHandler {
 
         case "clear":
             let erased = await state.clearTranscript(chatKey: chatKey)
+            try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(
                 callbackQueryID: callback.id,
                 text: erased > 0 ? "🧹 Забыто сообщений: \(erased)" : "Буфер и так пуст"

@@ -12,6 +12,8 @@ struct UpdateDeduplicator {
         self.ring = Array(repeating: nil, count: max(16, capacity))
     }
 
+    func contains(_ id: Int) -> Bool { members.contains(id) }
+
     /// Returns true when the ID is new (and records it), false for a duplicate.
     mutating func insert(_ id: Int) -> Bool {
         guard !members.contains(id) else { return false }
@@ -34,32 +36,65 @@ actor UpdateIntake {
     private var deduplicator = UpdateDeduplicator()
     private var albumBuffer = TelegramPhotoAlbumBuffer()
     private var albumFlushTask: Task<Void, Never>?
+    private var routingUpdates: [Int: Task<Bool?, Never>] = [:]
     private let deliver: @Sendable (TelegramUpdate) async -> Void
     private let metrics: RuntimeMetrics
+    private let durableDelivery: (@Sendable (TelegramUpdate) async -> Bool?)?
 
-    init(metrics: RuntimeMetrics, deliver: @escaping @Sendable (TelegramUpdate) async -> Void) {
+    init(
+        metrics: RuntimeMetrics,
+        durableDelivery: (@Sendable (TelegramUpdate) async -> Bool?)? = nil,
+        deliver: @escaping @Sendable (TelegramUpdate) async -> Void
+    ) {
         self.metrics = metrics
         self.deliver = deliver
+        self.durableDelivery = durableDelivery
     }
 
-    func enqueue(_ updates: [TelegramUpdate]) async {
-        guard !updates.isEmpty else { return }
+    /// Returns the number of consecutively acknowledged updates.
+    @discardableResult
+    func enqueue(_ updates: [TelegramUpdate]) async -> Int {
+        guard !updates.isEmpty else { return 0 }
         await metrics.increment(MetricName.updatesReceived, by: updates.count)
 
-        var fresh: [TelegramUpdate] = []
+        var accepted = 0
+        var duplicates = 0
         for update in updates {
-            if deduplicator.insert(update.update_id) {
-                fresh.append(update)
+            if deduplicator.contains(update.update_id) {
+                duplicates += 1
+                accepted += 1
+                continue
             }
+            let handled = await confirmRouting(update)
+            guard handled != false else { break }
+            if deduplicator.insert(update.update_id) {
+                if handled == nil {
+                    for releasable in albumBuffer.ingest([update]) {
+                        await deliver(releasable)
+                    }
+                }
+            } else {
+                duplicates += 1
+            }
+            accepted += 1
         }
-        if fresh.count < updates.count {
-            await metrics.increment(MetricName.updatesDeduplicated, by: updates.count - fresh.count)
+        if duplicates > 0 {
+            await metrics.increment(MetricName.updatesDeduplicated, by: duplicates)
         }
 
-        for update in albumBuffer.ingest(fresh) {
-            await deliver(update)
-        }
         scheduleAlbumFlushIfNeeded()
+        return accepted
+    }
+
+    private func confirmRouting(_ update: TelegramUpdate) async -> Bool? {
+        guard let durableDelivery else { return nil }
+        let id = update.update_id
+        if let pending = routingUpdates[id] { return await pending.value }
+        let pending = Task { await durableDelivery(update) }
+        routingUpdates[id] = pending
+        let result = await pending.value
+        routingUpdates.removeValue(forKey: id)
+        return result
     }
 
     private func scheduleAlbumFlushIfNeeded() {

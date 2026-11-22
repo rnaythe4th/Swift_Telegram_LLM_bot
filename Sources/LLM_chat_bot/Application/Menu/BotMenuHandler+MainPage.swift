@@ -8,8 +8,9 @@ extension BotMenuHandler {
     func renderMain(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let provider = await state.provider(chatKey: chatKey)
-        let gateway = try? gateways.gateway(for: provider)
-        let reasoningSupported = gateway?.capabilities.supportsReasoning ?? false
+        let reasoningSupported = gateways.capabilities(for: provider)?.supportsReasoning ?? false
+        let web = provider == .deepseekWeb
+        let webStatus = gateways.available.contains(.deepseekWeb) ? "" : " · отключён"
         let reasoningLabel = help.reasoningEffort?.displayName ?? "выключено"
         let usage = help.cumulativeUsage
         let usageLine: String
@@ -81,7 +82,9 @@ extension BotMenuHandler {
         let modesOn = !modeConfig.activeModes.isEmpty
 
         var settingsSummary: String
-        if modesOn {
+        if web {
+            settingsSummary = "🔌 <b>DeepSeek Web</b>\(webStatus)\n📝 Локальная история · <b>\(help.maxHistory) пар</b>"
+        } else if modesOn {
             // The name and the line under it are the super-admin's text on
             // the one page every user opens: escaped, or a stray `<` in a mode
             // title takes the settings page down for everybody.
@@ -101,16 +104,19 @@ extension BotMenuHandler {
         let text = """
         <b>⚙️ Настройки чата</b>
 
-        \(accessLine)
+        \(web ? "" : accessLine)
 
         \(settingsSummary)
 
-        \(usageLine)\(balanceLine)
+        \(web ? "" : usageLine)\(balanceLine)
         🆔 <code>\(chatKey.chatID)</code>
         """
 
         var rows: Keyboard = []
-        if modesOn {
+        if web {
+            rows.row([menuButton("🎭 Роль", page: .role), menuButton("📝 История", page: .history)])
+            rows.row([menuButton("🔌 Сервис ИИ", page: .provider), menuButton("↺ Сбросить", command: .reset)])
+        } else if modesOn {
             rows = modeRows(config: modeConfig, activeID: activeMode?.id, hasFullAccess: hasFullAccess)
             // "↺ Рабочий режим" only once the chat is actually off it —
             // otherwise it is a button that does nothing.
@@ -130,7 +136,7 @@ extension BotMenuHandler {
         // The modes are a shortlist, not a cage: the model page lists every
         // free model with its price and lets anyone pick one. Without this a
         // free user has no way to see that the list exists.
-        rows.row([menuButton("⚙️ Тонкая настройка", page: .tuning)])
+        if !web { rows.row([menuButton("⚙️ Тонкая настройка", page: .tuning)]) }
         // Listen mode belongs to group chats and to nowhere else: in a DM the
         // "conversation" the bot would follow is the dialogue it is already
         // having. Shown to everyone, including free chats — the page explains

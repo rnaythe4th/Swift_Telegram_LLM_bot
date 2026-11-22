@@ -1,9 +1,8 @@
 # Railway config-as-code (https://docs.railway.com/reference/config-as-code)
 #
-# /ready returns 503 until the bot has restored state and taken the writer
-# lock (§3.1), so a new
-# deployment starts receiving traffic (and the old one stops) only when it is
-# actually ready — zero-loss redeploys together with the webhook queue.
+# /ready can return 200 while the bot waits to take over the writer lock
+# from the previous deployment. The webhook returns 503 during that handoff.
+# DeepSeek Web requires the writer lock, durable state, and a ready worker.
 
 [build]
 builder = "DOCKERFILE"

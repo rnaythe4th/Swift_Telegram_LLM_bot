@@ -31,6 +31,7 @@ struct AppAssembly {
             config.stateEncryptionKey,
             config.deepseekKey,
             config.routerApiKey,
+            config.deepSeekWebToken,
             config.databaseURL,
             // …and the password on its own: a driver error quotes the
             // credential, not the whole URL the credential came from.
@@ -87,7 +88,13 @@ struct AppAssembly {
             flags: flags
         )
 
-        let intake = UpdateIntake(metrics: metrics) { [orchestrator] update in
+        let durableDelivery: (@Sendable (TelegramUpdate) async -> Bool?)?
+        if config.deepSeekWebToken == nil {
+            durableDelivery = nil
+        } else {
+            durableDelivery = { update in await orchestrator.dispatchWebUpdateIfNeeded(update) }
+        }
+        let intake = UpdateIntake(metrics: metrics, durableDelivery: durableDelivery) { update in
             await orchestrator.dispatch(update: update)
         }
 
@@ -139,7 +146,8 @@ struct AppAssembly {
             // The value is the owner's lever (it re-sends every remembered
             // message on every turn), so users no longer set it themselves.
             defaultHistoryLength: 20,
-            defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil
+            defaultSuffix: botUsername == "SwiftPT_test_bot" ? 1 : nil,
+            defaultProvider: config.defaultProvider
         )
 
         await state.setPresets(.model, [
@@ -244,16 +252,21 @@ struct AppAssembly {
         let mediaResolver = TelegramMediaResolver(telegram: telegram)
         let generationLimiter = GenerationLimiter(maxConcurrent: config.maxConcurrentGenerations)
 
-        let openrouter = OpenRouterProviderAdapter(network: network, apiKey: config.routerApiKey)
-        let deepseek = DeepSeekProviderAdapter(network: network, apiKey: config.deepseekKey)
-
-        let modelPriceMonitor = ModelPriceMonitor(
-            network: network,
-            apiKey: config.routerApiKey,
-            state: state,
-            telegram: telegram,
-            logger: logger
-        )
+        var providers: [ServiceProvider: ProviderGatewayPort] = [:]
+        if let key = config.routerApiKey {
+            let adapter = OpenRouterProviderAdapter(network: network, apiKey: key)
+            providers[.openrouter] = adapter
+            providers[.yandex] = adapter
+        }
+        if let key = config.deepseekKey {
+            providers[.deepseek] = DeepSeekProviderAdapter(network: network, apiKey: key)
+        }
+        let webGateway = config.deepSeekWebToken.map {
+            DeepSeekWebProviderAdapter(network: network, port: config.deepSeekWebPort, token: $0)
+        }
+        let modelPriceMonitor = config.routerApiKey.map { key in
+            ModelPriceMonitor(network: network, apiKey: key, state: state, telegram: telegram, logger: logger)
+        }
 
         // One post-payment routine for every method (§17): Stars and card go
         // through it from the orchestrator, crypto from its monitor, the hosted
@@ -296,11 +309,10 @@ struct AppAssembly {
             state: state,
             sessionRegistry: sessionRegistry,
             mediaResolver: mediaResolver,
-            providers: [
-                .openrouter: openrouter,
-                .deepseek: deepseek,
-                .yandex: openrouter
-            ],
+            providers: providers,
+            webGateway: webGateway,
+            webQuotaPause: config.deepSeekWebQuotaPause,
+            webRemoteUnitLimit: config.deepSeekWebRemoteUnitLimit,
             persistence: persistence,
             logger: logger,
             metrics: metrics,
@@ -456,8 +468,8 @@ struct AppAssembly {
                     // the same poison update forever.
                     return .ok("ignored")
                 }
-                await intake.enqueue([update])
-                return .ok("")
+                let accepted = await intake.enqueue([update])
+                return accepted == 1 ? .ok("") : AppHTTPResponse(status: .serviceUnavailable, body: "retry update")
 
             default:
                 return AppHTTPResponse(status: .notFound, body: "not found")

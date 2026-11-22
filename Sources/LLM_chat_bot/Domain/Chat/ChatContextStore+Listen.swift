@@ -40,9 +40,18 @@ extension ChatContextStore {
         var seeded = 0
         mutate(chatKey: chatKey) { context in
             context.listening.isOn = on
-            guard on, context.listening.transcript.isEmpty else { return }
+            guard on else {
+                if context.provider == .deepseekWeb {
+                    resetWebContext(&context, chatKey: chatKey, keepingIndependentTurns: true)
+                }
+                return
+            }
+            guard context.listening.transcript.isEmpty else { return }
             guard let preroll = _overheardPreroll[chatKey] else { return }
-            let adopted = preroll.seed(size: context.listening.size)
+            let adopted = preroll.seed(
+                size: context.listening.size,
+                startingAt: context.listening.transcript.nextSeq
+            )
             guard !adopted.isEmpty else { return }
             context.listening.transcript = adopted
             seeded = adopted.count
@@ -80,7 +89,12 @@ extension ChatContextStore {
     func clearTranscript(chatKey: ChatKey) -> Int {
         var erased = _overheardPreroll.removeValue(forKey: chatKey)?.count ?? 0
         guard contexts[chatKey] != nil else { return erased }
-        mutate(chatKey: chatKey) { erased += $0.listening.transcript.clear() }
+        mutate(chatKey: chatKey) { context in
+            erased += context.listening.transcript.clear()
+            if context.provider == .deepseekWeb {
+                resetWebContext(&context, chatKey: chatKey, keepingIndependentTurns: true)
+            }
+        }
         return erased
     }
 
@@ -172,7 +186,9 @@ extension ChatContextStore {
         guard context.listening.isOn else { return nil }
         let lines = context.listening.transcript.lines(
             excluding: askedMessageID,
-            label: { [self] in transcriptLabel($0) }
+            label: { [self] in transcriptLabel($0) },
+            afterSequence: context.deepSeekWeb?.listeningBoundary ?? -1,
+            requireKnownReply: context.deepSeekWeb != nil
         )
         // Nothing overheard yet — the chat has only just switched listening on,
         // or the one message in the buffer is the question itself. Explaining a
@@ -224,7 +240,7 @@ extension ChatContextStore {
     /// model as well as to the dump page. That is the safe direction of the two:
     /// an `&amp;` in a prompt costs a token, an unescaped `<` in the dump makes
     /// Telegram refuse the whole message and the button reads as broken.
-    private func transcriptLabel(_ author: TranscriptAuthor) -> String {
+    func transcriptLabel(_ author: TranscriptAuthor) -> String {
         switch author {
         case .bot: return "🤖 бот"
         case .member(let key): return displayLabel(forKey: key)
@@ -252,8 +268,13 @@ extension ChatContextStore {
         var marker = ""
         if let replyTo {
             if let target = context.listening.transcript.entries
-                .first(where: { $0.messageID == replyTo.messageID && $0.messageID != 0 }) {
+                .first(where: {
+                    $0.messageID == replyTo.messageID && $0.messageID != 0
+                        && $0.seq > (context.deepSeekWeb?.listeningBoundary ?? -1)
+                }) {
                 marker = " (в ответ на #\(target.seq))"
+            } else if context.deepSeekWeb != nil {
+                return "Тебе пишет \(asking): "
             } else if case .bot? = replyTo.author {
                 marker = " (в ответ на твоё сообщение)"
             } else if !replyTo.quote.isEmpty {

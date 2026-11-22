@@ -53,7 +53,7 @@ final class PostgresIntegrationTests: XCTestCase {
             "bot_ledger", "bot_payment", "bot_wallet", "bot_chat_context", "bot_chat",
             "bot_invite", "bot_premium_usage", "bot_referral", "bot_referral_tally",
             "bot_traffic_attribution", "bot_funnel_daily", "bot_crypto_invoice",
-            "bot_external_order", "bot_tenant", "bot_user", "bot_config", "bot_schema_meta",
+            "bot_external_order", "bot_tenant", "bot_user", "bot_config", "bot_web_update", "bot_schema_meta",
         ] {
             try await client.query(PostgresQuery(unsafeSQL: "drop table if exists \(table) cascade"))
         }
@@ -80,6 +80,151 @@ final class PostgresIntegrationTests: XCTestCase {
             XCTFail("a newer schema must stop an older build")
         } catch let error as PostgresSchemaError {
             guard case .databaseNewerThanBinary = error else { return XCTFail("wrong error: \(error)") }
+        }
+    }
+
+    func testWebAdmissionRestoresQueuedOperationAndDedupSurvivesForget() async throws {
+        let key = ChatKey(chatID: 123, threadID: 0)
+        let store = Fixtures.makeStore()
+        let writer = PersistenceCoordinator(
+            store: store, persistence: persistence, ledger: ledger, logger: SilentLogger(), metrics: RuntimeMetrics()
+        )
+        let account = try await writer.webAccount(workerMarker: UUID())
+        _ = await store.changeProvider(chatKey: key, newProvider: .deepseekWeb)
+        await store.webResetForAccount(chatKey: key, accountEpoch: account.epoch)
+        let candidate = await store.webCandidate(
+            chatKey: key, operationID: UUID(), updateID: 777, question: "первый вопрос",
+            messageID: 456, telegramThreadID: nil, reply: nil
+        )
+        let operation = try XCTUnwrap(candidate)
+        let admitted = try await writer.webAdmit(chatKey: key, operation: operation)
+        XCTAssertTrue(admitted)
+
+        // The admission itself is durable, prior to any write-behind flush.
+        let loaded = try await persistence.loadEverything()
+        let snapshot = try XCTUnwrap(loaded.contexts.first?.snapshot)
+        XCTAssertEqual(snapshot.provider, .openrouter)
+        XCTAssertEqual(snapshot.webSelected, true)
+        let restored = Fixtures.makeStore()
+        await restored.restore(from: loaded)
+        let restoredQueue = await restored.webOperations()
+        XCTAssertEqual(restoredQueue.map { $0.1.id }, [operation.id])
+        XCTAssertEqual(restoredQueue.first?.1.question, "первый вопрос")
+        let restoredEpoch = await restored.webState(chatKey: key)?.accountEpoch
+        XCTAssertEqual(restoredEpoch, account.epoch)
+
+        let forgotten = await store.forgetChat(chatKey: key)
+        XCTAssertTrue(forgotten)
+        try await writer.webCheckpoint(chatKey: key, contextEpoch: nil)
+        let seen = try await writer.webUpdateSeen(777)
+        XCTAssertTrue(seen)
+        let afterForget = try await persistence.loadEverything()
+        XCTAssertTrue(afterForget.contexts.isEmpty)
+    }
+
+    func testWebTurnsThroughTelegramKeepTopicBindingsAndReportAccountQuota() async throws {
+        let telegramDouble = FakeTelegram()
+        let base = try await telegramDouble.start()
+        let telegram = TelegramHTTPGateway(network: NetworkClient(), botToken: "test-token",
+                                           apiBase: base, rateLimiter: nil, metrics: nil)
+        let store = Fixtures.makeStore(ownerUsername: "owner", ownerUserID: 321)
+        let metrics = RuntimeMetrics()
+        let writer = PersistenceCoordinator(store: store, persistence: persistence, ledger: ledger,
+                                            logger: SilentLogger(), metrics: metrics)
+        let flags = RuntimeFlags()
+        flags.durability.value = .durable
+        let worker = WebWorkerFixture()
+        let orchestrator = BotOrchestrator(
+            telegram: telegram, state: store, sessionRegistry: SessionRegistry(), mediaResolver: FakeMediaResolver(),
+            providers: [:], webGateway: worker, persistence: writer, logger: SilentLogger(),
+            metrics: metrics, flags: flags, generationLimiter: GenerationLimiter(maxConcurrent: 1),
+            botUsername: "testbot", formatOptions: ""
+        )
+        let chatID: ChatID = -100321
+        let a = ChatKey(chatID: chatID, threadID: 5)
+        let b = ChatKey(chatID: chatID, threadID: 9)
+        _ = await store.changeProvider(chatKey: a, newProvider: .deepseekWeb)
+        _ = await store.changeProvider(chatKey: b, newProvider: .deepseekWeb)
+
+        func turn(_ id: Int, _ key: ChatKey, _ text: String) async -> Bool? {
+            let message = TelegramMessage(
+                message_id: id, from: .init(id: 321, is_bot: false, first_name: "Owner", username: "owner"),
+                chat: .init(id: chatID, type: "supergroup", title: "Fixture", username: nil, first_name: nil),
+                date: 1, text: text, caption: nil, voice: nil, video: nil, message_thread_id: key.threadID,
+                media_group_id: nil, reply_to_message: nil, photo: nil
+            )
+            return await orchestrator.dispatchWebUpdateIfNeeded(.init(update_id: id, message: message, callback_query: nil, pre_checkout_query: nil, my_chat_member: nil))
+        }
+
+        for (id, key, text) in [(1, a, "один"), (2, a, "два"), (3, b, "три")] {
+            let admitted = await turn(id, key, "@testbot " + text)
+            XCTAssertEqual(admitted, true)
+            let call = await telegramDouble.waitForCall("sendMessage", containing: "turn \(id)")
+            XCTAssertEqual(call?.text, "turn \(id) < &")
+            XCTAssertNil(call?.parseMode)
+        }
+        let opened = await worker.turns()
+        XCTAssertEqual(opened.map(\.remoteChatID), [nil, "fixture-1", nil])
+        XCTAssertEqual(Set(opened.map(\.operationID)).count, 3)
+
+        let duplicate = await turn(2, a, "@testbot два")
+        XCTAssertEqual(duplicate, true)
+        await worker.limit()
+        let quota = await turn(4, b, "@testbot лимит")
+        XCTAssertEqual(quota, true)
+        let first = await telegramDouble.waitForCall("sendMessage", containing: "исчерпал лимит")
+        XCTAssertNotNil(first)
+        let paused = await turn(5, a, "@testbot пауза")
+        XCTAssertEqual(paused, true)
+        let messages = await telegramDouble.waitForCalls("sendMessage", count: 5)
+        XCTAssertEqual(messages.last?.text, "DeepSeek Web исчерпал лимит запросов. Попробуйте позже.")
+        let clicks = await worker.turns()
+        XCTAssertEqual(clicks.count, 4)
+        let saved = try await writer.webAccount()
+        XCTAssertNotNil(saved.quotaUntil)
+
+        let cleared = await turn(6, a, "/clear_history")
+        XCTAssertEqual(cleared, true)
+        let clearedState = await store.webState(chatKey: a)
+        let otherState = await store.webState(chatKey: b)
+        XCTAssertNil(clearedState?.remoteChatID)
+        XCTAssertEqual(otherState?.remoteChatID, "fixture-3")
+        await telegramDouble.stop()
+    }
+
+    func testWebBindingCollisionRollsBackUpdateMarker() async throws {
+        let keyA = ChatKey(chatID: -100, threadID: 4)
+        let keyB = ChatKey(chatID: -100, threadID: 8)
+        let store = Fixtures.makeStore()
+        let account = try await persistence.webAccount()
+        for key in [keyA, keyB] {
+            _ = await store.changeProvider(chatKey: key, newProvider: .deepseekWeb)
+            await store.webResetForAccount(chatKey: key, accountEpoch: account.epoch)
+        }
+        for (index, key) in [keyA, keyB].enumerated() {
+            let state = await store.webState(chatKey: key)
+            let contextEpoch = try XCTUnwrap(state?.contextEpoch)
+            await store.mutateWeb(chatKey: key, contextEpoch: contextEpoch) { $0.remoteChatID = "same-id" }
+            let candidate = await store.webCandidate(
+                chatKey: key, operationID: UUID(), updateID: Int64(index + 1), question: "запрос",
+                messageID: index + 1, telegramThreadID: key.threadID, reply: nil
+            )
+            let operation = try XCTUnwrap(candidate)
+            let row = await store.webAdmissionRow(chatKey: key, operation: operation)
+            let selected = try XCTUnwrap(row)
+            if index == 0 {
+                guard case .inserted = try await persistence.admitWebUpdate(operation.updateID, row: selected) else {
+                    return XCTFail("the first chat must own the binding")
+                }
+            } else {
+                do {
+                    _ = try await persistence.admitWebUpdate(operation.updateID, row: selected)
+                    XCTFail("the second chat cannot claim the same binding")
+                } catch {
+                    let seen = try await persistence.webUpdateSeen(operation.updateID)
+                    XCTAssertFalse(seen)
+                }
+            }
         }
     }
 
@@ -630,5 +775,37 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertFalse(reportedLost.value, "failing to take the lock is not losing it")
 
         await holder.release()
+    }
+}
+
+private actor WebWorkerFixture: DeepSeekWebGateway {
+    private var requests: [DeepSeekWebWorkerRequest] = []
+    private var limited = false
+
+    func health() -> DeepSeekWebWorkerHealth {
+        .init(version: 1, status: .ready, accountMarker: nil)
+    }
+
+    func limit() { limited = true }
+
+    func turns() -> [DeepSeekWebWorkerRequest] { requests }
+
+    func perform(_ action: DeepSeekWebWorkerAction, _ request: DeepSeekWebWorkerRequest) -> DeepSeekWebWorkerResponse {
+        if action == .send {
+            requests.append(request)
+        }
+        let status: DeepSeekWebWorkerStatus = switch action {
+        case .prepare: .prepared
+        case .status, .reconcile: .notAccepted
+        case .cancel: .cancelled
+        case .send: limited ? .quota : .completed
+        }
+        let completed = status == .completed
+        return .init(
+            version: 1, operationID: request.operationID, status: status, accepted: completed,
+            remoteChatID: completed ? (request.remoteChatID ?? "fixture-\(requests.count)") : nil,
+            remoteTail: completed ? "tail-\(requests.count)" : nil,
+            text: completed ? "turn \(requests.count) < &" : nil, retryAfterSeconds: nil
+        )
     }
 }

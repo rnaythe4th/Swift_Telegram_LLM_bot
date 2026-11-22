@@ -6,7 +6,7 @@ enum ProviderGatewayRegistryError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingAdapter(let provider):
-            return "Provider adapter not found: \(provider.rawValue)"
+            return "Сервис \(provider.rawValue) отключён. Выберите доступный через /provider или /menu."
         }
     }
 }
@@ -14,8 +14,23 @@ enum ProviderGatewayRegistryError: LocalizedError {
 struct ProviderGatewayRegistry {
     private let providers: [ServiceProvider: ProviderGatewayPort]
     
-    init(providers: [ServiceProvider: ProviderGatewayPort]) {
+    let web: (any DeepSeekWebGateway)?
+
+    init(providers: [ServiceProvider: ProviderGatewayPort], web: (any DeepSeekWebGateway)? = nil) {
         self.providers = providers
+        self.web = web
+    }
+
+    var available: [ServiceProvider] {
+        ServiceProvider.allCases.filter { capabilities(for: $0) != nil }
+    }
+
+    func capabilities(for provider: ServiceProvider) -> ProviderCapabilities? {
+        if provider == .deepseekWeb {
+            guard web != nil else { return nil }
+            return .init(supportsImageInput: false, supportsAudioInput: false, supportsVideoInput: false, supportsReasoning: false)
+        }
+        return providers[provider]?.capabilities
     }
     
     func gateway(for provider: ServiceProvider) throws -> ProviderGatewayPort {

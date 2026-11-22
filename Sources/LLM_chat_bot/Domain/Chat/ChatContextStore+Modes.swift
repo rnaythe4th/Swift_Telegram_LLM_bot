@@ -139,6 +139,7 @@ extension ChatContextStore {
             if modelChanged || effectiveRole != nil {
                 context.history = [.init(role: "system", content: context.role)]
                 context.pendingTurns = []
+                resetWebContext(&context, chatKey: chatKey)
             }
         }
         return mode

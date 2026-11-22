@@ -15,6 +15,7 @@ enum OwnerAlert: String, Sendable, CaseIterable {
     case modelCatalogueDown
     /// A spending ceiling stopped paid models (§4.1).
     case spendCapReached
+    case deepSeekWebLogin
 
     var title: String {
         switch self {
@@ -23,6 +24,7 @@ enum OwnerAlert: String, Sendable, CaseIterable {
         case .notWriter: return "ℹ️ Эта копия бота — не основная"
         case .ledgerMismatch: return "🛑 Расхождение в журнале балансов"
         case .modelCatalogueDown: return "⚠️ Каталог моделей недоступен"
+        case .deepSeekWebLogin: return "⚠️ DeepSeek Web требует входа"
         case .spendCapReached: return "⏸ Достигнут дневной лимит расходов"
         }
     }
@@ -41,6 +43,8 @@ enum OwnerAlert: String, Sendable, CaseIterable {
             return "У части кошельков сумма журнала не сходится с остатком. Деньги не потеряны, но объяснить остаток нечем — нужна проверка."
         case .modelCatalogueDown:
             return "Список бесплатных моделей не обновляется, поэтому все платные модели считаются платными и работают по дневному лимиту."
+        case .deepSeekWebLogin:
+            return "Войдите в аккаунт DeepSeek через сеанс обслуживания Firefox."
         case .spendCapReached:
             return "Умные модели переключены на бесплатные до конца суток. Поднять потолок — /menu → 🛡 Супер-админ."
         }

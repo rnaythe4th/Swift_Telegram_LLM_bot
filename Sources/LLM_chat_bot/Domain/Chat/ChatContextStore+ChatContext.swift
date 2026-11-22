@@ -27,7 +27,7 @@ extension ChatContextStore {
             maxHistory: ChatContext.historyRange.clamping(tenant.defaultHistoryLength),
             showCost: true,
             showModel: true,
-            provider: .openrouter,
+            provider: defaultProvider,
             suffix: defaultSuffix,
             reasoningEffort: nil,
             backupNotify: false,
@@ -35,10 +35,12 @@ extension ChatContextStore {
             chatModelPresets: [],
             chatTempPresets: [],
             chatHistoryLengthPresets: [],
-            chatRolePresets: []
+            chatRolePresets: [],
+            deepSeekWeb: defaultProvider == .deepseekWeb ? DeepSeekWebChatState() : nil
         )
         contexts[chatKey] = context
         dirtyContexts.insert(chatKey)
+        deletedContexts.remove(chatKey)
         return context
     }
 
@@ -214,6 +216,7 @@ extension ChatContextStore {
         mutate(chatKey: chatKey) { context in
             context.maxHistory = ChatContext.historyRange.clamping(newMax)
             context.history = trimHistory(context.history, limit: context.maxHistory)
+            context.deepSeekWeb?.trimHistory(to: context.maxHistory)
             // Hand-edited: the chat no longer matches the mode it was in.
             context.activeModeID = nil
         }
@@ -225,6 +228,7 @@ extension ChatContextStore {
             context.role = effectiveRole
             context.history = [.init(role: "system", content: effectiveRole)]
             context.pendingTurns = []
+            resetWebContext(&context, chatKey: chatKey)
         }
         return effectiveRole
     }
@@ -233,6 +237,7 @@ extension ChatContextStore {
         mutate(chatKey: chatKey) { context in
             context.history = [.init(role: "system", content: context.role)]
             context.pendingTurns = []
+            resetWebContext(&context, chatKey: chatKey)
         }
     }
 
@@ -254,6 +259,7 @@ extension ChatContextStore {
             context.modelProviderRouting = providerRouting
             context.history = [.init(role: "system", content: context.role)]
             context.pendingTurns = []
+            resetWebContext(&context, chatKey: chatKey)
             // An explicit choice supersedes the cap fallback: nothing left to
             // restore later (roadmap step 6).
             context.downgradedFromModel = nil
@@ -284,12 +290,39 @@ extension ChatContextStore {
 
     func changeProvider(chatKey: ChatKey, newProvider: ServiceProvider) -> ServiceProvider {
         let oldProvider = ensure(chatKey: chatKey).provider
-        mutate(chatKey: chatKey) { $0.provider = newProvider }
+        mutate(chatKey: chatKey) { context in
+            guard oldProvider == .deepseekWeb || newProvider == .deepseekWeb else {
+                context.provider = newProvider
+                return
+            }
+            let wasAllowed = webAllowed(chatKey: chatKey)
+            guard oldProvider != newProvider || !wasAllowed else { return }
+            if oldProvider != .deepseekWeb {
+                context.apiProvider = oldProvider
+            }
+            context.history = [.init(role: "system", content: context.role)]
+            context.pendingTurns = []
+            if newProvider == .deepseekWeb {
+                context.provider = newProvider
+                // First group opt-in fences remarks collected before notice.
+                resetWebContext(&context, chatKey: chatKey)
+                context.deepSeekWeb?.groupAllowed = chatKey.chatID.isGroup
+            } else {
+                resetWebContext(&context, chatKey: chatKey)
+                context.provider = newProvider
+                context.apiProvider = nil
+                context.deepSeekWeb?.groupAllowed = false
+            }
+        }
         return oldProvider
     }
 
     func provider(chatKey: ChatKey) -> ServiceProvider {
         ensure(chatKey: chatKey).provider
+    }
+
+    func selectedProvider(chatKey: ChatKey) -> ServiceProvider {
+        contexts[chatKey]?.provider ?? defaultProvider
     }
 
     func snapshotAndAppend(
@@ -345,31 +378,26 @@ extension ChatContextStore {
         let markup = markupPercentValue
         let real = Money.usd(usage?.cost ?? 0)
         let billed = real.multiplied(byPercent: markup)
-        mutate(chatKey: chatKey) { context in
-            // The answer is a message in the chat like any other, and the one
-            // people reply to most. Without it in the transcript, «а почему?»
-            // ten seconds later is a question about nothing.
-            if context.listening.isOn {
-                context.listening.transcript.append(
-                    messageID: botMessageID ?? 0,
-                    author: .bot,
-                    text: content,
-                    at: Date(),
-                    replyTo: nil,
-                    size: context.listening.size
-                )
+        if contexts[chatKey] != nil {
+            mutate(chatKey: chatKey) { context in
+                let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID })
+                // A result from the previous provider must not enter
+                // the new provider's transcript after a switch.
+                if context.listening.isOn, context.deepSeekWeb == nil || index != nil {
+                    context.listening.transcript.append(
+                        messageID: botMessageID ?? 0,
+                        author: .bot,
+                        text: content,
+                        at: Date(),
+                        replyTo: nil,
+                        size: context.listening.size
+                    )
+                }
+                context.cumulativeUsage.add(usage, markupPercent: markup)
+                guard let index else { return }
+                context.pendingTurns[index].state = .completed(content)
+                flushResolvedTurns(&context)
             }
-            // Counted whatever became of the turn. The answer was generated and
-            // the money is being taken (the caller charges what this returns),
-            // so a `/clear_history` or a model switch that landed mid-stream
-            // must not leave the chat's own totals — the ones the tenant and
-            // the daily spend already got — quietly short by one answer.
-            context.cumulativeUsage.add(usage, markupPercent: markup)
-            guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
-                return
-            }
-            context.pendingTurns[index].state = .completed(content)
-            flushResolvedTurns(&context)
         }
         accumulateTenantUsage(chatID: chatKey.chatID, usage: usage)
         recordProviderSpend(chatID: chatKey.chatID, real: real)
@@ -377,6 +405,7 @@ extension ChatContextStore {
     }
 
     func cancelPendingTurn(chatKey: ChatKey, generationID: GenerationID) {
+        guard contexts[chatKey] != nil else { return }
         mutate(chatKey: chatKey) { context in
             guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
                 return
@@ -443,7 +472,12 @@ extension ChatContextStore {
     }
 
     func history(chatKey: ChatKey) -> [ChatMessage] {
-        ensure(chatKey: chatKey).history
+        let context = ensure(chatKey: chatKey)
+        guard context.provider == .deepseekWeb else { return context.history }
+        guard let history = context.deepSeekWeb?.history, !history.isEmpty else { return [] }
+        return [.init(role: "system", content: context.role)] + history.flatMap {
+            [.init(role: "user", content: $0.question), .init(role: "assistant", content: $0.answer)]
+        }
     }
 
     /// "↺ Сбросить": back to the settings the bot ships with.
@@ -461,7 +495,8 @@ extension ChatContextStore {
         let tenant = tenantState(for: chatKey.chatID)
         let role = roleWithCompanyMembers(chatID: chatKey.chatID, role: tenant.defaultRole + formatOptions)
         let previous = contexts[chatKey]
-        contexts[chatKey] = ChatContext(
+        let apiProvider = previous.flatMap { $0.provider == .deepseekWeb ? $0.apiProvider : $0.provider }
+        var context = ChatContext(
             role: role,
             history: [.init(role: "system", content: role)],
             pendingTurns: [],
@@ -472,7 +507,7 @@ extension ChatContextStore {
             maxHistory: ChatContext.historyRange.clamping(tenant.defaultHistoryLength),
             showCost: true,
             showModel: true,
-            provider: .openrouter,
+            provider: defaultProvider,
             suffix: defaultSuffix,
             reasoningEffort: nil,
             backupNotify: false,
@@ -490,9 +525,17 @@ extension ChatContextStore {
             // Сбросить" must not silently stop (or resume) recording what
             // everyone in the room says. It has its own page and its own
             // switch; `/forget` is what erases what it heard.
-            listening: previous?.listening ?? .off
+            listening: previous?.listening ?? .off,
+            apiProvider: apiProvider,
+            deepSeekWeb: previous?.deepSeekWeb
         )
+        if defaultProvider != .deepseekWeb || previous?.provider != .deepseekWeb {
+            context.deepSeekWeb?.groupAllowed = false
+        }
+        resetWebContext(&context, chatKey: chatKey)
+        contexts[chatKey] = context
         dirtyContexts.insert(chatKey)
+        deletedContexts.remove(chatKey)
         // "Стандартные настройки" means the working mode, when there is one:
         // the tenant defaults are a bare model id, the mode is the combination
         // the owner actually vouches for.

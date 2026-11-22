@@ -7,6 +7,15 @@ import Foundation
 extension BotCommandHandler {
     /// Role, model, style of the answer, memory length.
     func handleChatValueCommand(_ parsed: ParsedBotCommand, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
+        let web = await state.provider(chatKey: chatKey) == .deepseekWeb
+        if web && chatKey.chatID.isGroup && [.setRole, .defaultRole, .clearHistory].contains(parsed.name) {
+            guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
+                                                 refusal: "🔒 Эти настройки меняет администратор чата.") else { return }
+        }
+        if web && [.setTemp, .model].contains(parsed.name) {
+            try await sendUserFeedback(chatKey: chatKey, text: "Эта настройка доступна для API-сервисов. Сейчас выбран DeepSeek Web.")
+            return
+        }
         switch parsed.name {
         case .setRole:
             let trimmed = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -18,10 +27,12 @@ extension BotCommandHandler {
                 return
             }
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: trimmed + formatOptions)
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль обновлена. Переписка очищена.")
 
         case .clearHistory:
             await state.clearHistory(chatKey: chatKey)
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "🧹 Переписка очищена — бот забыл, о чём был разговор.")
 
         case .setTemp:
@@ -102,6 +113,7 @@ extension BotCommandHandler {
         case .defaultRole:
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
             _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: defaultRole)
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "✓ Роль сброшена к стандартной. Переписка очищена.")
 
         case .historyLength:
@@ -158,6 +170,7 @@ extension BotCommandHandler {
 
         case .reset:
             await state.resetChat(chatKey: chatKey)
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey)
             try await sendUserFeedback(chatKey: chatKey, text: "↺ Настройки сброшены к стандартным.")
 
         case .resetStats:
@@ -178,29 +191,42 @@ extension BotCommandHandler {
             guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
                                                  refusal: "🔒 Сервис ИИ настраивает владелец бота.") else { return }
             if let provider = ServiceProvider.parse(parsed.argument) {
+                guard let capabilities = gateways.capabilities(for: provider) else {
+                    throw ProviderGatewayRegistryError.missingAdapter(provider)
+                }
+                if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webAllowed(chatKey: chatKey)) {
+                    let listening = await state.listening(chatKey: chatKey).isOn
+                    let disclosure = BotMenuHandler.webGroupDisclosure + (listening ? "\n" + BotMenuHandler.webListenDisclosure : "")
+                    try await sendUserFeedback(chatKey: chatKey, text: disclosure)
+                }
                 let old = await state.changeProvider(chatKey: chatKey, newProvider: provider)
                 var lines = ["✓ Сервис ИИ: <b>\(provider.commandValue)</b>"]
                 if old != provider {
                     lines.append("<i>Был:</i> <b>\(old.commandValue)</b>")
                 }
 
-                let gateway = try gateways.gateway(for: provider)
+                try await menuHandler.checkpointWebSettings(chatKey: chatKey)
                 let reasoningEnabled = await state.reasoningEnabled(chatKey: chatKey)
-                if reasoningEnabled, !gateway.capabilities.supportsReasoning {
+                if reasoningEnabled, !capabilities.supportsReasoning && provider != .deepseekWeb {
                     await state.setReasoningEffort(chatKey: chatKey, effort: nil)
                     lines.append("<i>Обдумывание выключено — этот сервис его не умеет.</i>")
                 }
                 try await sendUserFeedback(chatKey: chatKey, text: lines.joined(separator: "\n"))
             } else {
-                try await sendUserFeedback(chatKey: chatKey, text: "Неизвестный сервис. Доступны: <code>deepseek</code>, <code>openrouter</code>, <code>yandex</code>.")
+                let available = gateways.available.map { "<code>\($0.commandValue)</code>" }.joined(separator: ", ")
+                let current = await state.provider(chatKey: chatKey)
+                let status = gateways.capabilities(for: current) == nil ? " (отключён)" : ""
+                try await sendUserFeedback(chatKey: chatKey, text: "Сейчас: \(current.rawValue)\(status). Доступны: \(available).")
             }
 
         case .reasoning:
             guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
             let provider = await state.provider(chatKey: chatKey)
-            let gateway = try gateways.gateway(for: provider)
+            guard let capabilities = gateways.capabilities(for: provider) else {
+                throw ProviderGatewayRegistryError.missingAdapter(provider)
+            }
 
-            guard gateway.capabilities.supportsReasoning else {
+            guard capabilities.supportsReasoning else {
                 try await sendUserFeedback(
                     chatKey: chatKey,
                     text: "🧠 Сервис <b>\(provider.commandValue)</b> не умеет обдумывать ответ. Смените его в /menu → 🔌 Сервис ИИ."

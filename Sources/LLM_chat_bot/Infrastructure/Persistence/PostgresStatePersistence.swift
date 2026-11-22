@@ -67,6 +67,97 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
 
     // MARK: - Load
 
+    func webUpdateSeen(_ updateID: Int64) async throws -> Bool {
+        let rows = try await client.query(
+            "select 1 from bot_web_update where update_id = \(updateID) and expires_at > now()",
+            logger: queryLogger
+        )
+        for try await _ in rows { return true }
+        return false
+    }
+
+    func recoverWebAdmission(_ updateID: Int64) async throws -> (ChatKey, DeepSeekWebOperation)? {
+        let rows = try await client.query(
+            """
+            select chat_id, thread_id, operation
+              from bot_chat_context,
+                   lateral jsonb_array_elements(data #> '{deepSeekWeb,operations}') as operations(operation)
+             where data ->> 'webSelected' = 'true' and operation ->> 'updateID' = \(String(updateID))
+             limit 1
+            """,
+            logger: queryLogger
+        )
+        for try await row in rows {
+            let row = PostgresRandomAccessRow(row)
+            let key = ChatKey(
+                chatID: ChatID(Int(try row["chat_id"].decode(Int64.self))),
+                threadID: try row["thread_id"].decode(Int64.self)
+            )
+            return (key, try row["operation"].decode(DeepSeekWebOperation.self))
+        }
+        return nil
+    }
+
+    func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
+        let log = queryLogger
+        let inserted = try await client.withTransaction(logger: log) { db in
+            try await db.query("delete from bot_web_update where expires_at <= now()", logger: log)
+            let marker = try await db.query(
+                """
+                insert into bot_web_update (update_id, expires_at)
+                values (\(updateID), now() + interval '48 hours')
+                on conflict (update_id) do nothing returning update_id
+                """,
+                logger: log
+            )
+            var admitted = false
+            for try await _ in marker { admitted = true }
+            if admitted { try await Self.upsertChatContext(row, db: db, logger: log) }
+            return admitted
+        }
+        if inserted { return .inserted }
+        guard let (key, operation) = try await recoverWebAdmission(updateID), key == row.key else {
+            return .duplicate(nil)
+        }
+        return .duplicate(operation)
+    }
+
+    func webAccount() async throws -> DeepSeekWebAccount {
+        let rows = try await client.query(
+            "select data from bot_config where key = 'deepseek-web-account'",
+            logger: queryLogger
+        )
+        for try await row in rows {
+            return try PostgresRandomAccessRow(row)["data"].decode(DeepSeekWebAccount.self)
+        }
+        let account = DeepSeekWebAccount()
+        try await saveWebAccount(account)
+        return account
+    }
+
+    func saveWebAccount(_ account: DeepSeekWebAccount) async throws {
+        try await client.query(
+            """
+            insert into bot_config (key, data, updated_at)
+            values ('deepseek-web-account', \(account), now())
+            on conflict (key) do update set data = excluded.data, updated_at = excluded.updated_at
+            """,
+            logger: queryLogger
+        )
+    }
+
+    private static func upsertChatContext(_ row: ChatContextRow, db: PostgresConnection, logger: Logger) async throws {
+        try await db.query(
+            """
+            insert into bot_chat_context (chat_id, thread_id, data, updated_at)
+            values (\(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now())
+            on conflict (chat_id, thread_id) do update set
+                data = excluded.data, updated_at = excluded.updated_at
+            """,
+            logger: logger
+        )
+    }
+
     func loadEverything() async throws -> PersistedBotState {
         var state = PersistedBotState()
 
@@ -401,15 +492,7 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
             }
 
             for row in batch.contexts {
-                try await db.query(
-                    """
-                    insert into bot_chat_context (chat_id, thread_id, data, updated_at)
-                    values (\(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now())
-                    on conflict (chat_id, thread_id) do update set
-                        data = excluded.data, updated_at = excluded.updated_at
-                    """,
-                    logger: log
-                )
+                try await Self.upsertChatContext(row, db: db, logger: log)
             }
 
             for row in batch.tenants {
@@ -693,6 +776,8 @@ extension UserKey: PostgresEncodable, PostgresDecodable {
 // MARK: - jsonb payloads
 
 extension ChatContextSnapshot: PostgresCodable {}
+extension DeepSeekWebOperation: PostgresCodable {}
+extension DeepSeekWebAccount: PostgresCodable {}
 extension CumulativeUsage: PostgresCodable {}
 extension ReferralRecord: PostgresCodable {}
 extension ReferralTally: PostgresCodable {}

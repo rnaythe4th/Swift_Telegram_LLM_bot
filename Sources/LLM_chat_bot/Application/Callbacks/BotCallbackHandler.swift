@@ -34,6 +34,13 @@ final class BotCallbackHandler: Sendable {
 
         switch action {
         case .stop(let generationID):
+            if let message = callback.message {
+                let key = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
+                if await menuHandler.webQueue?.cancel(generationID: generationID, chatKey: key) == true {
+                    try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Останавливаю")
+                    return
+                }
+            }
             guard let chatKey = await sessionRegistry.cancel(generationID: generationID, reason: .userRequested) else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Уже готово")
                 return
@@ -61,7 +68,7 @@ final class BotCallbackHandler: Sendable {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.staleButton)
                 return
             }
-            let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+            let chatKey = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
             _ = try? await telegram.sendMessage(.init(
                 chatID: chatKey.chatID,
                 threadID: chatKey.threadID == 0 ? nil : chatKey.threadID,

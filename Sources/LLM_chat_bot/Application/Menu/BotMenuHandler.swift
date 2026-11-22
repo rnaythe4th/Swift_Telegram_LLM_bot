@@ -32,6 +32,8 @@ final class BotMenuHandler: Sendable {
     /// Where money is written. Balances are not write-behind state either: the
     /// menu's top-up goes through `wallets`, never through the store's cache.
     let ledger: LedgerPort
+    let persistence: PersistenceCoordinator?
+    let webQueue: DeepSeekWebQueue?
 
     init(
         telegram: TelegramGatewayPort,
@@ -47,7 +49,9 @@ final class BotMenuHandler: Sendable {
         externalPayments: ExternalPaymentService? = nil,
         durability: LockedValue<StateDurability> = LockedValue(.durable),
         subscriptions: SubscriptionWriter? = nil,
-        ledger: LedgerPort = InMemoryLedger()
+        ledger: LedgerPort = InMemoryLedger(),
+        persistence: PersistenceCoordinator? = nil,
+        webQueue: DeepSeekWebQueue? = nil
     ) {
         self.telegram = telegram
         self.state = state
@@ -63,6 +67,8 @@ final class BotMenuHandler: Sendable {
         self.durability = durability
         self.subscriptions = subscriptions
         self.ledger = ledger
+        self.persistence = persistence
+        self.webQueue = webQueue
     }
 
     /// Wallet changes that are not a payment (a super-admin grant) go through a
@@ -97,7 +103,7 @@ final class BotMenuHandler: Sendable {
             return
         }
 
-        let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+        let chatKey = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
         guard let route = MenuRoute(action: rawAction) else {
             // An unknown command never reaches a handler. Answering is not
             // optional: a button that does nothing reads as a broken bot.
@@ -143,10 +149,8 @@ final class BotMenuHandler: Sendable {
         // members who never had those rights, and a lapsed subscription leaves
         // its buttons behind — so the tap is judged now, not when it was drawn.
         // The handlers keep their own `require…` guards for the finer rules.
-        guard await allow(route.command.access,
-                          chatKey: chatKey,
-                          callback: callback,
-                          refusal: route.command.access.refusal) else { return }
+        let access = await webAccess(route.command.access, feature: route.command.rawValue, chatKey: chatKey)
+        guard await allow(access, chatKey: chatKey, callback: callback, refusal: access.refusal) else { return }
 
         switch route.command {
         case .open, .close, .nav, .noop:
@@ -213,7 +217,8 @@ final class BotMenuHandler: Sendable {
             // .access`). It used to be two hand-written lists of page names
             // here, which is a gate that fails open: a page missing from the
             // list fell through to `default: break` and opened for anyone.
-            if !(await satisfies(menuPage.access, chatKey: chatKey, invoker: invokerKey(callback), userID: callback.from.id)) {
+            let access = await webAccess(menuPage.access, feature: menuPage.rawValue, chatKey: chatKey)
+            if !(await satisfies(access, chatKey: chatKey, invoker: invokerKey(callback), userID: callback.from.id)) {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: menuPage.restrictedNotice)
                 // Sell rather than refuse, but only where there is something to
                 // sell: this is somebody actively reaching for what premium
@@ -276,7 +281,7 @@ final class BotMenuHandler: Sendable {
     }
 
     private func closeMenu(callback: CallbackQuery, message: MaybeInaccessibleMessage) async throws {
-        let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+        let chatKey = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
         await state.clearPending(chatKey: chatKey)
         try await telegram.editMessage(
             .init(
@@ -350,7 +355,8 @@ final class BotMenuHandler: Sendable {
         // menu redrawn after a typed value), minutes after the button was
         // tapped — long enough for a licence to lapse or a super-admin to be
         // removed, and the page would have been drawn to them anyway.
-        if !(await satisfies(page.access, chatKey: chatKey, invoker: invoker)) {
+        let access = await webAccess(page.access, feature: page.rawValue, chatKey: chatKey)
+        if !(await satisfies(access, chatKey: chatKey, invoker: invoker)) {
             var rows = Keyboard()
             if page.access == .paidAccess {
                 rows.row([buyButton("⚡ Открыть тонкую настройку", source: .tuning)])

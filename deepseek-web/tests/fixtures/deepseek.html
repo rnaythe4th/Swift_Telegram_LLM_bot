@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>DeepSeek Web test fixture</title>
+<main>
+  <aside>
+    <a href="/a/chat/s/old-a">Same title</a>
+    <a href="/a/chat/s/old-b">Same title</a>
+  </aside>
+  <div data-testid="conversation"></div>
+  <textarea id="chat-input" placeholder="Message DeepSeek"></textarea>
+  <button aria-pressed="true">DeepThink</button>
+  <button aria-pressed="true">Search</button>
+  <button data-testid="send-button" type="button">Send</button>
+  <button data-testid="stop-button" type="button" hidden>Stop</button>
+  <div data-testid="chat-error" role="alert" hidden></div>
+</main>
+<script>
+  const mode = __FIXTURE_MODE__;
+  const conversation = document.querySelector('[data-testid="conversation"]');
+  const error = document.querySelector('[role="alert"]');
+  const input = document.querySelector('#chat-input');
+  const [deepThink, search] = document.querySelectorAll('[aria-pressed]');
+  const send = document.querySelector('[data-testid="send-button"]');
+  const stop = document.querySelector('[data-testid="stop-button"]');
+  const prefix = '/a/chat/s/';
+  const stored = JSON.parse(localStorage.getItem('chats') || '{}');
+  const seeded = {
+    'old-a': [['Question A', 'Old answer A']],
+    'old-b': [['Question B', 'Old answer B']]
+  };
+  const chats = {...seeded, ...stored};
+  let id = location.pathname.startsWith(prefix) ? location.pathname.slice(prefix.length) : null;
+
+  const add = (parent, tag, attributes, text) => {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+    if (text !== undefined) node.textContent = text;
+    parent.append(node);
+    return node;
+  };
+
+  function alert(text) {
+    error.textContent = text;
+    error.hidden = false;
+  }
+
+  function user(text) {
+    const turn = add(conversation, 'div', {class: 'ds-message'});
+    add(turn, 'div', {class: 'ds-markdown md-user-markdown'}, text);
+  }
+
+  function answer(text, finished) {
+    const wrap = add(conversation, 'div', {});
+    const turn = add(wrap, 'div', {class: 'ds-message'});
+    const thinking = add(turn, 'section', {class: 'ds-think-content'});
+    add(thinking, 'p', {}, 'Reasoning is never part of the final answer.');
+    add(thinking, 'button', {'aria-label': 'Copy response'}, 'Copy thinking');
+    const block = add(turn, 'div', {class: 'ds-markdown ds-assistant-message-main-content'});
+    add(block, 'p', {}, text);
+    if (text.includes('formatted')) {
+      add(block, 'p', {role: 'alert'}, 'Rate limit: try again in 10 minutes');
+      const list = add(block, 'ul', {});
+      add(list, 'li', {}, 'one');
+      add(list, 'li', {}, 'two');
+      const code = add(block, 'div', {class: 'md-code-block'});
+      add(code, 'div', {class: 'md-code-block-banner'}, 'Copy code label');
+      add(add(code, 'pre', {}), 'code', {}, 'if x < 2:\n    x & y');
+    }
+    if (finished) complete(wrap);
+    return wrap;
+  }
+
+  function complete(wrap) {
+    add(add(wrap, 'div', {class: 'ds-flex'}), 'button', {'aria-label': 'Read aloud'}, 'Read aloud');
+  }
+
+  for (const toggle of [deepThink, search]) {
+    toggle.addEventListener('click', () => toggle.setAttribute('aria-pressed', String(toggle.getAttribute('aria-pressed') !== 'true')));
+  }
+
+  if (id && !chats[id]) {
+    history.replaceState({}, '', '/');
+    id = null;
+  }
+  if (id) {
+    for (const [question, response] of chats[id]) {
+      user(question);
+      if (response !== null) answer(response, true);
+    }
+  }
+  if (mode === 'login') {
+    input.hidden = true;
+    alert('Please sign in');
+  }
+  if (mode === 'unexpected-url') history.replaceState({}, '', '/outside-conversation');
+  if (mode === 'draft') input.value = 'Existing draft';
+  if (mode === 'old-home') user('Old question');
+  if (mode === 'before-click') send.hidden = true;
+  if (mode === 'unknown-dialog') alert('Something entirely unexpected');
+  if (mode === 'low-limit') input.setAttribute('maxlength', '4');
+
+  send.addEventListener('click', () => {
+    if (mode === 'quota') return alert('Rate limit: try again in 10 minutes');
+    if (mode === 'busy') return alert('Server is busy');
+    const text = input.value;
+    if (search.getAttribute('aria-pressed') !== 'false' || !text || !event.isTrusted) {
+      return alert('Incorrect configuration');
+    }
+    if (mode === 'send-lost') return;
+    if (id === null) {
+      id = 'chat-' + crypto.randomUUID();
+      chats[id] = [];
+      history.pushState({}, '', prefix + id);
+    }
+    const count = chats[id].length + 1;
+    const response = id + ' / ' + count + ' / ' + text;
+    const stalled = mode === 'stalled';
+    chats[id].push([text, stalled ? null : response]);
+    localStorage.setItem('chats', JSON.stringify(chats));
+    user(text);
+    input.value = '';
+    stop.hidden = false;
+    const wrap = answer(response, false);
+    if (!stalled) {
+      setTimeout(() => {
+        stop.hidden = true;
+        complete(wrap);
+      }, 150);
+    }
+  });
+</script>
+</html>

@@ -245,6 +245,12 @@ protocol StatePersistencePort: Sendable {
     func loadEverything() async throws -> PersistedBotState
     func apply(_ batch: PersistenceBatch) async throws
 
+    func webUpdateSeen(_ updateID: Int64) async throws -> Bool
+    func recoverWebAdmission(_ updateID: Int64) async throws -> (ChatKey, DeepSeekWebOperation)?
+    func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission
+    func webAccount() async throws -> DeepSeekWebAccount
+    func saveWebAccount(_ account: DeepSeekWebAccount) async throws
+
     /// Deletes chat conversations untouched for longer than `idleDays`, except
     /// the chats named. Returns what went, so the in-memory cache can drop the
     /// same rows.
@@ -263,4 +269,24 @@ protocol StatePersistencePort: Sendable {
     /// The daily sweep is the only place in the process that owns "delete what
     /// nobody will read again", so it owns this too.
     func pruneFunnelDays(before day: Int) async throws -> Int
+}
+
+extension StatePersistencePort {
+    func webUpdateSeen(_ updateID: Int64) async throws -> Bool {
+        throw DeepSeekWebPersistenceError.unavailable
+    }
+
+    func recoverWebAdmission(_ updateID: Int64) async throws -> (ChatKey, DeepSeekWebOperation)? { nil }
+
+    func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
+        throw DeepSeekWebPersistenceError.unavailable
+    }
+
+    func webAccount() async throws -> DeepSeekWebAccount {
+        throw DeepSeekWebPersistenceError.unavailable
+    }
+
+    func saveWebAccount(_ account: DeepSeekWebAccount) async throws {
+        throw DeepSeekWebPersistenceError.unavailable
+    }
 }

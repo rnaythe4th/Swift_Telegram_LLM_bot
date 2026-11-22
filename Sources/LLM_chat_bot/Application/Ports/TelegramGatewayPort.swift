@@ -6,6 +6,7 @@ struct SendMessageRequest: Sendable {
     let replyTo: Int?
     let text: String
     let replyMarkup: InlineKeyboardMarkup?
+    var isPlainText = false
 }
 
 struct EditMessageRequest: Sendable {

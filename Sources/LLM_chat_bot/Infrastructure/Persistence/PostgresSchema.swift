@@ -28,7 +28,10 @@ enum PostgresSchema {
     }
 
     static var steps: [Step] {
-        [Step(index: 1, statements: initialSchema)]
+        [
+            Step(index: 1, statements: initialSchema),
+            Step(index: 2, statements: deepSeekWebSchema),
+        ]
     }
 
     /// Applied before anything else, including the version check itself.
@@ -39,6 +42,23 @@ enum PostgresSchema {
             applied_at timestamptz not null default now()
         )
         """
+
+    private static let deepSeekWebSchema = [
+        """
+        create unique index if not exists bot_chat_context_web_owner_idx
+        on bot_chat_context ((data #>> '{deepSeekWeb,accountEpoch}'), (data #>> '{deepSeekWeb,remoteChatID}'))
+        where data ->> 'webSelected' = 'true'
+          and data #>> '{deepSeekWeb,accountEpoch}' is not null
+          and data #>> '{deepSeekWeb,remoteChatID}' is not null
+        """,
+        """
+        create table if not exists bot_web_update (
+            update_id  bigint primary key,
+            expires_at timestamptz not null
+        )
+        """,
+        "create index if not exists bot_web_update_expiry_idx on bot_web_update (expires_at)",
+    ]
 
     // MARK: - v1
 

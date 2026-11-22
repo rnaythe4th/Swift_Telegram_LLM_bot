@@ -6,7 +6,7 @@ extension ChatContextStore {
 
     // MARK: - Snapshot builders
 
-    private func makeContextSnapshot(_ context: ChatContext) -> ChatContextSnapshot {
+    func makeContextSnapshot(_ context: ChatContext) -> ChatContextSnapshot {
         ChatContextSnapshot(
             role: context.role,
             history: context.history,
@@ -17,7 +17,7 @@ extension ChatContextStore {
             maxHistory: context.maxHistory,
             showCost: context.showCost,
             showModel: context.showModel,
-            provider: context.provider,
+            provider: context.provider == .deepseekWeb ? context.apiProvider ?? .openrouter : context.provider,
             suffix: context.suffix,
             reasoningEffort: context.reasoningEffort,
             backupNotify: context.backupNotify,
@@ -33,7 +33,9 @@ extension ChatContextStore {
             activeMode: context.activeModeID,
             // Written only for chats that listen: an `off` document in every
             // other row is bytes on every flush for a feature nobody enabled.
-            listening: context.listening == .off ? nil : context.listening
+            listening: context.listening == .off ? nil : context.listening,
+            webSelected: context.provider == .deepseekWeb ? true : nil,
+            deepSeekWeb: context.deepSeekWeb
         )
     }
 
@@ -72,7 +74,7 @@ extension ChatContextStore {
             maxHistory: snapshot.maxHistory,
             showCost: snapshot.showCost,
             showModel: snapshot.showModel,
-            provider: snapshot.provider,
+            provider: snapshot.webSelected == true ? .deepseekWeb : snapshot.provider,
             suffix: snapshot.suffix,
             reasoningEffort: snapshot.reasoningEffort,
             backupNotify: snapshot.backupNotify,
@@ -86,7 +88,9 @@ extension ChatContextStore {
             funnelFirstMessageCounted: snapshot.funnelCounted ?? false,
             downgradedFromModel: snapshot.downgradedFrom,
             activeModeID: snapshot.activeMode,
-            listening: snapshot.listening ?? .off
+            listening: snapshot.listening ?? .off,
+            apiProvider: snapshot.webSelected == true ? snapshot.provider : nil,
+            deepSeekWeb: snapshot.deepSeekWeb
         )
     }
 

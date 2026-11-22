@@ -123,6 +123,8 @@ struct ChatContext: Sendable {
     /// much of it it keeps, and the buffer itself (`ChatTranscript`). Off, and
     /// therefore free, in every chat that has not asked for it.
     var listening: ChatListening = .off
+    var apiProvider: ServiceProvider? = nil
+    var deepSeekWeb: DeepSeekWebChatState? = nil
 }
 
 extension ChatContext {

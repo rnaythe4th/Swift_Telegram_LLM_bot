@@ -29,11 +29,25 @@ actor ChatUpdateDispatcher {
 
     @discardableResult
     func submit(chatKey: ChatKey, operation: @escaping @Sendable () async -> Void) -> SubmitResult {
+        schedule(chatKey: chatKey, operation: operation).0
+    }
+
+    func submitAndWait(
+        chatKey: ChatKey, operation: @escaping @Sendable () async -> Void
+    ) async -> SubmitResult {
+        let (result, task) = schedule(chatKey: chatKey, operation: operation)
+        await task?.value
+        return result
+    }
+
+    private func schedule(
+        chatKey: ChatKey, operation: @escaping @Sendable () async -> Void
+    ) -> (SubmitResult, Task<Void, Never>?) {
         let depth = queueDepth[chatKey] ?? 0
         if depth >= maxQueuedPerChat {
             let shouldNotify = !notifiedFullChats.contains(chatKey)
             notifiedFullChats.insert(chatKey)
-            return .rejected(shouldNotify: shouldNotify)
+            return (.rejected(shouldNotify: shouldNotify), nil)
         }
         queueDepth[chatKey] = depth + 1
 
@@ -50,7 +64,7 @@ actor ChatUpdateDispatcher {
         }
 
         pendingByChat[chatKey] = PendingOperation(token: token, task: task)
-        return .accepted
+        return (.accepted, task)
     }
 
     private func finishOperation(chatKey: ChatKey, token: UUID) {

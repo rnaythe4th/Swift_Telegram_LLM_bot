@@ -100,13 +100,21 @@ extension ChatContextStore {
         guard oldID != newID else { return false }
         var moved = false
 
-        for (key, context) in contexts where key.chatID == oldID {
+        for (key, var context) in contexts where key.chatID == oldID {
             let target = ChatKey(chatID: newID, threadID: key.threadID)
             contexts.removeValue(forKey: key)
             dirtyContexts.remove(key)
             deletedContexts.insert(key)
             moved = true
-            guard contexts[target] == nil else { continue }
+            if var existing = contexts[target] {
+                if existing.deepSeekWeb != nil {
+                    fenceMigratedWebContext(&existing)
+                    contexts[target] = existing
+                    dirtyContexts.insert(target)
+                }
+                continue
+            }
+            fenceMigratedWebContext(&context)
             contexts[target] = context
             dirtyContexts.insert(target)
             deletedContexts.remove(target)

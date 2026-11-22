@@ -165,6 +165,9 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
     }
     
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage {
+        if request.isPlainText {
+            return try await sendSingle(request, html: request.text)
+        }
         let html = TelegramHTMLFormatter.helper(text: request.text)
         // Telegram counts UTF-16 code units and takes 4096 of them. Counting
         // `Character`s here said a message of emoji fits at half its true size
@@ -237,7 +240,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
             text: html,
             reply_parameters: request.replyTo.map { ReplyParameters(message_id: $0) },
             message_thread_id: request.threadID,
-            parse_mode: "HTML",
+            parse_mode: request.isPlainText ? nil : "HTML",
             reply_markup: request.replyMarkup
         )
 

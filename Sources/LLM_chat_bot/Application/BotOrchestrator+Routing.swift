@@ -8,6 +8,40 @@ import Foundation
 extension BotOrchestrator {
     // MARK: - Dispatch
 
+    func dispatchWebUpdateIfNeeded(_ update: TelegramUpdate) async -> Bool? {
+        guard let web = generationCoordinator.webQueue else { return nil }
+        if let callback = update.callback_query, let message = callback.message,
+           let action = callback.data.flatMap(BotCallbackAction.init(rawData:)),
+           case .example(let exampleID) = action {
+            let key = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
+            let retry = LockedValue(false)
+            let result = await updateDispatcher.submitAndWait(chatKey: key) { [self] in
+                do {
+                    if try await web.hasSeen(updateID: update.update_id) {
+                        try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+                    } else if await state.selectedProvider(chatKey: key) == .deepseekWeb {
+                        try await handleWebExample(id: exampleID, callback: callback, key: key, updateID: update.update_id, web: web)
+                    } else {
+                        let from = callback.from
+                        await state.identifyUser(userID: from.id, username: from.username, firstName: from.first_name)
+                        await handleOnboardingExample(id: exampleID, callback: callback)
+                    }
+                } catch {
+                    retry.value = true
+                }
+            }
+            if case .rejected = result { return false }
+            return !retry.value
+        }
+
+        guard let message = update.message else { return nil }
+        let key = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
+        if message.media_group_id != nil, await state.selectedProvider(chatKey: key) != .deepseekWeb {
+            return nil
+        }
+        return await dispatchMessage(message, key: key, updateID: update.update_id, waitForAdmission: true)
+    }
+
     func dispatch(update: TelegramUpdate) async {
         if let callback = update.callback_query {
             // Every path that carries a user refreshes the identity directory,
@@ -28,8 +62,15 @@ extension BotOrchestrator {
             }
             // Other callbacks bypass the per-chat queue on purpose: the stop
             // button must cancel the generation that is blocking that queue.
-            Task {
-                await self.callbackHandler.handleIfSupported(callback)
+            if generationCoordinator.webQueue != nil,
+               let message = callback.message,
+               case .menu? = callback.data.flatMap(BotCallbackAction.init(rawData:)) {
+                let key = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
+                _ = await updateDispatcher.submit(chatKey: key) {
+                    await self.callbackHandler.handleIfSupported(callback)
+                }
+            } else {
+                Task { await self.callbackHandler.handleIfSupported(callback) }
             }
             return
         }
@@ -49,12 +90,31 @@ extension BotOrchestrator {
         }
 
         guard let message = update.message else { return }
-        let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+        let chatKey = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
+        _ = await dispatchMessage(message, key: chatKey, updateID: update.update_id, waitForAdmission: false)
+    }
 
-        let result = await updateDispatcher.submit(chatKey: chatKey) { [self] in
+    private func dispatchMessage(
+        _ message: TelegramMessage, key chatKey: ChatKey, updateID: Int, waitForAdmission: Bool
+    ) async -> Bool {
+        let (replies, reply) = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingOldest(1))
+        let operation: @Sendable () async -> Void = { [self] in
+            defer { reply.finish() }
             do {
-                try await route(message: message, chatKey: chatKey)
+                if let web = generationCoordinator.webQueue,
+                   MessageRoutingPolicy.evaluate(message: message, botUsername: botUsername).shouldHandle,
+                   try await web.hasSeen(updateID: updateID) {
+                    reply.yield(true)
+                    return
+                }
+                try await route(message: message, chatKey: chatKey, updateID: updateID) {
+                    reply.yield(true)
+                }
+                reply.yield(true)
+            } catch is DeepSeekWebAdmissionRetry {
+                reply.yield(false)
             } catch {
+                reply.yield(true)
                 logger.error("routeMessage failed: \(error)", context: LogContext(chat: chatKey, user: message.from?.id))
                 if !(error is CancellationError) {
                     let text = "⚠️ " + UserFacingError.message(error)
@@ -71,7 +131,10 @@ extension BotOrchestrator {
             }
         }
 
+        let result = await updateDispatcher.submit(chatKey: chatKey, operation: operation)
         if case .rejected(let shouldNotify) = result {
+            reply.finish()
+            if waitForAdmission { return false }
             await metrics.increment(MetricName.updatesDropped)
             logger.warning("queue full, update dropped", context: LogContext(chat: chatKey))
             if shouldNotify {
@@ -90,6 +153,33 @@ extension BotOrchestrator {
                 }
             }
         }
+        guard waitForAdmission else { return true }
+        var iterator = replies.makeAsyncIterator()
+        return await iterator.next() ?? false
+    }
+
+    private func handleWebExample(
+        id: String, callback: CallbackQuery, key: ChatKey, updateID: Int, web: DeepSeekWebQueue
+    ) async throws {
+        guard let message = callback.message,
+              let example = await state.onboardingConfig().activeExamples(inGroup: key.chatID.isGroup).first(where: { $0.id == id }) else {
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.staleButton)
+            return
+        }
+        await state.identifyUser(userID: callback.from.id, username: callback.from.username, firstName: callback.from.first_name)
+        let userKey = state.userKey(userID: callback.from.id)
+        let origin = GenerationOrigin(user: callback.from, isPrivate: !key.chatID.isGroup,
+                                      replyToMessageID: message.message_id, updateID: updateID,
+                                      telegramThreadID: message.message_thread_id)
+        let inserted = try await web.admit(question: example.prompt, origin: origin, chatKey: key)
+        try? await telegram.answerCallback(callbackQueryID: callback.id, text: inserted ? "💡 Запрос принят" : nil)
+        guard inserted else { return }
+        _ = await state.recordOnboardingTap(id: id)
+        let label = key.chatID.isGroup ? await state.displayLabel(forKey: userKey) : nil
+        _ = try? await telegram.sendMessage(.init(
+            chatID: key.chatID, threadID: message.message_thread_id, replyTo: nil,
+            text: OnboardingPresenter.tapEcho(example: example, asker: label), replyMarkup: nil
+        ))
     }
 
     /// An onboarding example button was tapped (roadmap step 9): echo the prompt
@@ -100,7 +190,7 @@ extension BotOrchestrator {
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.staleButton)
             return
         }
-        let chatKey = ChatKey(chatID: message.chat.id, threadID: message.message_thread_id ?? 0)
+        let chatKey = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
 
         // Counts the tap (per-example stat + funnel) and resolves the prompt.
         guard let example = await state.recordOnboardingTap(id: id) else {
@@ -269,7 +359,9 @@ extension BotOrchestrator {
         ))
     }
 
-    private func route(message: TelegramMessage, chatKey: ChatKey) async throws {
+    private func route(
+        message: TelegramMessage, chatKey: ChatKey, updateID: Int, acknowledgeAPI: @Sendable () -> Void
+    ) async throws {
         let senderKey = message.from.map { state.userKey(userID: $0.id) }
         let senderUserID = message.from?.id
         let isPrivate = message.chat.type == "private"
@@ -351,7 +443,10 @@ extension BotOrchestrator {
         // forgotten, when somebody decides (`ChatContextStore._overheardPreroll`).
         await recordOverheard(message: message, chatKey: chatKey)
 
-        try await generationCoordinator.handleIfNeeded(message: message, chatKey: chatKey)
+        if await state.selectedProvider(chatKey: chatKey) != .deepseekWeb {
+            acknowledgeAPI()
+        }
+        try await generationCoordinator.handleIfNeeded(message: message, chatKey: chatKey, updateID: updateID)
     }
 
     private func recordOverheard(message: TelegramMessage, chatKey: ChatKey) async {

@@ -149,6 +149,7 @@ extension BotOrchestrator {
     private func startServing(mode: IntakeRunMode, intake: UpdateIntake, persistenceHealthy: Bool) async {
         if persistenceHealthy {
             await persistence?.start()
+            await generationCoordinator.webQueue?.start()
         }
 
         await modelPriceMonitor?.performInitialFetch()
@@ -215,12 +216,13 @@ extension BotOrchestrator {
         while !flags.draining.value {
             do {
                 let updates = try await telegram.getUpdates(offset: offset)
-                if let maxUpdateID = updates.map(\.update_id).max() {
+                let accepted = await intake.enqueue(updates)
+                if let maxUpdateID = updates.prefix(accepted).map(\.update_id).max() {
                     let next = maxUpdateID + 1
                     offset = next
                     await state.setPollingOffset(next)
                 }
-                await intake.enqueue(updates)
+                if accepted < updates.count { try? await Task.sleep(for: .seconds(2)) }
             } catch {
                 logger.error("getUpdates error: \(error)")
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -323,6 +325,7 @@ extension BotOrchestrator {
         logger.info("shutdown: draining…")
         flags.draining.value = true
         flags.ready.value = false
+        await generationCoordinator.webQueue?.stop()
 
         // Everything the webhook answered 200 for is ours to finish: Telegram
         // will not redeliver it. Release the album buffer first, then wait for

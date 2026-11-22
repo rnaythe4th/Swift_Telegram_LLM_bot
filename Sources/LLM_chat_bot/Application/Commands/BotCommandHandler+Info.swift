@@ -97,7 +97,13 @@ extension BotCommandHandler {
                 return
             }
         }
+        let hadWebState = await state.webState(chatKey: chatKey) != nil
         let erased = await state.forgetChat(chatKey: chatKey)
+        if erased && hadWebState {
+            try await menuHandler.checkpointWebSettings(chatKey: chatKey, deleted: true)
+            try await sendUserFeedback(chatKey: chatKey, text: "🧹 Локальная переписка удалена. Отправленные сообщения могут храниться в аккаунте DeepSeek. Владелец аккаунта может удалить их в веб-интерфейсе.")
+            return
+        }
         try await sendUserFeedback(chatKey: chatKey, text: erased
             ? """
             🧹 <b>Переписка удалена.</b>
