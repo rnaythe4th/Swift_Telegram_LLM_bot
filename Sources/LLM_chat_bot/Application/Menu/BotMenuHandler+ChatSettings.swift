@@ -59,17 +59,21 @@ extension BotMenuHandler {
     ) async throws {
         guard !route.sub.isEmpty else { return }
         if route.sub == "custom" {
-            await state.setPending(.admin(.init(kind: .chatCustomRole)), menuMessageID: message.message_id, chatKey: chatKey)
+            let instruction = chatKey.chatID.isGroup
+                ? "Ответьте на это сообщение текстом роли."
+                : "Отправьте текст роли одним сообщением."
             let prompt = """
             <b>🎭 Своя роль</b>
 
-            Отправьте текст роли одним сообщением.
+            \(instruction)
             <i>Пример:</i> <code>Ты — эксперт по математике, отвечай кратко.</code>
 
             ⚠️ Переписка в этом чате будет очищена.
             """
             let markup: Keyboard = [[cancelButton(to: .role)]]
-            try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
+            if let messageID = try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup)) {
+                await state.setPending(.admin(.init(kind: .chatCustomRole)), menuMessageID: messageID, chatKey: chatKey)
+            }
             return
         } else if route.sub == "default" {
             let defaultRole = await state.defaultRole(chatID: chatKey.chatID)
@@ -375,12 +379,6 @@ extension BotMenuHandler {
         if let provider = ServiceProvider.parse(route.sub) {
             guard let capabilities = gateways.capabilities(for: provider) else {
                 throw ProviderGatewayRegistryError.missingAdapter(provider)
-            }
-            if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webListeningAllowed(chatKey: chatKey)) {
-                let listening = await state.listening(chatKey: chatKey).isOn
-                let disclosure = Texts.webGroupDisclosure + (listening ? "\n" + Texts.webListenDisclosure : "")
-                _ = try await telegram.sendMessage(.init(chatID: chatKey.chatID, threadID: message.message_thread_id,
-                                                         replyTo: nil, text: disclosure, replyMarkup: nil))
             }
             _ = await state.changeProvider(chatKey: chatKey, newProvider: provider)
             try await checkpointWebSettings(chatKey: chatKey)

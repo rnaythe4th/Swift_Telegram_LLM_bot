@@ -792,15 +792,17 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
 (`/model3` при `suffix=3`). До access-gate разрешены только `/start` и `/buy` —
 через парсер, не по префиксу строки.
 
-- **Чат/настройки**: `/setrole`, `/clear_history`, `/settemp`, `/model`,
+- **Чат/настройки**: `/setrole`, `/default_role`, `/clear_history`, `/settemp`, `/model`,
   `/historylength`, `/show_model`, `/show_cost`, `/show_tokens`, `/provider`,
   `/testmode`, `/reasoning`, `/help`, `/menu`, `/reset`, `/history`,
   `/reset_stats`, `/backup_notify`, `/chatid`, `/forget`, `/start`, `/buy`,
   `/balance`, `/examples`, `/ref`, `/listen` (только группа, §5.7).
-  Гейты те же, что у страниц меню: `/settemp` и `/reasoning` — полный доступ
-  (`requireFullAccessForTuning`), `/historylength` и `/provider` — оператор
-  (`requireOperatorForTuning`).
-- **Админ/тенант**: `/default_role`, `/defaults`, `/whitelist`, `/chats`,
+  Для `/settemp` и обдумывания в API нужен полный доступ (`requireFullAccessForTuning`).
+  `/historylength` и `/provider` настраивает оператор (`requireOperatorForTuning`).
+  В DeepSeek Web роль и DeepThink доступны участникам чата. В группе эти настройки
+  действуют в текущей теме. Передачу реплик из прослушки разрешает оператор через
+  меню прослушки или `/listen on`.
+- **Админ/тенант**: `/defaults`, `/whitelist`, `/chats`,
   `/users`, `/presets`, `/tenant` (assign/release/adduser/register/remove/
   freemodels/crypto/…), `/inspect`, `/ads` (+`/ads promo`), `/invite`.
 - **Суперадмин**: `/superadmin`, `/simulate`, `/reminders`, `/examples`, `/ref`,

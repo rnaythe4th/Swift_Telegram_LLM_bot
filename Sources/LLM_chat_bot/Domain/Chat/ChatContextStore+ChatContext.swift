@@ -291,7 +291,6 @@ extension ChatContextStore {
     func changeProvider(chatKey: ChatKey, newProvider: ServiceProvider) -> ServiceProvider {
         let oldProvider = ensure(chatKey: chatKey).provider
         if oldProvider == .deepseekWeb, newProvider == .deepseekWeb {
-            allowWebListening(chatKey: chatKey)
             return oldProvider
         }
         mutate(chatKey: chatKey) { context in
@@ -306,9 +305,8 @@ extension ChatContextStore {
             context.pendingTurns = []
             if newProvider == .deepseekWeb {
                 context.provider = newProvider
-                // First group opt-in fences remarks collected before notice.
                 resetWebContext(&context, chatKey: chatKey)
-                context.deepSeekWeb?.groupAllowed = chatKey.chatID.isGroup
+                context.deepSeekWeb?.groupAllowed = false
             } else {
                 resetWebContext(&context, chatKey: chatKey)
                 context.provider = newProvider

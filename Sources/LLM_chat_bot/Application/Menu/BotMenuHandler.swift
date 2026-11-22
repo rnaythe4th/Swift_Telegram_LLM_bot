@@ -111,21 +111,20 @@ final class BotMenuHandler: Sendable {
             return
         }
 
-        do {
-            try await processAction(route: route, chatKey: chatKey, callback: callback, message: message)
-        } catch {
-            logger.error("menu action failed: \(error)")
-            let alertText = UserFacingError.shortMessage(error, context: "Ошибка")
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: alertText)
+        await PendingRequest.$inputOwner.withValue(invokerKey(callback)) {
+            do {
+                try await processAction(route: route, chatKey: chatKey, callback: callback, message: message)
+            } catch {
+                logger.error("menu action failed: \(error)")
+                let alertText = UserFacingError.shortMessage(error, context: "Ошибка")
+                try? await telegram.answerCallback(callbackQueryID: callback.id, text: alertText)
+            }
         }
-        // Whatever the action armed (if anything) belongs to whoever tapped:
-        // in a group the next message can come from someone else entirely.
-        await state.notePendingInputOwner(invokerKey(callback), chatKey: chatKey)
     }
 
     func sendMenu(chatKey: ChatKey, userID: UserID? = nil) async {
         let invoker = userID.map { self.state.userKey(userID: $0) }
-        await state.clearPending(chatKey: chatKey)
+        await state.clearPending(chatKey: chatKey) { $0.owner == invoker || !chatKey.chatID.isGroup }
         let screen = await renderPage(.main, chatKey: chatKey, invoker: invoker)
         _ = try? await telegram.sendMessage(
             .init(
@@ -149,7 +148,7 @@ final class BotMenuHandler: Sendable {
         // members who never had those rights, and a lapsed subscription leaves
         // its buttons behind — so the tap is judged now, not when it was drawn.
         // The handlers keep their own `require…` guards for the finer rules.
-        let access = await webAccess(route.command.access, feature: route.command.rawValue, chatKey: chatKey)
+        let access = await actionAccess(route.command, chatKey: chatKey)
         guard await allow(access, chatKey: chatKey, callback: callback, refusal: access.refusal) else { return }
 
         switch route.command {
@@ -198,17 +197,16 @@ final class BotMenuHandler: Sendable {
     ) async throws {
         switch route.command {
         case .open:
-            await state.clearPending(chatKey: chatKey)
+            await state.clearPending(chatKey: chatKey) { $0.menuMessageID == message.message_id }
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
 
         case .close:
-            await state.clearPending(chatKey: chatKey)
             try await closeMenu(callback: callback, message: message)
 
         case .nav:
             // Navigating away abandons any text-input prompt (incl. the
             // "❌ Отмена" buttons, which all point at nav:*).
-            await state.clearPending(chatKey: chatKey)
+            await state.clearPending(chatKey: chatKey) { $0.menuMessageID == message.message_id }
             guard let menuPage = route.page(1) else {
                 try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
                 return
@@ -217,7 +215,7 @@ final class BotMenuHandler: Sendable {
             // .access`). It used to be two hand-written lists of page names
             // here, which is a gate that fails open: a page missing from the
             // list fell through to `default: break` and opened for anyone.
-            let access = await webAccess(menuPage.access, feature: menuPage.rawValue, chatKey: chatKey)
+            let access = await pageAccess(menuPage, chatKey: chatKey)
             if !(await satisfies(access, chatKey: chatKey, invoker: invokerKey(callback), userID: callback.from.id)) {
                 let refusal = access == menuPage.access ? menuPage.restrictedNotice : access.refusal
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: refusal)
@@ -283,7 +281,7 @@ final class BotMenuHandler: Sendable {
 
     private func closeMenu(callback: CallbackQuery, message: MaybeInaccessibleMessage) async throws {
         let chatKey = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
-        await state.clearPending(chatKey: chatKey)
+        await state.clearPending(chatKey: chatKey) { $0.menuMessageID == message.message_id }
         try await telegram.editMessage(
             .init(
                 chatID: message.chat.id,
@@ -297,11 +295,13 @@ final class BotMenuHandler: Sendable {
 
     /// Redraws the tapped menu message in place, falling back to a new message
     /// when the old one can no longer be edited, and always answers the tap.
+    @discardableResult
     func editOrAnswer(
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage,
         screen: MenuScreen
-    ) async throws {
+    ) async throws -> Int? {
+        let promptMessageID: Int?
         do {
             try await telegram.editMessage(
                 .init(
@@ -311,8 +311,9 @@ final class BotMenuHandler: Sendable {
                     replyMarkup: screen.markup
                 )
             )
+            promptMessageID = message.message_id
         } catch {
-            _ = try? await telegram.sendMessage(
+            let sent = try? await telegram.sendMessage(
                 .init(
                     chatID: message.chat.id,
                     threadID: message.message_thread_id,
@@ -321,8 +322,10 @@ final class BotMenuHandler: Sendable {
                     replyMarkup: screen.markup
                 )
             )
+            promptMessageID = sent?.message_id
         }
         try? await telegram.answerCallback(callbackQueryID: callback.id, text: nil)
+        return promptMessageID
     }
 
     /// Refreshes the menu message a text-input prompt came from. Its id was
@@ -356,7 +359,7 @@ final class BotMenuHandler: Sendable {
         // menu redrawn after a typed value), minutes after the button was
         // tapped — long enough for a licence to lapse or a super-admin to be
         // removed, and the page would have been drawn to them anyway.
-        let access = await webAccess(page.access, feature: page.rawValue, chatKey: chatKey)
+        let access = await pageAccess(page, chatKey: chatKey)
         if !(await satisfies(access, chatKey: chatKey, invoker: invoker)) {
             var rows = Keyboard()
             if access == .paidAccess {

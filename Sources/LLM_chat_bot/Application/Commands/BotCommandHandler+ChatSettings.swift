@@ -8,7 +8,7 @@ extension BotCommandHandler {
     /// Role, model, style of the answer, memory length.
     func handleChatValueCommand(_ parsed: ParsedBotCommand, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         let web = await state.provider(chatKey: chatKey) == .deepseekWeb
-        if web && chatKey.chatID.isGroup && [.setRole, .defaultRole, .clearHistory].contains(parsed.name) {
+        if web && chatKey.chatID.isGroup && parsed.name == .clearHistory {
             guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
                                                  refusal: "🔒 Эти настройки меняет администратор чата.") else { return }
         }
@@ -195,11 +195,6 @@ extension BotCommandHandler {
                 guard let capabilities = gateways.capabilities(for: provider) else {
                     throw ProviderGatewayRegistryError.missingAdapter(provider)
                 }
-                if provider == .deepseekWeb, chatKey.chatID.isGroup, !(await state.webListeningAllowed(chatKey: chatKey)) {
-                    let listening = await state.listening(chatKey: chatKey).isOn
-                    let disclosure = Texts.webGroupDisclosure + (listening ? "\n" + Texts.webListenDisclosure : "")
-                    try await sendUserFeedback(chatKey: chatKey, text: disclosure)
-                }
                 let old = await state.changeProvider(chatKey: chatKey, newProvider: provider)
                 var lines = ["✓ Сервис ИИ: <b>\(provider.commandValue)</b>"]
                 if old != provider {
@@ -221,12 +216,7 @@ extension BotCommandHandler {
 
         case .reasoning:
             let provider = await state.provider(chatKey: chatKey)
-            if provider == .deepseekWeb {
-                if chatKey.chatID.isGroup {
-                    guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
-                                                         refusal: "🔒 DeepThink настраивает администратор чата.") else { return }
-                }
-            } else {
+            if provider != .deepseekWeb {
                 guard await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser) else { return }
             }
             guard let capabilities = gateways.capabilities(for: provider) else {

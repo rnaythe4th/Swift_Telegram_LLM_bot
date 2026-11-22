@@ -39,6 +39,9 @@ extension BotMenuHandler {
         rows.row([menuButton("⚙️ Мои заготовки", .pm, "role")])
         rows.row(navButtons())
 
+        let groupHint = chatKey.chatID.isGroup
+            ? "\n<i>Смена роли действует для всех в этой теме и очищает переписку бота.</i>"
+            : ""
         let text = """
         <b>🎭 Роль ассистента</b>
 
@@ -46,7 +49,7 @@ extension BotMenuHandler {
         <blockquote expandable>\(help.escapedRole)</blockquote>
 
         <i>🌐 — общая для всех чатов · 💬 — только для этого</i>
-        ✏️ — своя роль текстом (или /setrole &lt;текст&gt;)
+        ✏️ — своя роль текстом (или /setrole &lt;текст&gt;)\(groupHint)
         """
         return MenuScreen(text, rows)
     }
@@ -359,8 +362,9 @@ extension BotMenuHandler {
         if provider == .deepseekWeb, supported {
             let on = help.webDeepThinkEnabled ? "✓ Включить" : "Включить"
             let off = help.webDeepThinkEnabled ? "Выключить" : "✓ Выключить"
+            let groupHint = chatKey.chatID.isGroup ? "\nНастройка действует для всех в этой теме." : ""
             return MenuScreen(
-                "<b>🧠 DeepThink</b>\n\nСейчас · <b>\(help.webDeepThinkLabel)</b>",
+                "<b>🧠 DeepThink</b>\n\nСейчас · <b>\(help.webDeepThinkLabel)</b>\(groupHint)",
                 [[menuButton(on, .reasoning, "web", "on"), menuButton(off, .reasoning, "web", "off")], navButtons()]
             )
         }

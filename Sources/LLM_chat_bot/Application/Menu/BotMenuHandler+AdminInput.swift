@@ -307,9 +307,6 @@ extension BotMenuHandler {
             resumePage = .role
             if trimmed.isEmpty {
                 toast = "⚠️ Текст роли пуст"
-            } else if await webAccess(.everyone, feature: "role", chatKey: chatKey) == .chatOperator,
-                      !(await state.isAdmin(invoker, chatID: chatKey.chatID)) {
-                toast = "🔒 Роль настраивает администратор чата."
             } else {
                 _ = await state.setRoleAndResetHistory(chatKey: chatKey, role: trimmed + formatOptions)
                 do {

@@ -149,15 +149,20 @@ final class PostgresIntegrationTests: XCTestCase {
         let b = ChatKey(chatID: chatID, threadID: 9)
         _ = await store.changeProvider(chatKey: a, newProvider: .deepseekWeb)
 
-        func turn(_ id: Int, _ key: ChatKey, _ text: String) async -> Bool? {
+        func turn(_ id: Int, _ key: ChatKey, _ text: String, senderID: UserID = 321) async -> Bool? {
             let message = TelegramMessage(
-                message_id: id, from: .init(id: 321, is_bot: false, first_name: "Owner", username: "owner"),
+                message_id: id, from: Fixtures.user(id: senderID),
                 chat: .init(id: chatID, type: "supergroup", title: "Fixture", username: nil, first_name: nil),
                 date: 1, text: text, caption: nil, voice: nil, video: nil, message_thread_id: key.threadID,
                 media_group_id: nil, reply_to_message: nil, photo: nil
             )
             return await orchestrator.dispatchWebUpdateIfNeeded(.init(update_id: id, message: message, callback_query: nil, pre_checkout_query: nil, my_chat_member: nil))
         }
+
+        let deepThink = await turn(20, a, "/reasoning on", senderID: 322)
+        let role = await turn(21, a, "/setrole Отвечай как переводчик", senderID: 322)
+        XCTAssertEqual(deepThink, true)
+        XCTAssertEqual(role, true)
 
         for (id, key, text) in [(1, a, "один"), (2, a, "два"), (3, b, "три")] {
             let admitted = await turn(id, key, "@testbot " + text)
@@ -178,9 +183,12 @@ final class PostgresIntegrationTests: XCTestCase {
         }
         let opened = await worker.turns()
         XCTAssertEqual(opened.map(\.remoteChatID), [nil, "fixture-1", nil])
+        XCTAssertEqual(opened.map(\.deepThink), [true, true, nil])
+        XCTAssertTrue(opened.prefix(2).allSatisfy { $0.prompt?.contains("Отвечай как переводчик") == true })
+        XCTAssertFalse(opened[2].prompt?.contains("Отвечай как переводчик") == true)
         XCTAssertEqual(Set(opened.map(\.operationID)).count, 3)
         let notices = await telegramDouble.calls("sendMessage").filter { $0.text == Texts.webGroupDisclosure }
-        XCTAssertEqual(notices.count, 1, "The topic using the Web default answers after the group notice")
+        XCTAssertEqual(notices.count, 2, "Both topics announce where questions go before answering")
 
         let duplicate = await turn(2, a, "@testbot два")
         XCTAssertEqual(duplicate, true)

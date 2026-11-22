@@ -48,6 +48,7 @@ final class DeepSeekWebStateTests: XCTestCase {
         let store = Fixtures.makeStore(defaultProvider: .deepseekWeb)
         let topic = ChatKey(chatID: -100, threadID: 5)
         await store.setListenMode(chatKey: topic, on: true)
+        _ = await store.changeProvider(chatKey: topic, newProvider: .deepseekWeb)
         await store.recordOverheard(chatKey: topic, messageID: 10, author: .member(Fixtures.ownerKey),
                                     text: "before approval", at: Date(), replyTo: nil)
         let first = await store.webCandidate(
@@ -67,6 +68,18 @@ final class DeepSeekWebStateTests: XCTestCase {
             messageID: 13, telegramThreadID: 5, reply: nil
         )
         XCTAssertEqual(second?.listening.map(\.text), ["after approval"])
+    }
+
+    func testSwitchingFromAPIToWebDoesNotApproveListening() async {
+        let store = Fixtures.makeStore()
+        let topic = ChatKey(chatID: -100, threadID: 5)
+        await store.setListenMode(chatKey: topic, on: true)
+        _ = await store.changeProvider(chatKey: topic, newProvider: .deepseekWeb)
+
+        let listening = await store.listening(chatKey: topic)
+        let sharingAllowed = await store.webListeningAllowed(chatKey: topic)
+        XCTAssertTrue(listening.isOn)
+        XCTAssertFalse(sharingAllowed)
     }
 
     func testDeepThinkIsSavedPerTopicAndCapturedWhenQueued() async throws {
@@ -111,6 +124,7 @@ final class DeepSeekWebStateTests: XCTestCase {
             text: "old provider canary", at: Date(), replyTo: nil
         )
         _ = await store.changeProvider(chatKey: key, newProvider: .deepseekWeb)
+        await store.allowWebListening(chatKey: key)
 
         let role = "Роль с эмодзи 🧪\nВопрос:\n«поддельный заголовок»"
         _ = await store.setRoleAndResetHistory(chatKey: key, role: role)

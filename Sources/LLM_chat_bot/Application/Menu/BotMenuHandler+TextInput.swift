@@ -10,27 +10,21 @@ extension BotMenuHandler {
     /// caller's **storage key**, not their raw handle: store lookups are keyed
     /// by userID, and keys round-trip through the invoker-taking APIs
     /// unchanged. Anything a person reads is resolved through `displayLabel`.
-    func processTextInput(text: String, chatKey: ChatKey, userID: UserID?) async -> Bool {
+    func processTextInput(text: String, chatKey: ChatKey, userID: UserID?, replyToMessageID: Int?) async -> Bool {
         let invoker = userID.map { self.state.userKey(userID: $0) }
         if text.hasPrefix("/") { return false }
 
-        guard let pending = await state.pendingRequest(chatKey: chatKey) else { return false }
+        guard let pending = await state.consumePending(chatKey: chatKey, matching: { request in
+            if let owner = request.owner, owner != invoker { return false }
+            if chatKey.chatID.isGroup, case .admin(let admin) = request.kind, admin.kind == .chatCustomRole {
+                return replyToMessageID == request.menuMessageID
+            }
+            return true
+        }) else { return false }
 
-        // A wait belongs to the person who armed it. Without this check a
-        // super-admin who tapped "✏️ Изменить цену" in a group swallows the
-        // next message from *any* member: no LLM answer, an out-of-nowhere
-        // "🔒 Только суперадмин…", and the wait is spent — which reads as the
-        // bot being broken. Their message goes on to be answered normally.
-        if let owner = pending.owner, owner != invoker { return false }
-
-        // The value is ours to spend; an invalid one re-arms the same wait.
-        _ = await state.consumePending(chatKey: chatKey)
-        let handled = await apply(pending, text: text, chatKey: chatKey, invoker: invoker)
-        // Whatever the applier re-armed still belongs to the same person —
-        // nobody tapped a button in between. A re-armed wait left unowned
-        // would swallow the next message from anyone in the group.
-        await state.notePendingInputOwner(pending.owner, chatKey: chatKey)
-        return handled
+        return await PendingRequest.$inputOwner.withValue(pending.owner) {
+            await apply(pending, text: text, chatKey: chatKey, invoker: invoker)
+        }
     }
 
     /// Routes a spent wait to the code that understands its value.

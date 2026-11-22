@@ -73,6 +73,95 @@ final class MenuPageRenderTests: XCTestCase {
 
     // MARK: - Tests
 
+    func testGroupMemberCanChangeWebDeepThinkAndRole() async throws {
+        let store = Fixtures.makeStore(ownerUserID: ownerID, defaultProvider: .deepseekWeb)
+        let gateways = ProviderGatewayRegistry(
+            providers: [.openrouter: OpenRouterProviderAdapter(network: NetworkClient(), apiKey: "fixture")],
+            web: DeepSeekWebProviderAdapter(network: NetworkClient(), port: 8765, token: "fixture")
+        )
+        let menu = BotMenuHandler(telegram: gateway, state: store, gateways: gateways, logger: SilentLogger(),
+                                  formatOptions: "", botUsername: "testbot", canReadAllGroupMessages: false)
+        let commands = BotCommandHandler(telegram: gateway, state: store, gateways: gateways,
+                                         botUsername: "testbot", formatOptions: "", menuHandler: menu)
+        let member = Fixtures.user(id: plainID, username: nil)
+        let topic = ChatKey(chatID: -7_200, threadID: 8)
+        let other = ChatKey(chatID: topic.chatID, threadID: 9)
+        let message = MaybeInaccessibleMessage(chat: .init(id: topic.chatID, type: "supergroup"),
+                                               message_id: 51, date: 1, text: "меню", message_thread_id: topic.threadID)
+
+        func tap(_ action: String, as user: TelegramUser) async {
+            await menu.handle(action: action, callback: .init(id: action, from: user, data: "menu:\(action)", message: message))
+        }
+
+        func send(_ text: String) async throws {
+            let handled = try await commands.handleIfCommand(text: text, chatKey: topic, fromUser: member, isPrivate: false)
+            XCTAssertTrue(handled)
+        }
+
+        await tap("nav:reasoning", as: member)
+        let reasoningPage = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(reasoningPage?.buttonActions.contains("menu:reasoning:web:on") == true)
+        await tap("reasoning:web:on", as: member)
+        let deepThinkOn = await store.webState(chatKey: topic)?.deepThink
+        XCTAssertEqual(deepThinkOn, true)
+        try await send("/reasoning off")
+        let deepThinkOff = await store.webState(chatKey: topic)?.deepThink
+        XCTAssertEqual(deepThinkOff, false)
+
+        await tap("nav:role", as: member)
+        let rolePage = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(rolePage?.buttonActions.contains("menu:role:custom") == true)
+        let originalEpoch = await store.webState(chatKey: topic)?.contextEpoch
+        await tap("role:custom", as: member)
+        let prompt = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(prompt?.text?.contains("Ответьте на это сообщение") == true)
+
+        // A tap by someone else must leave the role prompt with its author.
+        let otherMember = Fixtures.user(id: 7_101, username: nil)
+        await tap("listen:on", as: otherMember)
+        await menu.sendMenu(chatKey: topic, userID: otherMember.id)
+        let strangerReply = await menu.processTextInput(text: "Чужой ответ", chatKey: topic,
+                                                       userID: otherMember.id, replyToMessageID: message.message_id)
+        let unrelated = await menu.processTextInput(text: "Другой вопрос", chatKey: topic,
+                                                   userID: member.id, replyToMessageID: nil)
+        let roleReply = await menu.processTextInput(text: "Отвечай как математик", chatKey: topic,
+                                                   userID: member.id, replyToMessageID: message.message_id)
+        XCTAssertFalse(strangerReply)
+        XCTAssertFalse(unrelated)
+        XCTAssertTrue(roleReply)
+        let updated = await store.fetchHelp(chatKey: topic)
+        let otherHelp = await store.fetchHelp(chatKey: other)
+        let web = await store.webState(chatKey: topic)
+        XCTAssertEqual(updated.role, "Отвечай как математик")
+        XCTAssertNotEqual(otherHelp.role, updated.role)
+        XCTAssertFalse(otherHelp.webDeepThinkEnabled)
+        XCTAssertNotEqual(web?.contextEpoch, originalEpoch)
+        XCTAssertEqual(web?.deepThink, false)
+
+        try await send("/setrole Краткий ответ")
+        let commandRole = await store.fetchHelp(chatKey: topic)
+        XCTAssertEqual(commandRole.role, "Краткий ответ")
+        await tap("role:default", as: member)
+        let resetRole = await store.fetchHelp(chatKey: topic)
+        XCTAssertEqual(resetRole.role, otherHelp.role)
+
+        await tap("nav:listen", as: member)
+        let listenPage = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(listenPage?.text?.contains("Прослушка беседы") == true)
+        XCTAssertFalse(listenPage?.buttonActions.contains("menu:listen:on") == true)
+        try await send("/listen on")
+        let listening = await store.listening(chatKey: topic)
+        let sharingAllowed = await store.webListeningAllowed(chatKey: topic)
+        XCTAssertFalse(listening.isOn)
+        XCTAssertFalse(sharingAllowed)
+
+        _ = await store.changeProvider(chatKey: topic, newProvider: .openrouter)
+        try await send("/reasoning high")
+        await tap("reasoning:set:high", as: member)
+        let apiReasoning = await store.reasoningEffort(chatKey: topic)
+        XCTAssertNil(apiReasoning)
+    }
+
     func testProviderListAndReasoningFollowTheSelectedService() async throws {
         let store = Fixtures.makeStore(ownerUserID: ownerID, defaultProvider: .deepseekWeb)
         let menu = BotMenuHandler(

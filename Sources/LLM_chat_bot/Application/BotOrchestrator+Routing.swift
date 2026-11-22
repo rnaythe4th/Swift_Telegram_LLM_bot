@@ -425,7 +425,10 @@ extension BotOrchestrator {
             return
         }
 
-        if let text = message.text, await menuHandler.processTextInput(text: text, chatKey: chatKey, userID: message.from?.id) {
+        if let text = message.text, await menuHandler.processTextInput(
+            text: text, chatKey: chatKey, userID: message.from?.id,
+            replyToMessageID: message.reply_to_message?.message_id
+        ) {
             return
         }
 

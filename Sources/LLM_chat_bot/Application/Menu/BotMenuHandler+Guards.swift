@@ -12,10 +12,23 @@ import Foundation
 // userID (CLAUDE.md §17), and a raw handle locks out everyone without one.
 
 extension BotMenuHandler {
-    func webAccess(_ access: MenuAccess, feature: String, chatKey: ChatKey) async -> MenuAccess {
-        guard ["role", "listen", "mode", "reset", "reasoning"].contains(feature),
-              await state.provider(chatKey: chatKey) == .deepseekWeb else { return access }
-        return chatKey.chatID.isGroup ? .chatOperator : .everyone
+    func pageAccess(_ page: MenuPage, chatKey: ChatKey) async -> MenuAccess {
+        guard page == .reasoning || page == .listen,
+              await state.selectedProvider(chatKey: chatKey) == .deepseekWeb else { return page.access }
+        return .everyone
+    }
+
+    func actionAccess(_ command: MenuCommand, chatKey: ChatKey) async -> MenuAccess {
+        switch command {
+        case .reasoning:
+            let provider = await state.selectedProvider(chatKey: chatKey)
+            return provider == .deepseekWeb ? .everyone : command.access
+        case .listen, .mode, .reset:
+            guard await state.selectedProvider(chatKey: chatKey) == .deepseekWeb else { return command.access }
+            return chatKey.chatID.isGroup ? .chatOperator : .everyone
+        default:
+            return command.access
+        }
     }
 
     func checkpointWebSettings(chatKey: ChatKey, deleted: Bool = false) async throws {

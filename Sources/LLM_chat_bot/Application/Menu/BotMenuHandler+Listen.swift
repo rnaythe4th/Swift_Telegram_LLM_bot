@@ -40,25 +40,23 @@ extension BotMenuHandler {
         let waiting = listening.isOn ? 0 : await state.prerollCount(chatKey: chatKey)
 
         var rows: Keyboard = []
-        if listening.isOn {
-            var controls = [menuButton("🟢 Слушаю — выключить", .listen, "off")]
-            if web && !sharingAllowed {
-                controls.append(menuButton("Передавать контекст в DeepSeek Web", .listen, "on"))
+        if !web || isOperator {
+            if listening.isOn {
+                var controls = [menuButton("🟢 Слушаю — выключить", .listen, "off")]
+                if web && !sharingAllowed {
+                    controls.append(menuButton("Передавать контекст в DeepSeek Web", .listen, "on"))
+                }
+                rows.row(controls)
+            } else {
+                let label = waiting > 0 ? "⚪️ Включить · подхвачу \(waiting) сообщ." : "⚪️ Не слушаю — включить"
+                rows.row([menuButton(label, .listen, "on")])
             }
-            rows.row(controls)
-        } else {
-            let label = waiting > 0 ? "⚪️ Включить · подхвачу \(waiting) сообщ." : "⚪️ Не слушаю — включить"
-            rows.row([menuButton(label, .listen, "on")])
+            var readRow = [menuButton("📜 Что бот слышал", .listen, "dump")]
+            if listening.transcript.count + waiting > 0 {
+                readRow.append(menuButton("🧹 Забыть услышанное", .listen, "clear"))
+            }
+            rows.row(readRow)
         }
-        // Always offered, empty buffer included. This is the one button that
-        // answers «а он вообще меня слышит?», and hiding it when the buffer is
-        // empty took it away in exactly the case somebody needs to ask —
-        // leaving "it doesn't work" with nothing to look at.
-        var readRow = [menuButton("📜 Что бот слышал", .listen, "dump")]
-        if listening.transcript.count + waiting > 0 {
-            readRow.append(menuButton("🧹 Забыть услышанное", .listen, "clear"))
-        }
-        rows.row(readRow)
         if isOperator {
             var sizeRow: [InlineKeyboardButton] = []
             for size in Self.listenSizes {
@@ -76,14 +74,19 @@ extension BotMenuHandler {
         // The number that decides whether 200 is a good idea. Approximate on
         // purpose — the order of magnitude is the whole message.
         var costLine = ""
-        if web {
+        if web && listening.isOn {
             costLine = "\n" + (sharingAllowed ? Texts.webListenDisclosure : Texts.webListeningNeedsApproval)
-        } else if listening.isOn && !listening.transcript.isEmpty {
+        } else if !web && listening.isOn && !listening.transcript.isEmpty {
             costLine = "\n💸 К каждому ответу добавляется ≈ <b>\(cost.characters)</b> симв. (~\(cost.tokens) токенов) — это платно."
         }
-        let sizeHint = isOperator
-            ? "\n\nРазмер буфера меняет владелец бота: чем больше, тем лучше бот понимает разговор — и тем дороже каждый ответ (\(ChatTranscript.sizeRange.lowerBound)–\(ChatTranscript.sizeRange.upperBound))."
-            : "\n\n<i>Размер буфера (сейчас \(listening.size)) настраивает владелец бота.</i>"
+        let sizeHint: String
+        if web && !isOperator {
+            sizeHint = "\n\n<i>Прослушку и передачу контекста настраивает администратор чата.</i>"
+        } else if isOperator {
+            sizeHint = "\n\nРазмер буфера меняет владелец бота: чем больше, тем лучше бот понимает разговор — и тем дороже каждый ответ (\(ChatTranscript.sizeRange.lowerBound)–\(ChatTranscript.sizeRange.upperBound))."
+        } else {
+            sizeHint = "\n\n<i>Размер буфера (сейчас \(listening.size)) настраивает владелец бота.</i>"
+        }
 
         // The setting without which none of this works. Telegram hands a bot
         // only the messages addressed to it until privacy mode is turned off,

@@ -17,15 +17,10 @@ extension ChatContextStore {
 
     /// Arms the chat's wait, replacing whatever it was waiting for before.
     ///
-    /// The owner is carried over: a wait re-armed because the typed value was
-    /// invalid had no button tap in between, so there is no new tapper to
-    /// stamp — and a menu action always re-stamps the owner afterwards anyway.
-    /// Carried over from a *live* wait only: inheriting the owner of one that
-    /// already expired would hand the new prompt to whoever tapped last week.
+    /// The current callback or retry supplies its owner at creation.
     func setPending(_ kind: PendingKind, menuMessageID: Int, chatKey: ChatKey, now: Date = Date()) {
-        let owner = livePending(chatKey: chatKey, now: now)?.owner
         _pendingRequests[chatKey] = PendingRequest(
-            owner: owner,
+            owner: PendingRequest.inputOwner,
             menuMessageID: menuMessageID,
             kind: kind,
             armedAt: now
@@ -40,14 +35,18 @@ extension ChatContextStore {
         livePending(chatKey: chatKey, now: now)
     }
 
-    func consumePending(chatKey: ChatKey, now: Date = Date()) -> PendingRequest? {
-        guard let request = livePending(chatKey: chatKey, now: now) else { return nil }
+    func consumePending(
+        chatKey: ChatKey,
+        now: Date = Date(),
+        matching: @Sendable (PendingRequest) -> Bool = { _ in true }
+    ) -> PendingRequest? {
+        guard let request = livePending(chatKey: chatKey, now: now), matching(request) else { return nil }
         _pendingRequests.removeValue(forKey: chatKey)
         return request
     }
 
-    func clearPending(chatKey: ChatKey) {
-        _pendingRequests.removeValue(forKey: chatKey)
+    func clearPending(chatKey: ChatKey, matching: @Sendable (PendingRequest) -> Bool = { _ in true }) {
+        _ = consumePending(chatKey: chatKey, matching: matching)
     }
 
     /// Is this chat waiting for a typed value of any kind?
@@ -67,13 +66,6 @@ extension ChatContextStore {
     }
 
     // MARK: - Ownership
-
-    /// Remembers who a live wait belongs to. Called after every menu action, so
-    /// a wait armed by a tap always carries the person who tapped.
-    func notePendingInputOwner(_ userKey: UserKey?, chatKey: ChatKey, now: Date = Date()) {
-        guard let userKey, livePending(chatKey: chatKey, now: now) != nil else { return }
-        _pendingRequests[chatKey]?.owner = userKey
-    }
 
     /// Owner of the chat's live wait, or nil when nothing is pending.
     func pendingInputOwner(chatKey: ChatKey, now: Date = Date()) -> UserKey? {

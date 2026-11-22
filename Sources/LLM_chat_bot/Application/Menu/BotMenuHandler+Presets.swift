@@ -12,7 +12,7 @@ extension BotMenuHandler {
     ) async throws {
         guard route.command == .pm else { return }
         guard let category = PresetCategory(rawValue: route.sub) else { return }
-        await state.clearPending(chatKey: chatKey)
+        await state.clearPending(chatKey: chatKey) { $0.menuMessageID == message.message_id }
         let canManageGlobal = await state.isAdmin(invokerKey(callback), chatID: chatKey.chatID)
 
         guard let subAction = route.arg(2) else {
