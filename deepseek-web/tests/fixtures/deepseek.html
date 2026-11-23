@@ -33,6 +33,10 @@
   };
   const chats = {...seeded, ...stored};
   let id = location.pathname.startsWith(prefix) ? location.pathname.slice(prefix.length) : null;
+  const virtualized = mode === 'virtualized';
+  const rows = [];
+  const rowHeight = 135;
+  let listItems, visibleItems;
 
   const add = (parent, tag, attributes = {}, text) => {
     const node = document.createElement(tag);
@@ -42,13 +46,42 @@
     return node;
   };
 
+  function renderWindow() {
+    if (!virtualized) return;
+    const first = Math.floor(conversation.scrollTop / rowHeight);
+    const last = Math.ceil((conversation.scrollTop + conversation.clientHeight) / rowHeight);
+    visibleItems.replaceChildren(...rows.slice(first, last));
+    visibleItems.style.setProperty('--dsl-virtual-list-transform-y', `${first * rowHeight}px`);
+    visibleItems.style.transform = `translateY(${first * rowHeight}px)`;
+  }
+
+  if (virtualized) {
+    conversation.className = 'ds-virtual-list';
+    conversation.style.cssText = 'height:290px; overflow-y:auto; overflow-anchor:none';
+    listItems = add(conversation, 'div', {class: 'ds-virtual-list-items', style: 'position:relative; overflow:clip'});
+    visibleItems = add(listItems, 'div', {class: 'ds-virtual-list-visible-items', style: 'position:absolute; width:100%'});
+    conversation.addEventListener('scroll', renderWindow);
+  }
+
+  function appendRow() {
+    if (!virtualized) return conversation;
+    const row = document.createElement('div');
+    row.dataset.virtualListItemKey = String(rows.length + 1);
+    row.style.cssText = `height:${rowHeight}px; display:flow-root`;
+    rows.push(row);
+    listItems.style.height = `${rows.length * rowHeight}px`;
+    conversation.scrollTop = conversation.scrollHeight;
+    renderWindow();
+    return row;
+  }
+
   function alert(text) {
     error.textContent = text;
     error.hidden = false;
   }
 
   function user(text) {
-    const turn = add(conversation, 'div', {class: 'ds-message'});
+    const turn = add(appendRow(), 'div', {class: 'ds-message'});
     if (mode.startsWith('native-')) {
       const body = add(add(turn, 'div'), 'div', {class: 'ds-collapsible-text'});
       add(add(body, 'div'), 'span', {}, text);
@@ -58,7 +91,7 @@
   }
 
   function answer(text, finished) {
-    const wrap = add(conversation, 'div', {});
+    const wrap = add(appendRow(), 'div', {});
     const turn = add(wrap, 'div', {class: 'ds-message'});
     const thinking = add(turn, 'section', {class: 'ds-think-content'});
     add(thinking, 'p', {}, 'Reasoning is never part of the final answer.');

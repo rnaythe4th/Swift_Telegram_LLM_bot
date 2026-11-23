@@ -59,6 +59,9 @@ const readAloud = '[aria-label="Read aloud" i], [aria-label="朗读"]';
 const stop = Array.from(document.querySelectorAll(arguments[0])).some(visible);
 let elements = Array.from(scope.querySelectorAll(`${user}, ${assistant}, .ds-message`)).filter(visible);
 elements = elements.filter(node => !elements.some(other => other !== node && node.contains(other)));
+const list = elements[0]?.closest('.ds-virtual-list');
+const items = elements[0]?.closest('.ds-virtual-list-visible-items');
+const offset = items ? parseFloat(getComputedStyle(items).getPropertyValue('--dsl-virtual-list-transform-y')) : NaN;
 
 function withoutControls(node) {
   const body = node.cloneNode(true);
@@ -100,8 +103,15 @@ function formatted(node, depth = 0) {
 
 return {
   stopping: stop,
+  viewport: list && items ? {
+    list,
+    first: offset === 0,
+    last: offset + items.offsetHeight >= items.parentElement.clientHeight - 2 ||
+      list.scrollHeight - list.clientHeight - list.scrollTop <= 2
+  } : null,
   turns: elements.map(element => {
     const id = element.getAttribute('data-message-id') || '';
+    const key = element.closest('[data-virtual-list-item-key]')?.getAttribute('data-virtual-list-item-key');
     const nativeQuestion = element.matches('.ds-message') && !element.matches(assistant) &&
       !element.querySelector(main + ', ' + reasoning)
       ? element.querySelector(':scope > div > .ds-collapsible-text') : null;
@@ -109,10 +119,10 @@ return {
     if (element.matches(user) || question) {
       const text = withoutControls(question || element);
       for (const br of text.querySelectorAll('br')) br.replaceWith('\n');
-      return {role: 'user', id, text: text.textContent.trim(), complete: true};
+      return {role: 'user', id, key, text: text.textContent.trim(), complete: true};
     }
     if (!element.matches(assistant) && !element.querySelector(main + ', ' + reasoning)) {
-      return {role: 'unknown', id, text: '', complete: false};
+      return {role: 'unknown', id, key, text: '', complete: false};
     }
     let blocks = Array.from(element.querySelectorAll(
       `[data-testid="final-answer"], [data-testid="response-content"], ${main}, .ds-markdown`
@@ -126,10 +136,17 @@ return {
     const completed = element.matches(done) || nativeToolbar ||
       Array.from(element.querySelectorAll(action)).some(node => visible(node) && !node.closest(reasoning + ', ' + code));
     const busy = element.matches(streaming) || Array.from(element.querySelectorAll(streaming)).some(visible);
-    return {role: 'assistant', id, text: final ? formatted(withoutControls(final)).trim() : '',
+    return {role: 'assistant', id, key, text: final ? formatted(withoutControls(final)).trim() : '',
             complete: Boolean(completed && !busy)};
   })
 };
+"""
+
+SCROLL_HISTORY = """
+const [list, toEnd, done] = arguments;
+const top = toEnd ? list.scrollHeight : Math.max(0, list.scrollTop - list.clientHeight * 0.75);
+list.scrollTo({top, behavior: 'instant'});
+requestAnimationFrame(() => requestAnimationFrame(() => done()));
 """
 
 SET_COMPOSER = """
@@ -197,6 +214,7 @@ class Prepared:
     remote_id: str | None
     tail: str | None
     count: int
+    history: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -218,6 +236,22 @@ def tail_for(turns):
     # Text hashes with native IDs when available cover the ordered prefix as well as the last pair.
     data = json.dumps([(turn["id"], turn["text"]) for turn in turns], ensure_ascii=False, separators=(",", ":"))
     return f"v1:{len(turns) // 2}:{hashlib.sha256(data.encode()).hexdigest()}"
+
+
+def history_prefix(earlier, later):
+    """Find the prefix missing from a later viewport using overlapping native list keys."""
+    if not earlier or not later:
+        return None
+    old_keys = [turn.get("key") for turn in earlier]
+    new_keys = [turn.get("key") for turn in later]
+    if (not all(old_keys) or not all(new_keys) or len(set(old_keys)) != len(old_keys)
+            or len(set(new_keys)) != len(new_keys) or new_keys[0] not in old_keys):
+        return None
+    start = old_keys.index(new_keys[0])
+    overlap = min(len(old_keys) - start, len(new_keys))
+    if old_keys[start:start + overlap] != new_keys[:overlap]:
+        return None
+    return list(earlier[:start])
 
 
 def classify_alert(message):
@@ -409,6 +443,45 @@ class Browser:
     def _read(self, driver):
         return driver.execute_script(READ_TURNS, STOP)
 
+    def _read_history(self, driver, stop, deadline, known=()):
+        state = self._read(driver)
+        viewport = state["viewport"]
+        if not viewport:
+            return state
+        if not viewport["last"]:
+            driver.execute_async_script(SCROLL_HISTORY, viewport["list"], True)
+            state = self._read(driver)
+            viewport = state["viewport"]
+            if not viewport or not viewport["last"]:
+                return None
+        if viewport["first"]:
+            return state
+
+        turns = state["turns"]
+        prefix = history_prefix(known, turns)
+        if prefix is not None:
+            return {**state, "turns": prefix + turns}
+
+        # Reopenings and newly mounted turns may have no overlap with the
+        # last snapshot. Walk the list with overlapping windows from the end.
+        list_element = viewport["list"]
+        try:
+            while not viewport["first"] and time.monotonic() < deadline:
+                if stop.is_set():
+                    raise BrowserFailure("cancelled")
+                driver.execute_async_script(SCROLL_HISTORY, list_element, False)
+                earlier = self._read(driver)
+                viewport = earlier["viewport"]
+                prefix = history_prefix(earlier["turns"], turns)
+                if not viewport or prefix is None:
+                    return None
+                turns = prefix + turns
+            if viewport["first"]:
+                return {**state, "turns": turns}
+            return None
+        finally:
+            driver.execute_async_script(SCROLL_HISTORY, list_element, True)
+
     def _read_toggles(self, driver, *names):
         return driver.execute_script(READ_TOGGLES, *names)
 
@@ -429,15 +502,17 @@ class Browser:
         think, search = self._read_toggles(driver, DEEPTHINK, SEARCH)
         return think and search and think["selected"] is deep_think and search["selected"] is False
 
-    def _view_for(self, driver, expected_id, expected_tail):
+    def _view_for(self, driver, expected_id, expected_tail, stop, deadline, known=()):
         actual_id = self._identity(driver)
         if actual_id != expected_id:
             if self._visible(driver, COMPOSER):
                 raise BrowserFailure("chatUnavailable" if expected_id else "unknownUI")
             return None
-        state = self._read(driver)
+        state = self._read_history(driver, stop, deadline, known)
         composer = self._visible(driver, COMPOSER)
-        if composer is None or state["stopping"]:
+        if composer is None or state is None or state["stopping"]:
+            return None
+        if state["viewport"] and self._identity(driver, check_alerts=False) != expected_id:
             return None
         turns = state["turns"]
         if expected_id is None and turns:
@@ -447,7 +522,7 @@ class Browser:
         value = driver.execute_script("return arguments[0].value ?? arguments[0].textContent", composer)
         if value or self._visible(driver, ATTACHMENT):
             raise BrowserFailure("unknownUI")
-        return composer, len(turns)
+        return composer, turns
 
     def prepare(self, request, stop):
         from selenium.common.exceptions import InvalidSessionIdException, NoSuchWindowException
@@ -465,15 +540,17 @@ class Browser:
 
     def _prepare(self, request, stop):
         deadline = time.monotonic() + self.prepare_seconds
-        driver = self._load_view(request.remote_id, request.tail, stop, deadline)
+        driver, (_, known) = self._load_view(request.remote_id, request.tail, stop, deadline)
         deep_think = self.deepthink if request.deep_think is None else request.deep_think
         self._set_toggle(driver, DEEPTHINK, deep_think, stop, deadline)
         self._set_toggle(driver, SEARCH, False, stop, deadline)
-        _, count = self._wait(stop, deadline, lambda: self._view_for(driver, request.remote_id, request.tail),
-                              "chatUnavailable" if request.remote_id else "unknownUI")
+        _, turns = self._wait(
+            stop, deadline, lambda: self._view_for(driver, request.remote_id, request.tail, stop, deadline, known),
+            "chatUnavailable" if request.remote_id else "unknownUI",
+        )
         if not self._toggles_match(driver, deep_think):
             raise BrowserFailure("unknownUI")
-        return Prepared(request.remote_id, request.tail, count)
+        return Prepared(request.remote_id, request.tail, len(turns), tuple(turns))
 
     def _load_view(self, remote_id, tail, stop, deadline):
         from selenium.common.exceptions import StaleElementReferenceException
@@ -483,20 +560,19 @@ class Browser:
         driver = self._open()
 
         def view():
-            return self._view_for(driver, remote_id, tail)
+            return self._view_for(driver, remote_id, tail, stop, deadline)
 
         if driver.current_url == self._chat_url(remote_id):
             try:
-                if view() is not None:
-                    return driver
+                if (loaded := view()) is not None:
+                    return driver, loaded
             except StaleElementReferenceException:
                 pass
             except BrowserFailure as error:
                 if error.status != "unknownUI":
                     raise
         self._navigate(driver, remote_id)
-        self._wait(stop, deadline, view, "chatUnavailable" if remote_id else "unknownUI")
-        return driver
+        return driver, self._wait(stop, deadline, view, "chatUnavailable" if remote_id else "unknownUI")
 
     def verify(self, stop):
         self._load_view(None, None, stop, time.monotonic() + self.prepare_seconds)
@@ -512,8 +588,9 @@ class Browser:
         from selenium.webdriver.common.keys import Keys
 
         driver = self.session[0]
-        view = self._view_for(driver, prepared.remote_id, prepared.tail)
-        if view is None or view[1] != prepared.count:
+        deadline = time.monotonic() + min(self.prepare_seconds, 5)
+        view = self._view_for(driver, prepared.remote_id, prepared.tail, stop, deadline, prepared.history)
+        if view is None or len(view[1]) != prepared.count:
             raise BrowserFailure("chatUnavailable" if prepared.remote_id else "unknownUI")
         composer = view[0]
         limit = composer.get_dom_attribute("maxlength")
@@ -534,13 +611,14 @@ class Browser:
                 return lambda: composer.send_keys(Keys.ENTER)
             return None
 
-        submit = self._wait(stop, time.monotonic() + min(self.prepare_seconds, 5), send_control, "unknownUI")
+        submit = self._wait(stop, deadline, send_control, "unknownUI")
         current = driver.execute_script("return arguments[0].value ?? arguments[0].textContent", composer)
-        state = self._read(driver)
+        state = self._read_history(driver, stop, deadline, prepared.history)
         if current != request.prompt:
             raise BrowserFailure("inputTooLong")
         deep_think = self.deepthink if request.deep_think is None else request.deep_think
-        if (self._identity(driver) != prepared.remote_id or state["stopping"] or len(state["turns"]) != prepared.count
+        if (self._identity(driver) != prepared.remote_id or state is None or state["stopping"]
+                or len(state["turns"]) != prepared.count
                 or tail_for(state["turns"]) != prepared.tail or self._visible(driver, ATTACHMENT)
                 or not self._toggles_match(driver, deep_think)):
             raise BrowserFailure("unknownUI")
@@ -588,17 +666,22 @@ class Browser:
 
         remote_id, accepted = prepared.remote_id, False
         confirmation_deadline = time.monotonic() + SUBMIT_CONFIRM_SECONDS
+        generation_deadline = time.monotonic() + self.generation_seconds
+        known = prepared.history
 
         def result():
-            nonlocal remote_id, accepted
+            nonlocal remote_id, accepted, known
             result_id = self._identity(driver, check_alerts=False)
             if remote_id and result_id != remote_id:
                 raise BrowserFailure("uncertain")
             if result_id:
                 remote_id = result_id
-            state = self._read(driver)
-            text, confirmed, complete = self._match(state, request.prompt, prepared)
+            deadline = generation_deadline if accepted else min(generation_deadline, confirmation_deadline)
+            state = self._read_history(driver, stop, deadline, known)
+            text, confirmed, complete = self._match(state, request.prompt, prepared) if state else (None, False, False)
             accepted |= confirmed
+            if confirmed:
+                known = state["turns"]
             if self._identity(driver) != result_id:
                 return None
             if result_id and complete:
@@ -610,7 +693,7 @@ class Browser:
             return None
 
         try:
-            return self._wait(stop, time.monotonic() + self.generation_seconds, result, "uncertain")
+            return self._wait(stop, generation_deadline, result, "uncertain")
         except BrowserFailure as error:
             # Only an explicit banner paired with a restored/blocked composer and baseline
             # history can prove a click was rejected. Other failures require reconciliation.
@@ -619,12 +702,12 @@ class Browser:
             may_have_sent = True
             if status in {"quota", "busy", "inputTooLong", "chatUnavailable"} and not accepted:
                 try:
-                    turns = self._read(driver)["turns"]
-                    may_have_sent = (
-                        remote_id != prepared.remote_id or len(turns) != prepared.count
-                        or tail_for(turns) != prepared.tail
-                    )
-                except WebDriverException:
+                    view = self._read_history(driver, stop, confirmation_deadline, known)
+                    if view is not None:
+                        turns = view["turns"]
+                        may_have_sent = (remote_id != prepared.remote_id or len(turns) != prepared.count
+                                         or tail_for(turns) != prepared.tail)
+                except (BrowserFailure, WebDriverException):
                     pass
             elif status == "cancelled" or status == "unknownUI":
                 status = "uncertain"
@@ -659,14 +742,20 @@ class Browser:
         deadline = time.monotonic() + min(self.prepare_seconds, 12)
         driver = self._open()
         self._navigate(driver, request.remote_id)
+        known = ()
 
         def result():
+            nonlocal known
             if self._identity(driver) != request.remote_id:
                 raise BrowserFailure("uncertain")
-            state = self._read(driver)
+            state = self._read_history(driver, stop, deadline, known)
+            if state is None:
+                return None
             answer, accepted, complete = self._match(state, request.prompt, prepared)
+            if accepted:
+                known = state["turns"]
             progress(request.remote_id, accepted)
-            if complete:
+            if complete and self._identity(driver) == request.remote_id:
                 return Answer(request.remote_id, tail_for(state["turns"]), answer)
             return None
 

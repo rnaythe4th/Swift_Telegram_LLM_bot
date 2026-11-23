@@ -116,6 +116,26 @@ class FirefoxTest(unittest.TestCase):
         third = self.run_turn(self.request("A3", same))
         self.assertIn(" / 3 / A3", third.text)
 
+    def test_followups_and_reconciliation_with_unmounted_messages(self):
+        self.site.mode = "virtualized"
+        first = self.run_turn(replace(self.request("first group message"), deep_think=True))
+        second = self.run_turn(replace(self.request("follow-up", first), deep_think=True))
+        self.assertEqual(second.remote_id, first.remote_id)
+        self.assertIn(" / 2 / follow-up", second.text)
+        self.assertEqual(len(self.browser._read(self.browser.session[0])["turns"]), 3)
+
+        driver = self.browser.session[0]
+        driver.execute_script("document.querySelector('.ds-virtual-list').style.height = '170px'")
+        third_request = replace(self.request("without DeepThink", second), deep_think=False)
+        third = self.run_turn(third_request)
+        self.assertEqual(third.remote_id, first.remote_id)
+        self.assertIn(" / 3 / without DeepThink", third.text)
+
+        self.browser.close()
+        self.assertEqual(self.browser.reconcile(third_request, self.stop, self.track), third)
+        fourth = self.run_turn(self.request("after reopening", third))
+        self.assertIn(" / 4 / after reopening", fourth.text)
+
     def test_native_composer_submits_without_labeled_send(self):
         for mode in ("keyboard-submit", "native-submit"):
             with self.subTest(mode=mode):
