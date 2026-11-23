@@ -152,6 +152,7 @@ class Worker:
         self.sweeper.start()
 
     def health(self):
+        upstream_status = self.browser.ready() if getattr(self.browser, "is_api", False) else "ready"
         with self.lock:
             if self.shutting_down:
                 status = "unavailable"
@@ -162,7 +163,7 @@ class Worker:
             elif self.active or self.closing_browser:
                 status = "busy"
             else:
-                status = "ready"
+                status = upstream_status
             response = {"version": 1, "status": status, "ready": status in {"ready", "busy"}}
             if self.idle_seconds is None:
                 response["browserWarm"] = (status == "ready" and self.browser.session is not None)
@@ -204,7 +205,11 @@ class Worker:
                 if self.active or self.closing_browser or self.gate:
                     self.lock.wait(0.5)
                     continue
-                if self.idle_seconds is None and self.browser.session is None and now >= self.warm_retry_at:
+                if (getattr(self.browser, "is_api", False)
+                        and now >= self.browser.next_refresh and now >= self.warm_retry_at):
+                    warm_stop = self.warm_stop = threading.Event()
+                    self.browser.next_refresh = now + self.browser.refresh_seconds
+                elif self.idle_seconds is None and self.browser.session is None and now >= self.warm_retry_at:
                     warm_stop = self.warm_stop = threading.Event()
                 elif (self.idle_seconds is not None and self.browser.session is not None
                         and now - self.last_activity >= self.idle_seconds):
@@ -374,6 +379,9 @@ class Worker:
                 with self.lock:
                     if not operation.stop.is_set() and not self.gate and not self.shutting_down:
                         operation.prepared = prepared
+                        # API transport preallocates an opaque chat ID so Swift can
+                        # persist a candidate before an uncertain HTTP send.
+                        operation.candidate_id = getattr(prepared, "remote_id", None) or operation.candidate_id
                         operation.phase = "prepared"
                         operation.deadline = time.monotonic() + self.prepared_ttl
                         LOG.info("operation %s preparing prepared %.2fs", request.id, time.monotonic() - start)
@@ -638,17 +646,34 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
     profile = Path(os.environ["DEEPSEEK_WEB_PROFILE_DIR"])
     private_directory(profile)
-    browser = Browser(
-        profile, firefox=os.getenv("DEEPSEEK_WEB_FIREFOX_BINARY", "/usr/bin/firefox-esr"),
-        geckodriver=os.getenv("DEEPSEEK_WEB_GECKODRIVER_BINARY", "/usr/local/bin/geckodriver"),
-        deepthink=os.getenv("DEEPSEEK_WEB_DEEPTHINK") == "1",
-        generation_seconds=integer_env("DEEPSEEK_WEB_GENERATION_SECONDS", 240, 1, 480),
-    )
+    firefox = os.getenv("DEEPSEEK_WEB_FIREFOX_BINARY", "/usr/bin/firefox-esr")
+    geckodriver = os.getenv("DEEPSEEK_WEB_GECKODRIVER_BINARY", "/usr/local/bin/geckodriver")
+    backend = os.getenv("DEEPSEEK_WEB_BACKEND", "browser")
+    if backend == "api":
+        from api_backend import APIBackend
+        browser = APIBackend(
+            profile, firefox=firefox, geckodriver=geckodriver,
+            key=os.environ["DEEPSEEK_WEB_WORKER_TOKEN"],
+            auth_path=os.environ["DEEPSEEK_WEB_AUTH_PATH"],
+            port=integer_env("DEEPSEEK_WEB_API_PORT", 9655, 1, 65535),
+            deepthink=os.getenv("DEEPSEEK_WEB_DEEPTHINK") == "1",
+            refresh_seconds=integer_env("DEEPSEEK_WEB_AUTH_REFRESH_SECONDS", 21600, 0, 86400),
+            generation_seconds=integer_env("DEEPSEEK_WEB_GENERATION_SECONDS", 480, 1, 540),
+        )
+    elif backend == "browser":
+        browser = Browser(
+            profile, firefox=firefox, geckodriver=geckodriver,
+            deepthink=os.getenv("DEEPSEEK_WEB_DEEPTHINK") == "1",
+            generation_seconds=integer_env("DEEPSEEK_WEB_GENERATION_SECONDS", 240, 1, 480),
+        )
+    else:
+        raise SystemExit("Invalid DEEPSEEK_WEB_BACKEND (expected browser or api)")
     if any(not os.access(binary, os.X_OK) for binary in (browser.firefox, browser.geckodriver)):
-        raise SystemExit("Firefox ESR or geckodriver is missing")
+        raise SystemExit("Firefox ESR or geckodriver is missing for interactive re-login")
     port = integer_env("DEEPSEEK_WEB_WORKER_PORT", 8765, 1, 65535)
-    idle_seconds = (None if os.getenv("DEEPSEEK_WEB_IDLE_SECONDS") == "never"
-                    else integer_env("DEEPSEEK_WEB_IDLE_SECONDS", 60, 0, 3600))
+    idle_seconds = (None if os.getenv("DEEPSEEK_WEB_IDLE_SECONDS") == "never" and backend == "browser"
+                    else integer_env("DEEPSEEK_WEB_IDLE_SECONDS", 60, 0, 3600)
+                    if os.getenv("DEEPSEEK_WEB_IDLE_SECONDS") != "never" else 60)
     worker = Worker(browser, idle_seconds=idle_seconds)
     server = Server(port, os.environ["DEEPSEEK_WEB_WORKER_TOKEN"], worker)
 

@@ -94,9 +94,9 @@ def child_processes():
         return []
 
 
-def reap_exited_browser_children(worker_pid):
+def reap_exited_browser_children(keep_pids):
     for pid in child_processes():
-        if pid != worker_pid:
+        if pid not in keep_pids:
             try:
                 os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
@@ -118,7 +118,7 @@ def reap_browser_children():
         time.sleep(0.05)
 
 
-def run_web(command, env):
+def run_web(command, env, companion=None):
     subreaper = ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
     stop = False
 
@@ -128,11 +128,16 @@ def run_web(command, env):
 
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, request_stop)
-    worker = subprocess.Popen(command, env=env, start_new_session=True)
+    processes = []
     try:
-        while not stop and worker.poll() is None:
+        if companion is not None:
+            processes.append(subprocess.Popen(companion[0], env=companion[1], start_new_session=True))
+        worker = subprocess.Popen(command, env=env, start_new_session=True)
+        processes.append(worker)
+        keep = {process.pid for process in processes}
+        while not stop and all(process.poll() is None for process in processes):
             if subreaper:
-                reap_exited_browser_children(worker.pid)
+                reap_exited_browser_children(keep)
             time.sleep(0.2)
     finally:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as window:
@@ -141,22 +146,48 @@ def run_web(command, env):
                 window.connect(str(WORKER_RUNTIME / "window.sock"))
             except OSError:
                 pass
-        if worker.poll() is None:
-            worker.terminate()
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        deadline = time.monotonic() + 25
+        for process in processes:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    pass
+        for process in processes:
             try:
-                worker.wait(timeout=30)
-            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
-        try:
-            os.killpg(worker.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        worker.wait()
+            process.wait()
         if subreaper:
             reap_browser_children()
     if stop:
         return 0
-    return worker.returncode if worker.returncode >= 0 else 128 - worker.returncode
+    errors = [p.returncode for p in processes if p.returncode]
+    if errors:
+        return errors[0] if errors[0] >= 0 else 128 - errors[0]
+    return 1
+
+
+def api_environment(env):
+    """Only the local API service receives credentials, never Telegram secrets."""
+    return {
+        key: value for key, value in env.items() if key in COMMON_ENV or key.startswith("LC_")
+    } | {
+        "NODE_ENV": "production",
+        "NON_INTERACTIVE": "1",
+        "OPEN_DASHBOARD": "1",
+        "FDSA_RESTARTED": "1",
+        "HOST": "127.0.0.1",
+        "PORT": env["DEEPSEEK_WEB_API_PORT"],
+        "DEEPSEEK_AUTH_PATH": env["DEEPSEEK_WEB_AUTH_PATH"],
+        "PROXY_API_KEY": env["DEEPSEEK_WEB_WORKER_TOKEN"],
+        "REQUIRE_PROXY_API_KEY": "1",
+        "DEEPSEEK_MAX_CONCURRENT": "1",
+    }
 
 
 def main():
@@ -174,6 +205,16 @@ def main():
     check_environment(values)
     env = process_environment(values)
     release = (ROOT / "current").resolve(strict=True)
+    has_api = (release / "free-deepseek-api/server.js").is_file()
+    mode = values.get("DEEPSEEK_WEB_BACKEND", "api" if has_api else "browser")
+    if mode not in ("api", "browser"):
+        raise ValueError("DEEPSEEK_WEB_BACKEND must be api or browser")
+    if mode == "api" and not has_api:
+        raise ValueError("API backend selected but FreeDeepseekAPI is not deployed")
+    env["DEEPSEEK_WEB_BACKEND"] = mode
+    env["DEEPSEEK_WEB_API_PORT"] = values.get("DEEPSEEK_WEB_API_PORT", "9655")
+    env["DEEPSEEK_WEB_AUTH_PATH"] = str(ROOT / "data/deepseek-auth.json")
+    env["DEEPSEEK_WEB_AUTH_REFRESH_SECONDS"] = values.get("DEEPSEEK_WEB_AUTH_REFRESH_SECONDS", "21600")
     if args[0] == "bot":
         binary = str(release / "bin/LLM_chat_bot")
         libraries = release / "lib"
@@ -182,11 +223,16 @@ def main():
             os.execve(loader, [str(loader), "--inhibit-cache", "--library-path", str(libraries), binary], env)
         os.execve(binary, [binary], env)
 
+    if args[0] == "web":
+        worker_env = worker_environment(env)
+        if mode == "api":
+            companion = (["/usr/bin/node", str(release / "free-deepseek-api/server.js")], api_environment(env))
+            return run_web([str(release / ".venv/bin/python"), str(release / "deepseek-web/worker.py")],
+                           worker_env, companion=companion)
+        return run_web([str(release / ".venv/bin/python"), str(release / "deepseek-web/worker.py")], worker_env)
     env = worker_environment(env)
     python = str(release / ".venv/bin/python")
     source = release / "deepseek-web"
-    if args[0] == "web":
-        return run_web([python, str(source / "worker.py")], env)
     os.execve(python, [python, str(source / "maintenance.py"), *args[1:]], env)
 
 
