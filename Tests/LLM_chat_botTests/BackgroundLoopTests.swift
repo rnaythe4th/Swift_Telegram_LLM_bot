@@ -113,6 +113,20 @@ final class BackgroundLoopTests: XCTestCase {
         XCTAssertEqual(active, [.volatileMode])
     }
 
+    func testCatalogueOutageOnlyAppearsInMetrics() async {
+        let telegram = RecordingTelegram()
+        let alerter = await makeAlerter(telegram: telegram)
+
+        await alerter.report(.modelCatalogueDown, active: true)
+        let active = await alerter.activeAlerts()
+        XCTAssertEqual(active, [.modelCatalogueDown])
+
+        await alerter.report(.modelCatalogueDown, active: false)
+        let recovered = await alerter.activeAlerts()
+        XCTAssertTrue(recovered.isEmpty)
+        XCTAssertEqual(telegram.attempts, 0)
+    }
+
     private func makeAlerter(telegram: TelegramGatewayPort) async -> OwnerAlerter {
         let store = Fixtures.makeStore()
         await store.identifyUser(userID: Fixtures.ownerUserID, username: Fixtures.ownerHandle, firstName: nil)

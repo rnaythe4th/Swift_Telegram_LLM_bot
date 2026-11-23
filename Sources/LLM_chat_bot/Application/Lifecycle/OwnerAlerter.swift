@@ -112,6 +112,8 @@ actor OwnerAlerter {
         }
         if incidents[alert]?.announced == true { return }
         if incidents[alert] == nil { incidents[alert] = Incident(since: now, announced: false) }
+        // Catalogue outages are tracked in /metrics only.
+        guard alert != .modelCatalogueDown else { return }
         guard attempts.claim(alert, now: now) else { return }
         let body = "<b>\(alert.title)</b>\n\n\(alert.advice)" + Self.detailLine(detail)
         if await send(body) { incidents[alert]?.announced = true }

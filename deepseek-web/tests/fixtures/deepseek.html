@@ -105,6 +105,12 @@
   if (mode === 'old-home') user('Old question');
   if (mode === 'before-click') send.hidden = true;
   if (mode === 'keyboard-submit') send.removeAttribute('data-testid');
+  if (mode === 'intercept-once' && !sessionStorage.intercepted) {
+    sessionStorage.intercepted = 'true';
+    const {left, top, width, height} = send.getBoundingClientRect();
+    add(document.body, 'div', {style:
+      `position:fixed;z-index:10;left:${left}px;top:${top}px;width:${width}px;height:${height}px`});
+  }
   if (mode.startsWith('native-')) {
     const icon = {role: 'button', class: 'ds-button ds-button--primary ds-button--filled ds-button--circle'};
     input.removeAttribute('id');
@@ -126,7 +132,10 @@
     if (search.getAttribute('aria-pressed') !== 'false' || !text || !event.isTrusted) {
       return alert('Incorrect configuration');
     }
-    if (mode === 'send-lost') return;
+    if (mode === 'send-lost') {
+      sessionStorage.lostSubmissions = String(Number(sessionStorage.lostSubmissions || 0) + 1);
+      return;
+    }
     if (id === null) {
       id = 'chat-' + crypto.randomUUID();
       chats[id] = [];
@@ -142,16 +151,22 @@
     stop.hidden = false;
     const streaming = mode === 'streaming';
     const wrap = answer(streaming ? 'First fragment' : response, false);
+    const finish = () => {
+      stop.hidden = true;
+      complete(wrap);
+    };
     if (streaming) {
       const content = wrap.querySelector('.ds-assistant-message-main-content p');
-      setTimeout(() => { content.textContent = 'First fragment < & next'; }, 400);
-      setTimeout(() => { content.textContent = response; }, 850);
-    }
-    if (!stalled) {
-      setTimeout(() => {
-        stop.hidden = true;
-        complete(wrap);
-      }, streaming ? 850 : 150);
+      window.advanceStream = () => {
+        if (content.textContent === 'First fragment') {
+          content.textContent = 'First fragment < & next';
+        } else {
+          content.textContent = response;
+          finish();
+        }
+      };
+    } else if (!stalled) {
+      setTimeout(finish, 150);
     }
   }
 

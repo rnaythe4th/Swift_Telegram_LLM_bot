@@ -13,7 +13,7 @@ struct DeepSeekWebWorkerRequest: Encodable, Sendable {
 }
 
 enum DeepSeekWebWorkerStatus: String, Decodable, Sendable {
-    case ready, maintenance, prepared, completed, cancelled, quota, busy, loginRequired
+    case ready, warming, maintenance, prepared, completed, cancelled, quota, busy, loginRequired
     case inputTooLong, chatUnavailable, unknownUI, uncertain, unavailable, notAccepted, inProgress, moderated
 }
 

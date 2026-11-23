@@ -2,7 +2,7 @@
 
 `llmchat` состоит из двух служб runit. Swift читает Telegram через long polling, а DeepSeek Web использует Firefox и отдельный профиль. Swift, HTTP worker и временный VNC используют локальные порты `18080`, `8766` и `15944` соответственно. Профиль хранится в `/opt/llmchat/data/firefox-profile`.
 
-Установите `DEEPSEEK_WEB_IDLE_SECONDS=never` в `/opt/llmchat/.env`, чтобы Firefox оставался запущенным между запросами. При обычной настройке он закрывается после 60 секунд простоя.
+Установите `DEEPSEEK_WEB_IDLE_SECONDS=never` в `/opt/llmchat/.env`, чтобы служба открывала DeepSeek в Firefox при запуске и держала окно открытым между запросами. При настройке по умолчанию Firefox закрывается после 60 секунд простоя.
 
 До установки сверить статусы всех работающих ботов, свободные порты, память и место на диске. Из прежнего `.env` нужны `TG_BOT_TOKEN` и `DATABASE_URL` с сессионным подключением к PostgreSQL, а также `STATE_ENCRYPTION_KEY`, если он использовался раньше. Перенести `ROUTER_API_KEY` для OpenRouter и Yandex и `DEEPSEEK_API_KEY` для DeepSeek API, чтобы сохранить доступ к этим сервисам. Добавить новый `DEEPSEEK_WEB_WORKER_TOKEN` со значением из `openssl rand -hex 32`. Скопировать файл по SSH с правами `0600`. Если предыдущий экземпляр этого же Telegram-бота активен, остановить его перед включением polling на телефоне.
 

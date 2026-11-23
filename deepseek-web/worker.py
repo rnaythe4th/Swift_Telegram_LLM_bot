@@ -26,6 +26,8 @@ RESULT_LIMIT = 32
 RESULT_TTL = 1800
 PREPARED_TTL = 45
 BODY_TIMEOUT = 5
+WARM_WAIT_SECONDS = 35
+WARM_RETRY_SECONDS = 15
 AUTH_TOKEN = re.compile(r"[a-zA-Z0-9._~+/=-]{16,256}", re.ASCII)
 
 
@@ -142,9 +144,11 @@ class Worker:
         self.prepared_ttl = prepared_ttl
         self.idle_seconds = idle_seconds
         self.last_activity = time.monotonic()
+        self.warm_stop = None
+        self.warm_retry_at = 0
         self.closing_browser = False
         self.shutting_down = False
-        self.sweeper = threading.Thread(target=self._sweep, name="browser-idle", daemon=True)
+        self.sweeper = threading.Thread(target=self._sweep, name="browser-lifecycle", daemon=True)
         self.sweeper.start()
 
     def health(self):
@@ -153,11 +157,15 @@ class Worker:
                 status = "unavailable"
             elif self.gate:
                 status = self.gate
+            elif self.warm_stop is not None:
+                status = "warming"
             elif self.active or self.closing_browser:
                 status = "busy"
             else:
                 status = "ready"
             response = {"version": 1, "status": status, "ready": status in {"ready", "busy"}}
+            if self.idle_seconds is None:
+                response["browserWarm"] = (status == "ready" and self.browser.session is not None)
             if self.marker:
                 response["accountMarker"] = str(self.marker)
             return response
@@ -193,15 +201,56 @@ class Worker:
                     self.results.pop(key, None)
                 if self.active and self.active.phase == "prepared" and self.active.deadline <= now:
                     self._release_prepared("cancelled")
-                if (self.active or self.closing_browser or self.browser.session is None
-                        or self.idle_seconds is None or now - self.last_activity < self.idle_seconds):
+                if self.active or self.closing_browser or self.gate:
                     self.lock.wait(0.5)
                     continue
-                self.closing_browser = True
+                if self.idle_seconds is None and self.browser.session is None and now >= self.warm_retry_at:
+                    warm_stop = self.warm_stop = threading.Event()
+                elif (self.idle_seconds is not None and self.browser.session is not None
+                        and now - self.last_activity >= self.idle_seconds):
+                    warm_stop = None
+                    self.closing_browser = True
+                else:
+                    self.lock.wait(0.5)
+                    continue
+            if warm_stop is not None:
+                self._warm(warm_stop)
+            else:
+                self._close()
+                with self.lock:
+                    self.closing_browser = False
+                    self.lock.notify_all()
+
+    def _warm(self, stop):
+        started = time.monotonic()
+        failure = None
+        try:
+            self.browser.verify(stop)
+        except BrowserFailure as error:
+            failure = error.status
+        except Exception as error:
+            failure = type(error).__name__
+        if failure or stop.is_set():
             self._close()
-            with self.lock:
-                self.closing_browser = False
-                self.lock.notify_all()
+        with self.lock:
+            if failure == "loginRequired":
+                self._pause_for_login()
+            self.warm_stop = None
+            self.last_activity = time.monotonic()
+            self.warm_retry_at = self.last_activity + WARM_RETRY_SECONDS
+            self.lock.notify_all()
+        if failure and not stop.is_set():
+            LOG.warning("browser warmup failed (%s) %.2fs", failure, time.monotonic() - started)
+        elif not stop.is_set():
+            LOG.info("browser warmed %.2fs", time.monotonic() - started)
+
+    def _pause_for_login(self):
+        if not self.gate:
+            self.gate = "loginRequired"
+            try:
+                write_state(self.gate_path, self.gate)
+            except OSError:
+                LOG.error("could not persist browser authentication pause")
 
     def _release_prepared(self, status):
         operation = self.active
@@ -228,6 +277,14 @@ class Worker:
         with self.lock:
             if request.account_marker != self.marker:
                 return reply(request, "notAccepted")
+            if self.warm_stop is not None and action in {"prepare", "reconcile"}:
+                ready = self.lock.wait_for(
+                    lambda: self.warm_stop is None or self.gate or self.shutting_down, timeout=WARM_WAIT_SECONDS,
+                )
+                if not ready:
+                    return reply(request, "unavailable")
+                if request.account_marker != self.marker:
+                    return reply(request, "notAccepted")
             cached = self._cached(request)
             current = self.active
             if current and current.request.id == request.id and current.request.binding != request.binding:
@@ -340,18 +397,18 @@ class Worker:
             result = reply(request, "uncertain" if maybe_sent else "unavailable", operation.accepted,
                            remoteChatID=operation.candidate_id, mayHaveSent=maybe_sent)
 
-        if result["status"] != "completed" or operation.stop.is_set():
+        rejected_before_send = (not result.get("mayHaveSent")
+                                and result["status"] in {"chatUnavailable", "quota", "busy", "inputTooLong", "moderated"})
+        if operation.stop.is_set() or (result["status"] != "completed" and not rejected_before_send):
             self._close()
 
         with self.lock:
-            if result["status"] == "loginRequired" and not self.gate:
-                self.gate = "loginRequired"
-                try:
-                    write_state(self.gate_path, self.gate)
-                except OSError:
-                    LOG.error("could not persist browser authentication pause")
+            if result["status"] == "loginRequired":
+                self._pause_for_login()
             self._store(request, result)
             self.last_activity = time.monotonic()
+            if self.browser.session is None:
+                self.warm_retry_at = self.last_activity + WARM_RETRY_SECONDS
             self.active = None
             self.lock.notify_all()
 
@@ -369,6 +426,10 @@ class Worker:
                 else:
                     self.active.stop.set()
                     return self._maintenance_reply("busy")
+            if self.warm_stop is not None:
+                self.warm_stop.set()
+                self.lock.notify_all()
+                return self._maintenance_reply("busy")
             if self.closing_browser:
                 return self._maintenance_reply("busy")
             self.closing_browser = True
@@ -388,7 +449,7 @@ class Worker:
         with self.lock:
             if not self.gate or self.shutting_down:
                 return self._maintenance_reply("unavailable")
-            if self.active or self.closing_browser:
+            if self.active or self.closing_browser or self.warm_stop is not None:
                 return self._maintenance_reply("busy")
             if abort:
                 return self._maintenance_reply("maintenance")
@@ -418,7 +479,8 @@ class Worker:
             LOG.warning("browser authorization verification failed (%s)", type(error).__name__)
             status = "unavailable"
         finally:
-            self._close()
+            if status != "ready" or self.idle_seconds is not None:
+                self._close()
             with self.lock:
                 self.closing_browser = False
                 self.last_activity = time.monotonic()
@@ -434,9 +496,12 @@ class Worker:
                     self._release_prepared("cancelled")
                 else:
                     self.active.stop.set()
+            if self.warm_stop is not None:
+                self.warm_stop.set()
             self.lock.notify_all()
-            self.lock.wait_for(lambda: self.active is None and not self.closing_browser, timeout=28)
-            idle = self.active is None and not self.closing_browser
+            idle = self.lock.wait_for(
+                lambda: self.active is None and self.warm_stop is None and not self.closing_browser, timeout=28,
+            )
         if idle:
             self._close()
 

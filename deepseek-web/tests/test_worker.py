@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.client import HTTPConnection
 import json
@@ -26,6 +27,9 @@ class FakeBrowser:
         self.sending = threading.Event()
         self.release = threading.Event()
         self.closed = threading.Event()
+        self.verifying = threading.Event()
+        self.allow_verify = threading.Event()
+        self.allow_verify.set()
         self.reject_login = False
         self.uncertain = False
         self.block_close = False
@@ -35,6 +39,10 @@ class FakeBrowser:
         self.guard = locked_profile(self.profile)
         self.guard.__enter__()
         self.session = object()
+        self.verifying.set()
+        while not self.allow_verify.wait(0.02):
+            if stop.is_set():
+                raise BrowserFailure("cancelled")
         if self.reject_login:
             raise BrowserFailure("loginRequired")
 
@@ -116,14 +124,42 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.worker.perform(self.request, "status")["status"], "uncertain")
         self.assertEqual(self.worker.perform(other, "prepare")["status"], "prepared")
 
-    def test_firefox_can_stay_open_until_shutdown(self):
-        self.worker.idle_seconds = None
-        self.assertEqual(self.worker.perform(self.request, "prepare")["status"], "prepared")
-        self.browser.release.set()
-        self.assertEqual(self.worker.perform(self.request, "send")["status"], "completed")
-        self.assertFalse(self.browser.closed.wait(0.65))
+    def test_startup_warms_firefox_and_prepare_waits_for_it(self):
         self.worker.shutdown()
+        self.browser.closed.clear()
+        self.browser.allow_verify.clear()
+        worker = Worker(self.browser, idle_seconds=None)
+        self.addCleanup(worker.shutdown)
+        self.assertTrue(self.browser.verifying.wait(2))
+        self.assertEqual(worker.health()["status"], "warming")
+        self.assertFalse(worker.health()["browserWarm"])
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(worker.perform, self.request, "prepare")
+            try:
+                with self.assertRaises(TimeoutError):
+                    pending.result(timeout=0.1)
+            finally:
+                self.browser.allow_verify.set()
+            self.assertEqual(pending.result(timeout=2)["status"], "prepared")
+        self.browser.release.set()
+        self.assertEqual(worker.perform(self.request, "send")["status"], "completed")
+        self.assertTrue(worker.health()["browserWarm"])
+        self.assertFalse(self.browser.closed.wait(0.65))
+        worker.shutdown()
         self.assertTrue(self.browser.closed.is_set())
+
+    def test_maintenance_can_stop_startup_warmup(self):
+        self.worker.shutdown()
+        self.browser.closed.clear()
+        self.browser.allow_verify.clear()
+        worker = Worker(self.browser, idle_seconds=None)
+        self.addCleanup(worker.shutdown)
+        self.assertTrue(self.browser.verifying.wait(2))
+        self.assertEqual(worker.begin_maintenance()["status"], "busy")
+        self.assertTrue(self.browser.closed.wait(2))
+        self.assertEqual(worker.health()["status"], "maintenance")
+        with locked_profile(self.profile):
+            self.assertFalse(worker.health()["browserWarm"])
 
     def test_deep_think_selection_is_part_of_operation_binding(self):
         enabled = replace(self.request, deep_think=True)

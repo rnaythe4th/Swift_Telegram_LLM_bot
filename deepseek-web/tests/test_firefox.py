@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
+from time import monotonic
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from browser import DEEPTHINK, Browser, BrowserFailure
@@ -18,6 +20,8 @@ FIXTURE = Path(__file__).parent.joinpath("fixtures/deepseek.html").read_text()
 
 class FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/":
+            self.server.home_loads += 1
         data = FIXTURE.replace("__FIXTURE_MODE__", json.dumps(self.server.mode)).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -34,6 +38,7 @@ class FirefoxTest(unittest.TestCase):
     def setUp(self):
         self.site = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
         self.site.mode = "normal"
+        self.site.home_loads = 0
         server = threading.Thread(target=self.site.serve_forever, daemon=True)
         server.start()
         self.addCleanup(server.join, 3)
@@ -61,6 +66,28 @@ class FirefoxTest(unittest.TestCase):
     def run_turn(self, request):
         preparation = self.browser.prepare(request, self.stop)
         return self.browser.send(request, preparation, self.stop, self.track)
+
+    def test_reuses_verified_home_after_navigation_timeout(self):
+        from selenium.common.exceptions import TimeoutException
+
+        driver = self.browser._open()
+        load = driver.get
+
+        def loaded_with_timeout(url):
+            load(url)
+            raise TimeoutException()
+
+        with patch.object(driver, "get", side_effect=loaded_with_timeout) as get:
+            self.browser.verify(self.stop)
+            answer = self.run_turn(self.request("synthetic input"))
+        get.assert_called_once_with(self.browser.home)
+        self.assertIn(" / 1 / synthetic input", answer.text)
+
+    def test_intercepted_click_recovers_without_duplicate_send(self):
+        self.site.mode = "intercept-once"
+        answer = self.run_turn(self.request("synthetic input"))
+        self.assertIn(" / 1 / synthetic input", answer.text)
+        self.assertEqual(self.site.home_loads, 2)
 
     def test_topics_restart_reconcile_and_final_format(self):
         first = self.run_turn(self.request("A formatted 😀\nКириллица"))
@@ -98,10 +125,18 @@ class FirefoxTest(unittest.TestCase):
 
     def test_reports_growing_answer_before_completion(self):
         self.site.mode = "streaming"
-        answer = self.run_turn(self.request("stream this"))
-        partials = {text for remote_id, accepted, text in self.progress
-                    if remote_id == answer.remote_id and accepted and text}
-        self.assertEqual(partials, {"First fragment", "First fragment < & next"})
+        self.browser.generation_seconds = 5
+        request = self.request("stream this")
+        prepared = self.browser.prepare(request, self.stop)
+
+        def advance(remote_id, accepted, text):
+            if remote_id and accepted and text:
+                self.track(remote_id, accepted, text)
+                self.browser.session[0].execute_script("window.advanceStream()")
+
+        answer = self.browser.send(request, prepared, self.stop, advance)
+        self.assertEqual(self.progress, [(answer.remote_id, True, "First fragment"),
+                                         (answer.remote_id, True, "First fragment < & next")])
         self.assertTrue(answer.text.endswith(" / 1 / stream this"))
 
     def test_deep_think_overrides_worker_default_per_turn(self):
@@ -141,6 +176,8 @@ class FirefoxTest(unittest.TestCase):
         ):
             with self.subTest(mode=mode), self.assertRaises(BrowserFailure) as exception:
                 self.site.mode = mode
+                if self.browser.session:
+                    self.browser.session[0].get(self.browser.home)
                 self.run_turn(self.request("synthetic input"))
             self.assertEqual(exception.exception.status, expected)
             self.assertFalse(exception.exception.accepted)
@@ -152,13 +189,20 @@ class FirefoxTest(unittest.TestCase):
         first = self.run_turn(self.request("A"))
         other = self.request("B")
         self.site.mode = "send-lost"
-        with self.assertRaises(BrowserFailure) as error:
-            self.run_turn(other)
+        self.browser.generation_seconds = 10
+        prepared = self.browser.prepare(other, self.stop)
+        started = monotonic()
+        with patch("browser.SUBMIT_CONFIRM_SECONDS", 0.4):
+            with self.assertRaises(BrowserFailure) as error:
+                self.browser.send(other, prepared, self.stop, self.track)
+        self.assertLess(monotonic() - started, 5)
+        self.assertEqual(self.browser.session[0].execute_script("return sessionStorage.lostSubmissions"), "1")
         self.assertEqual(error.exception.status, "uncertain")
         self.assertFalse(error.exception.accepted)
         self.assertTrue(error.exception.may_have_sent)
 
         self.site.mode = "stalled"
+        self.browser.generation_seconds = 1.7
         with self.assertRaises(BrowserFailure) as error:
             self.run_turn(self.request("A2", first))
         self.assertEqual(error.exception.status, "uncertain")

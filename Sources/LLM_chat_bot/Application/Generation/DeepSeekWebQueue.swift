@@ -219,7 +219,7 @@ actor DeepSeekWebQueue {
                 try await fail(Self.message(.busy), key, operation, persistence: persistence)
                 return
             }
-            guard let workerHealth, workerHealth.status == .ready else {
+            guard let workerHealth, workerHealth.status == .ready || workerHealth.status == .warming else {
                 let status = workerHealth?.status ?? .unavailable
                 if status == .loginRequired { await alerter.report(.deepSeekWebLogin, active: true) }
                 try await fail(Self.message(status), key, operation, persistence: persistence)

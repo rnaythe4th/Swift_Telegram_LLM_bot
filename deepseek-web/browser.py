@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -16,10 +17,12 @@ import time
 from urllib.parse import urlsplit
 
 DEEPSEEK_URL = "https://chat.deepseek.com/"
+LOG = logging.getLogger("deepseek-web")
 CHAT_PATH = "/a/chat/s/"
 CHAT_ID = re.compile(r"[a-zA-Z0-9_-]{1,128}", re.ASCII)
 TAIL = re.compile(r"v1:([1-9][0-9]{0,8}):[a-f0-9]{64}", re.ASCII)
 MAX_RESPONSE_BYTES = 64_000
+SUBMIT_CONFIRM_SECONDS = 20
 COMPOSER = '#chat-input, [data-testid="chat-input"], textarea[placeholder], [contenteditable="true"][role="textbox"]'
 SEND = '[data-testid="send-button"], [aria-label="Send" i], [aria-label="Send message" i], [title="Send message" i]'
 NATIVE_SEND = 'div[role="button"].ds-button.ds-button--primary.ds-button--filled.ds-button--circle'
@@ -131,6 +134,7 @@ return {
 
 SET_COMPOSER = """
 const [element, text] = arguments;
+element.focus({preventScroll: true});
 if (element instanceof HTMLTextAreaElement) {
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(element, text);
 } else if (element.isContentEditable) {
@@ -307,7 +311,7 @@ class Browser:
             client = ClientConfig(remote_server_addr=service.service_url, timeout=12,
                                   proxy=Proxy(raw={"proxyType": ProxyType.DIRECT}))
             driver = webdriver.Remote(command_executor=service.service_url, options=options, client_config=client)
-            driver.set_page_load_timeout(10)
+            driver.set_page_load_timeout(5)
             driver.set_script_timeout(8)
             self.session = driver, service
             return driver
@@ -392,10 +396,15 @@ class Browser:
     def _chat_url(self, remote_id):
         return self.home + (CHAT_PATH.lstrip("/") + remote_id if remote_id else "")
 
-    def _go(self, remote_id):
-        driver = self._open()
-        driver.get(self._chat_url(remote_id))
-        return driver
+    def _navigate(self, driver, remote_id):
+        from selenium.common.exceptions import TimeoutException
+
+        try:
+            driver.get(self._chat_url(remote_id))
+        except TimeoutException:
+            # The composer can be usable while page resources are still loading.
+            # The caller still verifies the origin, chat ID and visible page.
+            LOG.info("browser navigation timed out; checking the visible page")
 
     def _read(self, driver):
         return driver.execute_script(READ_TURNS, STOP)
@@ -441,50 +450,67 @@ class Browser:
         return composer, len(turns)
 
     def prepare(self, request, stop):
-        from selenium.common.exceptions import StaleElementReferenceException
+        from selenium.common.exceptions import InvalidSessionIdException, NoSuchWindowException
+        from urllib3.exceptions import HTTPError
 
+        was_open = self.session is not None
+        try:
+            return self._prepare(request, stop)
+        except (InvalidSessionIdException, NoSuchWindowException, HTTPError) as error:
+            if not was_open or stop.is_set():
+                raise
+            LOG.info("reopening browser before submission (%s)", type(error).__name__)
+            self.close()
+            return self._prepare(request, stop)
+
+    def _prepare(self, request, stop):
         deadline = time.monotonic() + self.prepare_seconds
-        driver = self._open()
-        timeout = "chatUnavailable" if request.remote_id else "unknownUI"
-
-        def view():
-            return self._view_for(driver, request.remote_id, request.tail)
-
-        loaded = None
-        if request.remote_id and driver.current_url == self._chat_url(request.remote_id):
-            try:
-                loaded = view()
-            except StaleElementReferenceException:
-                pass
-        if loaded is None:
-            driver.get(self._chat_url(request.remote_id))
-            self._wait(stop, deadline, view, timeout)
+        driver = self._load_view(request.remote_id, request.tail, stop, deadline)
         deep_think = self.deepthink if request.deep_think is None else request.deep_think
         self._set_toggle(driver, DEEPTHINK, deep_think, stop, deadline)
         self._set_toggle(driver, SEARCH, False, stop, deadline)
-        _, count = self._wait(stop, deadline, view, timeout)
+        _, count = self._wait(stop, deadline, lambda: self._view_for(driver, request.remote_id, request.tail),
+                              "chatUnavailable" if request.remote_id else "unknownUI")
         if not self._toggles_match(driver, deep_think):
             raise BrowserFailure("unknownUI")
         return Prepared(request.remote_id, request.tail, count)
 
+    def _load_view(self, remote_id, tail, stop, deadline):
+        from selenium.common.exceptions import StaleElementReferenceException
+
+        if stop.is_set():
+            raise BrowserFailure("cancelled")
+        driver = self._open()
+
+        def view():
+            return self._view_for(driver, remote_id, tail)
+
+        if driver.current_url == self._chat_url(remote_id):
+            try:
+                if view() is not None:
+                    return driver
+            except StaleElementReferenceException:
+                pass
+            except BrowserFailure as error:
+                if error.status != "unknownUI":
+                    raise
+        self._navigate(driver, remote_id)
+        self._wait(stop, deadline, view, "chatUnavailable" if remote_id else "unknownUI")
+        return driver
+
     def verify(self, stop):
-        driver = self._go(None)
-        self._wait(stop, time.monotonic() + self.prepare_seconds,
-                   lambda: self._view_for(driver, None, None), "unknownUI")
+        self._load_view(None, None, stop, time.monotonic() + self.prepare_seconds)
 
     @staticmethod
     def _can_send(control):
-        return (control.is_displayed() and control.is_enabled()
+        return (control.is_enabled()
                 and control.get_dom_attribute("disabled") is None
                 and control.get_dom_attribute("aria-disabled") != "true"
                 and "ds-button--disabled" not in (control.get_dom_attribute("class") or "").split())
 
-    def send(self, request, prepared, stop, progress):
-        from selenium.common.exceptions import WebDriverException
+    def _submission(self, request, prepared, stop):
         from selenium.webdriver.common.keys import Keys
 
-        if len(request.prompt.encode("utf-16-le")) // 2 > self.max_prompt_units:
-            raise BrowserFailure("inputTooLong")
         driver = self.session[0]
         view = self._view_for(driver, prepared.remote_id, prepared.tail)
         if view is None or view[1] != prepared.count:
@@ -493,22 +519,16 @@ class Browser:
         limit = composer.get_dom_attribute("maxlength")
         if limit and limit.isdecimal() and len(request.prompt.encode("utf-16-le")) // 2 > int(limit):
             raise BrowserFailure("inputTooLong")
-        composer.click()
         if not driver.execute_script(SET_COMPOSER, composer, request.prompt):
             raise BrowserFailure("inputTooLong")
 
         def send_control():
             if self._identity(driver) != prepared.remote_id:
                 raise BrowserFailure("unknownUI")
-            controls = driver.find_elements("css selector", SEND)
-            for send in controls:
-                if self._can_send(send):
-                    return send.click
+            controls = driver.execute_script(NEAREST_SEND_CONTROLS, composer, f"{SEND}, {NATIVE_SEND}")
             if controls:
-                return None
-            controls = driver.execute_script(NEAREST_SEND_CONTROLS, composer, NATIVE_SEND)
-            if controls:
-                return controls[0].click if len(controls) == 1 and self._can_send(controls[0]) else None
+                visible = [control for control in controls if control.is_displayed()]
+                return visible[0].click if len(visible) == 1 and self._can_send(visible[0]) else None
             # The native composer handles Enter on layouts with an unlabeled send icon.
             if composer.get_dom_attribute("id") == "chat-input":
                 return lambda: composer.send_keys(Keys.ENTER)
@@ -526,13 +546,48 @@ class Browser:
             raise BrowserFailure("unknownUI")
         if stop.is_set():
             raise BrowserFailure("cancelled")
+        return driver, submit
 
-        # This is the only send call. A driver error can happen after delivery.
+    def send(self, request, prepared, stop, progress):
+        from selenium.common.exceptions import (
+            ElementClickInterceptedException, ElementNotInteractableException,
+            InvalidSessionIdException, NoSuchWindowException, StaleElementReferenceException, WebDriverException,
+        )
+        from urllib3.exceptions import HTTPError
+
+        if len(request.prompt.encode("utf-16-le")) // 2 > self.max_prompt_units:
+            raise BrowserFailure("inputTooLong")
+        for attempt in range(2):
+            try:
+                driver, submit = self._submission(request, prepared, stop)
+            except (InvalidSessionIdException, NoSuchWindowException, StaleElementReferenceException, HTTPError) as error:
+                if attempt:
+                    raise BrowserFailure("unavailable") from error
+                LOG.info("preparing submission again (%s)", type(error).__name__)
+            except WebDriverException as error:
+                LOG.warning("submission preparation failed (%s)", type(error).__name__)
+                raise BrowserFailure("unavailable") from error
+            else:
+                try:
+                    submit()
+                except (ElementClickInterceptedException, ElementNotInteractableException,
+                        StaleElementReferenceException) as error:
+                    # WebDriver rejected the interaction before dispatching it.
+                    if attempt:
+                        raise BrowserFailure("unknownUI") from error
+                    LOG.info("browser rejected interaction (%s); checking the composer again", type(error).__name__)
+                except (WebDriverException, HTTPError) as error:
+                    LOG.warning("submission needs confirmation (%s)", type(error).__name__)
+                    break
+                else:
+                    break
+            try:
+                prepared = self.prepare(request, stop)
+            except (WebDriverException, HTTPError) as error:
+                raise BrowserFailure("unavailable") from error
+
         remote_id, accepted = prepared.remote_id, False
-        try:
-            submit()
-        except WebDriverException:
-            pass
+        confirmation_deadline = time.monotonic() + SUBMIT_CONFIRM_SECONDS
 
         def result():
             nonlocal remote_id, accepted
@@ -549,6 +604,9 @@ class Browser:
             if result_id and complete:
                 return Answer(result_id, tail_for(state["turns"]), text)
             progress(remote_id, accepted, text if result_id else None)
+            if not accepted and time.monotonic() >= confirmation_deadline:
+                LOG.warning("browser did not confirm prompt submission")
+                raise BrowserFailure("uncertain")
             return None
 
         try:
@@ -599,7 +657,8 @@ class Browser:
         count = int(TAIL.fullmatch(request.tail)[1]) * 2 if request.tail else 0
         prepared = Prepared(request.remote_id, request.tail, count)
         deadline = time.monotonic() + min(self.prepare_seconds, 12)
-        driver = self._go(request.remote_id)
+        driver = self._open()
+        self._navigate(driver, request.remote_id)
 
         def result():
             if self._identity(driver) != request.remote_id:
