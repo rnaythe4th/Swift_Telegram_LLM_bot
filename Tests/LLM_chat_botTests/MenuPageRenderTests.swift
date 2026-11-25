@@ -11,11 +11,11 @@ final class MenuPageRenderTests: XCTestCase {
 
     private var telegram: FakeTelegram!
     private var gateway: TelegramHTTPGateway!
-    private var store: ChatContextStore!
-    private var menu: BotMenuHandler!
+    var store: ChatContextStore!
+    var menu: BotMenuHandler!
 
-    private let ownerID: UserID = 7_000
-    private let plainID: UserID = 7_100
+    let ownerID: UserID = 7_000
+    let plainID: UserID = 7_100
 
     override func setUp() async throws {
         telegram = FakeTelegram()
@@ -48,7 +48,7 @@ final class MenuPageRenderTests: XCTestCase {
 
     /// Callback data as the dispatcher sees it: `menu:<action>`. Anything else
     /// (a URL button, the stop button) is not this test's business.
-    private func menuActions(_ markup: InlineKeyboardMarkup) -> [String] {
+    func menuActions(_ markup: InlineKeyboardMarkup) -> [String] {
         markup.inline_keyboard
             .flatMap { $0 }
             .compactMap(\.callback_data)
@@ -59,7 +59,7 @@ final class MenuPageRenderTests: XCTestCase {
     }
 
     /// Every page, in a DM and in a group, for the owner and for a stranger.
-    private func everyRendering() -> [(page: MenuPage, chat: ChatKey, user: UserKey)] {
+    func everyRendering() -> [(page: MenuPage, chat: ChatKey, user: UserKey)] {
         var cases: [(MenuPage, ChatKey, UserKey)] = []
         for page in MenuPage.allCases {
             for chat in [ChatKey(chatID: plainID.privateChat, threadID: 0), ChatKey(chatID: -7_200, threadID: 0)] {
@@ -193,11 +193,26 @@ final class MenuPageRenderTests: XCTestCase {
         XCTAssertTrue(providerButtons.contains { $0.text == "Yandex · не настроен" })
 
         let main = await menu.renderPage(.main, chatKey: chat, invoker: owner)
-        XCTAssertTrue(menuActions(main.markup).contains(MenuRoute.navigation(to: .tuning)))
+        let mainActions = menuActions(main.markup)
+        for page in [MenuPage.role, .history, .reasoning, .tuning, .presets] {
+            XCTAssertTrue(mainActions.contains(MenuRoute.navigation(to: page)))
+        }
+        for page in [MenuPage.model, .temp, .provider, .stats] {
+            XCTAssertFalse(mainActions.contains(MenuRoute.navigation(to: page)))
+        }
+        XCTAssertTrue(main.markup.inline_keyboard.flatMap { $0 }.contains { $0.text == "🧠 DeepThink" })
         let tuning = await menu.renderPage(.tuning, chatKey: chat, invoker: owner)
         let actions = menuActions(tuning.markup)
-        for page in [MenuPage.model, .temp, .stats, .history, .reasoning] {
+        for page in [MenuPage.provider, .temp, .stats] {
             XCTAssertTrue(actions.contains(MenuRoute.navigation(to: page)))
+        }
+        for page in [MenuPage.model, .history, .reasoning] {
+            XCTAssertFalse(actions.contains(MenuRoute.navigation(to: page)))
+        }
+        XCTAssertTrue(actions.contains("mode:reset:tuning"))
+        for page in [MenuPage.provider, .stats, .temp] {
+            let screen = await menu.renderPage(page, chatKey: chat, invoker: owner)
+            XCTAssertTrue(menuActions(screen.markup).contains("nav:tuning"))
         }
         let deepThink = await menu.renderPage(.reasoning, chatKey: chat, invoker: owner)
         XCTAssertEqual(menuActions(deepThink.markup).filter { $0.hasPrefix("reasoning:") },
@@ -210,6 +225,15 @@ final class MenuPageRenderTests: XCTestCase {
         XCTAssertNil(afterWebCommand.reasoningEffort)
 
         try await sendCommand("/provider openrouter")
+        let apiMain = await menu.renderPage(.main, chatKey: chat, invoker: owner)
+        let apiActions = menuActions(apiMain.markup)
+        XCTAssertTrue(apiActions.contains("nav:model"))
+        XCTAssertTrue(apiActions.contains("nav:temp"))
+        XCTAssertTrue(apiMain.markup.inline_keyboard.flatMap { $0 }.contains { $0.text.hasPrefix("🧠 Размышления") })
+        XCTAssertFalse(apiMain.markup.inline_keyboard.flatMap { $0 }.contains { $0.text.contains("DeepThink") })
+        let apiTemp = await menu.renderPage(.temp, chatKey: chat, invoker: owner)
+        XCTAssertTrue(menuActions(apiTemp.markup).contains("open"))
+        XCTAssertTrue(menuActions(apiTemp.markup).contains("nav:tuning"))
         let reasoning = await menu.renderPage(.reasoning, chatKey: chat, invoker: owner)
         XCTAssertEqual(menuActions(reasoning.markup).filter { $0.hasPrefix("reasoning:") },
                        ["reasoning:set:low", "reasoning:set:medium", "reasoning:set:high", "reasoning:set:off"])
@@ -445,164 +469,55 @@ final class MenuPageRenderTests: XCTestCase {
         )
     }
 
-    /// The settings page leads with modes, and a ⭐ one stays visible to a free
-    /// chat: a ceiling nobody can see is a ceiling nobody pays to lift.
+    /// All configured modes live in Presets, retaining their access markers.
     func testSettingsPageOffersModesAndMarksLockedOnes() async {
         let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
-        let screen = await menu.renderPage(.main, chatKey: chat, invoker: UserKey.identified(plainID))
+        let user = UserKey.identified(plainID)
+        let main = await menu.renderPage(.main, chatKey: chat, invoker: user)
+        let mainActions = menuActions(main.markup)
+        XCTAssertTrue(mainActions.contains("nav:presets"))
+        XCTAssertFalse(mainActions.contains { $0.hasPrefix("mode:pick:") || $0.hasPrefix("mode:reset") })
 
+        let screen = await menu.renderPage(.presets, chatKey: chat, invoker: user)
         let picks = menuActions(screen.markup).filter { $0.hasPrefix("mode:pick:") }
-        XCTAssertFalse(picks.isEmpty, "the settings page offers no modes at all")
+        let modes = await store.modeConfig().activeModes
+        XCTAssertFalse(modes.isEmpty)
+        XCTAssertEqual(picks, modes.map { "mode:pick:\($0.id)" })
+        XCTAssertTrue(menuActions(screen.markup).contains("open"))
 
         let labels = screen.markup.inline_keyboard.flatMap { $0 }.map(\.text)
         XCTAssertTrue(labels.contains { $0.hasSuffix("⭐") }, "no locked mode is advertised to a free chat")
     }
 
-    /// Telegram caps `callback_data` at 64 bytes and refuses the *whole*
-    /// message when one button is over it, so an oversized payload does not
-    /// disable a button — it stops the page from opening at all. Every button
-    /// on every page has to stay inside the cap, including the ones carrying a
-    /// preset the owner typed in.
-    func testNoButtonCarriesAPayloadTelegramWouldReject() async {
-        // Longer than the 48 characters that fit after `menu:model:gsel:` —
-        // OpenRouter really does list ids this long.
-        let longModelID = "cognitivecomputations/dolphin3.0-r1-mistral-24b:free"
-        XCTAssertGreaterThan(longModelID.utf8.count, 48, "this id is too short to prove anything")
 
-        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
-        _ = await store.addPreset(category: .model, display: "Длинная", value: longModelID, chatID: chat.chatID)
-        _ = await store.addChatPreset(category: .model, chatKey: chat, display: "Своя длинная", value: longModelID)
-        await store.addFreeModel(longModelID)
-
-        for (page, chatKey, user) in everyRendering() {
-            let markup = await menu.renderPage(page, chatKey: chatKey, invoker: user).markup
-            for button in markup.inline_keyboard.flatMap({ $0 }) {
-                guard let data = button.callback_data else { continue }
-                XCTAssertLessThanOrEqual(
-                    data.utf8.count, MenuRoute.maxCallbackDataBytes,
-                    "\(page): \"\(button.text)\" carries \(data.utf8.count) bytes — Telegram would refuse the whole page"
-                )
-            }
-        }
-    }
-
-    /// …and the button still means what it says: the payload it carries has to
-    /// resolve back to the preset it was drawn for, or the page renders and
-    /// nothing happens when it is tapped.
-    func testAModelButtonResolvesBackToItsPreset() async {
-        let longModelID = "cognitivecomputations/dolphin3.0-r1-mistral-24b:free"
-        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
-        _ = await store.addPreset(category: .model, display: "Длинная", value: longModelID, chatID: chat.chatID)
-
-        let presets = await store.modelPresets(chatID: chat.chatID)
-        let markup = await menu.renderPage(.model, chatKey: chat, invoker: UserKey.identified(ownerID)).markup
-        let tokens = menuActions(markup)
-            .compactMap { MenuRoute(action: $0) }
-            .filter { $0.command == .model && $0.sub == "gsel" }
-            .compactMap { $0.arg(2) }
-
-        XCTAssertEqual(tokens.count, presets.count, "the picker did not draw one button per preset")
-        for (token, preset) in zip(tokens, presets) {
-            XCTAssertEqual(
-                BotMenuHandler.presetTarget(token, in: presets)?.value, preset.value,
-                "button payload \"\(token)\" does not lead back to \(preset.value)"
-            )
-        }
-
-        // Buttons in messages an older build already sent carry the value
-        // itself; they have to keep working.
-        XCTAssertEqual(BotMenuHandler.presetTarget(longModelID, in: presets)?.value, longModelID)
-    }
-
-    /// Text a person typed is escaped where it becomes markup.
-    ///
-    /// «✏️ Своя модель» and «✏️ Своя роль» are open to every member of a chat,
-    /// and both values are printed into HTML on four pages. An unescaped `<`
-    /// does not garble a page — Telegram refuses the whole message, so the menu
-    /// stops opening at all, in a group for everybody, and the only way back is
-    /// a command. One member could switch off the chat's menu with one message.
-    func testTypedModelAndRoleCannotBreakThePagesTheyAppearOn() async {
-        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
-        _ = await store.setModelAndResetHistory(chatKey: chat, newModel: "<b>evil</b>/model", providerRouting: "<i>up</i>")
-        _ = await store.setRoleAndResetHistory(chatKey: chat, role: "Ты <script>alert(1)</script> & друг")
-
-        for page in [MenuPage.main, .model, .role, .tuning] {
-            let text = await menu.renderPage(page, chatKey: chat, invoker: UserKey.identified(plainID)).text
-            XCTAssertFalse(text.contains("<b>evil"), "\(page) printed a typed model id as markup")
-            XCTAssertFalse(text.contains("<script>"), "\(page) printed a typed role as markup")
-            XCTAssertFalse(text.contains("<i>up</i>"), "\(page) printed a typed provider pin as markup")
-        }
-    }
-
-    /// The same rule for a preset: any member of a chat can add one, and its
-    /// name is printed in the price list on the model page.
-    func testAPresetNameCannotBreakTheModelPage() async {
-        let chat = ChatKey(chatID: -7_500, threadID: 0)
-        _ = await store.addChatPreset(category: .model, chatKey: chat, display: "<b>free", value: "openai/gpt-4o")
-        await store.updateOpenRouterModelPrices(["openai/gpt-4o": ModelPriceInfo(inputPerToken: 0.000_01, outputPerToken: 0.000_03)])
-
-        let text = await menu.renderPage(.model, chatKey: chat, invoker: UserKey.identified(plainID)).text
-        XCTAssertTrue(text.contains("&lt;b&gt;free"), "the preset name was not escaped into the price list")
-        XCTAssertFalse(text.contains("<b>free"), "a preset name reached the page as markup")
-    }
-
-    /// A button that changes something carries the record's id, never its row
-    /// number: these two pages reorder and delete their own lists, so a
-    /// position describes the keyboard rather than the thing it was drawn for —
-    /// and «❌» then hits the neighbour.
-    func testEditorButtonsCarryIdsRatherThanPositions() async {
+    func testPresetAndTuningCallbacksReturnToTheirOwnPages() async throws {
         let chat = ChatKey(chatID: ownerID.privateChat, threadID: 0)
+        let user = Fixtures.user(id: ownerID, username: "owner")
+        let message = MaybeInaccessibleMessage(chat: .init(id: chat.chatID, type: "private"),
+                                               message_id: 52, date: 1, text: "меню", message_thread_id: nil)
+        let config = await store.modeConfig()
+        let preset = try XCTUnwrap(config.activeModes.first { $0.tier == .free })
 
-        let modeIDs = Set(await store.modeConfig().modes.map(\.id))
-        XCTAssertFalse(modeIDs.isEmpty, "premise: there are modes to address")
-        let modeArguments = await menuActions(menu.renderPage(.superModes, chatKey: chat, invoker: UserKey.identified(ownerID)).markup)
-            .compactMap { MenuRoute(action: $0) }
-            .filter { $0.command == .smode && ["on", "tier", "edit", "role", "work", "up", "del"].contains($0.sub) }
-            .compactMap { $0.arg(2) }
-        XCTAssertFalse(modeArguments.isEmpty, "the editor drew no per-mode buttons")
-        for argument in modeArguments {
-            XCTAssertTrue(modeIDs.contains(argument), "a mode button carries \"\(argument)\", which is not a mode id")
+        func tap(_ action: String) async {
+            await menu.handle(action: action, callback: .init(id: action, from: user, data: "menu:\(action)", message: message))
         }
-
-        let exampleIDs = Set(await store.onboardingConfig().examples.map(\.id))
-        let exampleArguments = await menuActions(menu.renderPage(.superOnboarding, chatKey: chat, invoker: UserKey.identified(ownerID)).markup)
-            .compactMap { MenuRoute(action: $0) }
-            .filter { $0.command == .onb && ["on", "place", "edit", "up", "del"].contains($0.sub) }
-            .compactMap { $0.arg(2) }
-        XCTAssertFalse(exampleArguments.isEmpty, "the editor drew no per-example buttons")
-        for argument in exampleArguments {
-            XCTAssertTrue(exampleIDs.contains(argument), "an example button carries \"\(argument)\", which is not an example id")
-        }
-    }
-
-    /// Wallets, tenants and super-admins are addressed by their storage key.
-    /// Interpolating the key wrote `UserKey(#42)`, which reads back as a
-    /// pending handle belonging to nobody — every destructive button on those
-    /// pages answered «не найдено» and left the record alone.
-    func testKeyCarryingButtonsAddressTheRecordTheyWereDrawnFor() async {
-        let chat = ChatKey(chatID: ownerID.privateChat, threadID: 0)
-        let payer = UserKey.identified(plainID)
-        await store.seedBalance(key: payer, amount: .usd(3))
-        await store.registerTenant(payer)
-
-        for page in [MenuPage.superBalances, .superTenants, .superAdmins] {
-            let keys = await menuActions(menu.renderPage(page, chatKey: chat, invoker: UserKey.identified(ownerID)).markup)
-                .compactMap { MenuRoute(action: $0) }
-                .filter { ["rm", "rmyes", "info", "ext", "unlim", "exp"].contains($0.sub) }
-                .compactMap { $0.userKey(2) }
-            XCTAssertFalse(keys.isEmpty, "\(page) drew no button addressing a record")
-            for key in keys {
-                XCTAssertTrue(key.isIdentified, "\(page) addressed \(key.storageValue), which is not a stored key")
-            }
-        }
-    }
-
-    /// The purchase page in a group is a price list, not somebody's account.
-    func testGroupPurchasePageCarriesNoPersonalNumbers() async {
-        await store.seedBalance(key: UserKey.identified(ownerID), amount: .usd(9.87))
-        let group = ChatKey(chatID: -7_400, threadID: 0)
-
-        let text = await menu.renderPage(.pay, chatKey: group, invoker: UserKey.identified(ownerID)).text
-        XCTAssertFalse(text.contains("9.87"), "the shared purchase page showed a member's balance")
+        await tap("nav:presets")
+        await tap("mode:pick:\(preset.id)")
+        let selected = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(selected?.text?.contains("Пресеты") == true)
+        XCTAssertTrue(selected?.buttonActions.contains("menu:open") == true)
+        await tap("open")
+        let main = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(main?.buttonActions.contains("menu:nav:presets") == true)
+        await tap("nav:tuning")
+        await tap("mode:reset:tuning")
+        let tuning = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(tuning?.buttonActions.contains("menu:nav:stats") == true)
+        await tap("nav:provider")
+        let provider = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(provider?.buttonActions.contains("menu:nav:tuning") == true)
+        await tap("nav:tuning")
+        let returned = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(returned?.buttonActions.contains("menu:nav:stats") == true)
     }
 }

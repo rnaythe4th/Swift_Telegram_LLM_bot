@@ -89,18 +89,20 @@ extension BotMenuHandler {
             // title takes the settings page down for everybody.
             let name = activeMode?.escapedTitle ?? "изменён вручную"
             let subtitle = activeMode.map { $0.subtitle.isEmpty ? "" : "\n<i>\($0.escapedSubtitle)</i>" }
-                ?? "\n<i>\(help.escapedModel)</i>"
+                ?? (web ? "" : "\n<i>\(help.escapedModel)</i>")
             settingsSummary = "Режим · <b>\(name)</b>\(subtitle)"
         } else {
-            let api = web ? " API" : ""
             let historyUnit = web ? "пар" : "сообщ."
-            settingsSummary = """
-            🤖 Модель\(api) · <b>\(help.escapedModel)</b>
-            🌡 Стиль ответа\(api) · <b>\(Self.tempBucket(help.temp))</b>
-            📝 Память · <b>\(help.maxHistory) \(historyUnit)</b>
-            """
-            if !web && reasoningSupported {
-                settingsSummary += "\n🧠 Обдумывание · <b>\(reasoningLabel)</b>"
+            settingsSummary = "📝 Память · <b>\(help.maxHistory) \(historyUnit)</b>"
+            if !web {
+                settingsSummary = """
+                🤖 Модель · <b>\(help.escapedModel)</b>
+                🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
+                \(settingsSummary)
+                """
+                if reasoningSupported {
+                    settingsSummary += "\n🧠 Размышления · <b>\(reasoningLabel)</b>"
+                }
             }
         }
         if web && reasoningSupported {
@@ -120,37 +122,15 @@ extension BotMenuHandler {
         """
 
         var rows: Keyboard = []
-        if modesOn {
-            rows = modeRows(config: modeConfig, activeID: activeMode?.id, hasFullAccess: hasFullAccess)
-            // "↺ Рабочий режим" only once the chat is actually off it —
-            // otherwise it is a button that does nothing.
-            let working = modeConfig.defaultMode
-            let onWorkingMode = activeMode != nil && activeMode?.id == working?.id
-            rows.row([
-                menuButton("🎭 Роль", page: .role),
-                onWorkingMode || working == nil
-                    ? menuButton("↺ Сбросить", command: .reset)
-                    : menuButton("↺ Рабочий режим", .mode, "reset"),
-            ])
+        let lock = hasFullAccess ? "" : " ⭐"
+        if web {
+            rows.row([menuButton("🎭 Роль", page: .role), menuButton("📝 Память", page: .history)])
         } else {
-            rows.row([menuButton("🤖 Модель", page: .model), menuButton("🎭 Роль", page: .role)])
-            rows.row([menuButton("🌡 Стиль ответа", page: .temp), menuButton("📝 Память", page: .history)])
-            rows.row([menuButton("↺ Сбросить", command: .reset)])
+            rows.row([menuButton("🎭 Роль", page: .role), menuButton("🤖 Модель", page: .model)])
+            rows.row([menuButton("🌡 Стиль ответа" + lock, page: .temp), menuButton("📝 Память", page: .history)])
         }
-        // The modes are a shortlist, not a cage: the model page lists every
-        // free model with its price and lets anyone pick one. Without this a
-        // free user has no way to see that the list exists.
-        rows.row([menuButton("⚙️ Тонкая настройка", page: .tuning)])
-        if web && reasoningSupported {
-            rows.row([menuButton("🔌 Сервис ИИ", page: .provider), menuButton("🧠 DeepThink", page: .reasoning)])
-        } else {
-            rows.row([menuButton("🔌 Сервис ИИ", page: .provider)])
-        }
-        // Listen mode belongs to group chats and to nowhere else: in a DM the
-        // "conversation" the bot would follow is the dialogue it is already
-        // having. Shown to everyone, including free chats — the page explains
-        // what it is and the switch behind it asks for premium, which is the
-        // one place a paywall meets somebody already reaching for the feature.
+        rows.row([menuButton(web ? "🧠 DeepThink" : "🧠 Размышления" + lock, page: .reasoning)])
+        // Listening is a group-chat feature; keep its existing access rules.
         if isGroupChat {
             let listening = await state.listening(chatKey: chatKey)
             rows.row([menuButton(
@@ -158,6 +138,8 @@ extension BotMenuHandler {
                 page: .listen
             )])
         }
+        rows.row([menuButton("⚙️ Тонкая настройка", page: .tuning)])
+        rows.row([menuButton("🎛 Пресеты", page: .presets)])
 
         // Everything below is a different job — money and growth, not settings.
         // Telegram has no separators, so a dead button draws the line; without

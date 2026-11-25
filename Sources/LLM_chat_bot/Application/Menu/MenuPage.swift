@@ -42,6 +42,8 @@ enum MenuPage: String, CaseIterable {
     /// full access: a free user picks a reference mode, a paying one may take
     /// the settings apart.
     case tuning
+    /// User-facing reference modes, separate from individual settings.
+    case presets
     /// Listen mode: the bot follows the whole group conversation and answers in
     /// its context. Group chats only — see `renderListen`.
     case listen
@@ -107,7 +109,7 @@ enum MenuPage: String, CaseIterable {
     /// actually multiply the price of an answer are not.
     var access: MenuAccess {
         switch self {
-        case .main, .role, .model, .stats, .history, .tuning, .helpPage, .pay,
+        case .main, .role, .model, .stats, .history, .tuning, .presets, .helpPage, .pay,
              .referral, .close:
             return .everyone
 
@@ -175,7 +177,7 @@ enum MenuPage: String, CaseIterable {
         case .superSpend: return "← К лимитам расходов"
         case .superChats: return "← К списку чатов"
         case .superAdminHelp: return "← К разделам справки"
-        case .tuning: return "← К настройкам"
+        case .tuning: return "← К тонкой настройке"
         case .listen: return "← К прослушке"
         // The four chat-setting pickers are only ever returned to from the
         // preset editor, where "back" means "back to picking one".

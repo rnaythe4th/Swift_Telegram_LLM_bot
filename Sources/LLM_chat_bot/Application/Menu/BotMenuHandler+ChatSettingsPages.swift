@@ -198,7 +198,13 @@ extension BotMenuHandler {
 
         rows.row([menuButton("✏️ Своё значение", .temp, "custom")])
         rows.row([menuButton("⚙️ Мои заготовки", .pm, "temp")])
-        rows.row(navButtons())
+        if help.provider == .deepseekWeb {
+            rows.row(navButtons(backTo: .tuning))
+        } else {
+            // This picker is linked from both settings hubs.
+            rows.row([backButton(to: .tuning)])
+            rows.row(navButtons())
+        }
 
         let bucket = Self.tempBucket(help.temp)
         let apiNote = help.provider == .deepseekWeb ? "\n<i>Стиль применяется к ответам через API.</i>" : ""
@@ -243,7 +249,7 @@ extension BotMenuHandler {
         if help.cumulativeUsage.generationCount > 0 {
             rows.row([menuButton("🗑 Сбросить статистику", .stats, "usage-reset")])
         }
-        rows.row(navButtons())
+        rows.row(navButtons(backTo: .tuning))
 
         let testHint = testModeOn
             ? "\n\n<i>🧪 Тест-режим включён — дописывайте <code>\(help.testModeSuffix!)</code> к командам, чтобы их выполнял именно этот бот.</i>"
@@ -341,7 +347,7 @@ extension BotMenuHandler {
         if !currentRow.isEmpty {
             rows.row(currentRow)
         }
-        rows.row(navButtons())
+        rows.row(navButtons(backTo: .tuning))
         let text = """
         <b>🔌 Сервис ИИ</b>
 
@@ -373,7 +379,7 @@ extension BotMenuHandler {
         if !supported {
             let rows = [navButtons()]
             let text = """
-            <b>🧠 Обдумывание</b>
+            <b>🧠 Размышления</b>
 
             Сервис <b>\(provider.commandValue)</b> этого не умеет.
             Смените сервис ИИ, чтобы включить.
@@ -392,7 +398,7 @@ extension BotMenuHandler {
             navButtons(),
         ]
         let text = """
-        <b>🧠 Обдумывание</b>
+        <b>🧠 Размышления</b>
 
         Сейчас · <b>\(help.reasoningEffort?.displayName ?? "выключено")</b>
 

@@ -40,7 +40,8 @@ extension BotMenuHandler {
             await state.resetChat(chatKey: chatKey)
             try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Настройки сброшены")
-            try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+            let destination: MenuPage = route.page(1) == .tuning ? .tuning : .main
+            try await showPage(destination, chatKey: chatKey, callback: callback, message: message)
             return
 
         case .help:
@@ -294,7 +295,7 @@ extension BotMenuHandler {
         if route.sub == "usage-reset" {
             await state.resetUsage(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Статистика сброшена")
-            try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+            try await showPage(.stats, chatKey: chatKey, callback: callback, message: message)
             return
         }
         guard route.sub == "toggle" else { return }

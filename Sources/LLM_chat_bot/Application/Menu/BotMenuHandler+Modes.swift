@@ -70,7 +70,7 @@ extension BotMenuHandler {
             await state.noteModeTap(id: id)
             let suffix = Self.dailyTasteToastSuffix(access, isPaidModel: isPaid)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "✓ \(applied.title)\(suffix)")
-            try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+            try await showPage(.presets, chatKey: chatKey, callback: callback, message: message)
 
         case "reset":
             // "↺ Рабочий режим": one tap back to something that answers well.
@@ -83,15 +83,15 @@ extension BotMenuHandler {
             }
             try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "↺ \(working.title)")
-            try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+            let destination: MenuPage = route.page(2) == .tuning ? .tuning : .main
+            try await showPage(destination, chatKey: chatKey, callback: callback, message: message)
 
         default:
             try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
         }
     }
 
-    /// The mode buttons on the settings page, two per row, plus the way back to
-    /// the working mode when the chat has drifted off it.
+    /// The configured preset buttons, two per row.
     func modeRows(config: ModePresetConfig, activeID: String?, hasFullAccess: Bool) -> Keyboard {
         var rows: Keyboard = []
         var current: [InlineKeyboardButton] = []
@@ -109,62 +109,58 @@ extension BotMenuHandler {
         return rows
     }
 
-    // MARK: - Fine tuning (behind full access)
+    // MARK: - Presets
 
-    /// Everything a mode sets, taken apart. The page opens for anyone; the
-    /// controls that cost money carry a ⭐ and lead to the offer instead
-    /// (`MenuPage.access == .paidAccess`, enforced on both the nav path and the
-    /// redraw-after-input path).
+    func renderPresets(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
+        let config = await state.modeConfig()
+        let activeMode = await state.activeMode(chatKey: chatKey)
+        let hasFullAccess = await state.hasFullModelAccess(
+            key: chatKey.chatID.isGroup ? nil : invoker,
+            chatID: chatKey.chatID
+        )
+        var rows = modeRows(config: config, activeID: activeMode?.id, hasFullAccess: hasFullAccess)
+        rows.row(navButtons())
+        let description = config.activeModes.isEmpty
+            ? "Нет доступных пресетов."
+            : "Выберите готовый набор настроек. ✓ — текущий пресет · ⭐ — нужен премиум или баланс."
+        return MenuScreen("<b>🎛 Пресеты</b>\n\n\(description)", rows)
+    }
+
+    // MARK: - Fine tuning
+
     func renderTuning(chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
-        let web = help.provider == .deepseekWeb
-        let reasoningSupported = gateways.capabilities(for: help.provider)?.supportsReasoning ?? false
-        let isOperator = await state.isAdmin(invoker, chatID: chatKey.chatID)
-        // A fact about the chat, not about the tapper: in a group this page is
-        // one shared message (CLAUDE.md §13).
         let hasFullAccess = await state.hasFullModelAccess(
             key: chatKey.chatID.isGroup ? nil : invoker,
             chatID: chatKey.chatID
         )
         let lock = hasFullAccess ? "" : " ⭐"
 
-        var rows: Keyboard = [
-            [menuButton("🤖 Модель", page: .model), menuButton("🌡 Стиль ответа" + lock, page: .temp)],
-        ]
-        if reasoningSupported {
-            rows.row([menuButton(web ? "🧠 DeepThink" : "🧠 Обдумывание" + lock, page: .reasoning)])
-        }
-        rows.row([menuButton("📊 Что показывать под ответом", page: .stats)])
-        // Memory and the AI service are the owner's levers: memory multiplies
-        // the cost of every answer, and the service silently decides which
-        // models and which reasoning are available at all.
-        if isOperator {
-            rows.row([menuButton("📝 Память", page: .history), menuButton("🔌 Сервис ИИ", page: .provider)])
+        var rows: Keyboard = [[menuButton("🔌 Сервис ИИ", page: .provider)]]
+        if let working = await state.defaultMode() {
+            rows.row([menuButton("↺ Рабочий режим", .mode, "reset", MenuPage.tuning)])
+            if await state.activeMode(chatKey: chatKey)?.id == working.id {
+                rows.row([menuButton("↺ Сбросить", .reset, MenuPage.tuning)])
+            }
         } else {
-            rows.row([menuButton("📜 Что бот помнит", page: .history)])
+            rows.row([menuButton("↺ Сбросить", .reset, MenuPage.tuning)])
         }
+        rows.row([menuButton("🌡 Стиль ответа" + lock, page: .temp)])
+        rows.row([menuButton("📊 Что показывать под ответом", page: .stats)])
         if !hasFullAccess {
             rows.row([buyButton("⚡ Открыть тонкую настройку", source: .tuning)])
         }
         rows.row(navButtons())
 
-        var reasoningLine = ""
-        if reasoningSupported {
-            reasoningLine = web
-                ? "\n🧠 DeepThink · <b>\(help.webDeepThinkLabel)</b>"
-                : "\n🧠 Обдумывание · <b>\(help.reasoningEffort?.displayName ?? "выключено")</b>"
-        }
-        let historyUnit = web ? "пар" : "сообщ."
-        let providerNote = web ? "\n\n<i>Модель и стиль применяются к ответам через API.</i>" : ""
+        let providerNote = help.provider == .deepseekWeb ? "\n<i>Стиль применяется к ответам через API.</i>" : ""
         let footer = hasFullAccess
-            ? "<i>Здесь настройки правятся по отдельности. Вернуться к проверенной связке — «↺ Рабочий режим» в настройках.</i>"
-            : "<i>⭐ — правится с премиумом или балансом. Без них работают готовые режимы: связка настроек в один тап.</i>"
+            ? "<i>Здесь можно изменить дополнительные настройки или вернуться к рабочему режиму.</i>"
+            : "<i>⭐ — правится с премиумом или балансом. Готовые наборы доступны в разделе «Пресеты».</i>"
         let text = """
         <b>⚙️ Тонкая настройка</b>
 
-        🤖 Модель · <code>\(help.escapedModel)</code>
-        🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>
-        📝 Память · <b>\(help.maxHistory) \(historyUnit)</b>\(reasoningLine)\(providerNote)
+        🔌 Сервис ИИ · <b>\(help.provider.rawValue)</b>
+        🌡 Стиль ответа · <b>\(Self.tempBucket(help.temp))</b>\(providerNote)
 
         \(footer)
         """
