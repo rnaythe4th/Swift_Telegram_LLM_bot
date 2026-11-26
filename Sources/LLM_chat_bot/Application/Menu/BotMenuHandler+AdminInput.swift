@@ -347,7 +347,7 @@ extension BotMenuHandler {
             }
 
         case .chatCustomTemp:
-            resumePage = .temp
+            resumePage = pending.payload == MenuPage.tuningTemp.rawValue ? .tuningTemp : .temp
             if let temp = Float(trimmed.replacingOccurrences(of: ",", with: ".")), ChatContext.tempRange.contains(temp) {
                 await state.setTemperature(chatKey: chatKey, value: temp)
                 toast = "✓ Стиль ответа: <b>\(Self.tempBucket(temp))</b> (\(Self.formatTemp(temp)))"

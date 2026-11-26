@@ -83,7 +83,7 @@ extension BotMenuHandler {
         }
     }
 
-    func renderPay(chatKey: ChatKey, invoker: UserKey?) async -> MenuScreen {
+    func renderPay(chatKey: ChatKey, invoker: UserKey?, backTo: MenuPage = .main) async -> MenuScreen {
         // Selling is switched off while state is not durable (§4.3). The page
         // still opens and still explains what premium is — it just does not
         // offer a button that would take money the bot cannot keep.
@@ -91,7 +91,7 @@ extension BotMenuHandler {
         guard durability.acceptsPayments else {
             return MenuScreen(
                 "<b>⚡ Премиум</b>\n\n⏸ \(durability.purchaseRefusalMessage)",
-                [[backButton(to: .main)]]
+                [[backButton(to: backTo)]]
             )
         }
 
@@ -266,7 +266,7 @@ extension BotMenuHandler {
                 rows.row([menuButton("🎁 Пригласить друга", page: .referral)])
             }
         }
-        rows.row(navButtons())
+        rows.row(navButtons(backTo: backTo))
         return MenuScreen(lines.joined(separator: "\n"), rows)
     }
 

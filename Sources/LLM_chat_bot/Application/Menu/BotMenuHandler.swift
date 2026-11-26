@@ -224,7 +224,10 @@ final class BotMenuHandler: Sendable {
                 // includes, the one moment a paywall is welcome instead of
                 // annoying (GROWTH.md P0.4). A missing *role* is not for sale.
                 if access == .paidAccess {
-                    try await showPage(.pay, chatKey: chatKey, callback: callback, message: message, purchaseSource: .tuning)
+                    try await showPage(
+                        .pay, chatKey: chatKey, callback: callback, message: message,
+                        purchaseSource: .tuning, purchaseBack: menuPage == .tuningTemp ? .tuning : .main
+                    )
                 }
                 return
             }
@@ -252,7 +255,8 @@ final class BotMenuHandler: Sendable {
         chatKey: ChatKey,
         callback: CallbackQuery,
         message: MaybeInaccessibleMessage,
-        purchaseSource: PurchaseSource = .menu
+        purchaseSource: PurchaseSource = .menu,
+        purchaseBack: MenuPage? = nil
     ) async throws {
         // A shared menu message must never render a personal page: the answer
         // would be visible to everyone in the group, not just to whoever tapped.
@@ -264,7 +268,15 @@ final class BotMenuHandler: Sendable {
         // the button that led here is counted separately — that is how the
         // pain-point upsells get compared with the plain menu (steps 5 and 7).
         if page == .pay { await state.bumpPurchaseOpen(source: purchaseSource) }
-        let screen = await renderPage(page, chatKey: chatKey, invoker: state.userKey(userID: callback.from.id))
+        let defaultPurchaseBack: MenuPage = switch purchaseSource {
+        case .mode: .presets
+        case .tuning: .tuning
+        default: .main
+        }
+        let screen = await renderPage(
+            page, chatKey: chatKey, invoker: state.userKey(userID: callback.from.id),
+            purchaseBack: purchaseBack ?? defaultPurchaseBack
+        )
         warnIfOversized(screen, page: page)
         try await editOrAnswer(callback: callback, message: message, screen: screen)
     }

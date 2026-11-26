@@ -11,21 +11,23 @@ extension BotMenuHandler {
         message: MaybeInaccessibleMessage
     ) async throws {
         guard route.command == .pm else { return }
-        guard let category = PresetCategory(rawValue: route.sub) else { return }
+        let fromTuning = route.page(1) == .tuningTemp
+        guard let category = fromTuning ? .temp : PresetCategory(rawValue: route.sub) else { return }
         await state.clearPending(chatKey: chatKey) { $0.menuMessageID == message.message_id }
         let canManageGlobal = await state.isAdmin(invokerKey(callback), chatID: chatKey.chatID)
+        let picker: MenuPage = fromTuning ? .tuningTemp : MenuPage(category: category)
 
         guard let subAction = route.arg(2) else {
-            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
+            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal, fromTuning: fromTuning))
             return
         }
 
         switch subAction {
         // Per-chat actions (anyone)
         case "add":
-            let pending = PresetInput(category: category, scope: .chat, kind: .add)
+            let pending = PresetInput(category: category, scope: .chat, kind: .add, fromTuning: fromTuning)
             await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
-            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil))
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(pending, preset: nil))
         case "edit":
             guard let id = route.arg(3) else { return }
             let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
@@ -33,28 +35,28 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
-            let pending = PresetInput(category: category, scope: .chat, kind: .edit(id: id))
+            let pending = PresetInput(category: category, scope: .chat, kind: .edit(id: id), fromTuning: fromTuning)
             await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
-            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .edit(id: id), preset: preset))
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(pending, preset: preset))
         case "del":
             guard let id = route.arg(3) else { return }
             let removed = await state.removeChatPreset(category: category, chatKey: chatKey, id: id)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : Texts.presetNotFound)
-            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
+            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal, fromTuning: fromTuning))
 
         // Scope picker shown to admins when clicking "Add preset"
         case "scopesel":
             guard canManageGlobal else {
-                let pending = PresetInput(category: category, scope: .chat, kind: .add)
+                let pending = PresetInput(category: category, scope: .chat, kind: .add, fromTuning: fromTuning)
                 await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
-                try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .chat, kind: .add, preset: nil))
+                try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(pending, preset: nil))
                 return
             }
             let scopeText = "<b>➕ Добавить заготовку · \(category.displayName)</b>\n\nКуда добавить?"
             let scopeMarkup: Keyboard = [
-                [menuButton("🌐 Глобальный (для всех чатов)", .pm, "\(category.rawValue)", "gadd")],
-                [menuButton("💬 Только этот чат", .pm, "\(category.rawValue)", "add")],
-                [menuButton(Texts.cancel, .pm, "\(category.rawValue)")],
+                [menuButton("🌐 Глобальный (для всех чатов)", .pm, picker, "gadd")],
+                [menuButton("💬 Только этот чат", .pm, picker, "add")],
+                [menuButton(Texts.cancel, .pm, picker)],
             ]
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(scopeText, scopeMarkup))
             return
@@ -65,9 +67,9 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
                 return
             }
-            let pending = PresetInput(category: category, scope: .global, kind: .add)
+            let pending = PresetInput(category: category, scope: .global, kind: .add, fromTuning: fromTuning)
             await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
-            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .global, kind: .add, preset: nil))
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(pending, preset: nil))
         case "gedit":
             guard canManageGlobal else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
@@ -79,9 +81,9 @@ extension BotMenuHandler {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.presetNotFound)
                 return
             }
-            let pending = PresetInput(category: category, scope: .global, kind: .edit(id: id))
+            let pending = PresetInput(category: category, scope: .global, kind: .edit(id: id), fromTuning: fromTuning)
             await state.setPending(.preset(pending), menuMessageID: message.message_id, chatKey: chatKey)
-            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(category: category, scope: .global, kind: .edit(id: id), preset: preset))
+            try await editOrAnswer(callback: callback, message: message, screen: renderAwaitingInput(pending, preset: preset))
         case "gdel":
             guard canManageGlobal else {
                 try? await telegram.answerCallback(callbackQueryID: callback.id, text: Texts.adminOnly)
@@ -90,7 +92,7 @@ extension BotMenuHandler {
             guard let id = route.arg(3) else { return }
             let removed = await state.removePreset(category: category, id: id, chatID: chatKey.chatID)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: removed ? "Заготовка удалена" : Texts.presetNotFound)
-            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal))
+            try await editOrAnswer(callback: callback, message: message, screen: await renderPresetManagement(category: category, chatKey: chatKey, canManageGlobal: canManageGlobal, fromTuning: fromTuning))
 
         default:
             return
@@ -99,7 +101,13 @@ extension BotMenuHandler {
 
     // MARK: - Preset management renderers
 
-    func renderPresetManagement(category: PresetCategory, chatKey: ChatKey, canManageGlobal: Bool) async -> MenuScreen {
+    func renderPresetManagement(
+        category: PresetCategory,
+        chatKey: ChatKey,
+        canManageGlobal: Bool,
+        fromTuning: Bool = false
+    ) async -> MenuScreen {
+        let picker: MenuPage = fromTuning ? .tuningTemp : MenuPage(category: category)
         let globalPresets = await state.presets(for: category, chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: category, chatKey: chatKey)
         let modelPrices = category == .model ? await state.openRouterModelPrices() : [:]
@@ -153,16 +161,16 @@ extension BotMenuHandler {
         if canManageGlobal {
             for preset in globalPresets {
                 rows.row([
-                    menuButton("🌐 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "gedit", preset.id),
-                    menuButton("❌", .pm, "\(category.rawValue)", "gdel", preset.id),
+                    menuButton("🌐 ✏️ \(preset.display)", .pm, picker, "gedit", preset.id),
+                    menuButton("❌", .pm, picker, "gdel", preset.id),
                 ])
             }
         }
 
         for preset in chatPresets {
             rows.row([
-                menuButton("💬 ✏️ \(preset.display)", .pm, "\(category.rawValue)", "edit", preset.id),
-                menuButton("❌", .pm, "\(category.rawValue)", "del", preset.id),
+                menuButton("💬 ✏️ \(preset.display)", .pm, picker, "edit", preset.id),
+                menuButton("❌", .pm, picker, "del", preset.id),
             ])
         }
 
@@ -172,26 +180,28 @@ extension BotMenuHandler {
         let canAddMore = chatPresets.count < PresetList.maxCount
             || (canManageGlobal && globalPresets.count < PresetList.maxCount)
         if canAddMore {
-            rows.row([menuButton("➕ Добавить заготовку", .pm, category.rawValue, scope)])
+            rows.row([menuButton("➕ Добавить заготовку", .pm, picker, scope)])
         } else {
             text += "\n\n<i>Список заполнен: \(PresetList.maxCount) заготовок. Удалите ненужную, чтобы добавить новую.</i>"
         }
 
         rows.row([
-            backButton(to: MenuPage(category: category)),
+            backButton(to: picker),
             menuButton(Texts.close, command: .close),
         ])
 
         return MenuScreen(text, rows)
     }
 
-    private func renderAwaitingInput(category: PresetCategory, scope: PresetInput.Scope, kind: PresetInput.Kind, preset: Preset?) -> MenuScreen {
-        let scopeLabel = scope == .global ? "🌐 Общая" : "💬 Только этот чат"
+    private func renderAwaitingInput(_ pending: PresetInput, preset: Preset?) -> MenuScreen {
+        let category = pending.category
+        let picker: MenuPage = pending.fromTuning ? .tuningTemp : MenuPage(category: category)
+        let scopeLabel = pending.scope == .global ? "🌐 Общая" : "💬 Только этот чат"
         let text: String
         let formatLine = category == .model
             ? "<code>Название | Значение | Сервис</code>\n<i>Сервис можно не указывать.</i>"
             : "<code>Название | Значение</code>"
-        switch kind {
+        switch pending.kind {
         case .add:
             text = """
             <b>➕ Новая заготовка · \(scopeLabel) · \(category.displayName)</b>
@@ -215,7 +225,7 @@ extension BotMenuHandler {
         }
 
         let rows: Keyboard = [
-            [menuButton(Texts.cancel, .pm, "\(category.rawValue)")],
+            [menuButton(Texts.cancel, .pm, picker)],
         ]
         return MenuScreen(text, rows)
     }

@@ -206,12 +206,13 @@ def main():
     env = process_environment(values)
     release = (ROOT / "current").resolve(strict=True)
     has_api = (release / "free-deepseek-api/server.js").is_file()
-    mode = values.get("DEEPSEEK_WEB_BACKEND", "api" if has_api else "browser")
+    mode = values.get("DEEPSEEK_WEB_BACKEND", "browser")
     if mode not in ("api", "browser"):
         raise ValueError("DEEPSEEK_WEB_BACKEND must be api or browser")
     if mode == "api" and not has_api:
         raise ValueError("API backend selected but FreeDeepseekAPI is not deployed")
     env["DEEPSEEK_WEB_BACKEND"] = mode
+    env.setdefault("DEEPSEEK_WEB_IDLE_SECONDS", "never" if mode == "browser" else "60")
     env["DEEPSEEK_WEB_API_PORT"] = values.get("DEEPSEEK_WEB_API_PORT", "9655")
     env["DEEPSEEK_WEB_AUTH_PATH"] = str(ROOT / "data/deepseek-auth.json")
     env["DEEPSEEK_WEB_AUTH_REFRESH_SECONDS"] = values.get("DEEPSEEK_WEB_AUTH_REFRESH_SECONDS", "21600")

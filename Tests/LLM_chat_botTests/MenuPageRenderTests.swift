@@ -203,14 +203,14 @@ final class MenuPageRenderTests: XCTestCase {
         XCTAssertTrue(main.markup.inline_keyboard.flatMap { $0 }.contains { $0.text == "🧠 DeepThink" })
         let tuning = await menu.renderPage(.tuning, chatKey: chat, invoker: owner)
         let actions = menuActions(tuning.markup)
-        for page in [MenuPage.provider, .temp, .stats] {
+        for page in [MenuPage.provider, .tuningTemp, .stats] {
             XCTAssertTrue(actions.contains(MenuRoute.navigation(to: page)))
         }
         for page in [MenuPage.model, .history, .reasoning] {
             XCTAssertFalse(actions.contains(MenuRoute.navigation(to: page)))
         }
         XCTAssertTrue(actions.contains("mode:reset:tuning"))
-        for page in [MenuPage.provider, .stats, .temp] {
+        for page in [MenuPage.provider, .stats, .tuningTemp] {
             let screen = await menu.renderPage(page, chatKey: chat, invoker: owner)
             XCTAssertTrue(menuActions(screen.markup).contains("nav:tuning"))
         }
@@ -233,7 +233,10 @@ final class MenuPageRenderTests: XCTestCase {
         XCTAssertFalse(apiMain.markup.inline_keyboard.flatMap { $0 }.contains { $0.text.contains("DeepThink") })
         let apiTemp = await menu.renderPage(.temp, chatKey: chat, invoker: owner)
         XCTAssertTrue(menuActions(apiTemp.markup).contains("open"))
-        XCTAssertTrue(menuActions(apiTemp.markup).contains("nav:tuning"))
+        XCTAssertFalse(menuActions(apiTemp.markup).contains("nav:tuning"))
+        let tunedTemp = await menu.renderPage(.tuningTemp, chatKey: chat, invoker: owner)
+        XCTAssertTrue(menuActions(tunedTemp.markup).contains("nav:tuning"))
+        XCTAssertFalse(menuActions(tunedTemp.markup).contains("open"))
         let reasoning = await menu.renderPage(.reasoning, chatKey: chat, invoker: owner)
         XCTAssertEqual(menuActions(reasoning.markup).filter { $0.hasPrefix("reasoning:") },
                        ["reasoning:set:low", "reasoning:set:medium", "reasoning:set:high", "reasoning:set:off"])
@@ -490,11 +493,30 @@ final class MenuPageRenderTests: XCTestCase {
     }
 
 
+    func testPaywallReturnsToTheSettingThatOpenedIt() async throws {
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
+        let user = Fixtures.user(id: plainID, username: "plain")
+        let message = MaybeInaccessibleMessage(chat: .init(id: chat.chatID, type: "private"),
+                                               message_id: 53, date: 1, text: "меню", message_thread_id: nil)
+        await store.setDailyPremiumLimit(0)
+        let config = await store.modeConfig()
+        let locked = try XCTUnwrap(config.activeModes.first { $0.tier != .free })
+
+        for (action, back) in [("nav:tuningtemp", "nav:tuning"), ("nav:temp", "nav:main"),
+                               ("mode:pick:\(locked.id)", "nav:presets")] {
+            await menu.handle(action: action, callback: .init(id: action, from: user, data: "menu:\(action)", message: message))
+            let paywall = await telegram.lastCall("editMessageText")
+            let actions = paywall?.buttonActions ?? []
+            XCTAssertTrue(actions.contains("menu:\(back)") || (back == "nav:main" && actions.contains("menu:open")), action)
+        }
+    }
+
     func testPresetAndTuningCallbacksReturnToTheirOwnPages() async throws {
         let chat = ChatKey(chatID: ownerID.privateChat, threadID: 0)
         let user = Fixtures.user(id: ownerID, username: "owner")
         let message = MaybeInaccessibleMessage(chat: .init(id: chat.chatID, type: "private"),
                                                message_id: 52, date: 1, text: "меню", message_thread_id: nil)
+        _ = await store.seedBalance(key: .identified(ownerID), amount: .usd(1))
         let config = await store.modeConfig()
         let preset = try XCTUnwrap(config.activeModes.first { $0.tier == .free })
 
@@ -519,5 +541,37 @@ final class MenuPageRenderTests: XCTestCase {
         await tap("nav:tuning")
         let returned = await telegram.lastCall("editMessageText")
         XCTAssertTrue(returned?.buttonActions.contains("menu:nav:stats") == true)
+
+        await tap("nav:tuningtemp")
+        let style = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(style?.buttonActions.contains("menu:nav:tuning") == true)
+        XCTAssertFalse(style?.buttonActions.contains("menu:open") == true)
+        await tap("temp:0.5:tuningtemp")
+        let applied = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(applied?.buttonActions.contains("menu:nav:tuning") == true)
+
+        await tap("temp:custom:tuningtemp")
+        let prompt = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(prompt?.buttonActions.contains("menu:nav:tuningtemp") == true)
+        let handled = await menu.processTextInput(text: "0.7", chatKey: chat, userID: ownerID, replyToMessageID: nil)
+        XCTAssertTrue(handled)
+        let saved = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(saved?.buttonActions.contains("menu:nav:tuning") == true)
+
+        await tap("pm:tuningtemp")
+        let editor = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(editor?.buttonActions.contains("menu:nav:tuningtemp") == true)
+        await tap("pm:tuningtemp:add")
+        let presetPrompt = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(presetPrompt?.buttonActions.contains("menu:pm:tuningtemp") == true)
+        let savedPreset = await menu.processTextInput(text: "Факты | 0.3", chatKey: chat, userID: ownerID, replyToMessageID: nil)
+        XCTAssertTrue(savedPreset)
+        let refreshed = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(refreshed?.buttonActions.contains("menu:nav:tuningtemp") == true)
+
+        await tap("nav:temp")
+        let fromMain = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(fromMain?.buttonActions.contains("menu:open") == true)
+        XCTAssertFalse(fromMain?.buttonActions.contains("menu:nav:tuning") == true)
     }
 }

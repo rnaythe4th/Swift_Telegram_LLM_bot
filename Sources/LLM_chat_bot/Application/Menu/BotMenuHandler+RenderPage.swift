@@ -3,7 +3,12 @@ import Foundation
 // Page dispatch and shared access checks.
 
 extension BotMenuHandler {
-    func renderPage(_ page: MenuPage, chatKey: ChatKey, invoker: UserKey? = nil) async -> MenuScreen {
+    func renderPage(
+        _ page: MenuPage,
+        chatKey: ChatKey,
+        invoker: UserKey? = nil,
+        purchaseBack: MenuPage = .main
+    ) async -> MenuScreen {
         // Second line of defence for the paths that render without a callback
         // (a menu refreshed after text input): a personal page never draws its
         // contents into a group message.
@@ -37,8 +42,8 @@ extension BotMenuHandler {
             return await renderRole(chatKey: chatKey)
         case .model:
             return await renderModel(chatKey: chatKey, invoker: invoker)
-        case .temp:
-            return await renderTemp(chatKey: chatKey)
+        case .temp, .tuningTemp:
+            return await renderTemp(chatKey: chatKey, fromTuning: page == .tuningTemp)
         case .stats:
             return await renderStats(chatKey: chatKey, invoker: invoker)
         case .history:
@@ -56,7 +61,7 @@ extension BotMenuHandler {
         case .helpPage:
             return await renderHelp(chatKey: chatKey)
         case .pay:
-            return await renderPay(chatKey: chatKey, invoker: invoker)
+            return await renderPay(chatKey: chatKey, invoker: invoker, backTo: purchaseBack)
         case .adminPanel:
             return await renderAdminPanel(chatKey: chatKey, invoker: invoker)
         case .adminHelp:

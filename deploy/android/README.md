@@ -2,7 +2,7 @@
 
 `llmchat` состоит из двух служб runit. Swift читает Telegram через long polling, а DeepSeek Web использует Firefox и отдельный профиль. Swift, HTTP worker и временный VNC используют локальные порты `18080`, `8766` и `15944` соответственно. Профиль хранится в `/opt/llmchat/data/firefox-profile`.
 
-Установите `DEEPSEEK_WEB_IDLE_SECONDS=never` в `/opt/llmchat/.env`, чтобы служба открывала DeepSeek в Firefox при запуске и держала окно открытым между запросами. При настройке по умолчанию Firefox закрывается после 60 секунд простоя.
+По умолчанию служба открывает DeepSeek в Firefox при запуске и держит окно открытым между запросами. При переходе с локального API задайте `DEEPSEEK_WEB_BACKEND=browser` и `DEEPSEEK_WEB_IDLE_SECONDS=never` в `/opt/llmchat/.env`. Служба использует существующий профиль Firefox. Чтобы ограничить время простоя, задайте `DEEPSEEK_WEB_IDLE_SECONDS` в секундах.
 
 До установки сверить статусы всех работающих ботов, свободные порты, память и место на диске. Из прежнего `.env` нужны `TG_BOT_TOKEN` и `DATABASE_URL` с сессионным подключением к PostgreSQL, а также `STATE_ENCRYPTION_KEY`, если он использовался раньше. Перенести `ROUTER_API_KEY` для OpenRouter и Yandex и `DEEPSEEK_API_KEY` для DeepSeek API, чтобы сохранить доступ к этим сервисам. Добавить новый `DEEPSEEK_WEB_WORKER_TOKEN` со значением из `openssl rand -hex 32`. Скопировать файл по SSH с правами `0600`. Если предыдущий экземпляр этого же Telegram-бота активен, остановить его перед включением polling на телефоне.
 
@@ -26,6 +26,8 @@ runuser -u llmchat -- sv -w 45 up /opt/llmchat/service/web
 `RELEASE_ID` принимает полный Git SHA или `local-<short-sha>-<UTC timestamp>` для локального рабочего дерева. Пока компилируется Swift, установщик с `--browser-only` позволяет запустить один Web worker. Перед включением Swift перенести `bin/LLM_chat_bot` и `lib/` в `/opt/llmchat/current/`. Владелец файлов `root:llmchat`, права каталогов, бинарника и `lib/ld-linux-aarch64.so.1` — `0750`, остальных библиотек — `0640`.
 
 ## Вход с Mac
+
+Mac и телефон должны быть в одной локальной сети. Команда подключения к `192.168.100.9:2222`, настройки ключа хоста и пример `~/.ssh/config` приведены в [инструкции SSH](../../docs/deepseek-api-phone.md#4-ssh-доступ-к-телефону-с-mac). Если ключ SSH защищён паролем, загрузите его в свой агент командой `ssh-add ~/.ssh/milby_phone` перед запуском с `BatchMode=yes`.
 
 В отдельном SSH-сеансе на телефоне запустить временное окно:
 

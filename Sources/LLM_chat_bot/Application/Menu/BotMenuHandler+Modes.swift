@@ -83,7 +83,12 @@ extension BotMenuHandler {
             }
             try await checkpointWebSettings(chatKey: chatKey)
             try? await telegram.answerCallback(callbackQueryID: callback.id, text: "↺ \(working.title)")
-            let destination: MenuPage = route.page(2) == .tuning ? .tuning : .main
+            let destination: MenuPage
+            switch route.page(2) {
+            case .tuning: destination = .tuning
+            case .model: destination = .model
+            default: destination = .main
+            }
             try await showPage(destination, chatKey: chatKey, callback: callback, message: message)
 
         default:
@@ -145,7 +150,7 @@ extension BotMenuHandler {
         } else {
             rows.row([menuButton("↺ Сбросить", .reset, MenuPage.tuning)])
         }
-        rows.row([menuButton("🌡 Стиль ответа" + lock, page: .temp)])
+        rows.row([menuButton("🌡 Стиль ответа" + lock, page: .tuningTemp)])
         rows.row([menuButton("📊 Что показывать под ответом", page: .stats)])
         if !hasFullAccess {
             rows.row([buyButton("⚡ Открыть тонкую настройку", source: .tuning)])

@@ -268,6 +268,14 @@ struct PresetInput: Sendable {
     let category: PresetCategory
     let scope: Scope
     let kind: Kind
+    let fromTuning: Bool
+
+    init(category: PresetCategory, scope: Scope, kind: Kind, fromTuning: Bool = false) {
+        self.category = category
+        self.scope = scope
+        self.kind = kind
+        self.fromTuning = fromTuning
+    }
 }
 
 enum AdminPendingInputKind: Sendable {

@@ -34,6 +34,7 @@ enum MenuPage: String, CaseIterable {
     case role
     case model
     case temp
+    case tuningTemp = "tuningtemp"
     case stats
     case history
     case provider
@@ -123,7 +124,7 @@ enum MenuPage: String, CaseIterable {
         // single multiplier the bot has. It is also the most obviously valuable
         // thing a group can switch on, so it is priced rather than hidden — the
         // page opens for anyone and the switch asks for premium.
-        case .temp, .reasoning, .listen:
+        case .temp, .tuningTemp, .reasoning, .listen:
             return .paidAccess
 
         // "Сервис ИИ" is plumbing — the wrong choice there silently disables
@@ -181,7 +182,7 @@ enum MenuPage: String, CaseIterable {
         case .listen: return "← К прослушке"
         // The four chat-setting pickers are only ever returned to from the
         // preset editor, where "back" means "back to picking one".
-        case .model, .role, .temp, .history: return "← К выбору"
+        case .model, .role, .temp, .tuningTemp, .history: return "← К выбору"
         default: return Texts.back
         }
     }

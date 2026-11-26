@@ -353,7 +353,12 @@ extension BotMenuHandler {
         await refreshMenu(
             chatKey: chatKey,
             menuMessageID: menuMessageID,
-            screen: await renderPresetManagement(category: pending.category, chatKey: chatKey, canManageGlobal: canManageGlobal)
+            screen: await renderPresetManagement(
+                category: pending.category,
+                chatKey: chatKey,
+                canManageGlobal: canManageGlobal,
+                fromTuning: pending.fromTuning
+            )
         )
 
         _ = try? await telegram.sendMessage(

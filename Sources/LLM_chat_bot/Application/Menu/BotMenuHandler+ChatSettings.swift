@@ -266,22 +266,24 @@ extension BotMenuHandler {
         message: MaybeInaccessibleMessage
     ) async throws {
         guard !route.sub.isEmpty else { return }
+        let picker: MenuPage = route.page(2) == .tuningTemp ? .tuningTemp : .temp
         if route.sub == "custom" {
-            await state.setPending(.admin(.init(kind: .chatCustomTemp)), menuMessageID: message.message_id, chatKey: chatKey)
+            let pending = AdminPendingInput(kind: .chatCustomTemp, payload: picker.rawValue)
+            await state.setPending(.admin(pending), menuMessageID: message.message_id, chatKey: chatKey)
             let prompt = """
             <b>🌡 Свой стиль ответа</b>
 
             Отправьте число от <code>0.0</code> до <code>2.0</code> одним сообщением.
             <i>0.0 — строго по фактам и предсказуемо · 2.0 — творчески и непредсказуемо</i>
             """
-            let markup: Keyboard = [[cancelButton(to: .temp)]]
+            let markup: Keyboard = [[cancelButton(to: picker)]]
             try await editOrAnswer(callback: callback, message: message, screen: MenuScreen(prompt, markup))
             return
         }
         guard let temp = Float(route.sub), ChatContext.tempRange.contains(temp) else { return }
         await state.setTemperature(chatKey: chatKey, value: temp)
         try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Стиль ответа: \(Self.tempBucket(temp))")
-        try await showPage(.temp, chatKey: chatKey, callback: callback, message: message)
+        try await showPage(picker, chatKey: chatKey, callback: callback, message: message)
         return
     }
 

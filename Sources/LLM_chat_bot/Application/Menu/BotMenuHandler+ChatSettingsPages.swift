@@ -112,7 +112,7 @@ extension BotMenuHandler {
         // like it needs one tap back to a combination that works, not a walk
         // through the settings.
         if await state.defaultMode() != nil {
-            rows.row([menuButton("↺ Рабочий режим", .mode, "reset")])
+            rows.row([menuButton("↺ Рабочий режим", .mode, "reset", MenuPage.model)])
         }
 
         var legendLine = ""
@@ -168,10 +168,11 @@ extension BotMenuHandler {
         return MenuScreen(text, rows)
     }
 
-    func renderTemp(chatKey: ChatKey) async -> MenuScreen {
+    func renderTemp(chatKey: ChatKey, fromTuning: Bool) async -> MenuScreen {
         let help = await state.fetchHelp(chatKey: chatKey)
         let globalPresets = await state.tempPresets(chatID: chatKey.chatID)
         let chatPresets = await state.chatPresets(category: .temp, chatKey: chatKey)
+        let picker: MenuPage = fromTuning || help.provider == .deepseekWeb ? .tuningTemp : .temp
         var rows: Keyboard = []
 
         if !globalPresets.isEmpty {
@@ -179,7 +180,7 @@ extension BotMenuHandler {
             for preset in globalPresets {
                 let isActive = Float(preset.value).map { abs($0 - help.temp) < 0.001 } ?? false
                 let label = (isActive ? "✓ " : "") + "🌐 \(preset.display)"
-                currentRow.append(menuButton(label, .temp, "\(preset.value)"))
+                currentRow.append(menuButton(label, .temp, preset.value, picker))
                 if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
             if !currentRow.isEmpty { rows.row(currentRow) }
@@ -190,21 +191,15 @@ extension BotMenuHandler {
             for preset in chatPresets {
                 let isActive = Float(preset.value).map { abs($0 - help.temp) < 0.001 } ?? false
                 let label = (isActive ? "✓ " : "") + "💬 \(preset.display)"
-                currentRow.append(menuButton(label, .temp, "\(preset.value)"))
+                currentRow.append(menuButton(label, .temp, preset.value, picker))
                 if currentRow.count == 2 { rows.row(currentRow); currentRow = [] }
             }
             if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
-        rows.row([menuButton("✏️ Своё значение", .temp, "custom")])
-        rows.row([menuButton("⚙️ Мои заготовки", .pm, "temp")])
-        if help.provider == .deepseekWeb {
-            rows.row(navButtons(backTo: .tuning))
-        } else {
-            // This picker is linked from both settings hubs.
-            rows.row([backButton(to: .tuning)])
-            rows.row(navButtons())
-        }
+        rows.row([menuButton("✏️ Своё значение", .temp, "custom", picker)])
+        rows.row([menuButton("⚙️ Мои заготовки", .pm, picker)])
+        rows.row(navButtons(backTo: picker == .tuningTemp ? .tuning : .main))
 
         let bucket = Self.tempBucket(help.temp)
         let apiNote = help.provider == .deepseekWeb ? "\n<i>Стиль применяется к ответам через API.</i>" : ""
@@ -379,7 +374,7 @@ extension BotMenuHandler {
         if !supported {
             let rows = [navButtons()]
             let text = """
-            <b>🧠 Размышления</b>
+            <b>🧠 \(provider == .deepseekWeb ? "DeepThink" : "Размышления")</b>
 
             Сервис <b>\(provider.commandValue)</b> этого не умеет.
             Смените сервис ИИ, чтобы включить.
