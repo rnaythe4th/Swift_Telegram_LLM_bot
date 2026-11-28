@@ -105,6 +105,14 @@
       add(list, 'li', {}, 'two');
       add(block, 'strong', {}, 'bold & visible');
       add(block, 'a', {href: 'https://example.test/?a=1&b=2'}, 'a link');
+      const cited = add(block, 'p', {}, 'Numbers in the answer: -1-5-12. 🐴');
+      const source = add(cited, 'a', {href: 'https://example.test/source'});
+      const citation = add(source, 'span', {class: 'ds-markdown-cite'});
+      for (const index of [1, 5, 12]) {
+        add(citation, 'span', {style: 'opacity: 0'}, '-');
+        add(citation, 'span', {style: 'position: absolute'}, String(index));
+      }
+      add(cited, 'span', {class: 'ds-markdown-cite'}, '-3');
       add(block, 'blockquote', {expandable: ''}, 'hidden quote');
       add(block, 'p', {}, '<u>Telegram HTML</u>');
       const code = add(block, 'div', {class: 'md-code-block'});

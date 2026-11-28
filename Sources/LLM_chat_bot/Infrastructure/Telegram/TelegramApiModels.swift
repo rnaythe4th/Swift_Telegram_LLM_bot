@@ -122,7 +122,11 @@ struct ReplyParameters: Codable, Sendable {
     let message_id: Int
 }
 
-struct TelegramSendMessageBody: Codable {
+struct TelegramLinkPreviewOptions: Encodable {
+    let is_disabled: Bool
+}
+
+struct TelegramSendMessageBody: Encodable {
     let chat_id: Int
     let text: String
     let reply_parameters: ReplyParameters?
@@ -130,15 +134,17 @@ struct TelegramSendMessageBody: Codable {
     let parse_mode: String?
     let entities: [TelegramTextEntity]?
     let reply_markup: InlineKeyboardMarkup?
+    let link_preview_options = TelegramLinkPreviewOptions(is_disabled: true)
 }
 
-struct TelegramEditMessageTextBody: Codable {
+struct TelegramEditMessageTextBody: Encodable {
     let chat_id: Int
     let message_id: Int
     let text: String
     let parse_mode: String?
     let entities: [TelegramTextEntity]?
     let reply_markup: InlineKeyboardMarkup?
+    let link_preview_options = TelegramLinkPreviewOptions(is_disabled: true)
 }
 
 struct TelegramSendMessageDraftBody: Codable {

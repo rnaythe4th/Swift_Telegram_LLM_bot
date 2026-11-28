@@ -17,8 +17,8 @@ actor DeepSeekWebQueue {
         var part: DeepSeekWebTelegramFormatter.Part
     }
 
-    private static let openingMessage = "🌐 DeepSeek Web открывает диалог…"
-    private static let waitingMessage = "💭 DeepSeek Web отвечает…"
+    private static let openingMessage = "🌐 Открываю чат…"
+    private static let waitingMessage = "💭 Отвечаю…"
 
     private let store: ChatContextStore
     private let persistence: PersistenceCoordinator?

@@ -51,6 +51,7 @@ const reasoning = '[data-testid="reasoning"], [data-role="reasoning"], .ds-think
   '[class*="thinking" i], [class*="reasoning" i]';
 const code = 'pre, .md-code-block, [data-testid="code-block"]';
 const controls = 'button, [role="button"], .md-code-block-banner';
+const citation = '.ds-markdown-cite';
 const streaming = '[aria-busy="true"], [data-status="streaming"], [data-state="streaming"]';
 const done = '[data-status="complete"], [data-state="complete"], [data-status="completed"]';
 const action = '[data-testid="response-complete"], [data-testid="regenerate"], ' +
@@ -77,6 +78,7 @@ const emphasis = {
 
 function formatted(node, depth = 0, rich = false) {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+  if (rich && node.tagName !== 'A' && node.matches?.(citation)) return '';
   const render = () => Array.from(node.childNodes).map(child => formatted(child, depth, rich)).join('');
   if (rich && emphasis[node.tagName]) {
     const tag = emphasis[node.tagName];
@@ -111,8 +113,12 @@ function formatted(node, depth = 0, rich = false) {
         formatted(child, depth + 1, rich).trim());
       return (depth ? '\n' : '\n\n') + lines.join('\n') + '\n\n';
     }
-    case 'A':
-      return rich && node.href ? '<a href="' + escapeAttr(node.href) + '">' + render() + '</a>' : render();
+    case 'A': {
+      if (!rich || !node.href) return render();
+      const isCitation = node.matches(citation) || node.querySelector(citation);
+      const label = isCitation ? '[Источник]' : render();
+      return (isCitation ? ' ' : '') + '<a href="' + escapeAttr(node.href) + '">' + label + '</a>';
+    }
     case 'SPAN':
       return rich && node.classList.contains('tg-spoiler') ? '<tg-spoiler>' + render() + '</tg-spoiler>' : render();
     case 'BLOCKQUOTE': {

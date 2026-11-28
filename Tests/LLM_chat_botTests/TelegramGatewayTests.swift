@@ -69,7 +69,8 @@ final class TelegramGatewayTests: XCTestCase {
     }
 
     func testWebFormattingSendsExplicitEntitiesOnSendAndEdit() async throws {
-        let part = try XCTUnwrap(DeepSeekWebTelegramFormatter.parts("😀 <b>&lt;hello&gt;</b>").first)
+        let source = "😀 <b>&lt;hello&gt;</b> <a href=\"https://example.test\">Источник</a>"
+        let part = try XCTUnwrap(DeepSeekWebTelegramFormatter.parts(source).first)
         let sent = try await gateway.sendMessage(.init(
             chatID: chatID, threadID: nil, replyTo: nil, text: part.text, replyMarkup: nil, entities: part.entities
         ))
@@ -80,12 +81,15 @@ final class TelegramGatewayTests: XCTestCase {
             let recorded = await telegram.calls(method)
             let call = try XCTUnwrap(recorded.first)
             XCTAssertNil(call.parseMode)
-            XCTAssertEqual(call.text, "😀 <hello>")
+            XCTAssertEqual(call.text, "😀 <hello> Источник")
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: Any])
+            let preview = try XCTUnwrap(body["link_preview_options"] as? [String: Bool])
+            XCTAssertEqual(preview["is_disabled"], true)
             let entities = try XCTUnwrap(body["entities"] as? [[String: Any]])
             XCTAssertEqual(entities.first?["type"] as? String, "bold")
             XCTAssertEqual(entities.first?["offset"] as? Int, 3)
             XCTAssertEqual(entities.first?["length"] as? Int, 7)
+            XCTAssertEqual(entities.last?["url"] as? String, "https://example.test")
         }
     }
 
