@@ -78,7 +78,6 @@ const emphasis = {
 
 function formatted(node, depth = 0, rich = false) {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent;
-  if (rich && node.tagName !== 'A' && node.matches?.(citation)) return '';
   const render = () => Array.from(node.childNodes).map(child => formatted(child, depth, rich)).join('');
   if (rich && emphasis[node.tagName]) {
     const tag = emphasis[node.tagName];
@@ -113,12 +112,8 @@ function formatted(node, depth = 0, rich = false) {
         formatted(child, depth + 1, rich).trim());
       return (depth ? '\n' : '\n\n') + lines.join('\n') + '\n\n';
     }
-    case 'A': {
-      if (!rich || !node.href) return render();
-      const isCitation = node.matches(citation) || node.querySelector(citation);
-      const label = isCitation ? '[Источник]' : render();
-      return (isCitation ? ' ' : '') + '<a href="' + escapeAttr(node.href) + '">' + label + '</a>';
-    }
+    case 'A':
+      return rich && node.href ? '<a href="' + escapeAttr(node.href) + '">' + render() + '</a>' : render();
     case 'SPAN':
       return rich && node.classList.contains('tg-spoiler') ? '<tg-spoiler>' + render() + '</tg-spoiler>' : render();
     case 'BLOCKQUOTE': {
@@ -178,9 +173,15 @@ return {
       Array.from(element.querySelectorAll(action)).some(node => visible(node) && !node.closest(reasoning + ', ' + code));
     const busy = element.matches(streaming) || Array.from(element.querySelectorAll(streaming)).some(visible);
     const body = final && withoutControls(final);
-    return {role: 'assistant', id, key, text: body ? formatted(body).trim() : '',
-            formattedText: body && index === elements.length - 1 ? formatted(body, 0, true).trim() : null,
-            complete: Boolean(completed && !busy)};
+    // Capture the original text for existing tail hashes before cleaning the delivery formats.
+    const turn = {role: 'assistant', id, key, text: body ? formatted(body).trim() : '',
+                  complete: Boolean(completed && !busy)};
+    if (!body || index !== elements.length - 1) return turn;
+    const markers = body.querySelectorAll(citation);
+    for (const marker of markers) (marker.closest('a') || marker).remove();
+    if (markers.length) turn.answerText = formatted(body).trim();
+    turn.formattedText = formatted(body, 0, true).trim();
+    return turn;
   })
 };
 """
@@ -268,10 +269,9 @@ class Answer:
     formatted_text: str | None = None
 
 
-def answer_format(turns):
-    # Keep the existing text and tail hashes stable across worker upgrades.
+def answer_format(turns, text):
     rich = turns[-1].get("formattedText")
-    return rich if rich and rich != turns[-1]["text"] and len(rich.encode()) <= MAX_RESPONSE_BYTES else None
+    return rich if rich and rich != text and len(rich.encode()) <= MAX_RESPONSE_BYTES else None
 
 
 def tail_for(turns):
@@ -734,7 +734,7 @@ class Browser:
                 known = state["turns"]
             if self._identity(driver) != result_id:
                 return None
-            rich = answer_format(state["turns"]) if text and result_id else None
+            rich = answer_format(state["turns"], text) if text and result_id else None
             if result_id and complete:
                 return Answer(result_id, tail_for(state["turns"]), text, rich)
             progress(remote_id, accepted, text if result_id else None, rich)
@@ -779,7 +779,7 @@ class Browser:
             raise BrowserFailure("uncertain", accepted=True)
         if len(new) != 2 or new[1]["role"] != "assistant":
             return None, True, False
-        answer = new[1]["text"]
+        answer = new[1].get("answerText", new[1]["text"])
         complete = new[1]["complete"] and not state["stopping"]
         if (complete and not answer) or len(answer.encode()) > MAX_RESPONSE_BYTES:
             raise BrowserFailure("uncertain", accepted=True)
@@ -807,7 +807,7 @@ class Browser:
                 known = state["turns"]
             progress(request.remote_id, accepted)
             if complete and self._identity(driver) == request.remote_id:
-                return Answer(request.remote_id, tail_for(state["turns"]), answer, answer_format(state["turns"]))
+                return Answer(request.remote_id, tail_for(state["turns"]), answer, answer_format(state["turns"], answer))
             return None
 
         # Existing history without the expected appended turn is ambiguous after a crash.

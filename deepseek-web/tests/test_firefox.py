@@ -99,10 +99,12 @@ class FirefoxTest(unittest.TestCase):
         self.assertNotIn("Copy code label", first.text)
         self.assertIn("<b>bold & visible</b>", first.formatted_text)
         self.assertIn('<a href="https://example.test/?a=1&amp;b=2">a link</a>', first.formatted_text)
-        self.assertIn("🐴-1-5-12-3", first.text)
-        self.assertIn('Numbers in the answer: -1-5-12. 🐴 <a href="https://example.test/source">[Источник]</a>',
-                      first.formatted_text)
-        self.assertNotIn("[Источник]</a>-3", first.formatted_text)
+        raw_turn = self.browser._read(self.browser.session[0])["turns"][-1]
+        self.assertIn("🐴-1-5-12-3", raw_turn["text"])
+        self.assertIn("Numbers in the answer: -1-5-12. 🐴 Open this page for details.", first.text)
+        self.assertIn('Numbers in the answer: -1-5-12. 🐴 Open '
+                      '<a href="https://example.test/source">this page</a> for details.', first.formatted_text)
+        self.assertEqual(first.formatted_text.count("https://example.test/source"), 1)
         self.assertIn("<blockquote expandable>hidden quote</blockquote>", first.formatted_text)
         self.assertIn("<u>Telegram HTML</u>", first.formatted_text)
         self.assertIn('<pre><code class="language-python">if x &lt; 2:\n    x &amp; y</code></pre>', first.formatted_text)
