@@ -67,6 +67,52 @@ class FirefoxTest(unittest.TestCase):
         preparation = self.browser.prepare(request, self.stop)
         return self.browser.send(request, preparation, self.stop, self.track)
 
+    def attachments(self, *names):
+        batch_id = uuid4()
+        root = Path(self.enterContext(TemporaryDirectory()))
+        self.enterContext(patch.dict(os.environ, {"TMPDIR": str(root)}))
+        batch = root / f"llmchat-attachments-{batch_id}"
+        batch.mkdir(mode=0o700)
+        for index, name in enumerate(names):
+            folder = batch / str(index)
+            folder.mkdir(mode=0o700)
+            path = folder / name
+            path.write_bytes(b"synthetic fixture")
+            path.chmod(0o600)
+        return replace(self.request("read all these files"), attachment_names=names, attachment_batch_id=batch_id)
+
+    def test_mixed_batch_submits_once_and_reconciles_exact_files(self):
+        request = self.attachments("фото 1.jpg", "visual.png", "notes.txt", "report.pdf", "source.py")
+        answer = self.run_turn(request)
+        self.assertIn(" / 1 / read all these files / " + ", ".join(request.attachment_names), answer.text)
+        self.browser.close()
+        recovered = replace(request, remote_id=answer.remote_id, attachment_batch_id=None)
+        self.assertEqual(self.browser.reconcile(recovered, self.stop, self.track).tail, answer.tail)
+        followup = self.run_turn(self.request("follow-up", answer))
+        self.assertIn(" / 2 / follow-up", followup.text)
+
+    def test_attachment_rejection_blocks_the_whole_turn(self):
+        self.site.mode = "attachment-rejected"
+        with self.assertRaises(BrowserFailure) as failure:
+            self.run_turn(self.attachments("photo.jpg", "notes.txt"))
+        self.assertEqual(failure.exception.status, "attachmentFailed")
+        self.assertFalse(failure.exception.may_have_sent)
+        self.assertEqual(self.browser._read(self.browser.session[0])["turns"], [])
+
+    def test_uses_the_current_picker_formats(self):
+        with self.assertRaises(BrowserFailure) as failure:
+            self.run_turn(self.attachments("notes.txt", "recording.mp4"))
+        self.assertEqual(failure.exception.status, "attachmentFormat")
+        self.assertFalse(failure.exception.may_have_sent)
+
+    def test_ignores_answer_to_a_turn_missing_a_file(self):
+        self.site.mode = "attachment-dropped"
+        with self.assertRaises(BrowserFailure) as failure:
+            self.run_turn(self.attachments("photo.jpg", "notes.txt"))
+        self.assertEqual(failure.exception.status, "uncertain")
+        self.assertTrue(failure.exception.may_have_sent)
+        self.assertFalse(failure.exception.accepted)
+
     def test_reuses_verified_home_after_navigation_timeout(self):
         from selenium.common.exceptions import TimeoutException
 

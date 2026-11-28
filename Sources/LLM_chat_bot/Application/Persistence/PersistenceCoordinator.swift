@@ -94,7 +94,7 @@ actor PersistenceCoordinator {
         }
         guard !abandoned else { throw DeepSeekWebPersistenceError.unavailable }
         do {
-            switch try await persistence.admitWebUpdate(operation.updateID, row: row) {
+            switch try await persistence.admitWebUpdate(operation.updateID, albumUpdateIDs: operation.albumUpdateIDs, row: row) {
             case .inserted:
                 uncertainWebAdmissions.remove(operation.updateID)
                 await store.acceptWebAdmission(chatKey: chatKey, operation: operation)

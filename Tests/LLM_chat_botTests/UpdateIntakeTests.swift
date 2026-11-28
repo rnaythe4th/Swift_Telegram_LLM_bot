@@ -55,7 +55,7 @@ final class UpdateIntakeTests: XCTestCase {
     // MARK: - Albums
 
     func testAnAlbumIsHeldBackAndThenReleasedAsOneMessage() {
-        var buffer = TelegramPhotoAlbumBuffer()
+        var buffer = TelegramMediaAlbumBuffer()
         let start = Date()
 
         let immediate = buffer.ingest([update(1, mediaGroup: "album"), update(2, mediaGroup: "album")], now: start)
@@ -63,15 +63,24 @@ final class UpdateIntakeTests: XCTestCase {
 
         let released = buffer.ingest([], now: start.addingTimeInterval(1))
         XCTAssertEqual(released.count, 1)
-        XCTAssertEqual(released.first?.message?.album_photos?.count, 2)
+        XCTAssertEqual(released.first?.message?.album_media?.count, 2)
         XCTAssertFalse(buffer.hasBufferedUpdates)
+    }
+
+    func testPollingBoundaryIncludesInterleavedAlbums() {
+        var page = (1...100).map { update($0) }
+        page[76] = update(77, mediaGroup: "interleaved")
+        page[84] = update(85, mediaGroup: "trailing")
+        page[87] = update(88, mediaGroup: "interleaved")
+        page[98] = update(99, mediaGroup: "trailing")
+        XCTAssertEqual(TelegramMediaAlbumBuffer.trailingAlbumStart(in: page), 76)
     }
 
     /// A client that keeps posting parts under one `media_group_id` pushes the
     /// quiet-period forward with every part. Without the lifetime ceiling the
     /// album — and every message queued behind it — is held indefinitely.
     func testAnAlbumThatNeverGoesQuietIsStillReleased() {
-        var buffer = TelegramPhotoAlbumBuffer()
+        var buffer = TelegramMediaAlbumBuffer()
         let start = Date()
         var released: [TelegramUpdate] = []
 
@@ -85,7 +94,7 @@ final class UpdateIntakeTests: XCTestCase {
 
         XCTAssertFalse(released.isEmpty, "released on its lifetime, not on silence that never comes")
         XCTAssertLessThanOrEqual(
-            released.first?.message?.album_photos?.count ?? 0,
+            released.first?.message?.album_media?.count ?? 0,
             12,
             "the drip is cut at the lifetime, not carried whole"
         )
@@ -94,7 +103,7 @@ final class UpdateIntakeTests: XCTestCase {
     /// Every part carries a photo that would be downloaded and base64-encoded
     /// into the model request, so the count is capped rather than trusted.
     func testAnAlbumKeepsAtMostItsCapInParts() {
-        var buffer = TelegramPhotoAlbumBuffer()
+        var buffer = TelegramMediaAlbumBuffer()
         let start = Date()
         var released: [TelegramUpdate] = []
 
@@ -105,7 +114,7 @@ final class UpdateIntakeTests: XCTestCase {
 
         XCTAssertFalse(released.isEmpty)
         for album in released {
-            XCTAssertLessThanOrEqual(album.message?.album_photos?.count ?? 0, 16)
+            XCTAssertLessThanOrEqual(album.message?.album_media?.count ?? 0, 16)
         }
         XCTAssertFalse(buffer.hasBufferedUpdates)
     }
@@ -114,7 +123,7 @@ final class UpdateIntakeTests: XCTestCase {
     /// the updates queued behind an album go through slightly out of order
     /// instead of piling up.
     func testUpdatesQueuedBehindAnAlbumAreBounded() {
-        var buffer = TelegramPhotoAlbumBuffer()
+        var buffer = TelegramMediaAlbumBuffer()
         let start = Date()
 
         _ = buffer.ingest([update(1, mediaGroup: "album")], now: start)
@@ -131,7 +140,7 @@ final class UpdateIntakeTests: XCTestCase {
     /// A callback query has no message and must never wait behind an album:
     /// «Стоп» has to reach the generation it is stopping.
     func testACallbackIsNeverHeldBehindAnAlbum() {
-        var buffer = TelegramPhotoAlbumBuffer()
+        var buffer = TelegramMediaAlbumBuffer()
         let start = Date()
         _ = buffer.ingest([update(1, mediaGroup: "album")], now: start)
 
@@ -177,6 +186,31 @@ final class UpdateIntakeTests: XCTestCase {
         XCTAssertEqual(delivered.value, [1, 2, 3])
         let counters = await metrics.snapshot().counters
         XCTAssertEqual(counters[MetricName.updatesDeduplicated], 1)
+    }
+
+    func testPartsFromSeparateRequestsWaitForOneDurableAdmissionAndCanRetry() async throws {
+        let received = LockedValue<[TelegramUpdate]>([])
+        let shouldAccept = LockedValue(false)
+        let intake = UpdateIntake(metrics: RuntimeMetrics(), durableDelivery: { update in
+            received.withLock { $0.append(update) }
+            return shouldAccept.value
+        }) { _ in XCTFail("Durable route should handle the merged update") }
+
+        let a = update(1, mediaGroup: "split")
+        let b = update(2, mediaGroup: "split")
+        async let first = intake.enqueue([a])
+        try await Task.sleep(for: .milliseconds(100))
+        let second = await intake.enqueue([b])
+        let firstResult = await first
+        XCTAssertEqual([firstResult, second], [0, 0])
+        XCTAssertEqual(received.value.map(\.album_update_ids), [[1, 2]])
+
+        shouldAccept.value = true
+        let retry = await intake.enqueue([a, b])
+        let duplicate = await intake.enqueue([b])
+        XCTAssertEqual(retry, 2)
+        XCTAssertEqual(duplicate, 1)
+        XCTAssertEqual(received.value.map(\.album_update_ids), [[1, 2], [1, 2]])
     }
 }
 

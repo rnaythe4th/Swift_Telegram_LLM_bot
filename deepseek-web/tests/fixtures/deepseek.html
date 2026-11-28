@@ -8,12 +8,14 @@
     <a href="/a/chat/s/old-b">Same title</a>
   </aside>
   <div data-testid="conversation"></div>
-  <section>
+  <section data-testid="composer">
     <textarea id="chat-input" placeholder="Message DeepSeek"></textarea>
     <button aria-pressed="true">DeepThink</button>
     <button aria-pressed="false">Search</button>
     <button data-testid="send-button" type="button">Send</button>
     <button data-testid="stop-button" type="button" hidden>Stop</button>
+    <input type="file" multiple accept=".jpg,.png,.pdf,.txt,.py,.xlsx" hidden>
+    <div data-testid="draft-files"></div>
   </section>
   <div data-testid="chat-error" role="alert" hidden></div>
 </main>
@@ -25,6 +27,9 @@
   const [deepThink, search] = document.querySelectorAll('[aria-pressed]');
   let send = document.querySelector('[data-testid="send-button"]');
   const stop = document.querySelector('[data-testid="stop-button"]');
+  const picker = document.querySelector('input[type="file"]');
+  const draftFiles = document.querySelector('[data-testid="draft-files"]');
+  let staged = [];
   const prefix = '/a/chat/s/';
   const stored = JSON.parse(localStorage.getItem('chats') || '{}');
   const seeded = {
@@ -80,8 +85,15 @@
     error.hidden = false;
   }
 
-  function user(text) {
+  function user(text, files = []) {
     const turn = add(appendRow(), 'div', {class: 'ds-message'});
+    for (const name of files) {
+      if (/\.(?:png|jpg)$/.test(name)) {
+        add(turn, 'img', {class: '_9f130b7', alt: name, width: '30', height: '30'});
+      } else {
+        add(add(turn, 'div', {class: 'cd314545'}), 'span', {class: 'e70accd6'}, name);
+      }
+    }
     if (mode.startsWith('native-')) {
       const body = add(add(turn, 'div'), 'div', {class: 'ds-collapsible-text'});
       add(add(body, 'div'), 'span', {}, text);
@@ -139,8 +151,8 @@
     id = null;
   }
   if (id) {
-    for (const [question, response] of chats[id]) {
-      user(question);
+    for (const [question, response, files] of chats[id]) {
+      user(question, files);
       if (response !== null) answer(response, true);
     }
   }
@@ -173,6 +185,22 @@
   if (mode === 'unknown-dialog') alert('Something entirely unexpected');
   if (mode === 'low-limit') input.setAttribute('maxlength', '4');
 
+  picker.addEventListener('change', () => {
+    const files = [...picker.files];
+    picker.value = '';
+    const previews = files.map(file => add(draftFiles, 'div', {
+      'data-file-name': file.name, 'data-state': 'uploading',
+    }, file.name));
+    setTimeout(() => {
+      if (mode === 'attachment-rejected') {
+        previews.at(-1).setAttribute('data-state', 'error');
+        return;
+      }
+      staged = files.map(file => file.name);
+      for (const preview of previews) preview.setAttribute('data-state', 'ready');
+    }, 300);
+  });
+
   function submit(event) {
     if (mode === 'quota') return alert('Rate limit: try again in 10 minutes');
     if (mode === 'busy') return alert('Server is busy');
@@ -180,6 +208,7 @@
     if (!text || !event.isTrusted) {
       return alert('Incorrect configuration');
     }
+    if (draftFiles.children.length !== staged.length) return alert('Upload failed');
     sessionStorage.submittedSearch = search.getAttribute('aria-pressed');
     if (mode === 'send-lost') {
       sessionStorage.lostSubmissions = String(Number(sessionStorage.lostSubmissions || 0) + 1);
@@ -191,11 +220,14 @@
       history.pushState({}, '', prefix + id);
     }
     const count = chats[id].length + 1;
-    const response = id + ' / ' + count + ' / ' + text;
+    const files = mode === 'attachment-dropped' ? staged.slice(0, -1) : staged;
+    const response = id + ' / ' + count + ' / ' + text + (files.length ? ' / ' + files.join(', ') : '');
     const stalled = mode === 'stalled';
-    chats[id].push([text, stalled ? null : response]);
+    chats[id].push([text, stalled ? null : response, files]);
     localStorage.setItem('chats', JSON.stringify(chats));
-    user(text);
+    user(text, files);
+    staged = [];
+    draftFiles.replaceChildren();
     input.value = '';
     stop.hidden = false;
     const streaming = mode === 'streaming';

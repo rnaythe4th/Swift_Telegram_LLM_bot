@@ -289,7 +289,9 @@ class HTTPTest(unittest.TestCase):
     def test_authorization_and_schema(self):
         self.assertEqual(self.request("/v1/health", token=None)[0], 401)
         self.assertEqual(self.request("/v1/health", token="wrong")[0], 401)
-        self.assertEqual(self.request("/v1/health")[1], {"version": 1, "status": "ready", "ready": True})
+        self.assertEqual(self.request("/v1/health")[1], {
+            "version": 1, "status": "ready", "ready": True, "supportsAttachments": False,
+        })
         self.assertEqual(self.request("/v1/prepare", {"version": 1})[0], 400)
         self.assertEqual(self.request("/v1/prepare", self.payload)[1]["status"], "prepared")
         self.assertEqual(self.request("/v1/prepare", dict(self.payload, operationID=str(uuid4())))[1]["status"], "busy")
@@ -315,3 +317,13 @@ class HTTPTest(unittest.TestCase):
         self.assertEqual(result["text"], "final")
         self.assertEqual(self.request("/v1/send", task)[1], result)
         self.assertEqual(self.browser.send_count, 1)
+
+    def test_attachment_metadata_and_send_only_batch(self):
+        attached = dict(self.payload, prompt="question", attachmentNames=["notes.txt", "фото.jpg"])
+        self.assertEqual(self.request("/v1/prepare", attached)[1]["status"], "attachmentsUnavailable")
+        self.assertEqual(self.request("/v1/send", attached)[0], 400)
+        batch = dict(attached, attachmentBatchID=str(uuid4()))
+        self.assertEqual(self.request("/v1/prepare", batch)[0], 400)
+        self.assertEqual(self.request("/v1/prepare", dict(attached, attachmentNames=["../secret.txt"]))[0], 400)
+        self.assertEqual(self.request("/v1/prepare", dict(attached, attachmentNames=["photo.jpg"] * 11))[0], 400)
+        self.assertEqual(self.request("/v1/send", batch)[1]["status"], "attachmentsUnavailable")

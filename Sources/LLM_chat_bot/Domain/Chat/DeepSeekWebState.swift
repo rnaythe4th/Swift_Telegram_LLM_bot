@@ -29,6 +29,9 @@ struct DeepSeekWebOperation: Codable, Sendable {
     let webSearch: Bool?
 
     var requesterID: UserID?
+    var attachments: [InboundMediaRef]?
+    var attachmentNames: [String]?
+    var albumUpdateIDs: [Int64]?
     var stage: Stage = .queued
     var workerOperationID: UUID?
     var candidateRemoteChatID: String?

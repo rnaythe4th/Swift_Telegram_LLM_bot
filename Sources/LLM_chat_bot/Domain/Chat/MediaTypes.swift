@@ -4,6 +4,7 @@ enum InboundMediaKind: Sendable, Equatable {
     case image
     case audio
     case video
+    case document
     
     var displayName: String {
         switch self {
@@ -13,14 +14,17 @@ enum InboundMediaKind: Sendable, Equatable {
             return "голосовое сообщение"
         case .video:
             return "видео"
+        case .document:
+            return "документы"
         }
     }
 }
 
-enum InboundMediaRef: Sendable {
+enum InboundMediaRef: Codable, Sendable {
     case photo(fileID: String)
     case voice(fileID: String, mimeType: String?)
     case video(fileID: String, mimeType: String?)
+    case document(fileID: String, fileName: String?, fileSize: Int?)
     
     var kind: InboundMediaKind {
         switch self {
@@ -30,6 +34,8 @@ enum InboundMediaRef: Sendable {
             return .audio
         case .video:
             return .video
+        case .document:
+            return .document
         }
     }
 }

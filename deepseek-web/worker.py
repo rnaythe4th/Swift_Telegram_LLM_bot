@@ -42,10 +42,13 @@ class Request:
     candidate_id: str | None = None
     deep_think: bool | None = None
     web_search: bool | None = None
+    attachment_names: tuple[str, ...] = ()
+    attachment_batch_id: UUID | None = None
 
     @property
     def binding(self):
-        return self.account_epoch, self.account_marker, self.remote_id, self.tail, self.deep_think, self.web_search
+        return (self.account_epoch, self.account_marker, self.remote_id, self.tail,
+                self.deep_think, self.web_search, self.attachment_names)
 
     @property
     def search_enabled(self):
@@ -78,7 +81,7 @@ def parse_request(payload, action):
     check_version(payload)
     if set(payload) - {
         "version", "operationID", "accountEpoch", "accountMarker", "remoteChatID", "remoteTail", "prompt",
-        "candidateRemoteChatID", "deepThink", "webSearch",
+        "candidateRemoteChatID", "deepThink", "webSearch", "attachmentNames", "attachmentBatchID",
     }:
         raise ValueError
     operation_id = UUID(payload["operationID"])
@@ -102,8 +105,17 @@ def parse_request(payload, action):
         prompt.encode("utf-8")  # Reject unpaired surrogates before dispatch.
     if any(field in payload and type(payload[field]) is not bool for field in ("deepThink", "webSearch")):
         raise ValueError
+    names = payload.get("attachmentNames", [])
+    if (not isinstance(names, list) or len(names) > 10
+            or any(not isinstance(name, str) or not name or name in {".", ".."} or name != name.strip()
+                   or len(name.encode("utf-8")) > 200 or re.search(r"[/\\\x00-\x1f\x7f]", name) for name in names)):
+        raise ValueError
+    batch_id = UUID(payload["attachmentBatchID"]) if "attachmentBatchID" in payload else None
+    if (batch_id is not None) != (action == "send" and bool(names)):
+        raise ValueError
     return Request(operation_id, account_epoch, account_marker, remote_id, tail, prompt, candidate_id,
-                   deep_think=payload.get("deepThink"), web_search=payload.get("webSearch"))
+                   deep_think=payload.get("deepThink"), web_search=payload.get("webSearch"),
+                   attachment_names=tuple(names), attachment_batch_id=batch_id)
 
 
 def reply(request, status, accepted=False, **fields):
@@ -170,7 +182,8 @@ class Worker:
                 status = "busy"
             else:
                 status = upstream_status
-            response = {"version": 1, "status": status, "ready": status in {"ready", "busy"}}
+            response = {"version": 1, "status": status, "ready": status in {"ready", "busy"},
+                        "supportsAttachments": getattr(self.browser, "supports_attachments", False)}
             if self.idle_seconds is None:
                 response["browserWarm"] = (status == "ready" and self.browser.session is not None)
             if self.marker:
@@ -331,6 +344,8 @@ class Worker:
 
             if self.shutting_down or self.gate:
                 return reply(request, self.gate or "unavailable")
+            if request.attachment_names and not getattr(self.browser, "supports_attachments", False):
+                return reply(request, "attachmentsUnavailable")
             if oversized:
                 if own and current.phase == "prepared":
                     self._release_prepared("inputTooLong")

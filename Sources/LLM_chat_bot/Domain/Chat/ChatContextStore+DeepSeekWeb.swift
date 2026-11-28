@@ -62,6 +62,8 @@ extension ChatContextStore {
         reply: TranscriptReply?,
         replyToMessageID: Int? = nil,
         asker: UserKey? = nil,
+        attachments: [InboundMediaRef]? = nil,
+        albumUpdateIDs: [Int64]? = nil,
         now: Date = Date()
     ) -> DeepSeekWebOperation? {
         let context = ensure(chatKey: chatKey)
@@ -119,7 +121,9 @@ extension ChatContextStore {
             reply: reply.flatMap(quote),
             deepThink: web.deepThink,
             webSearch: web.webSearch,
-            requesterID: asker?.userID
+            requesterID: asker?.userID,
+            attachments: attachments,
+            albumUpdateIDs: albumUpdateIDs
         )
     }
 

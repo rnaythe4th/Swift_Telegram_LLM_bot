@@ -11,11 +11,14 @@ struct DeepSeekWebWorkerRequest: Encodable, Sendable {
     let deepThink: Bool?
     let webSearch: Bool?
     var candidateRemoteChatID: String?
+    var attachmentNames: [String]?
+    var attachmentBatchID: UUID?
 }
 
 enum DeepSeekWebWorkerStatus: String, Decodable, Sendable {
     case ready, warming, maintenance, prepared, completed, cancelled, quota, busy, loginRequired
     case inputTooLong, chatUnavailable, unknownUI, uncertain, unavailable, notAccepted, inProgress, moderated
+    case attachmentsUnavailable, attachmentFormat, attachmentFailed
 }
 
 struct DeepSeekWebWorkerResponse: Decodable, Sendable {
@@ -37,6 +40,7 @@ struct DeepSeekWebWorkerHealth: Decodable, Sendable {
     let version: Int
     let status: DeepSeekWebWorkerStatus
     let accountMarker: UUID?
+    var supportsAttachments: Bool?
 }
 
 enum DeepSeekWebWorkerAction: String {

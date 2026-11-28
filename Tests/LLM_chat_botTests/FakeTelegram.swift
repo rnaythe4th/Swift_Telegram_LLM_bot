@@ -178,6 +178,12 @@ private actor CallRecorder {
             return .json(#"{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Test","username":"testbot"}}"#)
         case "getUpdates":
             return .json(#"{"ok":true,"result":[]}"#)
+        case "getFile":
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let fileID = (json?["file_id"] as? String) ?? "fixture"
+            return .json("""
+            {"ok":true,"result":{"file_id":"\(fileID)","file_unique_id":"\(fileID)","file_size":17,"file_path":"fixtures/\(fileID).sample"}}
+            """)
         case "sendMessage", "editMessageText", "sendInvoice":
             nextMessageID += 1
             let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
@@ -187,6 +193,7 @@ private actor CallRecorder {
              "chat":{"id":\(chatID),"type":"private"}}}
             """)
         default:
+            if method.hasSuffix(".sample") { return .ok("synthetic fixture") }
             // answerCallbackQuery, sendChatAction, deleteWebhook, setWebhook,
             // answerPreCheckoutQuery … all answer with a bare `true`.
             return .json(#"{"ok":true,"result":true}"#)

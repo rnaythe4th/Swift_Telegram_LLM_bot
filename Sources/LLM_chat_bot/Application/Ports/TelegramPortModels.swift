@@ -6,6 +6,7 @@ struct TelegramUpdate: Codable, Sendable {
     let callback_query: CallbackQuery?
     let pre_checkout_query: TelegramPreCheckoutQuery?
     let my_chat_member: ChatMemberUpdate?
+    var album_update_ids: [Int]?
 }
 
 /// The bot's own membership transition in a chat (added / removed / promoted).
@@ -34,8 +35,8 @@ final class TelegramMessage: Codable, Sendable {
     let media_group_id: String?
     let reply_to_message: TelegramMessage?
     let photo: [PhotoSize]?
-    // Internal marker for a synthetic merged album: one primary photo per album item.
-    let album_photos: [PhotoSize]?
+    let document: TelegramDocument?
+    let album_media: [InboundMediaRef]?
     let successful_payment: TelegramSuccessfulPayment?
     /// Service message posted in a group the moment Telegram upgrades it to a
     /// supergroup: the id every later update for this room will carry. The
@@ -56,7 +57,8 @@ final class TelegramMessage: Codable, Sendable {
         media_group_id: String?,
         reply_to_message: TelegramMessage?,
         photo: [PhotoSize]?,
-        album_photos: [PhotoSize]? = nil,
+        document: TelegramDocument? = nil,
+        album_media: [InboundMediaRef]? = nil,
         successful_payment: TelegramSuccessfulPayment? = nil,
         migrate_to_chat_id: ChatID? = nil
     ) {
@@ -72,10 +74,17 @@ final class TelegramMessage: Codable, Sendable {
         self.media_group_id = media_group_id
         self.reply_to_message = reply_to_message
         self.photo = photo
-        self.album_photos = album_photos
+        self.document = document
+        self.album_media = album_media
         self.successful_payment = successful_payment
         self.migrate_to_chat_id = migrate_to_chat_id
     }
+}
+
+struct TelegramDocument: Codable, Sendable {
+    let file_id: String
+    let file_name: String?
+    let file_size: Int?
 }
 
 struct TelegramVoice: Codable, Sendable {

@@ -59,6 +59,7 @@ final class TelegramAPIMessage: Decodable, Sendable {
     let media_group_id: String?
     let reply_to_message: TelegramAPIMessage?
     let photo: [TelegramAPIPhotoSize]?
+    let document: TelegramDocument?
     let successful_payment: TelegramAPISuccessfulPayment?
     /// Set on the service message a group posts when Telegram turns it into a
     /// supergroup — the chat's new id.

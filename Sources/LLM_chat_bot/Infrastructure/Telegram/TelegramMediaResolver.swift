@@ -4,6 +4,7 @@ enum TelegramMediaResolverError: LocalizedError {
     case missingFilePath(String)
     /// One turn asked for more bytes than a turn is allowed to download.
     case attachmentsTooHeavy(limitBytes: Int)
+    case unsupportedDocument
 
     var errorDescription: String? {
         switch self {
@@ -11,6 +12,8 @@ enum TelegramMediaResolverError: LocalizedError {
             return "Telegram returned nil file_path for file_id=\(fileID)"
         case .attachmentsTooHeavy(let limitBytes):
             return "Attachments exceed the \(limitBytes)-byte budget for one turn"
+        case .unsupportedDocument:
+            return "This provider does not accept documents"
         }
     }
 }
@@ -111,6 +114,8 @@ final class TelegramMediaResolver: MediaResolverPort, Sendable {
             let data = try await download(fileID: fileID, budget: budget)
             let format = mimeType?.split(separator: "/").last.map(String.init) ?? "mp4"
             return .videoBase64(data: data.base64EncodedString(), format: format)
+        case .document:
+            throw TelegramMediaResolverError.unsupportedDocument
         }
     }
 }

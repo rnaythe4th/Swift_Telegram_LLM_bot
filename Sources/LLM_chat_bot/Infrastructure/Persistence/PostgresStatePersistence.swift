@@ -98,25 +98,30 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
         return nil
     }
 
-    func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
+    func admitWebUpdate(_ updateID: Int64, albumUpdateIDs: [Int64]? = nil, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
         // Batch the writes, then explicitly wait for COMMIT. PostgresNIO
         // finishes a row stream before PostgreSQL reports implicit commit.
         let log = queryLogger
+        let ids = Array(Set((albumUpdateIDs ?? []) + [updateID]))
         let inserted = try await client.withTransaction(logger: log) { db in
             let rows = try await db.query(
                 """
                 with expired as (
                     delete from bot_web_update
-                    where expires_at <= now() and update_id <> \(updateID)
+                    where expires_at <= now() and update_id <> all(\(ids)::bigint[])
                 ), admitted as (
                     insert into bot_web_update (update_id, expires_at)
-                    values (\(updateID), now() + interval '48 hours')
+                    select id, now() + interval '48 hours' from unnest(\(ids)::bigint[]) as ids(id)
+                    where not exists (
+                        select 1 from bot_web_update where update_id = any(\(ids)::bigint[]) and expires_at > now()
+                    )
                     on conflict (update_id) do update set expires_at = excluded.expires_at
                     where bot_web_update.expires_at <= now()
                     returning update_id
                 )
                 insert into bot_chat_context (chat_id, thread_id, data, updated_at)
-                select \(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now() from admitted
+                select \(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now()
+                where (select count(*) from admitted) = \(ids.count)
                 on conflict (chat_id, thread_id) do update set
                     data = excluded.data, updated_at = excluded.updated_at
                 returning 1

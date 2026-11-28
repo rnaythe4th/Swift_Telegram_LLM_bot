@@ -13,7 +13,7 @@ import Foundation
 // the bot signs with its own name.
 enum Texts {
 
-    static let webGroupDisclosure = "Вопросы боту в этом чате отправляются в аккаунт DeepSeek, подключённый владельцем бота."
+    static let webGroupDisclosure = "Вопросы и вложения, отправленные боту в этом чате, передаются в аккаунт DeepSeek, подключённый владельцем бота."
     static let webListenDisclosure = "При обращении к боту часть реплик участников будет отправляться в этот аккаунт DeepSeek."
     static let webListeningNeedsApproval = "Чтобы DeepSeek Web учитывал беседу, администратор может разрешить передачу контекста в меню прослушки."
 

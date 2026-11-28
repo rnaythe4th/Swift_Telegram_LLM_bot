@@ -40,6 +40,7 @@ struct ProviderCapabilities: Sendable {
     let supportsAudioInput: Bool
     let supportsVideoInput: Bool
     let supportsReasoning: Bool
+    var supportsDocumentInput = false
     
     func supports(_ kind: InboundMediaKind) -> Bool {
         switch kind {
@@ -49,6 +50,8 @@ struct ProviderCapabilities: Sendable {
             return supportsAudioInput
         case .video:
             return supportsVideoInput
+        case .document:
+            return supportsDocumentInput
         }
     }
 }

@@ -224,7 +224,7 @@ extension BotOrchestrator {
         var retryDelay = initialRetryDelay
         while !flags.draining.value && flags.durability.value.acceptsUpdates {
             do {
-                let updates = try await telegram.getUpdates(offset: offset)
+                let updates = try await pollUpdates(offset: offset)
                 retryDelay = initialRetryDelay
                 guard !flags.draining.value, flags.durability.value.acceptsUpdates else { return }
                 let accepted = await intake.enqueue(updates)
@@ -243,6 +243,24 @@ extension BotOrchestrator {
                 retryDelay = min(retryDelay * 2, .seconds(3))
             }
         }
+    }
+
+    private func pollUpdates(offset: Int?) async throws -> [TelegramUpdate] {
+        let page = try await telegram.getUpdates(offset: offset)
+        guard let start = TelegramMediaAlbumBuffer.trailingAlbumStart(in: page) else { return page }
+        if page.count == 100 {
+            // Commit only the prefix, leaving the trailing albums unconfirmed
+            // so the next page can return all their parts together.
+            return start == 0 ? page : Array(page.prefix(start))
+        }
+        // The same offset leaves this page unconfirmed while Telegram adds
+        // any album parts delivered in separate updates.
+        try await Task.sleep(for: .milliseconds(350))
+        let refreshed = try await telegram.getUpdates(offset: offset)
+        if refreshed.count == 100, let boundary = TelegramMediaAlbumBuffer.trailingAlbumStart(in: refreshed), boundary > 0 {
+            return Array(refreshed.prefix(boundary))
+        }
+        return refreshed
     }
 
     /// Turns the conditions nobody watches into messages the owner gets once

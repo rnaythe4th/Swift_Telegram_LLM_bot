@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -23,11 +24,11 @@ CHAT_ID = re.compile(r"[a-zA-Z0-9_-]{1,128}", re.ASCII)
 TAIL = re.compile(r"v1:([1-9][0-9]{0,8}):[a-f0-9]{64}", re.ASCII)
 MAX_RESPONSE_BYTES = 64_000
 SUBMIT_CONFIRM_SECONDS = 20
+ATTACHMENT_UPLOAD_SECONDS = 60
 COMPOSER = '#chat-input, [data-testid="chat-input"], textarea[placeholder], [contenteditable="true"][role="textbox"]'
 SEND = '[data-testid="send-button"], [aria-label="Send" i], [aria-label="Send message" i], [title="Send message" i]'
 NATIVE_SEND = 'div[role="button"].ds-button.ds-button--primary.ds-button--filled.ds-button--circle'
 STOP = '[data-testid="stop-button"], [aria-label="Stop generating" i], [aria-label="Stop" i], [title="Stop generating" i]'
-ATTACHMENT = '[data-testid="attachment-preview"], [data-testid="file-preview"], .ds-file-preview'
 ALERT = '[role="alert"], [data-testid="chat-error"], .ds-toast, .ds-message-error'
 MODEL_BODY = (
     '[data-message-role="assistant"], [data-role="assistant"], '
@@ -38,9 +39,46 @@ MODEL_BODY = (
 DEEPTHINK = ("deepthink", "deep think", "глубокое мышление", "深度思考")
 SEARCH = ("search", "web search", "поиск", "联网搜索", "智能搜索")
 
+# The native file card is shared by the composer and sent messages. Image
+# preview loading can outlast upload, so readiness uses the send control and
+# the upload state on the cards, without waiting for preview pixels.
+ATTACHMENT_DOM = r"""
+function attachmentCards(root) {
+  return [...root.querySelectorAll(
+    '[data-file-name], [data-testid="attachment-preview"], [data-testid="file-preview"], ' +
+    '.ds-file-preview, .cd314545, img._9f130b7[alt]'
+  )].filter(card => card.getClientRects().length && !card.parentElement.closest(
+    '[data-file-name], [data-testid="attachment-preview"], [data-testid="file-preview"], .ds-file-preview, .cd314545'
+  ));
+}
+function attachmentName(card) {
+  return (card.getAttribute('data-file-name') || card.querySelector('.e70accd6')?.textContent ||
+    (card.matches('img') ? card : card.querySelector('img[alt]'))?.getAttribute('alt') || '').trim();
+}
+"""
+
+READ_ATTACHMENTS = ATTACHMENT_DOM + r"""
+const [composer] = arguments;
+const scope = composer.closest('._77cefa5, [data-testid="composer"]') || composer.parentElement;
+const inputs = scope.querySelectorAll('input[type="file"]');
+const input = inputs.length === 1 ? inputs[0] : null;
+const cards = attachmentCards(scope);
+const hasState = (card, selector) => card.matches(selector) || Boolean(card.querySelector(selector));
+return {
+  input,
+  multiple: input?.multiple,
+  accept: input?.accept,
+  names: cards.map(attachmentName),
+  pending: cards.some(card => hasState(card, '[aria-busy="true"], [role="progressbar"], [data-state="uploading"]') ||
+    (card.matches('.cd314545') && hasState(card, '.ds-loading'))),
+  failed: cards.some(card => hasState(card, '[data-state="error"], [data-status="error"], [aria-invalid="true"], ' +
+    '[aria-label="Retry" i], [title="Retry" i]')),
+};
+"""
+
 # The native selectors and completion toolbar follow the Firefox adapter in Ai-news-bot.
 # Measure position in rendered user/assistant pairs and ignore action and reasoning UI.
-READ_TURNS = r"""
+READ_TURNS = ATTACHMENT_DOM + r"""
 const visible = node => node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden';
 const scope = document.querySelector('[data-testid="conversation"], [data-testid="message-list"]') || document;
 const user = '[data-message-role="user"], [data-role="user"]';
@@ -155,7 +193,8 @@ return {
     if (element.matches(user) || question) {
       const text = withoutControls(question || element);
       for (const br of text.querySelectorAll('br')) br.replaceWith('\n');
-      return {role: 'user', id, key, text: text.textContent.trim(), complete: true};
+      return {role: 'user', id, key, text: text.textContent.trim(), complete: true,
+              attachments: attachmentCards(element).map(attachmentName)};
     }
     if (!element.matches(assistant) && !element.querySelector(main + ', ' + reasoning)) {
       return {role: 'unknown', id, key, text: '', complete: false};
@@ -284,7 +323,8 @@ def tail_for(turns):
     ):
         return None
     # Text hashes with native IDs when available cover the ordered prefix as well as the last pair.
-    data = json.dumps([(turn["id"], turn["text"]) for turn in turns], ensure_ascii=False, separators=(",", ":"))
+    identity = [[turn["id"], turn["text"], *sorted(turn.get("attachments", []))] for turn in turns]
+    data = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
     return f"v1:{len(turns) // 2}:{hashlib.sha256(data.encode()).hexdigest()}"
 
 
@@ -323,6 +363,10 @@ def classify_alert(message):
         return BrowserFailure("chatUnavailable")
     if re.search(r"blocked by (?:content )?moderation|violates? (?:our )?content policy|content policy violation", message):
         return BrowserFailure("moderated")
+    if re.search(r"unsupported (?:file|format)|file (?:type|format) (?:is )?not supported|不支持.*(?:文件|格式)", message):
+        return BrowserFailure("attachmentFormat")
+    if re.search(r"upload.*(?:failed|limit)|(?:file|attachment).*too large|failed to (?:upload|parse)|上传失败", message):
+        return BrowserFailure("attachmentFailed")
     return BrowserFailure("unavailable")
 
 
@@ -347,6 +391,8 @@ def locked_profile(profile):
 
 
 class Browser:
+    supports_attachments = True
+
     def __init__(self, profile, *, home=DEEPSEEK_URL, firefox="/usr/bin/firefox-esr",
                  geckodriver="/usr/local/bin/geckodriver", deepthink=False,
                  prepare_seconds=25, generation_seconds=240, max_prompt_units=12_000):
@@ -570,7 +616,7 @@ class Browser:
         if expected_id is not None and (not turns or tail_for(turns) != expected_tail):
             return None
         value = driver.execute_script("return arguments[0].value ?? arguments[0].textContent", composer)
-        if value or self._visible(driver, ATTACHMENT):
+        if value or driver.execute_script(READ_ATTACHMENTS, composer)["names"]:
             raise BrowserFailure("unknownUI")
         return composer, turns
 
@@ -634,6 +680,52 @@ class Browser:
                 and control.get_dom_attribute("aria-disabled") != "true"
                 and "ds-button--disabled" not in (control.get_dom_attribute("class") or "").split())
 
+    @staticmethod
+    def _attachment_paths(request):
+        root = Path(os.environ.get("TMPDIR", "/tmp")) / f"llmchat-attachments-{request.attachment_batch_id}"
+        try:
+            private_directory(root)
+            paths = []
+            for index, name in enumerate(request.attachment_names):
+                folder = root / str(index)
+                private_directory(folder)
+                path = folder / name
+                info = path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or info.st_mode & 0o077 or info.st_nlink != 1 or not 0 < info.st_size <= 20 << 20):
+                    raise ValueError
+                paths.append(path)
+            return paths
+        except (OSError, ValueError):
+            raise BrowserFailure("attachmentFailed") from None
+
+    @staticmethod
+    def _accepts_attachment(name, accept):
+        types = [entry.strip().lower() for entry in accept.split(",") if entry.strip()]
+        if not types:
+            return True
+        mime = mimetypes.guess_type(name)[0] or ""
+        name = "." + name.lower()
+        return any(
+            name.endswith(entry) if entry.startswith(".") else
+            mime == entry or (entry.endswith("/*") and mime.startswith(entry[:-1]))
+            for entry in types
+        )
+
+    def _attach(self, driver, composer, request):
+        from selenium.webdriver.remote.file_detector import UselessFileDetector
+
+        state = driver.execute_script(READ_ATTACHMENTS, composer)
+        if state["input"] is None or (len(request.attachment_names) > 1 and not state["multiple"]):
+            raise BrowserFailure("attachmentFailed")
+        if any(not self._accepts_attachment(name, state["accept"]) for name in request.attachment_names):
+            raise BrowserFailure("attachmentFormat")
+        paths = self._attachment_paths(request)
+        # Geckodriver and the worker share the host. Remote Selenium's
+        # default file transfer command is unsupported by geckodriver.
+        with driver.file_detector_context(UselessFileDetector):
+            state["input"].send_keys("\n".join(map(str, paths)))
+
     def _submission(self, request, prepared, stop):
         from selenium.webdriver.common.keys import Keys
 
@@ -646,22 +738,42 @@ class Browser:
         limit = composer.get_dom_attribute("maxlength")
         if limit and limit.isdecimal() and len(request.prompt.encode("utf-16-le")) // 2 > int(limit):
             raise BrowserFailure("inputTooLong")
+        expected_files = sorted(request.attachment_names)
+        if expected_files:
+            if stop.is_set():
+                raise BrowserFailure("cancelled")
+            deadline = time.monotonic() + ATTACHMENT_UPLOAD_SECONDS
+            self._attach(driver, composer, request)
         if not driver.execute_script(SET_COMPOSER, composer, request.prompt):
             raise BrowserFailure("inputTooLong")
 
+        def attachments_ready():
+            state = driver.execute_script(READ_ATTACHMENTS, composer)
+            if state["failed"] or len(state["names"]) > len(expected_files):
+                raise BrowserFailure("attachmentFailed" if expected_files else "unknownUI")
+            return sorted(state["names"]) == expected_files and not state["pending"]
+
         def send_control():
-            if self._identity(driver) != prepared.remote_id:
+            try:
+                current_id = self._identity(driver)
+            except BrowserFailure as error:
+                if expected_files and error.status == "unavailable":
+                    raise BrowserFailure("attachmentFailed") from None
+                raise
+            if current_id != prepared.remote_id:
                 raise BrowserFailure("unknownUI")
+            if expected_files and not attachments_ready():
+                return None
             controls = driver.execute_script(NEAREST_SEND_CONTROLS, composer, f"{SEND}, {NATIVE_SEND}")
             if controls:
                 visible = [control for control in controls if control.is_displayed()]
                 return visible[0].click if len(visible) == 1 and self._can_send(visible[0]) else None
             # The native composer handles Enter on layouts with an unlabeled send icon.
-            if composer.get_dom_attribute("id") == "chat-input":
+            if not expected_files and composer.get_dom_attribute("id") == "chat-input":
                 return lambda: composer.send_keys(Keys.ENTER)
             return None
 
-        submit = self._wait(stop, deadline, send_control, "unknownUI")
+        submit = self._wait(stop, deadline, send_control, "attachmentFailed" if expected_files else "unknownUI")
         current = driver.execute_script("return arguments[0].value ?? arguments[0].textContent", composer)
         state = self._read_history(driver, stop, deadline, prepared.history)
         if current != request.prompt:
@@ -669,7 +781,7 @@ class Browser:
         deep_think = self.deepthink if request.deep_think is None else request.deep_think
         if (self._identity(driver) != prepared.remote_id or state is None or state["stopping"]
                 or len(state["turns"]) != prepared.count
-                or tail_for(state["turns"]) != prepared.tail or self._visible(driver, ATTACHMENT)
+                or tail_for(state["turns"]) != prepared.tail or not attachments_ready()
                 or not self._toggles_match(driver, deep_think, request.search_enabled)):
             raise BrowserFailure("unknownUI")
         if stop.is_set():
@@ -728,7 +840,7 @@ class Browser:
                 remote_id = result_id
             deadline = generation_deadline if accepted else min(generation_deadline, confirmation_deadline)
             state = self._read_history(driver, stop, deadline, known)
-            text, confirmed, complete = self._match(state, request.prompt, prepared) if state else (None, False, False)
+            text, confirmed, complete = self._match(state, request, prepared) if state else (None, False, False)
             accepted |= confirmed
             if confirmed:
                 known = state["turns"]
@@ -766,14 +878,15 @@ class Browser:
         except Exception:
             raise BrowserFailure("uncertain", accepted, remote_id, may_have_sent=True) from None
 
-    def _match(self, state: Mapping, prompt, prepared):
+    def _match(self, state: Mapping, request, prepared):
         turns = state["turns"]
         count = prepared.count
         if len(turns) < count or tail_for(turns[:count]) != prepared.tail:
             return None, False, False
         new = turns[count:]
         if (not new or new[0]["role"] != "user"
-                or new[0]["text"].replace("\r\n", "\n").strip() != prompt.replace("\r\n", "\n").strip()):
+                or new[0]["text"].replace("\r\n", "\n").strip() != request.prompt.replace("\r\n", "\n").strip()
+                or sorted(new[0].get("attachments", [])) != sorted(request.attachment_names)):
             return None, False, False
         if len(new) > 2:
             raise BrowserFailure("uncertain", accepted=True)
@@ -802,7 +915,7 @@ class Browser:
             state = self._read_history(driver, stop, deadline, known)
             if state is None:
                 return None
-            answer, accepted, complete = self._match(state, request.prompt, prepared)
+            answer, accepted, complete = self._match(state, request, prepared)
             if accepted:
                 known = state["turns"]
             progress(request.remote_id, accepted)

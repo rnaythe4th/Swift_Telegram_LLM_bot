@@ -1,21 +1,21 @@
 import Foundation
 
-// telegram delivers photo albums as separate messages...
-struct TelegramPhotoAlbumBuffer {
+// Telegram delivers albums as separate messages.
+struct TelegramMediaAlbumBuffer {
     private struct AlbumKey: Hashable {
         let chatKey: ChatKey
         let mediaGroupID: String
     }
     
     private struct PendingAlbum {
-        var updatesByMessageID: [Int: TelegramUpdate]
+        var updatesByID: [Int: TelegramUpdate]
         var lastSeenAt: Date
         /// When this album started collecting. `lastSeenAt` slides forward with
         /// every new part, so it alone cannot bound how long an album is held.
         var firstSeenAt: Date
 
         var orderedUpdates: [TelegramUpdate] {
-            updatesByMessageID.values.sorted { $0.update_id < $1.update_id }
+            updatesByID.values.sorted { $0.update_id < $1.update_id }
         }
     }
 
@@ -56,8 +56,11 @@ struct TelegramPhotoAlbumBuffer {
         var released: [TelegramUpdate] = []
         
         for update in updates.sorted(by: { $0.update_id < $1.update_id }) {
-            if let albumKey = photoAlbumKey(for: update) {
+            if let albumKey = Self.albumKey(for: update) {
                 bufferAlbumUpdate(update, for: albumKey, now: now)
+                if pendingAlbums[albumKey]?.updatesByID.count == Self.maxPartsPerAlbum {
+                    released.append(contentsOf: releaseReadyAlbums(now: now))
+                }
                 continue
             }
             
@@ -129,17 +132,35 @@ struct TelegramPhotoAlbumBuffer {
         }
     }
     
-    private func photoAlbumKey(for update: TelegramUpdate) -> AlbumKey? {
+    /// getUpdates can end between parts of an album. Move the boundary back
+    /// to the beginning of those albums, including any interleaved ones.
+    static func trailingAlbumStart(in updates: [TelegramUpdate]) -> Int? {
+        var spans: [AlbumKey: (first: Int, last: Int)] = [:]
+        for (index, update) in updates.enumerated() {
+            guard let key = albumKey(for: update) else { continue }
+            spans[key] = (spans[key]?.first ?? index, index)
+        }
+        var boundary: Int?
+        for span in spans.values.sorted(by: { $0.last > $1.last }) {
+            guard span.last >= (boundary ?? updates.count - 10) else { break }
+            boundary = min(boundary ?? span.first, span.first)
+        }
+        return boundary
+    }
+
+    private static func albumKey(for update: TelegramUpdate) -> AlbumKey? {
         guard
             let message = update.message,
             let mediaGroupID = message.media_group_id,
-            let photos = message.photo,
-            !photos.isEmpty
+            message.photo?.isEmpty == false || message.document != nil || message.video != nil
         else {
             return nil
         }
         
-        return AlbumKey(chatKey: chatKey(for: message), mediaGroupID: mediaGroupID)
+        return AlbumKey(
+            chatKey: ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id),
+            mediaGroupID: mediaGroupID
+        )
     }
     
     private func chatKey(for message: TelegramMessage) -> ChatKey {
@@ -163,15 +184,8 @@ struct TelegramPhotoAlbumBuffer {
             pendingAlbumCountsByChat[key.chatKey, default: 0] += 1
         }
 
-        var album = pendingAlbums[key]
-            ?? PendingAlbum(updatesByMessageID: [:], lastSeenAt: now, firstSeenAt: now)
-        if let messageID = update.message?.message_id,
-           album.updatesByMessageID[messageID] != nil || album.updatesByMessageID.count < Self.maxPartsPerAlbum {
-            // Past the cap, extra parts are dropped rather than buffered: a real
-            // album never has that many, and each one carries a photo we would
-            // otherwise download and base64 into the model request.
-            album.updatesByMessageID[messageID] = update
-        }
+        var album = pendingAlbums[key] ?? PendingAlbum(updatesByID: [:], lastSeenAt: now, firstSeenAt: now)
+        album.updatesByID[update.update_id] = update
         album.lastSeenAt = now
         pendingAlbums[key] = album
     }
@@ -183,7 +197,7 @@ struct TelegramPhotoAlbumBuffer {
             // Quiet for a holdback, complete, or simply held too long — the last
             // one is what stops a steady drip of parts from pinning the chat.
             let quiet = album.lastSeenAt <= threshold
-            let full = album.updatesByMessageID.count >= Self.maxPartsPerAlbum
+            let full = album.updatesByID.count >= Self.maxPartsPerAlbum
             let expired = album.firstSeenAt <= lifetimeThreshold
             return (quiet || full || expired) ? key : nil
         }
@@ -236,8 +250,11 @@ struct TelegramPhotoAlbumBuffer {
               let firstMessage = firstUpdate.message else {
             return nil
         }
-        let albumPhotos = sortedUpdates.compactMap { update in
-            update.message?.photo.flatMap(selectPrimaryPhoto(from:))
+        let albumMedia = sortedUpdates.flatMap { $0.message?.mediaRefs ?? [] }
+        let captions = sortedUpdates.compactMap { update -> String? in
+            guard let caption = update.message?.caption?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !caption.isEmpty else { return nil }
+            return caption
         }
         
         let mergedMessage = TelegramMessage(
@@ -246,13 +263,7 @@ struct TelegramPhotoAlbumBuffer {
             chat: firstMessage.chat,
             date: firstMessage.date,
             text: firstMessage.text,
-            caption: sortedUpdates.compactMap { update -> String? in
-                guard let caption = update.message?.caption?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !caption.isEmpty else {
-                    return nil
-                }
-                return caption
-            }.first,
+            caption: captions.isEmpty ? nil : captions.joined(separator: "\n\n"),
             voice: firstMessage.voice,
             video: firstMessage.video,
             message_thread_id: firstMessage.message_thread_id,
@@ -260,10 +271,33 @@ struct TelegramPhotoAlbumBuffer {
             // telegram can place reply metadata on any album item
             // the first non-nil reply across the whole media group
             reply_to_message: sortedUpdates.compactMap { $0.message?.reply_to_message }.first,
-            photo: albumPhotos.isEmpty ? firstMessage.photo : albumPhotos,
-            album_photos: albumPhotos
+            photo: nil,
+            album_media: albumMedia
         )
         
-        return TelegramUpdate(update_id: firstUpdate.update_id, message: mergedMessage, callback_query: nil, pre_checkout_query: nil, my_chat_member: nil)
+        return TelegramUpdate(
+            update_id: firstUpdate.update_id, message: mergedMessage, callback_query: nil,
+            pre_checkout_query: nil, my_chat_member: nil, album_update_ids: sortedUpdates.map(\.update_id)
+        )
+    }
+}
+
+extension TelegramMessage {
+    var mediaRefs: [InboundMediaRef] {
+        if let album_media { return album_media }
+        var refs: [InboundMediaRef] = []
+        if let photo, let best = TelegramMediaAlbumBuffer.selectPrimaryPhoto(from: photo) {
+            refs.append(.photo(fileID: best.file_id))
+        }
+        if let document {
+            refs.append(.document(fileID: document.file_id, fileName: document.file_name, fileSize: document.file_size))
+        }
+        if let voice {
+            refs.append(.voice(fileID: voice.file_id, mimeType: voice.mime_type))
+        }
+        if let video {
+            refs.append(.video(fileID: video.file_id, mimeType: video.mime_type))
+        }
+        return refs
     }
 }

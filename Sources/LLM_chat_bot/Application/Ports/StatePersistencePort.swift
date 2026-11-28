@@ -247,7 +247,7 @@ protocol StatePersistencePort: Sendable {
 
     func webUpdateSeen(_ updateID: Int64) async throws -> Bool
     func recoverWebAdmission(_ updateID: Int64) async throws -> (ChatKey, DeepSeekWebOperation)?
-    func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission
+    func admitWebUpdate(_ updateID: Int64, albumUpdateIDs: [Int64]?, row: ChatContextRow) async throws -> DeepSeekWebAdmission
     func webAccount() async throws -> DeepSeekWebAccount
     func saveWebAccount(_ account: DeepSeekWebAccount) async throws
 
@@ -278,7 +278,7 @@ extension StatePersistencePort {
 
     func recoverWebAdmission(_ updateID: Int64) async throws -> (ChatKey, DeepSeekWebOperation)? { nil }
 
-    func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
+    func admitWebUpdate(_ updateID: Int64, albumUpdateIDs: [Int64]?, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
         throw DeepSeekWebPersistenceError.unavailable
     }
 

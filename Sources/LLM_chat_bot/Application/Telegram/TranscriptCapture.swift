@@ -26,12 +26,12 @@ enum TranscriptCapture {
         let body = (message.text ?? message.caption)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let kinds = message.mediaRefs.map(\.kind)
         var tags: [String] = []
-        if message.photo?.isEmpty == false || message.album_photos?.isEmpty == false {
-            tags.append(photoTag)
-        }
-        if message.voice != nil { tags.append(voiceTag) }
-        if message.video != nil { tags.append(videoTag) }
+        if kinds.contains(.image) { tags.append(photoTag) }
+        if kinds.contains(.document) { tags.append("[документ]") }
+        if kinds.contains(.audio) { tags.append(voiceTag) }
+        if kinds.contains(.video) { tags.append(videoTag) }
 
         var parts: [String] = []
         if let body, !body.isEmpty { parts.append(body) }

@@ -16,7 +16,7 @@ PR_SET_CHILD_SUBREAPER = 36
 
 
 def worker_environment():
-    allowed = {"HOME", "LANG", "PATH", "PYTHONUNBUFFERED", "SSL_CERT_FILE", "TZ"}
+    allowed = {"HOME", "LANG", "PATH", "PYTHONUNBUFFERED", "SSL_CERT_FILE", "TMPDIR", "TZ"}
     return {
         key: value
         for key, value in os.environ.items()

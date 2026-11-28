@@ -48,7 +48,7 @@ Telegram-бот на Swift (server-side, без Vapor): LLM-чат с памят
   (очередь 16, переполнение → дроп с одним предупреждением).
 - `Telegram/`: `MessageRouting` (`MessageRoutingPolicy` — реагировать ли:
   личка всегда, группа только reply/@-упоминание; нормализация текста),
-  `TelegramPhotoAlbumBuffer` (склейка `media_group`), `OnboardingPresenter`,
+  `TelegramMediaAlbumBuffer` (склейка `media_group`), `OnboardingPresenter`,
   `ReferralPresenter`, `GroupWelcomePresenter`, `TranscriptCapture` (сообщение
   Telegram → строка стенограммы, §5.7).
 - `Generation/`: `GenerationCoordinator` (весь пайплайн ответа, §7) +
@@ -560,6 +560,10 @@ AsyncThrowingStream<ProviderStreamEvent>`, `fallbackModel(for:)`.
   `openrouter.ai/api/v1/chat/completions`.
 - **DeepSeek** (`.deepseek`) — только текст, модель `deepseek-chat`, стоимость не
   отдаёт.
+- **DeepSeek Web** (`.deepseekWeb`) — очередь с подтверждением через PostgreSQL.
+  Браузерный worker принимает фото и документы через форму DeepSeek. Бот
+  собирает все части альбома в один ход и сохраняет его Telegram ID вместе
+  с ID частей для дедупликации. [Контракт Web](../docs/deepseek-web-architecture.md#вложения)
 
 Оба парсят SSE через `NetworkClient.ssePayloads` и складывают чанки одним и тем
 же `OpenAIStreamAccumulator<Chunk>` (**один декод на пейлоад**: usage, ошибка и
@@ -745,8 +749,9 @@ false)`, деньги не списываются), `handleBuyAction` (все `m
 
 - `UpdateIntake` — единая точка для webhook и polling: дедуп по `update_id`
   (кольцевой буфер 2048), склейка альбомов (holdback 750 мс, тик 300 мс).
-  `shutdown()` **сливает** буфер (за эти апдейты Telegram уже получил 200).
-- `TelegramPhotoAlbumBuffer` ограничен со всех сторон: частей на альбом 16,
+  В режиме с Web все части получают подтверждение после допуска объединённого
+  сообщения. `shutdown()` выпускает альбомы, которые ещё в буфере.
+- `TelegramMediaAlbumBuffer` ограничен со всех сторон: частей на альбом 16,
   жизнь альбома 10 с, апдейтов в очереди за чатом 64, альбомов 256; по
   превышению альбом отдаётся как есть, лишнее уходит вне очереди.
 - `ChatUpdateDispatcher` — порядок в чате, параллельность чатов, очередь 16.
@@ -1069,9 +1074,9 @@ OpenRouter; `allowedFreeModelIDs()` = оно же ∪ модели 🆓-режи
 - Длина сообщения меряется в UTF-16 **везде**, включая развилку «слать одним или
   резать» (`sendMessage`) — она стоит до `chunkFittingHTML` и до
   `MessageSplitter`.
-- Вложения качаются в пределах `TelegramMediaResolver.turnByteBudget`: альбом —
-  16 файлов, медиа резолвится **до** `generationLimiter.acquire()`, поэтому
-  больше ничто в пайплайне их не считает.
+- Для API-провайдеров `TelegramMediaResolver.turnByteBudget` ограничивает
+  параллельную загрузку медиа до `generationLimiter.acquire()`. Для DeepSeek
+  Web очередь скачивает до 10 файлов по одному в приватный временный каталог.
 - Имя пользователя — чужой текст: экранирование живёт в источнике меток
   (`UserIdentity.displayLabel`, `sanitizeName`, `ChatMetaInfo.displayLabel`).
   То же для текста, который человек ввёл сам и который печатается в сообщение:

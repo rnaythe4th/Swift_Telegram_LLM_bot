@@ -94,7 +94,9 @@ final class PostgresIntegrationTests: XCTestCase {
         await store.webResetForAccount(chatKey: key, accountEpoch: account.epoch)
         let candidate = await store.webCandidate(
             chatKey: key, operationID: UUID(), updateID: 777, question: "первый вопрос",
-            messageID: 456, telegramThreadID: nil, reply: nil
+            messageID: 456, telegramThreadID: nil, reply: nil,
+            attachments: [.document(fileID: "report", fileName: "report.pdf", fileSize: 25)],
+            albumUpdateIDs: [777, 780]
         )
         let operation = try XCTUnwrap(candidate)
         let row = await store.webAdmissionRow(chatKey: key, operation: operation)
@@ -119,6 +121,9 @@ final class PostgresIntegrationTests: XCTestCase {
         let restoredQueue = await restored.webOperations()
         XCTAssertEqual(restoredQueue.map { $0.1.id }, [operation.id])
         XCTAssertEqual(restoredQueue.first?.1.question, "первый вопрос")
+        guard case .document(fileID: "report", fileName: "report.pdf", fileSize: 25)? = restoredQueue.first?.1.attachments?.first else {
+            return XCTFail("queued attachments should survive restore")
+        }
         let restoredEpoch = await restored.webState(chatKey: key)?.accountEpoch
         XCTAssertEqual(restoredEpoch, account.epoch)
 
@@ -127,6 +132,8 @@ final class PostgresIntegrationTests: XCTestCase {
         try await writer.webCheckpoint(chatKey: key, contextEpoch: nil)
         let seen = try await writer.webUpdateSeen(777)
         XCTAssertTrue(seen)
+        let otherPartSeen = try await writer.webUpdateSeen(780)
+        XCTAssertTrue(otherPartSeen)
         let afterForget = try await persistence.loadEverything()
         XCTAssertTrue(afterForget.contexts.isEmpty)
 
@@ -196,7 +203,7 @@ final class PostgresIntegrationTests: XCTestCase {
             let admitted = await turn(id, key, "@testbot " + text)
             XCTAssertEqual(admitted, true)
             if id == 1 {
-                let opening = await telegramDouble.waitForCall("sendMessage", containing: "открывает диалог")
+                let opening = await telegramDouble.waitForCall("sendMessage", containing: "Открываю чат")
                 XCTAssertEqual(opening?.buttonLabels, ["⏹ Остановить"])
                 let preview = await telegramDouble.waitForCall("editMessageText", containing: "First fragment")
                 XCTAssertEqual(preview?.text, "First fragment < &")
@@ -244,6 +251,70 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertNil(clearedState?.remoteChatID)
         XCTAssertEqual(otherState?.remoteChatID, "fixture-3")
         await telegramDouble.stop()
+    }
+
+    func testTelegramAlbumsReachWebAsSingleTurnsWithEveryFile() async throws {
+        let fake = FakeTelegram()
+        let base = try await fake.start()
+        let telegram = TelegramHTTPGateway(network: NetworkClient(), botToken: "test-token",
+                                           apiBase: base, rateLimiter: nil, metrics: nil)
+        let store = Fixtures.makeStore(defaultProvider: .deepseekWeb)
+        let metrics = RuntimeMetrics()
+        let writer = PersistenceCoordinator(store: store, persistence: persistence, ledger: ledger,
+                                            logger: SilentLogger(), metrics: metrics)
+        let flags = RuntimeFlags()
+        flags.durability.value = .durable
+        let worker = WebWorkerFixture(holdFirstTurn: false)
+        let orchestrator = BotOrchestrator(
+            telegram: telegram, state: store, sessionRegistry: SessionRegistry(), mediaResolver: FakeMediaResolver(),
+            providers: [:], webGateway: worker, persistence: writer, logger: SilentLogger(),
+            metrics: metrics, flags: flags, generationLimiter: GenerationLimiter(maxConcurrent: 1),
+            botUsername: "testbot", formatOptions: ""
+        )
+        let intake = UpdateIntake(metrics: metrics, durableDelivery: { await orchestrator.dispatchWebUpdateIfNeeded($0) }) {
+            await orchestrator.dispatch(update: $0)
+        }
+
+        func update(_ id: Int, group: String, payload: String) throws -> TelegramUpdate {
+            try telegram.decodeIncomingUpdate(Data("""
+            {"update_id":\(id),"message":{"message_id":\(id),"date":1,"chat":{"id":123,"type":"private"},
+            "from":{"id":123,"is_bot":false,"first_name":"Tester"},"media_group_id":"\(group)",\(payload)}}
+            """.utf8))
+        }
+        let photos = try (1...2).map { index in
+            try update(index, group: "photo", payload: """
+            "photo":[{"file_id":"small-\(index)","file_unique_id":"s-\(index)","width":10,"height":10},
+            {"file_id":"big-\(index)","file_unique_id":"b-\(index)","width":100,"height":100}]
+            """)
+        }
+        let documents = [
+            try update(3, group: "docs", payload: #""document":{"file_id":"first","file_name":"report.pdf","file_size":17}"#),
+            try update(4, group: "docs", payload: #""document":{"file_id":"second","file_name":"report.pdf"},"caption":"Сравни файлы""#),
+        ]
+        let photosAccepted = await intake.enqueue(photos)
+        XCTAssertEqual(photosAccepted, 2)
+        let firstReply = await fake.waitForCall("editMessageText", containing: "turn 1")
+        XCTAssertNotNil(firstReply)
+        let documentsAccepted = await intake.enqueue(documents)
+        XCTAssertEqual(documentsAccepted, 2)
+        let secondReply = await fake.waitForCall("editMessageText", containing: "turn 2")
+        XCTAssertNotNil(secondReply)
+
+        let requests = await worker.turns()
+        XCTAssertEqual(requests.map(\.attachmentNames), [["photo-1.jpg", "photo-2.jpg"], ["report.pdf", "report.pdf"]])
+        XCTAssertEqual(requests.map(\.remoteChatID), [nil, "fixture-1"])
+        XCTAssertTrue(requests.first?.prompt?.contains("Опиши содержимое прикреплённых файлов.") == true)
+        XCTAssertTrue(requests.last?.prompt?.contains("Сравни файлы") == true)
+        let staged = await worker.attachmentsSeen()
+        XCTAssertEqual(staged, Array(repeating: Array(repeating: "synthetic fixture", count: 2), count: 2))
+        let downloads = await fake.calls("getFile")
+        XCTAssertEqual(downloads.count, 4)
+        XCTAssertTrue(downloads.contains(where: { $0.contains("big-1") }))
+        XCTAssertFalse(downloads.contains(where: { $0.contains("small-") }))
+        let seen = try await writer.webUpdateSeen(4)
+        XCTAssertTrue(seen)
+        await orchestrator.generationCoordinator.webQueue?.stop()
+        await fake.stop()
     }
 
     func testWebBindingCollisionRollsBackUpdateMarker() async throws {
@@ -834,16 +905,21 @@ final class PostgresIntegrationTests: XCTestCase {
 
 private actor WebWorkerFixture: DeepSeekWebGateway {
     private var requests: [DeepSeekWebWorkerRequest] = []
+    private var files: [[String]] = []
     private var limited = false
     private var firstTurn: CheckedContinuation<Void, Never>?
+    private let holdFirstTurn: Bool
+
+    init(holdFirstTurn: Bool = true) { self.holdFirstTurn = holdFirstTurn }
 
     func health() -> DeepSeekWebWorkerHealth {
-        .init(version: 1, status: .ready, accountMarker: nil)
+        .init(version: 1, status: .ready, accountMarker: nil, supportsAttachments: true)
     }
 
     func limit() { limited = true }
 
     func turns() -> [DeepSeekWebWorkerRequest] { requests }
+    func attachmentsSeen() -> [[String]] { files }
 
     func completeFirstTurn() {
         firstTurn?.resume()
@@ -853,7 +929,14 @@ private actor WebWorkerFixture: DeepSeekWebGateway {
     func perform(_ action: DeepSeekWebWorkerAction, _ request: DeepSeekWebWorkerRequest) async -> DeepSeekWebWorkerResponse {
         if action == .send {
             requests.append(request)
-            if requests.count == 1 {
+            if let id = request.attachmentBatchID, let names = request.attachmentNames {
+                let root = ProcessInfo.processInfo.environment["TMPDIR"] ?? "/tmp"
+                files.append(names.enumerated().map { index, name in
+                    let path = "\(root)/llmchat-attachments-\(id.uuidString.lowercased())/\(index)/\(name)"
+                    return (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+                })
+            }
+            if holdFirstTurn && requests.count == 1 {
                 await withCheckedContinuation { firstTurn = $0 }
             }
         }

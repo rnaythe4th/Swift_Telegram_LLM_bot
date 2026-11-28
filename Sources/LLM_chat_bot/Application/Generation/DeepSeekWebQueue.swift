@@ -9,6 +9,7 @@ actor DeepSeekWebQueue {
         let key: ChatKey
         let operationID: UUID
         var request: DeepSeekWebWorkerRequest?
+        var attachmentDownload: Task<DeepSeekWebAttachmentBatch, Error>?
         var stopRequested = false
     }
 
@@ -72,7 +73,10 @@ actor DeepSeekWebQueue {
     }
 
     @discardableResult
-    func admit(question: String, origin: GenerationOrigin, chatKey: ChatKey) async throws -> Bool {
+    func admit(
+        question: String, origin: GenerationOrigin, chatKey: ChatKey,
+        attachments: [InboundMediaRef] = [], albumUpdateIDs: [Int]? = nil
+    ) async throws -> Bool {
         guard canRun, let persistence, let updateID = origin.updateID else {
             await notify(Self.message(.unavailable), chatKey, origin.telegramThreadID)
             return false
@@ -110,7 +114,9 @@ actor DeepSeekWebQueue {
                 chatKey: chatKey, operationID: UUID(), updateID: Int64(updateID),
                 question: question, messageID: origin.askedMessageID ?? 0,
                 telegramThreadID: origin.telegramThreadID, reply: origin.repliedTo,
-                replyToMessageID: origin.replyToMessageID, asker: origin.userKey
+                replyToMessageID: origin.replyToMessageID, asker: origin.userKey,
+                attachments: attachments.isEmpty ? nil : attachments,
+                albumUpdateIDs: albumUpdateIDs?.map(Int64.init)
             ) else { return false }
             let inserted = try await persistence.webAdmit(chatKey: chatKey, operation: operation)
             if inserted {
@@ -141,6 +147,7 @@ actor DeepSeekWebQueue {
         guard let activeRequest, activeRequest.key == chatKey, activeRequest.operationID == generationID.raw,
               !activeRequest.stopRequested else { return false }
         self.activeRequest?.stopRequested = true
+        activeRequest.attachmentDownload?.cancel()
         if let request = activeRequest.request {
             _ = try? await gateway.perform(.cancel, request)
         }
@@ -233,6 +240,10 @@ actor DeepSeekWebQueue {
                 try await fail(Self.message(status), key, operation, persistence: persistence)
                 return
             }
+            if operation.attachments?.isEmpty == false, workerHealth.supportsAttachments != true {
+                try await fail(Self.message(.attachmentsUnavailable), key, operation, persistence: persistence)
+                return
+            }
             await alerter.report(.deepSeekWebLogin, active: false)
             if state.hasUncertainDelivery, await store.mutateWeb(chatKey: key, contextEpoch: operation.contextEpoch, {
                 $0.hasUncertainDelivery = false
@@ -260,7 +271,8 @@ actor DeepSeekWebQueue {
             let started = ContinuousClock.now
             guard let message = try? await telegram.sendMessage(.init(
                 chatID: key.chatID, threadID: queued.telegramThreadID, replyTo: queued.replyToMessageID,
-                text: Self.openingMessage, replyMarkup: markup
+                text: queued.attachments?.isEmpty == false ? "📎 Загружаю вложения…" : Self.openingMessage,
+                replyMarkup: markup
             )) else { return nil }
             logger.info(
                 "DeepSeek Web operation \(queued.id) sent opening status in \(started.duration(to: .now))"
@@ -277,13 +289,44 @@ actor DeepSeekWebQueue {
                 }
             }
         }
+        let batch: DeepSeekWebAttachmentBatch?
+        if let attachments = queued.attachments, !attachments.isEmpty {
+            let download = Task { [telegram] in
+                try await DeepSeekWebAttachmentBatch.stage(attachments, telegram: telegram)
+            }
+            activeRequest?.attachmentDownload = download
+            do {
+                batch = try await withTaskCancellationHandler {
+                    try await download.value
+                } onCancel: {
+                    download.cancel()
+                }
+            } catch {
+                guard canRun, !Task.isCancelled else { return }
+                let feedback = activeRequest?.stopRequested == true
+                    ? Self.message(.cancelled)
+                    : (error as? DeepSeekWebAttachmentBatch.Failure ?? .downloadFailed).message
+                try await fail(feedback, key, queued, persistence: persistence)
+                return
+            }
+            activeRequest?.attachmentDownload = nil
+        } else {
+            batch = nil
+        }
+        defer { batch?.remove() }
+        guard canRun, !Task.isCancelled, await isCurrent(key, queued) else { return }
+        if activeRequest?.stopRequested == true {
+            try await fail(Self.message(.cancelled), key, queued, persistence: persistence)
+            return
+        }
+
         var context = state
         if context.remoteUnits >= remoteUnitLimit { context.rotate() }
-        var prepared = await prepare(queued, state: context, account: account)
+        var prepared = await prepare(queued, state: context, account: account, attachmentNames: batch?.names)
         if prepared.1.status == .chatUnavailable, context.remoteChatID != nil, !prepared.1.accepted,
            activeRequest?.stopRequested == false, canRun, !Task.isCancelled, await isCurrent(key, queued) {
             context.rotate()
-            prepared = await prepare(queued, state: context, account: account)
+            prepared = await prepare(queued, state: context, account: account, attachmentNames: batch?.names)
         }
 
         let (operation, status) = prepared
@@ -326,10 +369,12 @@ actor DeepSeekWebQueue {
             await observeTurn(key, sending, request: request, persistence: persistence)
         }
         await metrics.increment(MetricName.generationsStarted)
+        var submission = request
+        submission.attachmentBatchID = batch?.id
         let outcome: DeepSeekWebWorkerResponse
         do {
             outcome = try await withTaskCancellationHandler {
-                try await gateway.perform(.send, request)
+                try await gateway.perform(.send, submission)
             } onCancel: { [gateway] in
                 Task.detached { _ = try? await gateway.perform(.cancel, request) }
             }
@@ -456,7 +501,7 @@ actor DeepSeekWebQueue {
 
     private func prepare(
         _ queued: DeepSeekWebOperation, state: DeepSeekWebChatState,
-        account: DeepSeekWebAccount
+        account: DeepSeekWebAccount, attachmentNames: [String]?
     ) async -> (DeepSeekWebOperation, DeepSeekWebWorkerResponse) {
         var operation = queued
         operation.workerOperationID = UUID()
@@ -465,6 +510,8 @@ actor DeepSeekWebQueue {
                                      accepted: false, remoteChatID: nil, remoteTail: nil, text: nil, retryAfterSeconds: nil))
         }
         operation.prompt = prompt.text
+        operation.attachments = nil
+        operation.attachmentNames = attachmentNames
         operation.remoteChatID = state.remoteChatID
         operation.remoteTail = state.remoteTail
         operation.plannedListeningThrough = prompt.listeningThrough
@@ -489,7 +536,7 @@ actor DeepSeekWebQueue {
         .init(operationID: operation.workerOperationID ?? operation.id, accountEpoch: account.epoch,
               accountMarker: account.workerMarker, remoteChatID: operation.remoteChatID,
               remoteTail: operation.remoteTail, prompt: operation.prompt, deepThink: operation.deepThink,
-              webSearch: operation.webSearch)
+              webSearch: operation.webSearch, attachmentNames: operation.attachmentNames)
     }
 
     private func reconcile(
@@ -748,6 +795,9 @@ actor DeepSeekWebQueue {
         case .loginRequired: return "DeepSeek Web просит войти в аккаунт. Сообщите администратору бота."
         case .maintenance: return "DeepSeek Web на обслуживании. Попробуйте позже."
         case .moderated: return "DeepSeek Web отклонил запрос по правилам сервиса."
+        case .attachmentsUnavailable: return "Загрузка файлов доступна, когда DeepSeek Web работает через браузер."
+        case .attachmentFormat: return "DeepSeek Web не принимает формат одного из файлов. Попробуйте отправить файл в другом формате."
+        case .attachmentFailed: return "DeepSeek Web не загрузил все вложения. Отправьте запрос ещё раз."
         case .inputTooLong: return "Сообщение для DeepSeek Web слишком длинное. Сократите вопрос или роль."
         case .uncertain: return "DeepSeek Web не подтвердил результат отправки. Отправьте вопрос ещё раз."
         case .chatUnavailable: return "Диалог DeepSeek Web недоступен. Отправьте вопрос ещё раз."

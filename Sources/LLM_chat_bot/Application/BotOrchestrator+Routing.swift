@@ -36,10 +36,7 @@ extension BotOrchestrator {
 
         guard let message = update.message else { return nil }
         let key = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
-        if message.media_group_id != nil, await state.selectedProvider(chatKey: key) != .deepseekWeb {
-            return nil
-        }
-        return await dispatchMessage(message, key: key, updateID: update.update_id, waitForAdmission: true)
+        return await dispatchMessage(update, message: message, key: key, waitForAdmission: true)
     }
 
     func dispatch(update: TelegramUpdate) async {
@@ -91,11 +88,11 @@ extension BotOrchestrator {
 
         guard let message = update.message else { return }
         let chatKey = ChatKey(telegramChatID: message.chat.id, threadID: message.message_thread_id)
-        _ = await dispatchMessage(message, key: chatKey, updateID: update.update_id, waitForAdmission: false)
+        _ = await dispatchMessage(update, message: message, key: chatKey, waitForAdmission: false)
     }
 
     private func dispatchMessage(
-        _ message: TelegramMessage, key chatKey: ChatKey, updateID: Int, waitForAdmission: Bool
+        _ update: TelegramUpdate, message: TelegramMessage, key chatKey: ChatKey, waitForAdmission: Bool
     ) async -> Bool {
         let (replies, reply) = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingOldest(1))
         let operation: @Sendable () async -> Void = { [self] in
@@ -103,11 +100,11 @@ extension BotOrchestrator {
             do {
                 if let web = generationCoordinator.webQueue,
                    MessageRoutingPolicy.evaluate(message: message, botUsername: botUsername).shouldHandle,
-                   try await web.hasSeen(updateID: updateID) {
+                   try await web.hasSeen(updateID: update.update_id) {
                     reply.yield(true)
                     return
                 }
-                try await route(message: message, chatKey: chatKey, updateID: updateID) {
+                try await route(message: message, chatKey: chatKey, update: update) {
                     reply.yield(true)
                 }
                 reply.yield(true)
@@ -360,7 +357,7 @@ extension BotOrchestrator {
     }
 
     private func route(
-        message: TelegramMessage, chatKey: ChatKey, updateID: Int, acknowledgeAPI: @Sendable () -> Void
+        message: TelegramMessage, chatKey: ChatKey, update: TelegramUpdate, acknowledgeAPI: @Sendable () -> Void
     ) async throws {
         let senderKey = message.from.map { state.userKey(userID: $0.id) }
         let senderUserID = message.from?.id
@@ -449,7 +446,9 @@ extension BotOrchestrator {
         if await state.selectedProvider(chatKey: chatKey) != .deepseekWeb {
             acknowledgeAPI()
         }
-        try await generationCoordinator.handleIfNeeded(message: message, chatKey: chatKey, updateID: updateID)
+        try await generationCoordinator.handleIfNeeded(
+            message: message, chatKey: chatKey, updateID: update.update_id, albumUpdateIDs: update.album_update_ids
+        )
     }
 
     private func recordOverheard(message: TelegramMessage, chatKey: ChatKey) async {

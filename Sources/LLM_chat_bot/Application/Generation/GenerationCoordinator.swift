@@ -3,12 +3,6 @@ import Foundation
 // The generation pipeline: access gate, billing mode, history snapshot and the
 // hand-off to a streamer. Delivery and monetization live in the +*.swift files.
 
-private enum ReplyContentResolution {
-    case none
-    case unsupported(String)
-    case content(UserInputContent)
-}
-
 /// The answer outgrew one message and the continuation message could not be
 /// sent, so there is nowhere left to stream. Its own type because the only
 /// alternative on hand — `CancellationError` — makes the bot report «⏹
@@ -138,19 +132,38 @@ final class GenerationCoordinator: Sendable {
         await sessionRegistry.finish(generationID: generationID)
     }
 
-    func handleIfNeeded(message: TelegramMessage, chatKey: ChatKey, updateID: Int? = nil) async throws {
-        switch try await resolveProcessableContent(message: message, chatKey: chatKey) {
-        case .content(let content):
-            try await processContent(
-                origin: GenerationOrigin(message: message, botUsername: botUsername, updateID: updateID),
-                content: content,
-                chatKey: chatKey
-            )
-        case .unsupported(let feedback):
-            try await sendUserFeedback(chatKey: chatKey, text: feedback)
-        case .none:
-            break
+    func handleIfNeeded(
+        message: TelegramMessage, chatKey: ChatKey, updateID: Int? = nil, albumUpdateIDs: [Int]? = nil
+    ) async throws {
+        let routing = MessageRoutingPolicy.evaluate(message: message, botUsername: botUsername)
+        guard routing.shouldHandle else { return }
+        let text = routing.normalizedText
+        let refs = message.mediaRefs
+        guard text != nil || !refs.isEmpty else { return }
+
+        let provider = await state.provider(chatKey: chatKey)
+        guard let capabilities = gateways.capabilities(for: provider) else {
+            throw ProviderGatewayRegistryError.missingAdapter(provider)
         }
+        let unsupported = unsupportedMediaKinds(in: refs, capabilities: capabilities)
+        if !unsupported.isEmpty {
+            let kinds = unsupported.map(\.displayName).joined(separator: ", ")
+            try await sendUserFeedback(
+                chatKey: chatKey,
+                text: "⚠️ Этот сервис ИИ не понимает: \(kinds).\nВыберите другой в /menu → 🔌 Сервис ИИ или отправьте только текст."
+            )
+            return
+        }
+        let origin = GenerationOrigin(message: message, botUsername: botUsername, updateID: updateID)
+        if provider == .deepseekWeb {
+            try await webQueue?.admit(
+                question: text ?? "Опиши содержимое прикреплённых файлов.",
+                origin: origin, chatKey: chatKey, attachments: refs, albumUpdateIDs: albumUpdateIDs
+            )
+            return
+        }
+        let resolved = refs.isEmpty ? [] : try await mediaResolver.resolveMedia(refs)
+        try await processContent(origin: origin, content: .init(text: text, attachments: resolved), chatKey: chatKey)
     }
 
     /// Runs a ready-made prompt as a normal turn — the onboarding example
@@ -163,37 +176,6 @@ final class GenerationCoordinator: Sendable {
             content: UserInputContent(text: text, attachments: []),
             chatKey: chatKey
         )
-    }
-    
-    private func resolveProcessableContent(message: TelegramMessage, chatKey: ChatKey) async throws -> ReplyContentResolution {
-        let routing = MessageRoutingPolicy.evaluate(message: message, botUsername: botUsername)
-        let refs = extractMediaRefs(from: message)
-        
-        guard routing.shouldHandle else {
-            return .none
-        }
-        
-        let normalizedText = routing.normalizedText
-        guard normalizedText != nil || !refs.isEmpty else {
-            return .none
-        }
-        
-        if !refs.isEmpty {
-            let provider = await state.provider(chatKey: chatKey)
-            guard let capabilities = gateways.capabilities(for: provider) else {
-                throw ProviderGatewayRegistryError.missingAdapter(provider)
-            }
-            let unsupportedKinds = unsupportedMediaKinds(in: refs, capabilities: capabilities)
-            if !unsupportedKinds.isEmpty {
-                let kinds = unsupportedKinds.map(\.displayName).joined(separator: ", ")
-                return .unsupported(
-                    "⚠️ Этот сервис ИИ не понимает: \(kinds).\nВыберите другой в /menu → 🔌 Сервис ИИ или отправьте только текст."
-                )
-            }
-        }
-        
-        let resolved = refs.isEmpty ? [] : try await mediaResolver.resolveMedia(refs)
-        return .content(.init(text: normalizedText, attachments: resolved))
     }
     
     func processContent(origin: GenerationOrigin, content: UserInputContent, chatKey: ChatKey) async throws {
@@ -370,25 +352,6 @@ final class GenerationCoordinator: Sendable {
         }
         
         return unsupportedKinds
-    }
-    
-    private func extractMediaRefs(from message: TelegramMessage) -> [InboundMediaRef] {
-        var refs: [InboundMediaRef] = []
-        
-        // Synthetic merged albums expose one already-selected photo per album item here.
-        if let albumPhotos = message.album_photos, !albumPhotos.isEmpty {
-            refs.append(contentsOf: albumPhotos.map { .photo(fileID: $0.file_id) })
-        } else if let photos = message.photo, let bestPhoto = TelegramPhotoAlbumBuffer.selectPrimaryPhoto(from: photos) {
-            refs.append(.photo(fileID: bestPhoto.file_id))
-        }
-        if let voice = message.voice {
-            refs.append(.voice(fileID: voice.file_id, mimeType: voice.mime_type))
-        }
-        if let video = message.video {
-            refs.append(.video(fileID: video.file_id, mimeType: video.mime_type))
-        }
-        
-        return refs
     }
     
     func cancellationNotice(for generationID: GenerationID) async -> String {
