@@ -1,4 +1,4 @@
 [submodule "FreeDeepseekAPI"]
 	path = FreeDeepseekAPI
-	url = https://github.com/dekrezz/FreeDeepseekAPI.git
-	branch = stable
+	url = https://github.com/rnaythe4th/FreeDeepseekAPI.git
+	branch = llm-chat-bot

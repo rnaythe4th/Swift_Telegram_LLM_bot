@@ -237,7 +237,7 @@ VNC доступен только на loopback телефона, порт `1594
 
 Для развёртывания этой конфигурации требуется явный выбор `DEEPSEEK_WEB_BACKEND=api` в `/opt/llmchat/.env`. В браузерном режиме локальный Node API не запускается.
 
-Зависимость FreeDeepseekAPI хранится как Git submodule в `FreeDeepseekAPI`, зафиксированный на проверенном upstream-коммите. После клонирования проекта:
+Зависимость FreeDeepseekAPI хранится как Git submodule в `FreeDeepseekAPI`. Ветка `llm-chat-bot` в форке содержит тесты проекта поверх upstream. После клонирования проекта:
 
 ```bash
 git submodule update --init --recursive
