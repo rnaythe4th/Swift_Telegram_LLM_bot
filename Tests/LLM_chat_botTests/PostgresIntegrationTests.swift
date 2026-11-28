@@ -97,6 +97,7 @@ final class PostgresIntegrationTests: XCTestCase {
             messageID: 456, telegramThreadID: nil, reply: nil
         )
         let operation = try XCTUnwrap(candidate)
+        let row = await store.webAdmissionRow(chatKey: key, operation: operation)
         try await client.query(
             """
             insert into bot_web_update (update_id, expires_at)
@@ -128,6 +129,25 @@ final class PostgresIntegrationTests: XCTestCase {
         XCTAssertTrue(seen)
         let afterForget = try await persistence.loadEverything()
         XCTAssertTrue(afterForget.contexts.isEmpty)
+
+        // The admission must fail if PostgreSQL rejects the explicit commit
+        // after reporting that both writes succeeded.
+        try await client.query(
+            """
+            alter table bot_web_update add constraint test_deferred_admission_violation
+            foreign key (update_id) references bot_chat (chat_id) deferrable initially deferred not valid
+            """
+        )
+        let admissionRow = try XCTUnwrap(row)
+        do {
+            _ = try await persistence.admitWebUpdate(779, row: admissionRow)
+            XCTFail("admission must wait for commit")
+        } catch {
+            let stored = try await persistence.loadEverything()
+            XCTAssertTrue(stored.contexts.isEmpty)
+            let marked = try await persistence.webUpdateSeen(779)
+            XCTAssertFalse(marked)
+        }
     }
 
     func testWebTurnsThroughTelegramKeepTopicBindingsAndReportAccountQuota() async throws {

@@ -99,30 +99,34 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
     }
 
     func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
-        // Keep the marker and the queued turn atomic in one database round trip.
-        // Expiry and admission must touch different rows within this statement.
-        let rows = try await client.query(
-            """
-            with expired as (
-                delete from bot_web_update
-                where expires_at <= now() and update_id <> \(updateID)
-            ), admitted as (
-                insert into bot_web_update (update_id, expires_at)
-                values (\(updateID), now() + interval '48 hours')
-                on conflict (update_id) do update set expires_at = excluded.expires_at
-                where bot_web_update.expires_at <= now()
-                returning update_id
+        // Batch the writes, then explicitly wait for COMMIT. PostgresNIO
+        // finishes a row stream before PostgreSQL reports implicit commit.
+        let log = queryLogger
+        let inserted = try await client.withTransaction(logger: log) { db in
+            let rows = try await db.query(
+                """
+                with expired as (
+                    delete from bot_web_update
+                    where expires_at <= now() and update_id <> \(updateID)
+                ), admitted as (
+                    insert into bot_web_update (update_id, expires_at)
+                    values (\(updateID), now() + interval '48 hours')
+                    on conflict (update_id) do update set expires_at = excluded.expires_at
+                    where bot_web_update.expires_at <= now()
+                    returning update_id
+                )
+                insert into bot_chat_context (chat_id, thread_id, data, updated_at)
+                select \(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now() from admitted
+                on conflict (chat_id, thread_id) do update set
+                    data = excluded.data, updated_at = excluded.updated_at
+                returning 1
+                """,
+                logger: log
             )
-            insert into bot_chat_context (chat_id, thread_id, data, updated_at)
-            select \(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now() from admitted
-            on conflict (chat_id, thread_id) do update set
-                data = excluded.data, updated_at = excluded.updated_at
-            returning 1
-            """,
-            logger: queryLogger
-        )
-        var inserted = false
-        for try await _ in rows { inserted = true }
+            var inserted = false
+            for try await _ in rows { inserted = true }
+            return inserted
+        }
         if inserted { return .inserted }
         guard let (key, operation) = try await recoverWebAdmission(updateID), key == row.key else {
             return .duplicate(nil)
@@ -144,14 +148,17 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
     }
 
     func saveWebAccount(_ account: DeepSeekWebAccount) async throws {
-        try await client.query(
-            """
-            insert into bot_config (key, data, updated_at)
-            values ('deepseek-web-account', \(account), now())
-            on conflict (key) do update set data = excluded.data, updated_at = excluded.updated_at
-            """,
-            logger: queryLogger
-        )
+        let log = queryLogger
+        try await client.withTransaction(logger: log) { db in
+            _ = try await db.query(
+                """
+                insert into bot_config (key, data, updated_at)
+                values ('deepseek-web-account', \(account), now())
+                on conflict (key) do update set data = excluded.data, updated_at = excluded.updated_at
+                """,
+                logger: log
+            )
+        }
     }
 
     private static func upsertChatContext(_ row: ChatContextRow, db: PostgresConnection, logger: Logger) async throws {
