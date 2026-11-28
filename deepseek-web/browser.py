@@ -69,14 +69,35 @@ function withoutControls(node) {
   return body;
 }
 
-function formatted(node, depth = 0) {
+const escape = value => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+const escapeAttr = value => escape(value).replaceAll('"', '&quot;');
+const emphasis = {
+  B: 'b', STRONG: 'b', I: 'i', EM: 'i', U: 'u', INS: 'u', S: 's', STRIKE: 's', DEL: 's'
+};
+
+function formatted(node, depth = 0, rich = false) {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent;
-  const render = (level = depth) => Array.from(node.childNodes).map(child => formatted(child, level)).join('');
+  const render = () => Array.from(node.childNodes).map(child => formatted(child, depth, rich)).join('');
+  if (rich && emphasis[node.tagName]) {
+    const tag = emphasis[node.tagName];
+    return `<${tag}>${render()}</${tag}>`;
+  }
   const pad = '  '.repeat(depth);
   switch (node.tagName) {
     case 'BR': return '\n';
+    case 'CODE':
+      return rich ? '<code>' + escape(node.textContent) + '</code>' : render();
     case 'PRE': {
       const raw = node.textContent;
+      if (rich) {
+        const code = node.querySelector('code');
+        const language = code?.getAttribute('data-language') || node.getAttribute('data-language') ||
+          Array.from([...(code?.classList || []), ...node.classList])
+            .find(name => name.startsWith('language-'))?.slice('language-'.length);
+        const body = escape(raw);
+        return '\n\n<pre>' + (language ? '<code class="language-' + escapeAttr(language) + '">' + body + '</code>' : body) +
+          '</pre>\n\n';
+      }
       const longest = Math.max(2, ...(raw.match(/`+/g) || []).map(run => run.length));
       const fence = '`'.repeat(longest + 1);
       return '\n\n' + fence + '\n' + raw + (raw.endsWith('\n') ? '' : '\n') + fence + '\n\n';
@@ -86,17 +107,31 @@ function formatted(node, depth = 0) {
       const items = Array.from(node.children).filter(child => child.tagName === 'LI');
       const start = Number(node.getAttribute('start') || '1');
       const lines = items.map((child, index) =>
-        pad + (node.tagName === 'UL' ? '- ' : (start + index) + '. ') + formatted(child, depth + 1).trim());
+        pad + (node.tagName === 'UL' ? (rich ? '• ' : '- ') : (start + index) + '. ') +
+        formatted(child, depth + 1, rich).trim());
       return (depth ? '\n' : '\n\n') + lines.join('\n') + '\n\n';
     }
-    case 'P':
-    case 'BLOCKQUOTE':
+    case 'A':
+      return rich && node.href ? '<a href="' + escapeAttr(node.href) + '">' + render() + '</a>' : render();
+    case 'SPAN':
+      return rich && node.classList.contains('tg-spoiler') ? '<tg-spoiler>' + render() + '</tg-spoiler>' : render();
+    case 'BLOCKQUOTE': {
+      if (!rich) return render() + '\n\n';
+      const flag = node.hasAttribute('expandable') ? ' expandable' : '';
+      return '<blockquote' + flag + '>' + render().trim() + '</blockquote>\n\n';
+    }
+    case 'DETAILS':
+      return rich ? '<blockquote expandable>' + render().trim() + '</blockquote>\n\n' : render();
+    case 'SUMMARY': return render() + (rich ? '\n' : '');
+    case 'TR':
+      return rich ? Array.from(node.cells, cell => formatted(cell, depth, rich).trim()).join(' | ') + '\n' : render();
+    case 'P': return render() + '\n\n';
     case 'H1':
     case 'H2':
     case 'H3':
     case 'H4':
     case 'H5':
-    case 'H6': return render() + '\n\n';
+    case 'H6': return (rich ? '<b>' + render() + '</b>' : render()) + '\n\n';
     default: return render();
   }
 }
@@ -109,7 +144,7 @@ return {
     last: offset + items.offsetHeight >= items.parentElement.clientHeight - 2 ||
       list.scrollHeight - list.clientHeight - list.scrollTop <= 2
   } : null,
-  turns: elements.map(element => {
+  turns: elements.map((element, index) => {
     const id = element.getAttribute('data-message-id') || '';
     const key = element.closest('[data-virtual-list-item-key]')?.getAttribute('data-virtual-list-item-key');
     const nativeQuestion = element.matches('.ds-message') && !element.matches(assistant) &&
@@ -136,7 +171,9 @@ return {
     const completed = element.matches(done) || nativeToolbar ||
       Array.from(element.querySelectorAll(action)).some(node => visible(node) && !node.closest(reasoning + ', ' + code));
     const busy = element.matches(streaming) || Array.from(element.querySelectorAll(streaming)).some(visible);
-    return {role: 'assistant', id, key, text: final ? formatted(withoutControls(final)).trim() : '',
+    const body = final && withoutControls(final);
+    return {role: 'assistant', id, key, text: body ? formatted(body).trim() : '',
+            formattedText: body && index === elements.length - 1 ? formatted(body, 0, true).trim() : null,
             complete: Boolean(completed && !busy)};
   })
 };
@@ -222,6 +259,13 @@ class Answer:
     remote_id: str
     tail: str
     text: str
+    formatted_text: str | None = None
+
+
+def answer_format(turns):
+    # Keep the existing text and tail hashes stable across worker upgrades.
+    rich = turns[-1].get("formattedText")
+    return rich if rich and rich != turns[-1]["text"] and len(rich.encode()) <= MAX_RESPONSE_BYTES else None
 
 
 def tail_for(turns):
@@ -684,9 +728,10 @@ class Browser:
                 known = state["turns"]
             if self._identity(driver) != result_id:
                 return None
+            rich = answer_format(state["turns"]) if text and result_id else None
             if result_id and complete:
-                return Answer(result_id, tail_for(state["turns"]), text)
-            progress(remote_id, accepted, text if result_id else None)
+                return Answer(result_id, tail_for(state["turns"]), text, rich)
+            progress(remote_id, accepted, text if result_id else None, rich)
             if not accepted and time.monotonic() >= confirmation_deadline:
                 LOG.warning("browser did not confirm prompt submission")
                 raise BrowserFailure("uncertain")
@@ -756,7 +801,7 @@ class Browser:
                 known = state["turns"]
             progress(request.remote_id, accepted)
             if complete and self._identity(driver) == request.remote_id:
-                return Answer(request.remote_id, tail_for(state["turns"]), answer)
+                return Answer(request.remote_id, tail_for(state["turns"]), answer, answer_format(state["turns"]))
             return None
 
         # Existing history without the expected appended turn is ambiguous after a crash.

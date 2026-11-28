@@ -14,7 +14,7 @@ actor DeepSeekWebQueue {
 
     private struct PreviewPart {
         let messageID: Int
-        var text: String
+        var part: DeepSeekWebTelegramFormatter.Part
     }
 
     private static let openingMessage = "🌐 DeepSeek Web открывает диалог…"
@@ -355,7 +355,9 @@ actor DeepSeekWebQueue {
         persistence: PersistenceCoordinator
     ) async {
         var candidate = operation.remoteChatID
-        var previews = (operation.previewMessageIDs ?? []).map { PreviewPart(messageID: $0, text: Self.openingMessage) }
+        var previews = (operation.previewMessageIDs ?? []).map {
+            PreviewPart(messageID: $0, part: .init(text: Self.openingMessage))
+        }
         var canPreview = true
         var showedText = false
         while !Task.isCancelled {
@@ -387,33 +389,31 @@ actor DeepSeekWebQueue {
             }
 
             guard canPreview else { continue }
-            let parts: [String]
+            let parts: [DeepSeekWebTelegramFormatter.Part]
             if let partial = response.partialText, !partial.isEmpty {
-                parts = Self.parts(partial)
+                parts = DeepSeekWebTelegramFormatter.parts(response.partialFormattedText ?? partial)
                 showedText = true
             } else {
                 guard !showedText, !previews.isEmpty else { continue }
-                parts = [Self.waitingMessage]
+                parts = [.init(text: Self.waitingMessage)]
             }
             let previousCount = previews.count
             let markup = Self.stopMarkup(for: operation)
-            for (index, text) in parts.enumerated() {
+            for (index, part) in parts.enumerated() {
                 guard canRun, !Task.isCancelled, activeRequest?.stopRequested == false,
                       await isCurrent(key, operation) else { break }
                 do {
                     if index < previews.count {
                         let preview = previews[index]
-                        guard preview.text != text else { continue }
-                        try await editPreview(preview.messageID, text: text, key: key, markup: index == 0 ? markup : nil)
-                        previews[index].text = text
+                        guard preview.part != part else { continue }
+                        try await editPart(preview.messageID, part: part, key: key, markup: index == 0 ? markup : nil)
+                        previews[index].part = part
                     } else {
-                        let delivery = SendMessageRequest(
-                            chatID: key.chatID, threadID: operation.telegramThreadID,
-                            replyTo: previews.last?.messageID ?? operation.replyToMessageID,
-                            text: text, replyMarkup: index == 0 ? markup : nil, isPlainText: true
+                        let message = try await sendPart(
+                            part, key: key, thread: operation.telegramThreadID,
+                            replyTo: previews.last?.messageID ?? operation.replyToMessageID, markup: index == 0 ? markup : nil
                         )
-                        let message = try await deliverToTelegram(key) { [telegram] in try await telegram.sendMessage(delivery) }
-                        previews.append(.init(messageID: message.message_id, text: text))
+                        previews.append(.init(messageID: message.message_id, part: part))
                     }
                 } catch {
                     canPreview = false
@@ -519,6 +519,7 @@ actor DeepSeekWebQueue {
             var confirmed = operation
             confirmed.stage = .confirmed
             confirmed.response = text
+            confirmed.formattedResponse = result.formattedText ?? text
             confirmed.remoteChatID = remoteID
             confirmed.remoteTail = tail
             let saved = confirmed
@@ -566,14 +567,16 @@ actor DeepSeekWebQueue {
             return
         }
 
-        let parts = Self.parts(response)
+        // The persisted source also keeps chunk boundaries stable after restart.
+        let parts = operation.formattedResponse.map(DeepSeekWebTelegramFormatter.parts)
+            ?? DeepSeekWebTelegramFormatter.plainParts(response)
         var ids = operation.deliveryMessageIDs
         let previews = operation.previewMessageIDs ?? []
         for (index, part) in parts.enumerated().dropFirst(ids.count) {
             guard canRun, await isCurrent(key, operation) else { return }
             if previews.indices.contains(index) {
                 let messageID = previews[index]
-                if try await finalizePreview(messageID, text: part, key: key) {
+                if try await finalizePreview(messageID, part: part, key: key) {
                     ids.append(messageID)
                     try await updateDelivery(key, operation, ids: ids, inFlight: false, persistence: persistence)
                     continue
@@ -584,12 +587,10 @@ actor DeepSeekWebQueue {
             guard canRun, await isCurrent(key, operation) else { return }
             let message: TelegramMessage
             do {
-                let request = SendMessageRequest(
-                    chatID: key.chatID, threadID: operation.telegramThreadID,
-                    replyTo: ids.last ?? operation.replyToMessageID,
-                    text: part, replyMarkup: nil, isPlainText: true
+                message = try await sendPart(
+                    part, key: key, thread: operation.telegramThreadID,
+                    replyTo: ids.last ?? operation.replyToMessageID, markup: nil
                 )
-                message = try await deliverToTelegram(key) { [telegram] in try await telegram.sendMessage(request) }
             } catch {
                 try await fail("Не удалось доставить весь ответ DeepSeek Web.", key, operation,
                                persistence: persistence, uncertainDelivery: true)
@@ -610,22 +611,60 @@ actor DeepSeekWebQueue {
         }
     }
 
-    private func editPreview(
-        _ id: Int, text: String, key: ChatKey, markup: InlineKeyboardMarkup?
-    ) async throws {
-        let request = EditMessageRequest(chatID: key.chatID, messageID: id, text: text, replyMarkup: markup, isPlainText: true)
-        try await deliverToTelegram(key) { [telegram] in try await telegram.editMessage(request) }
+    private func sendPart(
+        _ part: DeepSeekWebTelegramFormatter.Part, key: ChatKey, thread: Int64?, replyTo: Int?, markup: InlineKeyboardMarkup?
+    ) async throws -> TelegramMessage {
+        try await deliverToTelegram(key) { [telegram] in
+            try await Self.withFormattingFallback(part) { entities in
+                try await telegram.sendMessage(.init(
+                    chatID: key.chatID, threadID: thread, replyTo: replyTo,
+                    text: part.text, replyMarkup: markup, isPlainText: true, entities: entities
+                ))
+            }
+        }
     }
 
-    private func finalizePreview(_ id: Int, text: String, key: ChatKey) async throws -> Bool {
+    private func editPart(
+        _ id: Int, part: DeepSeekWebTelegramFormatter.Part, key: ChatKey, markup: InlineKeyboardMarkup?
+    ) async throws {
+        try await deliverToTelegram(key) { [telegram] in
+            try await Self.withFormattingFallback(part) { entities in
+                try await telegram.editMessage(.init(
+                    chatID: key.chatID, messageID: id, text: part.text,
+                    replyMarkup: markup, isPlainText: true, entities: entities
+                ))
+            }
+        }
+    }
+
+    private func finalizePreview(_ id: Int, part: DeepSeekWebTelegramFormatter.Part, key: ChatKey) async throws -> Bool {
         do {
-            try await editPreview(id, text: text, key: key, markup: .init(inline_keyboard: []))
+            try await editPart(id, part: part, key: key, markup: .init(inline_keyboard: []))
             return true
         } catch let error as TelegramAPIError where error.statusCode == 400 && (
             error.descriptionText.contains("message to edit not found") || error.descriptionText.contains("message can't be edited")
         ) {
             return false
         }
+    }
+
+    private static func withFormattingFallback<Result>(
+        _ part: DeepSeekWebTelegramFormatter.Part, send: ([TelegramTextEntity]?) async throws -> Result
+    ) async throws -> Result {
+        var entities = part.entities
+        while !entities.isEmpty {
+            do {
+                return try await send(entities)
+            } catch let error as TelegramAPIError where error.statusCode == 400 {
+                let description = error.descriptionText.lowercased()
+                guard ["entit", "custom emoji", "custom_emoji", "url_invalid", "wrong http url"].contains(where: {
+                    description.contains($0)
+                }) else { throw error }
+                let withoutEmoji = entities.filter { $0.customEmojiID == nil }
+                entities = withoutEmoji.count < entities.count ? withoutEmoji : []
+            }
+        }
+        return try await send(nil)
     }
 
     private func deliverToTelegram<Result: Sendable>(
@@ -686,24 +725,6 @@ actor DeepSeekWebQueue {
         _ = try? await telegram.sendMessage(.init(
             chatID: key.chatID, threadID: thread, replyTo: replyTo, text: text, replyMarkup: nil
         ))
-    }
-
-    static func parts(_ raw: String) -> [String] {
-        var parts: [String] = []
-        var part = ""
-        var units = 0
-        for scalar in raw.unicodeScalars {
-            let width = scalar.value > 0xFFFF ? 2 : 1
-            if units + width > MessageSplitter.telegramMaxChars {
-                parts.append(part)
-                part = ""
-                units = 0
-            }
-            part.unicodeScalars.append(scalar)
-            units += width
-        }
-        if !part.isEmpty { parts.append(part) }
-        return parts
     }
 
     static func message(_ status: DeepSeekWebWorkerStatus) -> String {

@@ -350,6 +350,25 @@ final class StoreListenModeTests: XCTestCase {
         XCTAssertTrue(prefix.contains("в ответ на #\(entries.last!.seq)"), prefix)
     }
 
+    func testClearingHistoryAlsoFencesAnAnswerAlreadyInFlight() async {
+        let store = await makeStore()
+        await store.setListenMode(chatKey: group, on: true)
+        await overhear(store, id: 1, from: alice, "до очистки")
+        let generation = GenerationID()
+        _ = await store.snapshotAndAppend(chatKey: group, generationID: generation,
+                                          content: UserInputContent(text: "вопрос"), username: "alice")
+
+        await store.clearHistory(chatKey: group)
+        _ = await store.appendAssistant(chatKey: group, generationID: generation, content: "старый ответ")
+        await overhear(store, id: 2, from: bob, "после очистки")
+
+        let listening = await store.listening(chatKey: group)
+        let history = await store.history(chatKey: group)
+        XCTAssertTrue(listening.isOn)
+        XCTAssertEqual(listening.transcript.entries.map(\.text), ["после очистки"])
+        XCTAssertEqual(history.map(\.role), ["system"])
+    }
+
     // MARK: - Bounds
 
     func testTheBufferKeepsOnlyItsSize() async {

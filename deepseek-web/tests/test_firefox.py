@@ -60,7 +60,7 @@ class FirefoxTest(unittest.TestCase):
         return Request(uuid4(), self.epoch, None, previous.remote_id if previous else None,
                        previous.tail if previous else None, prompt)
 
-    def track(self, remote_id, accepted, text=None):
+    def track(self, remote_id, accepted, text=None, formatted_text=None):
         self.progress.append((remote_id, accepted, text))
 
     def run_turn(self, request):
@@ -97,6 +97,11 @@ class FirefoxTest(unittest.TestCase):
         self.assertIn("if x < 2:\n    x & y", first.text)
         self.assertNotIn("Reasoning is never", first.text)
         self.assertNotIn("Copy code label", first.text)
+        self.assertIn("<b>bold & visible</b>", first.formatted_text)
+        self.assertIn('<a href="https://example.test/?a=1&amp;b=2">a link</a>', first.formatted_text)
+        self.assertIn("<blockquote expandable>hidden quote</blockquote>", first.formatted_text)
+        self.assertIn("<u>Telegram HTML</u>", first.formatted_text)
+        self.assertIn('<pre><code class="language-python">if x &lt; 2:\n    x &amp; y</code></pre>', first.formatted_text)
 
         rotated = self.run_turn(self.request("B"))
         self.assertNotEqual(rotated.remote_id, first.remote_id)
@@ -149,9 +154,9 @@ class FirefoxTest(unittest.TestCase):
         request = self.request("stream this")
         prepared = self.browser.prepare(request, self.stop)
 
-        def advance(remote_id, accepted, text):
+        def advance(remote_id, accepted, text, formatted_text=None):
             if remote_id and accepted and text:
-                self.track(remote_id, accepted, text)
+                self.track(remote_id, accepted, text, formatted_text)
                 self.browser.session[0].execute_script("window.advanceStream()")
 
         answer = self.browser.send(request, prepared, self.stop, advance)

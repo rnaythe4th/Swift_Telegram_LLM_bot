@@ -103,9 +103,13 @@
       const list = add(block, 'ul', {});
       add(list, 'li', {}, 'one');
       add(list, 'li', {}, 'two');
+      add(block, 'strong', {}, 'bold & visible');
+      add(block, 'a', {href: 'https://example.test/?a=1&b=2'}, 'a link');
+      add(block, 'blockquote', {expandable: ''}, 'hidden quote');
+      add(block, 'p', {}, '<u>Telegram HTML</u>');
       const code = add(block, 'div', {class: 'md-code-block'});
       add(code, 'div', {class: 'md-code-block-banner'}, 'Copy code label');
-      add(add(code, 'pre', {}), 'code', {}, 'if x < 2:\n    x & y');
+      add(add(code, 'pre', {}), 'code', {class: 'language-python'}, 'if x < 2:\n    x & y');
     }
     if (finished) complete(wrap);
     return wrap;

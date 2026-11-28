@@ -66,6 +66,7 @@ class Operation:
     candidate_id: str | None = None
     accepted: bool = False
     partial_text: str | None = None
+    partial_formatted_text: str | None = None
 
 
 def check_version(payload):
@@ -270,17 +271,19 @@ class Worker:
         self.last_activity = time.monotonic()
         self.lock.notify_all()
 
-    def _progress(self, operation, remote_id, accepted, partial_text):
+    def _progress(self, operation, remote_id, accepted, partial_text, formatted_text):
         with self.lock:
             operation.candidate_id = remote_id or operation.candidate_id
             operation.accepted |= accepted
             operation.partial_text = partial_text if remote_id and accepted else None
+            operation.partial_formatted_text = formatted_text if operation.partial_text else None
 
     def _in_progress(self, request, operation):
         phase = "prepared" if operation.phase == "prepared" else "inProgress"
         partial = operation.partial_text if operation.phase == "sending" and not operation.stop.is_set() else None
         return reply(request, phase, operation.accepted, remoteChatID=operation.candidate_id,
-                     partialText=partial, mayHaveSent=operation.phase in {"sending", "reconciling"})
+                     partialText=partial, partialFormattedText=operation.partial_formatted_text if partial else None,
+                     mayHaveSent=operation.phase in {"sending", "reconciling"})
 
     def perform(self, request, action):
         oversized = request.prompt and len(request.prompt.encode()) > MAX_PROMPT_BYTES
@@ -375,8 +378,8 @@ class Worker:
         start = time.monotonic()
         result = reply(request, "unavailable")
 
-        def update(remote_id, accepted, partial_text=None):
-            self._progress(operation, remote_id, accepted, partial_text)
+        def update(remote_id, accepted, partial_text=None, formatted_text=None):
+            self._progress(operation, remote_id, accepted, partial_text, formatted_text)
 
         try:
             if operation.phase == "preparing":
@@ -398,7 +401,7 @@ class Worker:
             else:
                 answer = self.browser.reconcile(replace(request, remote_id=operation.candidate_id), operation.stop, update)
             result = reply(request, "completed", True, remoteChatID=answer.remote_id,
-                           remoteTail=answer.tail, text=answer.text, mayHaveSent=True)
+                           remoteTail=answer.tail, text=answer.text, formattedText=answer.formatted_text, mayHaveSent=True)
         except BrowserFailure as error:
             result = reply(request, error.status, error.accepted or operation.accepted,
                            remoteChatID=error.remote_id or operation.candidate_id,

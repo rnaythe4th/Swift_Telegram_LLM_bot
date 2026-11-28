@@ -298,10 +298,12 @@ extension BotMenuHandler {
             if !currentRow.isEmpty { rows.row(currentRow) }
         }
 
-        rows.row([
-            menuButton("📜 Что бот помнит", .history, "dump"),
-            menuButton("🧹 Очистить", .history, "clear"),
-        ])
+        var memoryActions = [menuButton("📜 Что бот помнит", .history, "dump")]
+        let clearAccess = chatKey.chatID.isGroup ? await actionAccess(.listen, chatKey: chatKey) : .everyone
+        if await satisfies(clearAccess, chatKey: chatKey, invoker: invoker) {
+            memoryActions.append(menuButton("🧹 Очистить", .history, "clear"))
+        }
+        rows.row(memoryActions)
         if isOperator {
             rows.row([menuButton("✏️ Своё значение", .history, "custom")])
             rows.row([menuButton("⚙️ Мои заготовки", .pm, "history")])

@@ -236,9 +236,11 @@ extension ChatContextStore {
     }
 
     func clearHistory(chatKey: ChatKey) {
+        _overheardPreroll.removeValue(forKey: chatKey)
         mutate(chatKey: chatKey) { context in
             context.history = [.init(role: "system", content: context.role)]
             context.pendingTurns = []
+            _ = context.listening.transcript.clear()
             resetWebContext(&context, chatKey: chatKey)
         }
     }
@@ -381,10 +383,12 @@ extension ChatContextStore {
         let billed = real.multiplied(byPercent: markup)
         if contexts[chatKey] != nil {
             mutate(chatKey: chatKey) { context in
-                let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID })
-                // A result from the previous provider must not enter
-                // the new provider's transcript after a switch.
-                if context.listening.isOn, context.deepSeekWeb == nil || index != nil {
+                context.cumulativeUsage.add(usage, markupPercent: markup)
+                // History resets invalidate pending turns and their transcript entries together.
+                guard let index = context.pendingTurns.firstIndex(where: { $0.generationID == generationID }) else {
+                    return
+                }
+                if context.listening.isOn {
                     context.listening.transcript.append(
                         messageID: botMessageID ?? 0,
                         author: .bot,
@@ -394,8 +398,6 @@ extension ChatContextStore {
                         size: context.listening.size
                     )
                 }
-                context.cumulativeUsage.add(usage, markupPercent: markup)
-                guard let index else { return }
                 context.pendingTurns[index].state = .completed(content)
                 flushResolvedTurns(&context)
             }

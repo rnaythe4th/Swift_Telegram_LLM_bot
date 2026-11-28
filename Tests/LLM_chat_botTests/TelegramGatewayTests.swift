@@ -68,6 +68,27 @@ final class TelegramGatewayTests: XCTestCase {
         XCTAssertEqual(calls.count, 1)
     }
 
+    func testWebFormattingSendsExplicitEntitiesOnSendAndEdit() async throws {
+        let part = try XCTUnwrap(DeepSeekWebTelegramFormatter.parts("😀 <b>&lt;hello&gt;</b>").first)
+        let sent = try await gateway.sendMessage(.init(
+            chatID: chatID, threadID: nil, replyTo: nil, text: part.text, replyMarkup: nil, entities: part.entities
+        ))
+        try await gateway.editMessage(.init(
+            chatID: chatID, messageID: sent.message_id, text: part.text, replyMarkup: nil, entities: part.entities
+        ))
+        for method in ["sendMessage", "editMessageText"] {
+            let recorded = await telegram.calls(method)
+            let call = try XCTUnwrap(recorded.first)
+            XCTAssertNil(call.parseMode)
+            XCTAssertEqual(call.text, "😀 <hello>")
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: Any])
+            let entities = try XCTUnwrap(body["entities"] as? [[String: Any]])
+            XCTAssertEqual(entities.first?["type"] as? String, "bold")
+            XCTAssertEqual(entities.first?["offset"] as? Int, 3)
+            XCTAssertEqual(entities.first?["length"] as? Int, 7)
+        }
+    }
+
     // MARK: - Which refusals are failures
 
     /// «message is not modified» says the message already reads exactly this —

@@ -8,9 +8,12 @@ extension BotCommandHandler {
     /// Role, model, style of the answer, memory length.
     func handleChatValueCommand(_ parsed: ParsedBotCommand, chatKey: ChatKey, fromUser: TelegramUser?) async throws {
         let web = await state.provider(chatKey: chatKey) == .deepseekWeb
-        if web && chatKey.chatID.isGroup && parsed.name == .clearHistory {
-            guard await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
-                                                 refusal: "🔒 Эти настройки меняет администратор чата.") else { return }
+        if chatKey.chatID.isGroup && parsed.name == .clearHistory {
+            let allowed = web
+                ? await requireOperatorForTuning(chatKey: chatKey, fromUser: fromUser,
+                                                 refusal: "🔒 Историю очищает администратор чата.")
+                : await requireFullAccessForTuning(chatKey: chatKey, fromUser: fromUser)
+            guard allowed else { return }
         }
         switch parsed.name {
         case .setRole:
@@ -29,7 +32,8 @@ extension BotCommandHandler {
         case .clearHistory:
             await state.clearHistory(chatKey: chatKey)
             try await menuHandler.checkpointWebSettings(chatKey: chatKey)
-            try await sendUserFeedback(chatKey: chatKey, text: "🧹 Переписка очищена — бот забыл, о чём был разговор.")
+            let cleared = chatKey.chatID.isGroup ? "Переписка и история прослушки очищены." : "Переписка очищена."
+            try await sendUserFeedback(chatKey: chatKey, text: "🧹 \(cleared)")
 
         case .setTemp:
             // Same line as the menu: hand-tuning is what premium unlocks, and a

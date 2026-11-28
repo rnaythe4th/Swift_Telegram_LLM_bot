@@ -36,6 +36,7 @@ struct DeepSeekWebOperation: Codable, Sendable {
     var remoteChatID: String?
     var remoteTail: String?
     var response: String?
+    var formattedResponse: String?
     var previewMessageIDs: [Int]?
     var deliveryMessageIDs: [Int] = []
     var deliveryInFlight: Bool?

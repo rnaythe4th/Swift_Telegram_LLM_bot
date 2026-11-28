@@ -1,5 +1,19 @@
 import Foundation
 
+struct TelegramTextEntity: Codable, Equatable, Sendable {
+    let type: String
+    let offset: Int
+    let length: Int
+    var url: String?
+    var language: String?
+    var customEmojiID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, offset, length, url, language
+        case customEmojiID = "custom_emoji_id"
+    }
+}
+
 struct SendMessageRequest: Sendable {
     let chatID: ChatID
     let threadID: Int64?
@@ -7,6 +21,7 @@ struct SendMessageRequest: Sendable {
     let text: String
     let replyMarkup: InlineKeyboardMarkup?
     var isPlainText = false
+    var entities: [TelegramTextEntity]? = nil
 }
 
 struct EditMessageRequest: Sendable {
@@ -15,6 +30,7 @@ struct EditMessageRequest: Sendable {
     let text: String
     let replyMarkup: InlineKeyboardMarkup?
     var isPlainText = false
+    var entities: [TelegramTextEntity]? = nil
 }
 
 struct SendMessageDraftRequest: Sendable {

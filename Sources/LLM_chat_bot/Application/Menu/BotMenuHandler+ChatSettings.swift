@@ -349,9 +349,14 @@ extension BotMenuHandler {
     ) async throws {
         guard !route.sub.isEmpty else { return }
         if route.sub == "clear" {
+            if chatKey.chatID.isGroup {
+                let access = await actionAccess(.listen, chatKey: chatKey)
+                guard await allow(access, chatKey: chatKey, callback: callback, refusal: access.refusal) else { return }
+            }
             await state.clearHistory(chatKey: chatKey)
             try await checkpointWebSettings(chatKey: chatKey)
-            try? await telegram.answerCallback(callbackQueryID: callback.id, text: "Переписка очищена")
+            let cleared = chatKey.chatID.isGroup ? "Переписка и история прослушки очищены" : "Переписка очищена"
+            try? await telegram.answerCallback(callbackQueryID: callback.id, text: cleared)
             try await showPage(.history, chatKey: chatKey, callback: callback, message: message)
             return
         } else if route.sub == "dump" {

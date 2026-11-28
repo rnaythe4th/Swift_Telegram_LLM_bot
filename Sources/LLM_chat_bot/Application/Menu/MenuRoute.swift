@@ -59,8 +59,7 @@ enum MenuCommand: String, CaseIterable {
         case .role, .model, .stats, .websearch, .reset, .help, .mode, .pm, .buy:
             return .everyone
 
-        // Cost multipliers. `history` also carries an operator check inside for
-        // the length buttons, while its "clear" and "dump" stay open to the chat.
+        // History applies its own checks for length changes and group wipes.
         case .history:
             return .everyone
         case .temp, .reasoning:

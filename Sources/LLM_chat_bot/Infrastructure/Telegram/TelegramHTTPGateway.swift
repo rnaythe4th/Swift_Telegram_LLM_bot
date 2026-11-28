@@ -165,7 +165,7 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
     }
     
     func sendMessage(_ request: SendMessageRequest) async throws -> TelegramMessage {
-        if request.isPlainText {
+        if request.isPlainText || request.entities != nil {
             return try await sendSingle(request, html: request.text)
         }
         let html = TelegramHTMLFormatter.helper(text: request.text)
@@ -240,7 +240,8 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
             text: html,
             reply_parameters: request.replyTo.map { ReplyParameters(message_id: $0) },
             message_thread_id: request.threadID,
-            parse_mode: request.isPlainText ? nil : "HTML",
+            parse_mode: request.isPlainText || request.entities != nil ? nil : "HTML",
+            entities: request.entities,
             reply_markup: request.replyMarkup
         )
 
@@ -276,12 +277,14 @@ final class TelegramHTTPGateway: TelegramGatewayPort, Sendable {
         // stops updating. Callers budget with `MessageSplitter`, which already
         // accounts for escaping, so this only trims pathological input — and
         // trimming shows most of the answer where the alternative shows none.
-        let text = request.isPlainText ? request.text : Self.chunkFittingHTML(request.text).html
+        let usesHTML = !request.isPlainText && request.entities == nil
+        let text = usesHTML ? Self.chunkFittingHTML(request.text).html : request.text
         let body = TelegramEditMessageTextBody(
             chat_id: request.chatID.value,
             message_id: request.messageID,
             text: text,
-            parse_mode: request.isPlainText ? nil : "HTML",
+            parse_mode: usesHTML ? "HTML" : nil,
+            entities: request.entities,
             reply_markup: request.replyMarkup
         )
         

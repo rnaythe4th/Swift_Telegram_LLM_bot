@@ -128,6 +128,7 @@ struct TelegramSendMessageBody: Codable {
     let reply_parameters: ReplyParameters?
     let message_thread_id: Int64?
     let parse_mode: String?
+    let entities: [TelegramTextEntity]?
     let reply_markup: InlineKeyboardMarkup?
 }
 
@@ -136,6 +137,7 @@ struct TelegramEditMessageTextBody: Codable {
     let message_id: Int
     let text: String
     let parse_mode: String?
+    let entities: [TelegramTextEntity]?
     let reply_markup: InlineKeyboardMarkup?
 }
 

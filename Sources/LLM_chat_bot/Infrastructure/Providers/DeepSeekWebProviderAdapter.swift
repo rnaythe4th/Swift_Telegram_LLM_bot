@@ -29,6 +29,8 @@ struct DeepSeekWebWorkerResponse: Decodable, Sendable {
     let retryAfterSeconds: Int?
     var mayHaveSent: Bool?
     var partialText: String?
+    var formattedText: String?
+    var partialFormattedText: String?
 }
 
 struct DeepSeekWebWorkerHealth: Decodable, Sendable {

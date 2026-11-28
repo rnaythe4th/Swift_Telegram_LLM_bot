@@ -242,6 +242,36 @@ final class EndToEndTests: XCTestCase {
         XCTAssertEqual(texts, ["это было до включения", "и это тоже"])
     }
 
+    func testBothHistoryClearActionsForgetTheListeningBufferAndPreroll() async throws {
+        let group: ChatID = -4_205
+        let key = ChatKey(chatID: group, threadID: 0)
+        await store.setListenMode(chatKey: key, on: true)
+        await orchestrator.dispatch(update: message("до команды", chatID: group, isGroup: true, messageID: 21))
+        try await waitUntil { await self.store.transcriptView(chatKey: key).total == 1 }
+
+        await orchestrator.dispatch(update: message("/clear_history", chatID: group, userID: ownerID,
+                                                    username: "owner", isGroup: true, messageID: 22))
+        let confirmation = await telegram.waitForCall("sendMessage", containing: "история прослушки очищены")
+        XCTAssertNotNil(confirmation)
+        let afterCommand = await store.listening(chatKey: key)
+        XCTAssertTrue(afterCommand.isOn)
+        XCTAssertTrue(afterCommand.transcript.isEmpty)
+
+        await orchestrator.dispatch(update: message("после команды", chatID: group, isGroup: true, messageID: 23))
+        try await waitUntil { await self.store.transcriptView(chatKey: key).total == 1 }
+        await store.setListenMode(chatKey: key, on: false)
+        await orchestrator.dispatch(update: message("пока прослушка выключена", chatID: group, isGroup: true, messageID: 24))
+        try await waitUntil { await self.store.prerollCount(chatKey: key) == 1 }
+
+        await orchestrator.dispatch(update: callback("menu:history:clear", chatID: group, userID: ownerID, isGroup: true))
+        let toast = await telegram.waitForCall("answerCallbackQuery", containing: "история прослушки очищены")
+        XCTAssertNotNil(toast)
+        let outcome = await store.setListenMode(chatKey: key, on: true)
+        XCTAssertEqual(outcome.seeded, 0)
+        let afterMenu = await store.listening(chatKey: key)
+        XCTAssertTrue(afterMenu.transcript.isEmpty)
+    }
+
     /// The switch is a paid feature, and a keyboard outlives the rights it was
     /// drawn for: a member of a free group tapping it is sold, not obeyed.
     func testListenSwitchInAFreeGroupSellsInsteadOfRecording() async throws {
