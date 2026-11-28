@@ -74,6 +74,7 @@ enum MenuPage: String, CaseIterable {
     case superReminders = "superreminders"
     case superOnboarding = "superonboarding"
     case superModes = "supermodes"
+    case superMainMenu = "supermainmenu"
     case superReferrals = "superref"
     case superTraffic = "supersrc"
     /// Daily spending ceilings — the only cap that applies to people who have
@@ -138,7 +139,7 @@ enum MenuPage: String, CaseIterable {
              .superExternalPay, .superFreeModels, .superTenants, .superAdmins,
              .superSimulate, .superChats, .superAds, .superBalances, .superFunnel,
              .superReminders, .superOnboarding, .superModes, .superReferrals,
-             .superTraffic, .superSpend:
+             .superTraffic, .superSpend, .superMainMenu:
             return .superAdmin
         }
     }
@@ -173,6 +174,7 @@ enum MenuPage: String, CaseIterable {
     var backLabel: String {
         switch self {
         case .superAdmin: return "← К супер-админу"
+        case .superMainMenu: return "← К выбору аудитории"
         case .adminPanel: return "← К моему премиуму"
         case .superTenants: return "← К тенантам"
         case .superSpend: return "← К лимитам расходов"

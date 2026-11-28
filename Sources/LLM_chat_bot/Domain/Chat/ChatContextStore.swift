@@ -83,6 +83,7 @@ actor ChatContextStore {
     /// Greeting example prompts + their tap counters (roadmap step 9).
     /// Super-admin knob, persisted via GlobalConfigKey.onboarding.
     var onboardingConfigValue: OnboardingConfig = .default
+    var mainMenuConfig = MainMenuConfig()
     /// Two-sided referral economics (roadmap step 10). Super-admin knob,
     /// persisted via GlobalConfigKey.referrals.
     var referralConfigValue: ReferralConfig = .default

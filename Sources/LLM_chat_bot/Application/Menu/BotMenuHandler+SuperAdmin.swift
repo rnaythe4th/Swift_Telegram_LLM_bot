@@ -154,6 +154,7 @@ extension BotMenuHandler {
 
         let rows: Keyboard = [
             [menuButton("🎛 Режимы бота · \(modes.enabled ? "\(modes.activeModes.count)" : "выкл")", page: .superModes)],
+            [menuButton("⚙️ Кнопки главного меню", page: .superMainMenu)],
             [menuButton(starsButtonLabel, page: .superStars)],
             [menuButton(cryptoButtonLabel, page: .superCrypto)],
             [menuButton(cardButtonLabel, page: .superCard)],

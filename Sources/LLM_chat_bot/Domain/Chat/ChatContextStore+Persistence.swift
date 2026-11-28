@@ -308,6 +308,8 @@ extension ChatContextStore {
             return StoredConfig(Config.reminders, reminderConfigValue)
         case .onboarding:
             return StoredConfig(Config.onboarding, onboardingConfigValue)
+        case .mainMenu:
+            return StoredConfig(Config.mainMenu, mainMenuConfig)
         case .referrals:
             return StoredConfig(Config.referrals, referralConfigValue)
         case .referralTotals:
@@ -437,6 +439,7 @@ extension ChatContextStore {
         modeConfigValue = state.configs[Config.modes].normalized
         reminderConfigValue = state.configs[Config.reminders].normalized
         onboardingConfigValue = state.configs[Config.onboarding].normalized
+        mainMenuConfig = state.configs[Config.mainMenu]
         referralConfigValue = state.configs[Config.referrals].normalized
         spendPolicyValue = state.configs[Config.spendPolicy]
 

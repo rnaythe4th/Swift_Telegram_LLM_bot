@@ -28,6 +28,7 @@ enum ConfigName: String, CaseIterable, Sendable {
     case modes = "modes"
     case reminders = "reminders"
     case onboarding = "onboarding"
+    case mainMenu = "main_menu"
     case referrals = "referrals"
     /// Program-wide referral counters (payout total, refusal reasons). The
     /// records and per-inviter tallies behind them are tables.
@@ -105,6 +106,7 @@ struct ConfigRegistry: Sendable {
     let modes = ConfigKey(.modes, default: ModePresetConfig.default)
     let reminders = ConfigKey(.reminders, default: SubscriptionReminderConfig.default)
     let onboarding = ConfigKey(.onboarding, default: OnboardingConfig.default)
+    let mainMenu = ConfigKey(.mainMenu, default: MainMenuConfig())
     let referrals = ConfigKey(.referrals, default: ReferralConfig.default)
     let referralTotals = ConfigKey(.referralTotals, default: ReferralTotals.empty)
     let trafficTotals = ConfigKey(.trafficTotals, default: TrafficSourceTotals.empty)

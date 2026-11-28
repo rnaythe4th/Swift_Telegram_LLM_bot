@@ -108,6 +108,8 @@ extension BotMenuHandler {
             return await renderSuperOnboarding(chatKey: chatKey)
         case .superModes:
             return await renderSuperModes(chatKey: chatKey)
+        case .superMainMenu:
+            return renderMainMenuAudiences()
         case .superReferrals:
             return await renderSuperReferrals(chatKey: chatKey)
         case .superTraffic:

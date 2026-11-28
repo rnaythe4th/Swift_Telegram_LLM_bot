@@ -183,6 +183,9 @@ final class BotMenuHandler: Sendable {
         case .spend:
             try await processSpendAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
+        case .mainmenu:
+            try await processMainMenuEdit(route: route, callback: callback, message: message)
+
         case .sahelp:
             try await processHelpAction(route: route, chatKey: chatKey, callback: callback, message: message)
         }

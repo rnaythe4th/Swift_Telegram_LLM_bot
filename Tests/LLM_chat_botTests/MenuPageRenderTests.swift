@@ -73,6 +73,91 @@ final class MenuPageRenderTests: XCTestCase {
 
     // MARK: - Tests
 
+    func testRegularMainMenuDefaultsKeepTheWebControls() async {
+        let store = Fixtures.makeStore(ownerUserID: ownerID, defaultProvider: .deepseekWeb)
+        await store.setStarsPrice(100)
+        let menu = BotMenuHandler(telegram: gateway, state: store, gateways: ProviderGatewayRegistry(providers: [:]),
+                                  logger: SilentLogger(), formatOptions: "", botUsername: "testbot")
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
+        let screen = await menu.renderPage(.main, chatKey: chat, invoker: .identified(plainID))
+
+        XCTAssertEqual(screen.keyboard.map { menuActions(InlineKeyboardMarkup(inline_keyboard: [$0])) }, [
+            ["nav:role", "nav:history"], ["nav:reasoning", "websearch:off"],
+            ["nav:tuning"], ["nav:presets"], ["noop"], ["nav:help"], ["close"],
+        ])
+        XCTAssertFalse(screen.keyboard.flatMap { $0 }.contains { $0.url != nil })
+    }
+
+    func testSuperAdminEditsAndRestoresOnlyTheSelectedMainMenu() async throws {
+        let owner = UserKey.identified(ownerID)
+        let plain = UserKey.identified(plainID)
+        let chat = ChatKey(chatID: plainID.privateChat, threadID: 0)
+        let ownerChat = ChatKey(chatID: ownerID.privateChat, threadID: 0)
+        let group = ChatKey(chatID: -7_200, threadID: 0)
+        let message = MaybeInaccessibleMessage(chat: .init(id: ownerChat.chatID, type: "private"),
+                                               message_id: 51, date: 1, text: "меню", message_thread_id: nil)
+        func tap(_ action: String, as id: UserID? = nil) async {
+            let actor = Fixtures.user(id: id ?? ownerID, username: nil)
+            await menu.handle(action: action, callback: .init(id: action, from: actor, data: "menu:\(action)", message: message))
+        }
+
+        let panel = await menu.renderPage(.superAdmin, chatKey: ownerChat, invoker: owner)
+        XCTAssertTrue(menuActions(panel.markup).contains("nav:supermainmenu"))
+        await tap("nav:supermainmenu")
+        let selector = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(selector?.buttonActions.contains("menu:mainmenu:edit:regular") == true)
+        await tap("mainmenu:edit:regular")
+        let editor = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(editor?.buttonActions.contains("menu:mainmenu:show:regular:examples") == true)
+        XCTAssertTrue(editor?.buttonActions.contains("menu:mainmenu:down:regular:role") == true)
+
+        await tap("mainmenu:hide:regular:role", as: plainID)
+        let denied = await store.mainMenuEntries(for: .regular)
+        XCTAssertEqual(denied, MainMenuConfig.defaults(for: .regular))
+
+        await tap("mainmenu:show:regular:examples")
+        await tap("mainmenu:down:regular:role")
+        await tap("mainmenu:hide:regular:help")
+        let regularMenu = await menu.renderPage(.main, chatKey: chat, invoker: plain)
+        let regularActions = menuActions(regularMenu.markup)
+        XCTAssertEqual(Array(regularActions.prefix(2)), ["nav:model", "nav:role"])
+        XCTAssertTrue(regularActions.contains("examples"))
+        XCTAssertFalse(regularActions.contains("nav:help"))
+        let exampleMessage = MaybeInaccessibleMessage(chat: .init(id: chat.chatID, type: "private"),
+                                                      message_id: 52, date: 1, text: "меню", message_thread_id: nil)
+        await menu.handle(action: "examples", callback: .init(id: "examples", from: Fixtures.user(id: plainID, username: nil),
+                                                              data: "menu:examples", message: exampleMessage))
+        let examples = await telegram.lastCall("sendMessage")
+        XCTAssertTrue(examples?.buttonActions.contains(BotCallbackAction.example(id: "explain").rawData) == true)
+
+        await store.seedBalance(key: plain, amount: .usd(1))
+        for (chatKey, user) in [(chat, plain), (group, plain), (ownerChat, owner)] {
+            let screen = await menu.renderPage(.main, chatKey: chatKey, invoker: user)
+            let actions = menuActions(screen.markup)
+            XCTAssertEqual(Array(actions.prefix(2)), ["nav:role", "nav:model"])
+            XCTAssertTrue(actions.contains("nav:help"))
+        }
+
+        let batch = await store.drainDirtyBatch()
+        let row = try XCTUnwrap(batch.configs.first { $0.name == .mainMenu })
+        var saved = PersistedBotState()
+        saved.configs = ConfigDocuments(rows: [.mainMenu: try JSONEncoder().encode(row)], keys: Config.all) { _, error in
+            XCTFail("\(error)")
+        }
+        let restarted = Fixtures.makeStore()
+        await restarted.restore(from: saved)
+        let restored = await restarted.mainMenuEntries(for: .regular)
+        let current = await store.mainMenuEntries(for: .regular)
+        XCTAssertEqual(restored, current)
+
+        await tap("mainmenu:reset:regular")
+        await tap("mainmenu:hide:superAdmin:superAdmin")
+        let reset = await store.mainMenuEntries(for: .regular)
+        let superMenu = await menu.renderPage(.main, chatKey: ownerChat, invoker: owner)
+        XCTAssertEqual(reset, MainMenuConfig.defaults(for: .regular))
+        XCTAssertTrue(menuActions(superMenu.markup).contains("nav:superadmin"))
+    }
+
     func testGroupMemberCanChangeWebDeepThinkSearchAndRole() async throws {
         let store = Fixtures.makeStore(ownerUserID: ownerID, defaultProvider: .deepseekWeb)
         let gateways = ProviderGatewayRegistry(

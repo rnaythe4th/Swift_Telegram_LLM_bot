@@ -121,40 +121,57 @@ extension BotMenuHandler {
         🆔 <code>\(chatKey.chatID)</code>
         """
 
-        var rows: Keyboard = []
+        let isSuperAdmin = await state.isSuperAdmin(invoker)
+        let isAdmin = isSuperAdmin ? true : await state.isAdmin(invoker, chatID: chatKey.chatID)
+        let audience: MainMenuAudience
+        if isGroupChat {
+            audience = .group
+        } else if isSuperAdmin {
+            audience = .superAdmin
+        } else if isAdmin {
+            audience = .admin
+        } else {
+            audience = hasFullAccess ? .premium : .regular
+        }
+
+        typealias Item = (MainMenuButton, InlineKeyboardButton)
+        func pageButton(_ id: MainMenuButton, _ page: MenuPage, title: String? = nil) -> Item {
+            (id, menuButton(title ?? id.label, page: page))
+        }
+
+        var available: [[Item]] = []
         let lock = hasFullAccess ? "" : " ⭐"
         if web {
-            rows.row([menuButton("🎭 Роль", page: .role), menuButton("📝 Память", page: .history)])
-            rows.row([
-                menuButton("🧠 DeepThink", page: .reasoning),
-                menuButton(help.webSearchEnabled ? "🌐 Поиск · вкл" : "🌐 Поиск · выкл",
-                           .websearch, help.webSearchEnabled ? "off" : "on")
+            available.append([pageButton(.role, .role), pageButton(.history, .history)])
+            available.append([
+                pageButton(.reasoning, .reasoning, title: "🧠 DeepThink"),
+                (.search, menuButton(help.webSearchEnabled ? "🌐 Поиск · вкл" : "🌐 Поиск · выкл",
+                                     .websearch, help.webSearchEnabled ? "off" : "on"))
             ])
         } else {
-            rows.row([menuButton("🎭 Роль", page: .role), menuButton("🤖 Модель", page: .model)])
-            rows.row([menuButton("🌡 Стиль ответа" + lock, page: .temp), menuButton("📝 Память", page: .history)])
-            rows.row([menuButton("🧠 Размышления" + lock, page: .reasoning)])
+            available.append([pageButton(.role, .role), pageButton(.model, .model)])
+            available.append([pageButton(.style, .temp, title: MainMenuButton.style.label + lock), pageButton(.history, .history)])
+            available.append([pageButton(.reasoning, .reasoning, title: "🧠 Размышления" + lock)])
         }
         // Listening is a group-chat feature; keep its existing access rules.
         if isGroupChat {
             let listening = await state.listening(chatKey: chatKey)
-            rows.row([menuButton(
-                listening.isOn ? "🎧 Прослушка беседы · 🟢" : "🎧 Прослушка беседы",
-                page: .listen
+            available.append([pageButton(.listen, .listen, title: listening.isOn
+                ? MainMenuButton.listen.label + " · 🟢" : MainMenuButton.listen.label
             )])
         }
-        rows.row([menuButton("⚙️ Тонкая настройка", page: .tuning)])
-        rows.row([menuButton("🎛 Пресеты", page: .presets)])
+        available.append([pageButton(.tuning, .tuning)])
+        available.append([pageButton(.presets, .presets)])
 
         // Everything below is a different job — money and growth, not settings.
         // Telegram has no separators, so a dead button draws the line; without
         // it the page is fourteen buttons of equal weight and reads as noise.
-        rows.row([menuButton("· · · · ·", command: .noop)])
+        available.append([(.separator, menuButton("· · · · ·", command: .noop))])
 
         // Onboarding (roadmap step 9): a way back to the ready-made prompts
         // after the greeting has scrolled away.
-        if !(await state.onboardingConfig().activeExamples(inGroup: chatKey.chatID.isGroup).isEmpty) {
-            rows.row([menuButton("💡 Примеры-запросы", command: .examples)])
+        if !(await state.onboardingConfig().activeExamples(inGroup: isGroupChat).isEmpty) {
+            available.append([(.examples, menuButton(MainMenuButton.examples.label, command: .examples))])
         }
         // Monetization entry point: shown whenever there is something to buy
         // or an existing subscription/wallet to inspect.
@@ -168,30 +185,44 @@ extension BotMenuHandler {
         if (starsPrice ?? 0) > 0 || cryptoCents != nil || card.isEnabled || isTenant || wallet != nil {
             // "Продлить" would out the tapper as a paying customer in a group.
             let payLabel = isTenant ? "🔄 Продлить премиум" : "⚡ Премиум-доступ"
-            rows.row([menuButton(payLabel, page: .pay)])
+            available.append([pageButton(.purchase, .pay, title: payLabel)])
         }
         // Viral loop: one tap opens Telegram's group picker and adds the bot.
         if !botUsername.isEmpty {
-            rows.row([InlineKeyboardButton(text: "➕ Добавить в свой чат", url: "https://t.me/\(botUsername)?startgroup=add")])
+            available.append([(.addToGroup, InlineKeyboardButton(text: MainMenuButton.addToGroup.label, url: "https://t.me/\(botUsername)?startgroup=add"))])
         }
         // Referral (roadmap step 10): personal link, so private chats only.
         let referral = await state.referralConfig()
         if referral.enabled, !botUsername.isEmpty, chatKey.chatID.isPrivate {
-            let label = referral.inviterRewardCents > 0
-                ? "🎁 Пригласить друга · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))"
-                : "🎁 Пригласить друга"
-            rows.row([menuButton(label, page: .referral)])
+            let reward = referral.inviterRewardCents > 0
+                ? " · +\(ReferralConfig.formatUsd(cents: referral.inviterRewardCents))" : ""
+            available.append([pageButton(.referral, .referral, title: MainMenuButton.referral.label + reward)])
         }
-        rows.row([menuButton("❓ Справка", page: .helpPage)])
-        if await state.isSuperAdmin(invoker) {
-            rows.row([
-                menuButton("⚡ Мой премиум", page: .adminPanel),
-                menuButton("🛡 Супер-админ", page: .superAdmin),
-            ])
-        } else if await state.isAdmin(invoker, chatID: chatKey.chatID) {
-            rows.row([menuButton("⚡ Мой премиум", page: .adminPanel)])
+        available.append([pageButton(.help, .helpPage)])
+        if isSuperAdmin {
+            available.append([pageButton(.admin, .adminPanel), pageButton(.superAdmin, .superAdmin)])
+        } else if isAdmin {
+            available.append([pageButton(.admin, .adminPanel)])
         }
-        rows.row([menuButton(Texts.close, command: .close)])
+        available.append([(.close, menuButton(Texts.close, command: .close))])
+
+        // Keep buttons from an original row together while they are adjacent
+        // in the configured order, including when their positions are swapped.
+        var byID: [MainMenuButton: (row: Int, button: InlineKeyboardButton)] = [:]
+        for (row, items) in available.enumerated() {
+            for (id, button) in items { byID[id] = (row, button) }
+        }
+        var rows: Keyboard = []
+        var lastRow: Int?
+        for entry in await state.mainMenuEntries(for: audience) where entry.visible {
+            guard let item = byID[entry.button] else { continue }
+            if item.row == lastRow {
+                rows.extendLastRow(with: item.button)
+            } else {
+                rows.row(item.button)
+            }
+            lastRow = item.row
+        }
 
         return MenuScreen(text, rows)
     }

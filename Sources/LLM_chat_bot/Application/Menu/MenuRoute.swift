@@ -27,6 +27,7 @@ enum MenuCommand: String, CaseIterable {
     // Super-admin
     case sa, stenant, sim, sinspect, ads, markup, dailylimit
     case stars, freemodels, sbal, crypto, card
+    case mainmenu
     /// Hosted checkout settings (§7 «Внешняя касса»).
     case extpay
     // Growth and retention
@@ -56,7 +57,7 @@ enum MenuCommand: String, CaseIterable {
 
         // Per-chat settings anyone in the chat may touch, plus the pickers whose
         // finer rules (whose preset, whose chat) live in the handler.
-        case .role, .model, .stats, .websearch, .reset, .help, .mode, .pm, .buy:
+        case .role, .model, .stats, .websearch, .reset, .help, .mode, .pm, .buy, .examples:
             return .everyone
 
         // History applies its own checks for length changes and group wipes.
@@ -76,8 +77,8 @@ enum MenuCommand: String, CaseIterable {
             return .chatOperator
 
         case .smode, .sa, .stenant, .sim, .sinspect, .ads, .markup, .dailylimit,
-             .stars, .freemodels, .sbal, .crypto, .card, .extpay,
-             .funnel, .promo, .rem, .examples, .onb, .sref, .strf, .spend, .sahelp:
+             .stars, .freemodels, .sbal, .crypto, .card, .extpay, .mainmenu,
+             .funnel, .promo, .rem, .onb, .sref, .strf, .spend, .sahelp:
             return .superAdmin
         }
     }
@@ -139,6 +140,9 @@ extension CryptoAsset: CallbackArgument {}
 extension FiatCurrency: CallbackArgument {}
 extension FunnelPeriod: CallbackArgument {}
 extension SuperHelpSection: CallbackArgument {}
+extension MainMenuAudience: CallbackArgument {}
+extension MainMenuButton: CallbackArgument {}
+extension MainMenuEdit: CallbackArgument {}
 
 /// `<command>[:<arg>…]`, already split and validated.
 ///
