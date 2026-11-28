@@ -84,7 +84,7 @@ Worker предоставляет операции `prepare`, `send`, `status`, 
 
 Подключение выполняется из Terminal на Mac. Используются root-доступ по SSH, порт `2222` и отдельный приватный ключ `~/.ssh/milby_phone`.
 
-### Одноразовая команда
+### Подключение по локальной сети
 
 ```bash
 ssh -p 2222 \
@@ -98,6 +98,24 @@ ssh -p 2222 \
 ```
 
 Команда использует проверку host key. Не заменяйте `StrictHostKeyChecking=yes` на отключённую проверку и не принимайте неожиданный новый ключ без отдельной проверки.
+
+### Подключение через ZeroTier
+
+Mac и телефон должны быть подключены к одной сети ZeroTier. Адрес телефона в этой сети — `172.22.122.235`, порт SSH — `2222`.
+
+```bash
+ssh -p 2222 \
+  -i "$HOME/.ssh/milby_phone" \
+  -o IdentitiesOnly=yes \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes \
+  -o HostKeyAlgorithms=ssh-ed25519 \
+  -o HostKeyAlias='[192.168.0.104]:2222' \
+  -o ConnectTimeout=8 \
+  root@172.22.122.235
+```
+
+`HostKeyAlias` указывает на уже доверенную запись ключа этого телефона в `~/.ssh/known_hosts`. При таймауте проверьте доступность порта с Mac командой `nc -G 5 -vz 172.22.122.235 2222`.
 
 ### Постоянный alias в `~/.ssh/config`
 
@@ -133,6 +151,8 @@ scp -P 2222 \
   -o HostKeyAlias='[192.168.0.104]:2222' \
   /path/to/file root@192.168.100.9:/tmp/
 ```
+
+Для передачи файлов через ZeroTier укажите получателя `root@172.22.122.235:/tmp/` с тем же `HostKeyAlias`.
 
 Не копируйте в staging-каталог `.env`, auth-файлы, Firefox-профиль, Cookies или приватные ключи.
 
