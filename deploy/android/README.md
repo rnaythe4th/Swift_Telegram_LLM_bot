@@ -8,6 +8,16 @@
 
 Для Supabase взять корневой сертификат в настройках базы. После установки пользователя разместить его в `/opt/llmchat/certs/supabase-ca.crt` с владельцем `root:llmchat` и правами `0640`, каталог создать с тем же владельцем и правами `0750`. В URL подключения указать `sslmode=verify-full&sslrootcert=/opt/llmchat/certs/supabase-ca.crt`. Использовать хост и порт Session pooler из настроек своего проекта. [Подключение и проверка сертификата Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres#connecting-with-ssl)
 
+## PostgreSQL на телефоне
+
+На Xiaomi Mi 5s сервер PostgreSQL запускается из Termux, где пакеты поддерживают Android без System V IPC. Установите `postgresql` в Termux. В Alpine установите `deploy/android/llmchat-postgres.init` как `/etc/init.d/llmchat-postgres` с правами `0755`. Выполните `/etc/init.d/llmchat-postgres setup` один раз, затем `/etc/init.d/llmchat-postgres start`. Для автозапуска используйте ссылку `/etc/bots.d/35-llmchat-postgres` перед `40-llmchat`. Сервер слушает только `127.0.0.1:5432`. Администрирование через `/etc/init.d/llmchat-postgres psql` использует закрытый Unix-сокет.
+
+Создайте отдельную БД `llmchat` и роль-владельца `llmchat_bot` с паролем SCRAM. Укажите в `/opt/llmchat/.env` значение `DATABASE_URL=postgres://llmchat_bot:PASSWORD@127.0.0.1:5432/llmchat?sslmode=disable`. Оригинальный URL Supabase сохраните отдельно под root с правами `0600`. Сохраните `STATE_ENCRYPTION_KEY`, если он настроен.
+
+При переносе остановите Swift-службу и дождитесь завершения записи состояния. С учётными данными источника в конфигурации libpq сделайте архив командой `pg_dump --format=custom --table='public.bot_*' --file=llmchat.dump`. Восстановите его в пустую целевую БД от имени её владельца командой `pg_restore --dbname=llmchat --no-owner --no-privileges --single-transaction llmchat.dump`. Размещайте архив в закрытом каталоге. Сравните таблицы и количество строк, переключите `DATABASE_URL`, запустите Swift и проверьте `/ready` и восстановление состояния в журнале. Firefox может оставаться запущенным.
+
+Выбор БД выполняется через `DATABASE_URL` при старте. Supabase хранит копию на момент переноса. Для возврата с актуальными данными выполните такой же перенос с телефона в пустую удалённую БД и укажите её URL с проверкой TLS. При переключении оставляйте один активный экземпляр бота, поскольку блокировка записи действует внутри каждой БД.
+
 ## Установка
 
 На Mac запустить `sh deploy/android/build.sh /tmp/llmchat-stage`. Сборка подготовит Linux aarch64 бинарник `bin/LLM_chat_bot`, его приватный glibc-рантайм в `lib/` и каталог `deepseek-web/`. Версия статического SDK использует инструкцию ARMv8.1, которой нет у процессора этого телефона. Приватный загрузчик работает из каталога релиза вместе с его библиотеками. В staging-каталог скопировать скрипты `deploy/android/{install.sh,llmchat.init,runtime.py,signal-group.sh}`, сохранив путь `deploy/android/`. При наличии подготовленных wheels положить их в `wheels/`.

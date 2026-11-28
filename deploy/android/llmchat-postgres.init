@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+android=/proc/1/root
+termux=/data/data/com.termux/files
+prefix=$termux/usr
+home=$termux/home
+data=$home/.llmchat-postgres
+uidgid=$(stat -c '%u:%g' "$android$prefix")
+
+# Android kernels without System V IPC need the Termux PostgreSQL build.
+run_termux() {
+    chroot --userspec="$uidgid" --groups=3003 "$android" "$prefix/bin/env" -i \
+        "HOME=$home" "PREFIX=$prefix" "TMPDIR=$prefix/tmp" \
+        "PATH=$prefix/bin:/system/bin" "LD_LIBRARY_PATH=$prefix/lib" "$@"
+}
+
+postgres() {
+    run_termux pg_ctl -D "$data" "$@"
+}
+
+case "${1:-}" in
+    setup)
+        test ! -e "$android$data"
+        run_termux initdb -D "$data" -U postgres --encoding=UTF8 --locale=C \
+            --auth-local=trust --auth-host=scram-sha-256 --data-checksums
+        run_termux mkdir -m 0700 "$data/socket"
+        run_termux sh -c 'cat >> "$1"' sh "$data/postgresql.conf" <<EOF
+listen_addresses = '127.0.0.1'
+unix_socket_directories = '$data/socket'
+max_connections = 16
+shared_buffers = 16MB
+EOF
+        ;;
+    start)
+        if ! postgres status >/dev/null; then
+            postgres -w -t 30 -l "$data/postmaster.log" start
+        fi
+        ;;
+    stop)
+        if postgres status >/dev/null; then
+            postgres -w -t 30 -m fast stop
+        fi
+        ;;
+    status)
+        postgres status
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    psql)
+        shift
+        run_termux psql -X -h "$data/socket" -U postgres "$@"
+        ;;
+    *)
+        printf 'Usage: %s {setup|start|stop|status|restart|psql}\n' "$0" >&2
+        exit 1
+        ;;
+esac

@@ -44,6 +44,7 @@ struct GenerationOrigin: Sendable {
     let repliedTo: TranscriptReply?
     let updateID: Int?
     let telegramThreadID: Int64?
+    let telegramMessageDate: Date?
 
     /// Storage key of whoever asked. Built from the userID, which every update
     /// carries — a @username is optional, and a gate keyed off one locks out
@@ -57,7 +58,8 @@ struct GenerationOrigin: Sendable {
         askedMessageID: Int? = nil,
         repliedTo: TranscriptReply? = nil,
         updateID: Int? = nil,
-        telegramThreadID: Int64? = nil
+        telegramThreadID: Int64? = nil,
+        telegramMessageDate: Date? = nil
     ) {
         self.user = user
         self.isPrivate = isPrivate
@@ -66,6 +68,7 @@ struct GenerationOrigin: Sendable {
         self.repliedTo = repliedTo
         self.updateID = updateID
         self.telegramThreadID = telegramThreadID
+        self.telegramMessageDate = telegramMessageDate
     }
 
     init(message: TelegramMessage, botUsername: String, updateID: Int? = nil) {
@@ -76,7 +79,8 @@ struct GenerationOrigin: Sendable {
             askedMessageID: message.message_id,
             repliedTo: TranscriptCapture.reply(from: message, botUsername: botUsername),
             updateID: updateID,
-            telegramThreadID: message.message_thread_id
+            telegramThreadID: message.message_thread_id,
+            telegramMessageDate: TranscriptCapture.sentAt(message)
         )
     }
 }

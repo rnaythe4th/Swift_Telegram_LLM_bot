@@ -31,6 +31,8 @@ actor PersistenceCoordinator {
     /// A dropped connection while committing admission can hide a successful
     /// transaction. Only these updates need a read-back on retransmission.
     private var uncertainWebAdmissions = Set<Int64>()
+    // Only the writer can change this row, and it changes through this chain.
+    private var cachedWebAccount: DeepSeekWebAccount?
 
     private var lastErrorMessage: String?
     private var lastSuccessAt: Date?
@@ -122,22 +124,35 @@ actor PersistenceCoordinator {
 
     func webAccount(workerMarker: UUID? = nil) async throws -> DeepSeekWebAccount {
         try await serializeWebWrite {
-            let current = try await self.persistence.webAccount()
+            let current = try await self.loadWebAccount()
             guard let workerMarker, workerMarker != current.workerMarker else { return current }
-            // The first marker identifies the current account. A new marker
-            // replaces its epoch and expires the previous account pauses.
+            // A new marker replaces the account epoch and drops previous pauses.
             let updated = DeepSeekWebAccount(workerMarker: workerMarker)
-            try await self.persistence.saveWebAccount(updated)
+            try await self.persistWebAccount(updated)
             return updated
         }
     }
 
     func saveWebAccount(_ account: DeepSeekWebAccount) async throws {
         try await serializeWebWrite {
-            let current = try await self.persistence.webAccount()
+            let current = try await self.loadWebAccount()
             guard current.epoch == account.epoch else { throw DeepSeekWebPersistenceError.superseded }
-            try await self.persistence.saveWebAccount(account)
+            try await self.persistWebAccount(account)
         }
+    }
+
+    private func loadWebAccount() async throws -> DeepSeekWebAccount {
+        if let cachedWebAccount { return cachedWebAccount }
+        let account = try await persistence.webAccount()
+        cachedWebAccount = account
+        return account
+    }
+
+    private func persistWebAccount(_ account: DeepSeekWebAccount) async throws {
+        // A failed connection can hide a successful write. Read it back on retry.
+        cachedWebAccount = nil
+        try await persistence.saveWebAccount(account)
+        cachedWebAccount = account
     }
 
     private func serializeWebWrite<T: Sendable>(_ work: @Sendable @escaping () async throws -> T) async throws -> T {

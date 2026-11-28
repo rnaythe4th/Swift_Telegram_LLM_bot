@@ -99,22 +99,30 @@ final class PostgresStatePersistence: StatePersistencePort, Sendable {
     }
 
     func admitWebUpdate(_ updateID: Int64, row: ChatContextRow) async throws -> DeepSeekWebAdmission {
-        let log = queryLogger
-        let inserted = try await client.withTransaction(logger: log) { db in
-            try await db.query("delete from bot_web_update where expires_at <= now()", logger: log)
-            let marker = try await db.query(
-                """
+        // Keep the marker and the queued turn atomic in one database round trip.
+        // Expiry and admission must touch different rows within this statement.
+        let rows = try await client.query(
+            """
+            with expired as (
+                delete from bot_web_update
+                where expires_at <= now() and update_id <> \(updateID)
+            ), admitted as (
                 insert into bot_web_update (update_id, expires_at)
                 values (\(updateID), now() + interval '48 hours')
-                on conflict (update_id) do nothing returning update_id
-                """,
-                logger: log
+                on conflict (update_id) do update set expires_at = excluded.expires_at
+                where bot_web_update.expires_at <= now()
+                returning update_id
             )
-            var admitted = false
-            for try await _ in marker { admitted = true }
-            if admitted { try await Self.upsertChatContext(row, db: db, logger: log) }
-            return admitted
-        }
+            insert into bot_chat_context (chat_id, thread_id, data, updated_at)
+            select \(Int64(row.key.chatID.value)), \(row.key.threadID), \(row.snapshot), now() from admitted
+            on conflict (chat_id, thread_id) do update set
+                data = excluded.data, updated_at = excluded.updated_at
+            returning 1
+            """,
+            logger: queryLogger
+        )
+        var inserted = false
+        for try await _ in rows { inserted = true }
         if inserted { return .inserted }
         guard let (key, operation) = try await recoverWebAdmission(updateID), key == row.key else {
             return .duplicate(nil)

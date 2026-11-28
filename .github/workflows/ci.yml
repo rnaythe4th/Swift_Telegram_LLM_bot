@@ -53,6 +53,7 @@ jobs:
 
       # A warning today is an error somebody stops reading tomorrow.
       - name: Fail on warnings
+        shell: bash
         run: |
           set -o pipefail
           swift build -Xswiftc -warnings-as-errors 2>&1 | tail -20

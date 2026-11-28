@@ -77,6 +77,7 @@ actor DeepSeekWebQueue {
             await notify(Self.message(.unavailable), chatKey, origin.telegramThreadID)
             return false
         }
+        let started = ContinuousClock.now
         // Count admission calls while awaiting actor and database work.
         inAdmission += 1
         defer { inAdmission -= 1 }
@@ -112,6 +113,13 @@ actor DeepSeekWebQueue {
                 replyToMessageID: origin.replyToMessageID, asker: origin.userKey
             ) else { return false }
             let inserted = try await persistence.webAdmit(chatKey: chatKey, operation: operation)
+            if inserted {
+                let telegramAge = origin.telegramMessageDate.map { Date().timeIntervalSince($0) }
+                logger.info(
+                    "DeepSeek Web operation \(operation.id) admitted in \(started.duration(to: .now))"
+                    + (telegramAge.map { " (Telegram message age \($0.formatted(.number.precision(.fractionLength(3))))s)" } ?? "")
+                )
+            }
             start()
             return inserted
         } catch {
@@ -248,11 +256,17 @@ actor DeepSeekWebQueue {
         }
         activeRequest = ActiveRequest(key: key, operationID: queued.id)
         let markup = Self.stopMarkup(for: queued)
-        let notice = Task { [telegram] () -> Int? in
-            try? await telegram.sendMessage(.init(
+        let notice = Task { [telegram, logger] () -> Int? in
+            let started = ContinuousClock.now
+            guard let message = try? await telegram.sendMessage(.init(
                 chatID: key.chatID, threadID: queued.telegramThreadID, replyTo: queued.replyToMessageID,
                 text: Self.openingMessage, replyMarkup: markup
-            )).message_id
+            )) else { return nil }
+            logger.info(
+                "DeepSeek Web operation \(queued.id) sent opening status in \(started.duration(to: .now))"
+                + " (queued operation age \(Date().timeIntervalSince(queued.createdAt).formatted(.number.precision(.fractionLength(3))))s)"
+            )
+            return message.message_id
         }
         var noticeRecorded = false
         defer {

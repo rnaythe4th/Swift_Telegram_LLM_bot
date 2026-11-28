@@ -97,8 +97,16 @@ final class PostgresIntegrationTests: XCTestCase {
             messageID: 456, telegramThreadID: nil, reply: nil
         )
         let operation = try XCTUnwrap(candidate)
+        try await client.query(
+            """
+            insert into bot_web_update (update_id, expires_at)
+            values (777, now() - interval '1 second'), (778, now() - interval '1 second')
+            """
+        )
         let admitted = try await writer.webAdmit(chatKey: key, operation: operation)
         XCTAssertTrue(admitted)
+        let expiredRows = try await client.query("select count(*) from bot_web_update where update_id = 778")
+        for try await count in expiredRows.decode(Int.self) { XCTAssertEqual(count, 0) }
 
         // The admission itself is durable, prior to any write-behind flush.
         let loaded = try await persistence.loadEverything()

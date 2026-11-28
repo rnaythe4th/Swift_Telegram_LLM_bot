@@ -157,11 +157,11 @@ extension BotOrchestrator {
             await generationCoordinator.webQueue?.start()
         }
 
-        await modelPriceMonitor?.performInitialFetch()
-
         var tasks: [Task<Void, Never>] = []
         tasks.append(Task { [weak self] in
-            await self?.modelPriceMonitor?.run()
+            guard let monitor = self?.modelPriceMonitor else { return }
+            await monitor.performInitialFetch()
+            await monitor.run()
         })
         tasks.append(Task { [weak self] in
             await self?.cryptoMonitor?.run()
@@ -220,9 +220,12 @@ extension BotOrchestrator {
 
     private func runPollingLoop(intake: UpdateIntake) async {
         var offset = await state.pollingOffset()
+        let initialRetryDelay = Duration.milliseconds(250)
+        var retryDelay = initialRetryDelay
         while !flags.draining.value && flags.durability.value.acceptsUpdates {
             do {
                 let updates = try await telegram.getUpdates(offset: offset)
+                retryDelay = initialRetryDelay
                 guard !flags.draining.value, flags.durability.value.acceptsUpdates else { return }
                 let accepted = await intake.enqueue(updates)
                 if let maxUpdateID = updates.prefix(accepted).map(\.update_id).max() {
@@ -233,7 +236,11 @@ extension BotOrchestrator {
                 if accepted < updates.count { try? await Task.sleep(for: .seconds(2)) }
             } catch {
                 logger.error("getUpdates error: \(error)")
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                let apiError = error as? TelegramAPIError
+                let rateLimitDelay = Duration.seconds(apiError?.retryAfter ?? 0)
+                let conflictDelay = apiError?.statusCode == 409 ? Duration.seconds(3) : .zero
+                try? await Task.sleep(for: max(retryDelay, rateLimitDelay, conflictDelay))
+                retryDelay = min(retryDelay * 2, .seconds(3))
             }
         }
     }
