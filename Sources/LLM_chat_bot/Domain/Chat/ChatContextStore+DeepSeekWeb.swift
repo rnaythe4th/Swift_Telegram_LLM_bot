@@ -37,6 +37,12 @@ extension ChatContextStore {
         return next
     }
 
+    func setWebSearch(chatKey: ChatKey, enabled: Bool) -> Bool {
+        let context = ensure(chatKey: chatKey)
+        guard let web = context.deepSeekWeb else { return false }
+        return mutateWeb(chatKey: chatKey, contextEpoch: web.contextEpoch) { $0.webSearch = enabled }
+    }
+
     func webOperations() -> [(ChatKey, DeepSeekWebOperation)] {
         contexts.flatMap { key, context in
             (context.deepSeekWeb?.operations ?? []).map { (key, $0) }
@@ -112,6 +118,7 @@ extension ChatContextStore {
             listeningThrough: boundary,
             reply: reply.flatMap(quote),
             deepThink: web.deepThink,
+            webSearch: web.webSearch,
             requesterID: asker?.userID
         )
     }
@@ -222,7 +229,8 @@ extension ChatContextStore {
             history: keepingIndependentTurns ? previous?.history.filter { !$0.usesListening } ?? [] : [],
             groupAllowed: previous?.groupAllowed ?? false,
             groupNoticeSent: previous?.groupNoticeSent,
-            deepThink: previous?.deepThink
+            deepThink: previous?.deepThink,
+            webSearch: previous?.webSearch
         )
         _overheardPreroll.removeValue(forKey: chatKey)
     }

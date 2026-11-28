@@ -159,9 +159,12 @@ class APIBackend:
                 {"role": turn["role"], "content": turn["text"]}
                 for turn in record["turns"]
             ] + [{"role": "user", "content": request.prompt}]
-        model = "deepseek-v4-flash-thinking-nosearch" if (
-            self.deepthink if request.deep_think is None else request.deep_think
-        ) else "deepseek-v4-flash-nosearch"
+        deep_think = self.deepthink if request.deep_think is None else request.deep_think
+        model = "deepseek-v4-flash"
+        if deep_think:
+            model += "-thinking"
+        if not request.search_enabled:
+            model += "-nosearch"
         payload = {"model": model, "messages": messages, "stream": False}
         if stop.is_set():
             # The journal says pending; no remote request was dispatched.

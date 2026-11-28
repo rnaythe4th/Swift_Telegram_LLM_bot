@@ -1,5 +1,6 @@
 """Safety/continuation regression tests for the browserless DeepSeek transport."""
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -67,6 +68,19 @@ class APIBackendTests(unittest.TestCase):
 
     def request(self, remote=None, tail=None, prompt="Вопрос", op=None):
         return Request(op or uuid4(), uuid4(), self.marker, remote, tail, prompt)
+
+    def test_model_matches_search_and_deep_think(self):
+        for think, search, model in (
+            (False, None, "deepseek-v4-flash"),
+            (True, True, "deepseek-v4-flash-thinking"),
+            (False, False, "deepseek-v4-flash-nosearch"),
+            (True, False, "deepseek-v4-flash-thinking-nosearch"),
+        ):
+            with self.subTest(think=think, search=search):
+                request = replace(self.request(), deep_think=think, web_search=search)
+                prepared = self.backend.prepare(request, self.stop)
+                self.backend.send(request, prepared, self.stop, lambda *_: None)
+                self.assertEqual(FakeConnection.sent[-1][2]["model"], model)
 
     def test_independent_sessions_and_continuation_after_restart(self):
         request1 = self.request()

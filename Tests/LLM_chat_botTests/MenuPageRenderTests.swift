@@ -73,7 +73,7 @@ final class MenuPageRenderTests: XCTestCase {
 
     // MARK: - Tests
 
-    func testGroupMemberCanChangeWebDeepThinkAndRole() async throws {
+    func testGroupMemberCanChangeWebDeepThinkSearchAndRole() async throws {
         let store = Fixtures.makeStore(ownerUserID: ownerID, defaultProvider: .deepseekWeb)
         let gateways = ProviderGatewayRegistry(
             providers: [.openrouter: OpenRouterProviderAdapter(network: NetworkClient(), apiKey: "fixture")],
@@ -107,6 +107,17 @@ final class MenuPageRenderTests: XCTestCase {
         try await send("/reasoning off")
         let deepThinkOff = await store.webState(chatKey: topic)?.deepThink
         XCTAssertEqual(deepThinkOff, false)
+
+        await tap("websearch:off", as: member)
+        let searchOff = await store.fetchHelp(chatKey: topic).webSearchEnabled
+        let turnedOff = await telegram.lastCall("editMessageText")
+        XCTAssertFalse(searchOff)
+        XCTAssertTrue(turnedOff?.buttonActions.contains("menu:websearch:on") == true)
+        await tap("websearch:on", as: member)
+        let searchOn = await store.fetchHelp(chatKey: topic).webSearchEnabled
+        let turnedOn = await telegram.lastCall("editMessageText")
+        XCTAssertTrue(searchOn)
+        XCTAssertTrue(turnedOn?.buttonActions.contains("menu:websearch:off") == true)
 
         await tap("nav:role", as: member)
         let rolePage = await telegram.lastCall("editMessageText")
@@ -200,7 +211,8 @@ final class MenuPageRenderTests: XCTestCase {
         for page in [MenuPage.model, .temp, .provider, .stats] {
             XCTAssertFalse(mainActions.contains(MenuRoute.navigation(to: page)))
         }
-        XCTAssertTrue(main.markup.inline_keyboard.flatMap { $0 }.contains { $0.text == "🧠 DeepThink" })
+        XCTAssertTrue(main.markup.inline_keyboard.contains { $0.map(\.text) == ["🧠 DeepThink", "🌐 Поиск · вкл"] })
+        XCTAssertTrue(mainActions.contains("websearch:off"))
         let tuning = await menu.renderPage(.tuning, chatKey: chat, invoker: owner)
         let actions = menuActions(tuning.markup)
         for page in [MenuPage.provider, .tuningTemp, .stats] {
@@ -231,6 +243,7 @@ final class MenuPageRenderTests: XCTestCase {
         XCTAssertTrue(apiActions.contains("nav:temp"))
         XCTAssertTrue(apiMain.markup.inline_keyboard.flatMap { $0 }.contains { $0.text.hasPrefix("🧠 Размышления") })
         XCTAssertFalse(apiMain.markup.inline_keyboard.flatMap { $0 }.contains { $0.text.contains("DeepThink") })
+        XCTAssertFalse(apiActions.contains { $0.hasPrefix("websearch:") })
         let apiTemp = await menu.renderPage(.temp, chatKey: chat, invoker: owner)
         XCTAssertTrue(menuActions(apiTemp.markup).contains("open"))
         XCTAssertFalse(menuActions(apiTemp.markup).contains("nav:tuning"))

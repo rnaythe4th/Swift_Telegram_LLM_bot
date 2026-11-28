@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from browser import DEEPTHINK, Browser, BrowserFailure
+from browser import DEEPTHINK, SEARCH, Browser, BrowserFailure
 from worker import Request
 
 FIREFOX = os.getenv("DEEPSEEK_WEB_TEST_FIREFOX")
@@ -159,26 +159,36 @@ class FirefoxTest(unittest.TestCase):
                                          (answer.remote_id, True, "First fragment < & next")])
         self.assertTrue(answer.text.endswith(" / 1 / stream this"))
 
-    def test_deep_think_overrides_worker_default_per_turn(self):
+    def test_toggles_follow_each_turn(self):
         previous = None
-        for choice, default, expected in ((False, True, False), (True, False, True), (None, True, True)):
-            with self.subTest(choice=choice, default=default):
+        for think, default, expected_think, search, expected_search in (
+            (False, True, False, None, True),
+            (True, False, True, False, False),
+            (None, True, True, True, True),
+        ):
+            with self.subTest(think=think, default=default, search=search):
                 self.browser.deepthink = default
-                request = replace(self.request("synthetic input", previous), deep_think=choice)
+                request = replace(self.request("synthetic input", previous), deep_think=think, web_search=search)
                 previous = self.run_turn(request)
-                toggle, = self.browser._read_toggles(self.browser.session[0], DEEPTHINK)
-                self.assertIs(toggle["selected"], expected)
+                driver = self.browser.session[0]
+                think_toggle, search_toggle = self.browser._read_toggles(driver, DEEPTHINK, SEARCH)
+                self.assertIs(think_toggle["selected"], expected_think)
+                self.assertIs(search_toggle["selected"], expected_search)
+                self.assertEqual(driver.execute_script("return sessionStorage.submittedSearch"),
+                                 "true" if expected_search else "false")
 
-    def test_deep_think_change_after_prepare_is_rejected_before_send(self):
-        request = replace(self.request("synthetic input"), deep_think=True)
-        prepared = self.browser.prepare(request, self.stop)
-        toggle, = self.browser._read_toggles(self.browser.session[0], DEEPTHINK)
-        toggle["button"].click()
-        with self.assertRaises(BrowserFailure) as error:
-            self.browser.send(request, prepared, self.stop, self.track)
-        self.assertEqual(error.exception.status, "unknownUI")
-        self.assertFalse(error.exception.may_have_sent)
-        self.assertEqual(self.progress, [])
+    def test_toggle_change_after_prepare_is_rejected_before_send(self):
+        for names in (DEEPTHINK, SEARCH):
+            with self.subTest(toggle=names[0]):
+                request = replace(self.request("synthetic input"), deep_think=True)
+                prepared = self.browser.prepare(request, self.stop)
+                toggle, = self.browser._read_toggles(self.browser.session[0], names)
+                toggle["button"].click()
+                with self.assertRaises(BrowserFailure) as error:
+                    self.browser.send(request, prepared, self.stop, self.track)
+                self.assertEqual(error.exception.status, "unknownUI")
+                self.assertFalse(error.exception.may_have_sent)
+                self.assertEqual(self.progress, [])
 
     def test_refusals_and_unknown_ui(self):
         for mode, expected in (

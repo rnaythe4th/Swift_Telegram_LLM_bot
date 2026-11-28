@@ -161,17 +161,19 @@ class WorkerTest(unittest.TestCase):
         with locked_profile(self.profile):
             self.assertFalse(worker.health()["browserWarm"])
 
-    def test_deep_think_selection_is_part_of_operation_binding(self):
-        enabled = replace(self.request, deep_think=True)
-        disabled = replace(self.request, deep_think=False)
+    def test_toggle_selections_are_part_of_operation_binding(self):
+        enabled = replace(self.request, deep_think=True, web_search=True)
+        changed = (replace(enabled, deep_think=False), replace(enabled, web_search=False))
         self.assertEqual(self.worker.perform(enabled, "prepare")["status"], "prepared")
         for action in ("send", "status", "cancel", "reconcile"):
-            with self.subTest(action=action):
-                self.assertEqual(self.worker.perform(disabled, action)["status"], "notAccepted")
+            for request in changed:
+                with self.subTest(action=action, think=request.deep_think, search=request.web_search):
+                    self.assertEqual(self.worker.perform(request, action)["status"], "notAccepted")
         self.assertEqual(self.worker.perform(self.request, "send")["status"], "notAccepted")
         self.browser.release.set()
         self.assertEqual(self.worker.perform(enabled, "send")["status"], "completed")
-        self.assertEqual(self.worker.perform(disabled, "status")["status"], "notAccepted")
+        for request in changed:
+            self.assertEqual(self.worker.perform(request, "status")["status"], "notAccepted")
         self.assertEqual(self.worker.perform(enabled, "status")["status"], "completed")
         self.assertEqual(self.browser.send_count, 1)
 
@@ -236,9 +238,12 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(parse_request(data, "send"), self.request)
         for choice in (True, False):
             self.assertEqual(parse_request(dict(data, deepThink=choice), "send").deep_think, choice)
+            self.assertEqual(parse_request(dict(data, webSearch=choice), "send").search_enabled, choice)
+        self.assertTrue(parse_request(data, "send").search_enabled)
         for choice in (None, 0, 1, "false"):
-            with self.subTest(deep_think=choice), self.assertRaises(ValueError):
-                parse_request(dict(data, deepThink=choice), "send")
+            for field in ("deepThink", "webSearch"):
+                with self.subTest(field=field, value=choice), self.assertRaises(ValueError):
+                    parse_request(dict(data, **{field: choice}), "send")
         for field in ("a/b", "../../x", "?mode=foo", "%2f"):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 parse_request(dict(data, remoteChatID=field, remoteTail=TAIL), "send")

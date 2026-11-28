@@ -179,6 +179,7 @@ struct HelpData: Sendable {
     let provider: ServiceProvider
     let reasoningEffort: ReasoningEffort?
     let webDeepThinkEnabled: Bool
+    let webSearchEnabled: Bool
     let testModeSuffix: Int?
     let backupNotify: Bool
     let cumulativeUsage: CumulativeUsage

@@ -498,9 +498,9 @@ class Browser:
 
             self._wait(stop, deadline, applied, "unknownUI")
 
-    def _toggles_match(self, driver, deep_think):
+    def _toggles_match(self, driver, deep_think, web_search):
         think, search = self._read_toggles(driver, DEEPTHINK, SEARCH)
-        return think and search and think["selected"] is deep_think and search["selected"] is False
+        return think and search and think["selected"] is deep_think and search["selected"] is web_search
 
     def _view_for(self, driver, expected_id, expected_tail, stop, deadline, known=()):
         actual_id = self._identity(driver)
@@ -543,12 +543,12 @@ class Browser:
         driver, (_, known) = self._load_view(request.remote_id, request.tail, stop, deadline)
         deep_think = self.deepthink if request.deep_think is None else request.deep_think
         self._set_toggle(driver, DEEPTHINK, deep_think, stop, deadline)
-        self._set_toggle(driver, SEARCH, False, stop, deadline)
+        self._set_toggle(driver, SEARCH, request.search_enabled, stop, deadline)
         _, turns = self._wait(
             stop, deadline, lambda: self._view_for(driver, request.remote_id, request.tail, stop, deadline, known),
             "chatUnavailable" if request.remote_id else "unknownUI",
         )
-        if not self._toggles_match(driver, deep_think):
+        if not self._toggles_match(driver, deep_think, request.search_enabled):
             raise BrowserFailure("unknownUI")
         return Prepared(request.remote_id, request.tail, len(turns), tuple(turns))
 
@@ -620,7 +620,7 @@ class Browser:
         if (self._identity(driver) != prepared.remote_id or state is None or state["stopping"]
                 or len(state["turns"]) != prepared.count
                 or tail_for(state["turns"]) != prepared.tail or self._visible(driver, ATTACHMENT)
-                or not self._toggles_match(driver, deep_think)):
+                or not self._toggles_match(driver, deep_think, request.search_enabled)):
             raise BrowserFailure("unknownUI")
         if stop.is_set():
             raise BrowserFailure("cancelled")

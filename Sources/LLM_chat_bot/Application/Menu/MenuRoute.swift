@@ -12,7 +12,7 @@ enum MenuCommand: String, CaseIterable {
     // Navigation
     case open, close, nav, noop
     // Per-chat settings
-    case role, model, temp, stats, history, provider, reasoning, reset, help
+    case role, model, temp, stats, history, provider, reasoning, websearch, reset, help
     /// Reference modes: `mode` is the user-facing picker, `smode` the
     /// super-admin editor behind it.
     case mode, smode
@@ -56,7 +56,7 @@ enum MenuCommand: String, CaseIterable {
 
         // Per-chat settings anyone in the chat may touch, plus the pickers whose
         // finer rules (whose preset, whose chat) live in the handler.
-        case .role, .model, .stats, .reset, .help, .mode, .pm, .buy:
+        case .role, .model, .stats, .websearch, .reset, .help, .mode, .pm, .buy:
             return .everyone
 
         // Cost multipliers. `history` also carries an operator check inside for

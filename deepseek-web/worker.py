@@ -41,10 +41,15 @@ class Request:
     prompt: str | None
     candidate_id: str | None = None
     deep_think: bool | None = None
+    web_search: bool | None = None
 
     @property
     def binding(self):
-        return self.account_epoch, self.account_marker, self.remote_id, self.tail, self.deep_think
+        return self.account_epoch, self.account_marker, self.remote_id, self.tail, self.deep_think, self.web_search
+
+    @property
+    def search_enabled(self):
+        return self.web_search is not False
 
     @property
     def prompt_digest(self):
@@ -72,7 +77,7 @@ def parse_request(payload, action):
     check_version(payload)
     if set(payload) - {
         "version", "operationID", "accountEpoch", "accountMarker", "remoteChatID", "remoteTail", "prompt",
-        "candidateRemoteChatID", "deepThink",
+        "candidateRemoteChatID", "deepThink", "webSearch",
     }:
         raise ValueError
     operation_id = UUID(payload["operationID"])
@@ -94,10 +99,10 @@ def parse_request(payload, action):
         raise ValueError
     if prompt is not None:
         prompt.encode("utf-8")  # Reject unpaired surrogates before dispatch.
-    deep_think = payload.get("deepThink")
-    if "deepThink" in payload and type(deep_think) is not bool:
+    if any(field in payload and type(payload[field]) is not bool for field in ("deepThink", "webSearch")):
         raise ValueError
-    return Request(operation_id, account_epoch, account_marker, remote_id, tail, prompt, candidate_id, deep_think)
+    return Request(operation_id, account_epoch, account_marker, remote_id, tail, prompt, candidate_id,
+                   deep_think=payload.get("deepThink"), web_search=payload.get("webSearch"))
 
 
 def reply(request, status, accepted=False, **fields):

@@ -9,6 +9,7 @@ struct DeepSeekWebWorkerRequest: Encodable, Sendable {
     let remoteTail: String?
     let prompt: String?
     let deepThink: Bool?
+    let webSearch: Bool?
     var candidateRemoteChatID: String?
 }
 

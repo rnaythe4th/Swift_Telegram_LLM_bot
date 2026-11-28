@@ -35,6 +35,17 @@ extension BotMenuHandler {
         case .reasoning:
             try await handleReasoningAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
+        case .websearch:
+            let enabled = route.sub == "on"
+            guard enabled || route.sub == "off",
+                  await state.setWebSearch(chatKey: chatKey, enabled: enabled) else {
+                return try await staleTap(callback)
+            }
+            try await checkpointWebSettings(chatKey: chatKey)
+            try? await telegram.answerCallback(callbackQueryID: callback.id,
+                                               text: "Поиск в интернете \(enabled ? "включён" : "выключен")")
+            try await showPage(.main, chatKey: chatKey, callback: callback, message: message)
+
         case .reset:
             await state.clearPending(chatKey: chatKey)
             await state.resetChat(chatKey: chatKey)

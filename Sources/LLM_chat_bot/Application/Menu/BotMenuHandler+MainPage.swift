@@ -125,11 +125,16 @@ extension BotMenuHandler {
         let lock = hasFullAccess ? "" : " ⭐"
         if web {
             rows.row([menuButton("🎭 Роль", page: .role), menuButton("📝 Память", page: .history)])
+            rows.row([
+                menuButton("🧠 DeepThink", page: .reasoning),
+                menuButton(help.webSearchEnabled ? "🌐 Поиск · вкл" : "🌐 Поиск · выкл",
+                           .websearch, help.webSearchEnabled ? "off" : "on")
+            ])
         } else {
             rows.row([menuButton("🎭 Роль", page: .role), menuButton("🤖 Модель", page: .model)])
             rows.row([menuButton("🌡 Стиль ответа" + lock, page: .temp), menuButton("📝 Память", page: .history)])
+            rows.row([menuButton("🧠 Размышления" + lock, page: .reasoning)])
         }
-        rows.row([menuButton(web ? "🧠 DeepThink" : "🧠 Размышления" + lock, page: .reasoning)])
         // Listening is a group-chat feature; keep its existing access rules.
         if isGroupChat {
             let listening = await state.listening(chatKey: chatKey)

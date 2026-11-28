@@ -151,6 +151,7 @@ extension ChatContextStore {
             provider: context.provider,
             reasoningEffort: context.reasoningEffort,
             webDeepThinkEnabled: context.deepSeekWeb?.deepThink ?? webDeepThinkDefault,
+            webSearchEnabled: context.deepSeekWeb?.webSearch ?? true,
             testModeSuffix: context.suffix,
             backupNotify: context.backupNotify,
             cumulativeUsage: context.cumulativeUsage
@@ -533,6 +534,7 @@ extension ChatContextStore {
             context.deepSeekWeb?.groupAllowed = false
         }
         context.deepSeekWeb?.deepThink = nil
+        context.deepSeekWeb?.webSearch = nil
         resetWebContext(&context, chatKey: chatKey)
         contexts[chatKey] = context
         dirtyContexts.insert(chatKey)

@@ -11,7 +11,7 @@
   <section>
     <textarea id="chat-input" placeholder="Message DeepSeek"></textarea>
     <button aria-pressed="true">DeepThink</button>
-    <button aria-pressed="true">Search</button>
+    <button aria-pressed="false">Search</button>
     <button data-testid="send-button" type="button">Send</button>
     <button data-testid="stop-button" type="button" hidden>Stop</button>
   </section>
@@ -162,9 +162,10 @@
     if (mode === 'quota') return alert('Rate limit: try again in 10 minutes');
     if (mode === 'busy') return alert('Server is busy');
     const text = input.value;
-    if (search.getAttribute('aria-pressed') !== 'false' || !text || !event.isTrusted) {
+    if (!text || !event.isTrusted) {
       return alert('Incorrect configuration');
     }
+    sessionStorage.submittedSearch = search.getAttribute('aria-pressed');
     if (mode === 'send-lost') {
       sessionStorage.lostSubmissions = String(Number(sessionStorage.lostSubmissions || 0) + 1);
       return;

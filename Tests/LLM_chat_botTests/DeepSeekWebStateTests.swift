@@ -115,6 +115,47 @@ final class DeepSeekWebStateTests: XCTestCase {
         XCTAssertNil(try JSONDecoder().decode(DeepSeekWebOperation.self, from: old).deepThink)
     }
 
+    func testWebSearchDefaultsOnAndPersistsPerTopic() async throws {
+        let store = Fixtures.makeStore(defaultProvider: .deepseekWeb)
+        let key = ChatKey(chatID: -100, threadID: 5)
+        let other = ChatKey(chatID: -100, threadID: 6)
+        let initial = await store.fetchHelp(chatKey: key)
+        XCTAssertTrue(initial.webSearchEnabled)
+        _ = await store.setWebSearch(chatKey: key, enabled: false)
+        let candidate = await store.webCandidate(
+            chatKey: key, operationID: UUID(), updateID: 1, question: "question",
+            messageID: 10, telegramThreadID: 5, reply: nil
+        )
+        let operation = try XCTUnwrap(candidate)
+        let data = try JSONEncoder().encode(operation)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "webSearch")
+        let old = try JSONSerialization.data(withJSONObject: legacy)
+        XCTAssertNil(try JSONDecoder().decode(DeepSeekWebOperation.self, from: old).webSearch)
+
+        await store.clearHistory(chatKey: key)
+        let rows = await store.drainDirtyBatch().contexts
+        let row = try XCTUnwrap(rows.first { $0.key == key })
+        let snapshot = try JSONDecoder().decode(ChatContextSnapshot.self, from: JSONEncoder().encode(row.snapshot))
+        var saved = PersistedBotState()
+        saved.contexts = [.init(key: key, snapshot: snapshot)]
+        let restarted = Fixtures.makeStore(defaultProvider: .deepseekWeb)
+        await restarted.restore(from: saved)
+        let restored = await restarted.fetchHelp(chatKey: key)
+        let otherTopic = await restarted.fetchHelp(chatKey: other)
+        XCTAssertFalse(restored.webSearchEnabled)
+        XCTAssertTrue(otherTopic.webSearchEnabled)
+
+        _ = await restarted.setWebSearch(chatKey: key, enabled: true)
+        XCTAssertEqual(try JSONDecoder().decode(DeepSeekWebOperation.self, from: data).webSearch, false)
+        _ = await restarted.changeProvider(chatKey: key, newProvider: .openrouter)
+        let stale = await restarted.setWebSearch(chatKey: key, enabled: false)
+        XCTAssertFalse(stale)
+        _ = await restarted.changeProvider(chatKey: key, newProvider: .deepseekWeb)
+        let reselected = await restarted.fetchHelp(chatKey: key)
+        XCTAssertTrue(reselected.webSearchEnabled)
+    }
+
     func testWebPromptKeepsQuestionOnceAndDropsNestedQuoteFromOldProvider() async throws {
         let store = Fixtures.makeStore()
         let key = ChatKey(chatID: -100, threadID: 5)

@@ -155,7 +155,7 @@ final class BotMenuHandler: Sendable {
         case .open, .close, .nav, .noop:
             try await processNavigationAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
-        case .role, .model, .temp, .stats, .history, .provider, .reasoning, .reset, .help:
+        case .role, .model, .temp, .stats, .history, .provider, .reasoning, .websearch, .reset, .help:
             try await processChatSettingsAction(route: route, chatKey: chatKey, callback: callback, message: message)
 
         case .mode, .smode:
