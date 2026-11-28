@@ -198,6 +198,39 @@ final class DeepSeekWebStateTests: XCTestCase {
         XCTAssertNil(DeepSeekWebPrompt.build(operation: operation, state: state, maxUTF8Bytes: 20))
     }
 
+    func testWebPromptSuggestsFormattingAndEmojiInNewAndExistingDialogs() async throws {
+        let store = Fixtures.makeStore(defaultProvider: .deepseekWeb)
+        let key = ChatKey(chatID: 100, threadID: 0)
+        let role = "Отвечай спокойно"
+        let question = "Как дела? 🐈"
+        _ = await store.setRoleAndResetHistory(chatKey: key, role: role)
+        let candidate = await store.webCandidate(
+            chatKey: key, operationID: UUID(), updateID: 1, question: question,
+            messageID: 1, telegramThreadID: nil, reply: nil
+        )
+        let snapshot = await store.webState(chatKey: key)
+        let operation = try XCTUnwrap(candidate)
+        let newDialog = try XCTUnwrap(snapshot)
+        var existingDialog = newDialog
+        existingDialog.remoteChatID = "existing-chat"
+
+        let core = "Роль бота:\n\"\(role)\"\n\nВопрос:\n\"\(question)\""
+        for state in [newDialog, existingDialog] {
+            let prompt = try XCTUnwrap(DeepSeekWebPrompt.build(operation: operation, state: state))
+            XCTAssertTrue(prompt.text.contains("Оформление ответа в Telegram:"))
+            XCTAssertTrue(prompt.text.contains("Используй оформление умеренно"))
+            XCTAssertTrue(prompt.text.contains("<tg-spoiler>"))
+            XCTAssertTrue(prompt.text.contains("Добавляй обычные эмодзи"))
+            XCTAssertTrue(prompt.text.contains("без <tg-emoji>"))
+            XCTAssertTrue(prompt.text.hasSuffix("Вопрос:\n\"\(question)\""))
+
+            let withTightBudget = try XCTUnwrap(DeepSeekWebPrompt.build(
+                operation: operation, state: state, maxUTF8Bytes: core.utf8.count, maxUTF16Units: core.utf16.count
+            ))
+            XCTAssertEqual(withTightBudget.text, core)
+        }
+    }
+
     func testListeningResetPreservesOnlyTurnsIndependentOfTranscript() async throws {
         let store = Fixtures.makeStore()
         let key = ChatKey(chatID: -100, threadID: 5)

@@ -119,6 +119,12 @@ struct DeepSeekWebChatState: Codable, Sendable {
 }
 
 struct DeepSeekWebPrompt: Sendable {
+    private static let telegramFormatting = """
+        Оформление ответа в Telegram:
+        Используй оформление умеренно, когда оно помогает читать ответ. Для акцентов доступны <b>, <i>, <u> и <s>, для ссылок — <a href="…">, для спойлеров — <tg-spoiler>, для цитат — <blockquote> и <blockquote expandable>, для кода — <code> и <pre><code class="language-python">. Для простого ответа обычно достаточно обычного текста.
+        Добавляй обычные эмодзи по смыслу и тону ответа, например 🙂 или ✅. Пиши их прямо в тексте, без <tg-emoji> и выдуманных emoji-id.
+        """
+
     let text: String
     let listeningThrough: Int
     let sentListeningSequences: [Int]
@@ -153,6 +159,7 @@ struct DeepSeekWebPrompt: Sendable {
         var lines: [DeepSeekWebTranscriptLine] = []
         var previous: [DeepSeekWebTurn] = []
         var includeReply = false
+        var includeFormatting = true
 
         func replyText(_ reply: DeepSeekWebQuote, visible: Set<Int>) -> String {
             if let sequence = reply.sequence, visible.contains(sequence) { return "в ответ на #\(sequence)" }
@@ -162,6 +169,7 @@ struct DeepSeekWebPrompt: Sendable {
         func render() -> String {
             let visible = existing.union(lines.map(\.sequence))
             var parts = [role]
+            if includeFormatting { parts.append(telegramFormatting) }
             if !previous.isEmpty {
                 let pairs = previous.map { "Вопрос: \(quote($0.question))\nОтвет: \(quote($0.answer))" }
                 parts.append("Предыдущие доставленные ответы:\n" + pairs.joined(separator: "\n\n"))
@@ -180,7 +188,10 @@ struct DeepSeekWebPrompt: Sendable {
             return parts.joined(separator: "\n\n")
         }
 
-        guard fits(render()) else { return nil }
+        if !fits(render()) {
+            includeFormatting = false
+            guard fits(render()) else { return nil }
+        }
         if operation.reply != nil {
             includeReply = true
             if !fits(render()) { includeReply = false }

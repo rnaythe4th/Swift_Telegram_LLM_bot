@@ -66,6 +66,15 @@ final class DeepSeekWebTelegramFormatterTests: XCTestCase {
             XCTAssertEqual(part.entities, [.init(type: "bold", offset: 0, length: part.text.utf16.count)])
         }
     }
+
+    func testEscapedEmojiWrapperLeavesTheEmojiAndSurroundingFormatting() throws {
+        let source = """
+        <b>Готово</b> &lt;tg-emoji emoji-id=&quot;123456789&quot;&gt;😀&lt;/tg-emoji&gt; и <tg-emoji emoji-id="placeholder">🙂</tg-emoji>
+        """
+        let part = try XCTUnwrap(DeepSeekWebTelegramFormatter.parts(source).only)
+        XCTAssertEqual(part.text, "Готово 😀 и 🙂")
+        XCTAssertEqual(part.entities, [.init(type: "bold", offset: 0, length: 6)])
+    }
 }
 
 private extension Array {

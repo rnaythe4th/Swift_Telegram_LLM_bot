@@ -47,6 +47,7 @@ enum DeepSeekWebTelegramFormatter {
     (?m:^[ \t]{0,3}(?<fence>`{3,}|~{3,})(?<lang>[^\r\n]*)\r?\n(?<block>[\s\S]*?)(?:^[ \t]{0,3}\k<fence>`*~*[ \t]*(?=\r?$)|\z))
     |(?<!`)(?<ticks>`+)(?!`)(?<inline>[^`\r\n]+)\k<ticks>(?!`)
     |<(?<close>/)?(?<tag>\#(types.keys.sorted().joined(separator: "|"))|br)(?<attrs>(?:\s(?:[^<>"']|"[^"]*"|'[^']*')*)?)/?>
+    |(?<escapedEmoji>&lt;/?tg-emoji(?:[ \t]+(?:(?!&gt;|&lt;)[^<>\r\n])*)?&gt;)
     |\#(reference)
     """#.replacingOccurrences(of: "\n|", with: "|"), options: [.caseInsensitive])
 
@@ -78,7 +79,12 @@ enum DeepSeekWebTelegramFormatter {
             let name = group("tag")?.lowercased()
             let closing = group("close") != nil
 
-            if token.hasPrefix("&") {
+            if group("escapedEmoji") != nil {
+                // Model output sometimes escapes the wrapper as visible text.
+                if tags.last?.name == "code" || tags.last?.name == "pre" {
+                    append(decodeReferences(token))
+                }
+            } else if token.hasPrefix("&") {
                 append(decodedReference(token))
             } else if let protected = tags.last, protected.name == "code" || protected.name == "pre" {
                 if closing, let name,
